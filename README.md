@@ -35,17 +35,23 @@ as a truth set. **All peptide counts are at `peptide_q <= 0.01`** — spectrum-l
 our counts by 14-16% versus diaTracer's 5-7%, because we emit more spectra per peptide and each
 gets more chances at a per-spectrum threshold.
 
-| | ours | diaTracer | ratio |
-|---|---|---|---|
-| S08, baseline | 6,133 | 11,218 | 54.7% |
-| S23, baseline | 5,131 | 9,038 | 56.8% |
-| S23, MS2 valley splitting | 5,813 | 9,038 | 64.3% |
-| S23, **MS1+MS2 valley splitting** | **7,949** | 9,038 | **88.0%** |
-| S30, best config | 7,430 | *no reference* | — |
+| | before | **now** | diaTracer | ratio |
+|---|---|---|---|---|
+| S23 | 5,813 | **7,949** (+36.7%) | 9,038 | **88.0%** |
+| S08 | 6,133 | **8,425** (+37.4%) | 11,218 | **75.1%** |
+| S30 | 7,430 | *running* | *no reference* | — |
 
-**MS1+MS2 valley splitting is confirmed on S23 only.** Confirmation on S08 and S30 is in
-progress; this project has produced three wrong conclusions from cross-sample comparison, so
-a single-sample result is not treated as established.
+**MS1 valley splitting is confirmed on two independent samples** (+36.7% / +37.4%) and is now
+the default (`trace:ms1_split_valleys 7.0`). It costs ~1.7x wall time and ~25% peak RAM.
+
+**Charge inference now defaults to `count`**, the partner-count heuristic. Against a DIA-NN
+reference on S23 it gives **71.8% charge agreement vs 49.7%** for the previous default
+(`envelope`), and it eliminates the catastrophic `4->2` confusion (10,199 cases) that fabricates
+a ~-1198 Da phantom modification at m/z 600 in open search.
+
+Both numbers deserve a caveat: **always answering z=2 would score 69.6%.** `count` beats that by
+2.2 points and the previous default was 20 points *below* it. Charge inference barely works; it
+merely stopped failing catastrophically.
 
 There is **no diaTracer run for S30**, so the S30 column has no ratio. An earlier version of
 this table reported "S08, best config 7,430 -> 66.2%", which was wrong twice over: 7,430 is an
