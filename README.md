@@ -59,17 +59,16 @@ independent of whether anything identifies the spectrum):
 
 ## The main open defect
 
-An MS1 funnel against 43,499 DIA-NN precursors localises where precursors are lost:
+**Charge annotation.** Agreement with a DIA-NN reference is **47.8%** against diaTracer's
+**82.6%**, dominant confusion `4->2` (15,734 cases on S08).
 
-| stage | share |
-|---|---|
-| no MS1 trace at all | **2.2%** |
-| trace, but no hypothesis | 10.5% |
-| hypothesis, **wrong charge** | **15.9%** |
-| correct hypothesis | 71.3% |
+An MS1 funnel attempting to localise *where* precursors are lost was **retracted the same day it
+was produced** — see [docs/ms1-funnel.md](docs/ms1-funnel.md). A decoy floor added afterwards
+showed that a precursor which does not exist still matched an MS1 trace 91.9% of the time, so the
+assay measured trace density rather than correctness. **"97.8% detection ceiling" and "26.5% lost
+in inference" are withdrawn.** A tolerance sweep is running to find a usable operating point.
 
-**Detection is not the bottleneck** — the MS1 ceiling is 97.8%. 26.5% is destroyed in isotope and
-charge inference, corroborated by 47.8% charge agreement against diaTracer's 82.6%.
+The charge-agreement number does not depend on that assay and stands.
 
 This matters disproportionately for the intended use: dM = (z'-z)(m/z - 1.00728), so a z4->z2
 error at m/z 600 fabricates a -1198 Da phantom modification. A closed search hides this because

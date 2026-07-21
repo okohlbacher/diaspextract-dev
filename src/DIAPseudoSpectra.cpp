@@ -81,6 +81,8 @@ namespace
   }
   static std::string clk_() { char b[32]; snprintf(b, sizeof b, " [t=%.0fs]", phase_clock_()); return b; }
 
+  bool log_overlap_ = false;   ///< [B0] gate:coelution == "logoverlap"
+
   static std::string rss_()
   {
     std::ifstream st("/proc/self/status");
@@ -530,6 +532,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "[stream] Same, for MS1 frames (BrukerTimsFile Config ms1_n_neighbors). Requires perf:stream_load.", false);
 
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
+    registerStringOption_("gate:coelution", "<mode>", "pearson", "[B0] Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
+    setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
     registerIntOption_("perf:trace_bands", "<n>", 0, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable + our own RSS) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
@@ -1034,8 +1038,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       }
       if (gi >= 0) { if (pdense[gi] == 0.0f) touched.push_back(gi); pdense[gi] += (float)p.second; }
     }
-    double psum = 0, psumsq = 0;
-    for (int gi : touched) { double v = pdense[gi]; psum += v; psumsq += v * v; }
+    double psum = 0, psumsq = 0, plogsum = 0;
+    // plogsum normalises the precursor profile for gate:coelution=logoverlap. Constant across
+    // every fragment of this precursor, so hoist it out of the inner loop.
+    for (int gi : touched)
+    {
+      double v = pdense[gi];
+      psum += v; psumsq += v * v;
+      if (log_overlap_) plogsum += std::log1p(v);
+    }
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
     if (pinv > 0.0)
@@ -1052,7 +1063,40 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         for (size_t k = fg.supBegin(fi), ke = fg.supEnd(fi); k < ke; ++k)
         { const auto& gv = fg.flat[k]; float pv = pdense[gv.first]; if (pv != 0.0f) { dot += (double)pv * gv.second; ++overlap; } }
         if (overlap < min_corr_pts) continue;                          // overlap guard [H-4]
-        double c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
+        // [B0] Pearson takes variance over the FULL grid G, so a fragment present in 5 of ~1300
+        // grid points has its variance computed against ~1300 implicit zeros -- the zero-padding
+        // defect the adversarial review flagged. It rewards sparse fragments that happen to spike
+        // where the precursor spikes, and its scale depends on G rather than on the evidence.
+        // AlphaDIA instead collapses fragments with sum(log(intensity+1)): a likelihood under
+        // independence, where one missing point does not zero the score (unlike a product) and
+        // one huge point cannot dominate (unlike a sum). Adapted to a (precursor, fragment) pair:
+        // profile overlap in log space, summed ONLY where the precursor has signal, normalised to
+        // [0,1]. No zero padding, no dependence on G.
+        double c;
+        if (log_overlap_)
+        {
+          // Normalise BOTH log-profiles to unit sum, then intersect. The first attempt divided
+          // the intersection by the precursor's total log-intensity alone, which made the score
+          // bounded by the fragment/precursor INTENSITY RATIO: a genuine fragment at 1% of
+          // precursor intensity scored ~0.01 however perfectly it co-eluted, and was gated out.
+          // Measured -18.9% peptides at gate 0.5 and -9.1% at 0.3 -- a magnitude statistic
+          // standing in for a shape statistic. Unit-sum normalisation makes this a distributional
+          // intersection: 1 iff the two normalised elution shapes agree, invariant to scale --
+          // which is what Pearson gets right and the first version did not.
+          double fsum = 0.0;
+          for (size_t k = fg.supBegin(fi), ke = fg.supEnd(fi); k < ke; ++k)
+            fsum += std::log1p((double)fg.flat[k].second);
+          if (fsum <= 0.0 || plogsum <= 0.0) continue;
+          double inter = 0.0;
+          for (size_t k = fg.supBegin(fi), ke = fg.supEnd(fi); k < ke; ++k)
+          {
+            const auto& gv = fg.flat[k];
+            inter += std::min(std::log1p((double)gv.second) / fsum,
+                              std::log1p((double)pdense[gv.first]) / plogsum);
+          }
+          c = inter;
+        }
+        else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
         if (c < min_corr) continue;                                    // correlation gate
         emit(fi, c);
       }
@@ -1119,6 +1163,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const String out = getStringOption_("out");
     const double delta_im = getDoubleOption_("gate:delta_im");
     const double delta_rt = getDoubleOption_("gate:delta_rt");
+    log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
@@ -1390,7 +1435,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     if (n_bands <= 0)  // auto: enough bands that windows x bands covers every thread
       n_bands = (int)std::ceil((double)n_threads / std::max<size_t>(window_list.size(), 1));
     n_bands = std::max(1, n_bands);
-    int n_conc = std::min<int>((int)window_list.size(), n_threads);
+    // TOTAL live threads are outer x inner. Capping only the inner team (as a first cut did)
+    // gave 24 windows x 9 bands = 216 threads on a 224-core box that another job was already
+    // loading to ~173 -- measured: 11 of 24 windows in 98 min against a 40 min single-band
+    // reference. Divide the thread budget between the two levels instead of multiplying it.
+    int n_conc = std::min<int>((int)window_list.size(), std::max(1, n_threads / n_bands));
     if (max_conc > 0) n_conc = std::min(n_conc, max_conc);
     if (n_conc < 1) n_conc = 1;
 #ifdef _OPENMP
@@ -1398,8 +1447,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     if (n_bands > 1) omp_set_max_active_levels(2);
 #endif
     writeLogInfo_("Parallelism: " + String(window_list.size()) + " windows x " + String(n_bands)
-                  + " m/z bands = " + String((int)window_list.size() * n_bands) + " trace units for "
-                  + String(n_threads) + " threads");
+                  + " m/z bands = " + String((int)window_list.size() * n_bands) + " trace units; "
+                  + String(n_conc) + " windows x " + String(n_bands) + " bands = "
+                  + String(n_conc * n_bands) + " live threads of " + String(n_threads));
     // [dyn-mem] Thread count is the UPPER bound; free RAM is the real one. A static cap either
     // wastes cores on a big machine or OOMs on a shared one, and this node is shared. Admit each
     // window only when its projected footprint fits in currently-free RAM, re-read from
