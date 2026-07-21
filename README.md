@@ -37,9 +37,19 @@ gets more chances at a per-spectrum threshold.
 
 | | ours | diaTracer | ratio |
 |---|---|---|---|
-| S08, best config | 7,430 | 11,218 | 66.2% |
+| S08, baseline | 6,133 | 11,218 | 54.7% |
 | S23, baseline | 5,131 | 9,038 | 56.8% |
-| S23, MS1+MS2 valley splitting | **7,917** | 9,038 | **87.6%** |
+| S23, MS2 valley splitting | 5,813 | 9,038 | 64.3% |
+| S23, **MS1+MS2 valley splitting** | **7,949** | 9,038 | **88.0%** |
+| S30, best config | 7,430 | *no reference* | — |
+
+**MS1+MS2 valley splitting is confirmed on S23 only.** Confirmation on S08 and S30 is in
+progress; this project has produced three wrong conclusions from cross-sample comparison, so
+a single-sample result is not treated as established.
+
+There is **no diaTracer run for S30**, so the S30 column has no ratio. An earlier version of
+this table reported "S08, best config 7,430 -> 66.2%", which was wrong twice over: 7,430 is an
+**S30** result, and it was being divided by the **S08** diaTracer reference.
 
 Spectrum quality, from a model-free DIA-NN-anchored assay (decoy-controlled, equal depth,
 independent of whether anything identifies the spectrum):
