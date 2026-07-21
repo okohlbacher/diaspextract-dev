@@ -47,6 +47,27 @@ Isotope-envelope **intensity** matching: for a genuine z=4 precursor of mass ~24
 averagine model predicts specific M/M+1/M+2 abundance ratios. A spurious +0.25 Da peak
 will not match them. Spacing is degenerate between z and 2z; **abundance is not**.
 
-`charge:scoring=envelope` already implements this path and is default-OFF. It was
-evaluated only under `spectrum_q` — see the correction in [[S08-results]] — so its prior
-assessment is not trustworthy and it must be re-judged at `peptide_q`.
+## CORRECTION (2026-07-21): envelope scoring is default-ON, not default-OFF
+
+An earlier version of this file claimed `charge:scoring=envelope` was an untested lever
+waiting to be enabled. It is the **default** (`registerStringOption_("charge:scoring",
+"<mode>", "envelope", ...)`). A benchmark arm passing `-charge:scoring envelope`
+returned byte-identical output to baseline (6509 spectrum_q / 5813 peptide_q), which is
+what exposed it.
+
+This matters for how every number here is read:
+
+* The **15.9% wrong-charge rate and 47.8% charge agreement are what envelope scoring
+  already produces.** They are not a "before" measurement.
+* Averagine-shape cosine x isotope-XIC co-elution, with gapped envelopes allowed, is
+  therefore **not sufficient** to break the z vs 2z degeneracy. The abundance argument
+  above is correct in principle but the current implementation of it is not working.
+* The informative experiment is the opposite direction: `-charge:scoring count` (the
+  legacy partner-count heuristic, ties favouring LOW charge, break-on-first-miss) to
+  establish whether envelope is better or worse than the alternative. Until that runs,
+  we do not know that envelope scoring is helping at all.
+
+The dominant confusion being `4->2` (overcalling charge) is consistent with a scorer that
+rewards finding MORE envelope members: a z=4 hypothesis has twice as many candidate slots
+as z=2 in the same m/z span, so gapped-envelope tolerance may actively favour it. Worth
+checking whether the evidence weighting penalises hypothesis complexity enough.
