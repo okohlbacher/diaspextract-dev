@@ -1,0 +1,5 @@
+build/
+*.mzML
+*.parquet
+*.tsv
+__pycache__/
