@@ -41,8 +41,29 @@ gets more chances at a per-spectrum threshold.
 | S08 | 6,133 | **8,425** (+37.4%) | 11,218 | **75.1%** |
 | S30 | 7,430 | *running* | *no reference* | — |
 
-**MS1 valley splitting is confirmed on two independent samples** (+36.7% / +37.4%) and is now
-the default (`trace:ms1_split_valleys 7.0`). It costs ~1.7x wall time and ~25% peak RAM.
+**MS1 valley splitting is now the default** (`trace:ms1_split_valleys 7.0`), costing ~1.7x wall
+time and ~25% peak RAM. Two caveats that arrived after it was made default, both of which
+matter more than the peptide count:
+
+**1. It works by emitting more, larger, dirtier spectra — not by inferring better.** Against a
+DIA-NN S23 reference:
+
+| | baseline | ms1split |
+|---|---|---|
+| recall of DIA-NN precursors | 69.9% | **85.4%** |
+| **charge agreement** | 49.7% | **45.8%** |
+| co-isolation contamination (net) | +10.78% | **+16.29%** |
+| median peaks/spectrum | 228 | **500 (cap-saturated)** |
+
+Recall rises 15 points, but charge agreement falls *below* baseline and contamination rises 50%.
+For a closed-search peptide count that is a win. **For open search — what this tool is for —
+worse charge annotation means more fabricated modifications.**
+
+**2. "Confirmed on two samples" was overstated.** S23 (+36.7%) and S08 (+37.4%) were each
+measured against whatever baseline that sample happened to have: MS2-split for S23, plain for
+S08, and a tuned +-25 ppm search config for S30 — three different denominators. S30 showed only
+**+4.1%**, which may be an artefact of its stronger baseline rather than a failure to generalise.
+Matched-baseline runs across all three samples are in progress.
 
 **Charge inference now defaults to `count`**, the partner-count heuristic. Against a DIA-NN
 reference on S23 it gives **71.8% charge agreement vs 49.7%** for the previous default
