@@ -19,7 +19,27 @@ Cost in open search: ΔM = (z′−z)(m/z − 1.00728). Measured at m/z 600:
 | z=3 | z=2 | −599.0 Da |
 | z=1 | z=2 | +599.0 Da |
 
-## FALSIFIED: ion mobility cannot break the tie
+## RETRACTED FALSIFICATION: ion mobility was retired on a wrong null
+
+**This section previously read "FALSIFIED: ion mobility cannot break the tie". That conclusion
+rested on a statistical error and is withdrawn.**
+
+The nearest-neighbour test asks whether a precursor's nearest neighbour in (m/z, IM) **shares**
+its charge. That is a coincidence rate between two draws, so the null is `sum(p_z^2)`. The
+script compared it against `max(p_z)` instead — the null for *predicting* one label:
+
+| | value |
+|---|---|
+| null used (`max p_z`) | 69.6% |
+| **correct null (`sum p_z^2`)** | **55.8%** |
+| observed | 75.0% |
+| margin as published | +5.4 points |
+| **margin corrected** | **+19.2 points** |
+
+So the (m/z, IM) plane carries **substantially more** charge information than reported, and
+"do not build an IM-based charge prior" was wrong.
+
+What still stands, because it is a direct observation rather than a null comparison:
 
 Hypothesis was that diaPASEF's mobility dimension constrains charge — the acquisition
 tiles themselves track the charge-2 line, so charge ought to be separable in (m/z, 1/K0).

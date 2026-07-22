@@ -53,4 +53,12 @@ for i in range(0, len(mzs), step):
 tot = sum(agree.values())
 print(f"\nnearest neighbour in (m/z +-2 Da, closest IM) shares charge: "
       f"{100*agree[True]/max(tot,1):.1f}%  (n={tot})")
-print(f"chance baseline (most common charge): {100*max(np.bincount(z))/len(z):.1f}%")
+# NULL CORRECTION. This test asks whether a precursor's nearest neighbour SHARES its charge --
+# a coincidence rate between two draws, whose null is sum(p_z^2), NOT max(p_z). max(p_z) is the
+# null for PREDICTING one label. Using it inflated the baseline from 55.8% to 69.6% and turned a
+# +19.2-point signal into +5.4, which is the sentence that falsified the whole ion-mobility
+# lever in docs/charge-inference.md. Both nulls are printed so the error cannot recur silently.
+_c = np.bincount(z)[np.bincount(z) > 0]
+_p = _c / _c.sum()
+print(f"null, PREDICT one label   (max p_z) : {100*_p.max():.1f}%   <- WRONG for this test")
+print(f"null, SHARE a label     (sum p_z^2) : {100*(_p**2).sum():.1f}%   <- correct")

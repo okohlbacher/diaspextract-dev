@@ -46,8 +46,12 @@ spurious "+4.1%, does not generalise" for S30.
 | S08 | 6,114 | **8,996** | **+47.1%** | 11,218 | **80.2%** |
 | S30 | 6,866 | **10,072** | **+46.7%** | 11,626 | **86.6%** |
 
-**+44.6% / +47.1% / +46.7%** — consistent within 2.5 points across three samples, and
-**80–93% of diaTracer** on all three. An earlier version of this table reported
+**Paired within-sample delta: +46.1%, 95% CI [+42.8%, +49.5%]** (n=3). Both arms run in one
+invocation, so sample-to-sample variance cancels and this interval is the defensible claim.
+
+**The ratio to diaTracer is NOT.** Mean 86.6%, sd 6.5, **95% CI [70.6%, 102.7%] — which includes
+parity.** Three point estimates were previously quoted as "80–93%" as if they bounded the
+quantity; they are a sample of three, and the interval is far wider than the spread suggests. An earlier version of this table reported
 "S08, best config 7,430 → 66.2%", which was wrong twice over: 7,430 is an **S30** result, and it
 was divided by the **S08** diaTracer reference.
 
@@ -79,8 +83,14 @@ This matters disproportionately for the intended use: dM = (z'-z)(m/z - 1.00728)
 error at m/z 600 fabricates a -1198 Da phantom modification. A closed search hides this because
 the engine enumerates charge; an open search does not.
 
-See [docs/](docs/) for the measurements, including levers that were **falsified** — ion mobility
-cannot predict charge, and every redundancy-reducing knob loses peptides at peptide-level FDR.
+**Run-to-run reproducibility is 0.17%** (4 runs of an identical effective configuration:
+8,411 / 8,408 / 8,406 / 8,397). Differences below ~0.2% are noise; the +46% delta is far above it.
+
+See [docs/](docs/) for the measurements, including levers that were **falsified** — every
+redundancy-reducing knob loses peptides at peptide-level FDR. One falsification has been
+**withdrawn**: ion mobility was retired against the wrong null (`max p_z` = 69.6% instead of
+`sum p_z^2` = 55.8%), so its true margin is **+19.2 points, not +5.4**. See
+[docs/charge-inference.md](docs/charge-inference.md).
 
 ## Layout
 
