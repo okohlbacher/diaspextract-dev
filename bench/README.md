@@ -64,3 +64,50 @@ python3 open_bench.py analyse RESULTS.tsv --label arm --ratio 0.800
 
 All three arms are extracted on **one node with one binary** — comparing across nodes or builds
 is the error class this benchmark exists to eliminate.
+
+
+## `joint_bench.py` — the success metric across the three datasets
+
+**3 samples × {diaTracer, speXtract} × {Sage, MSFragger}**, reporting the two numbers the
+project is scored on:
+
+* **PSMs** at ≤1% PSM-level FDR
+* **unique peptides** at ≤1% peptide-level FDR
+
+### The design decision that matters
+
+Both engines are scored by **one identical target-decoy procedure** implemented in
+`joint_bench.py`, *not* by each engine's own FDR machinery (Sage's internal linear discriminant;
+MSFragger via PeptideProphet/Philosopher or Percolator). Those pipelines differ in rescoring, in
+PSM→peptide aggregation, and in decoy handling — comparing their outputs would confound *"which
+engine identifies more"* with *"whose FDR is more permissive"*.
+
+For the same reason both engines search **one pre-built target+decoy FASTA** with a shared
+`rev_` prefix, and Sage's internal decoy generation is turned **off**, so the two see
+byte-identical search spaces.
+
+Peptide-level FDR is "picked": best-scoring PSM per distinct sequence, then target-decoy over
+that reduced list. That axis is the point — speXtract emits ~4.6 PSMs/peptide against
+diaTracer's 1.46, so PSM counts reward redundancy and peptide counts do not. **Both are
+reported so the gap is visible rather than hidden.**
+
+Validated before use: null control (targets and decoys from one distribution) collapses to 1
+accepted; peptide-level correctly reduces 5 PSMs over 2 sequences to 2.
+
+### Known asymmetry — read before quoting an engine comparison
+
+**No rescoring is applied.** Sage's reported score is already discriminant-rescored; MSFragger's
+hyperscore is not, which favours Sage on absolute counts. Adding Percolator to MSFragger alone
+would reintroduce the confound this design removes; adding it to *both* is the correct fix and
+is not done here.
+
+**The tool comparison is unaffected** — diaTracer vs speXtract is made *within* an engine, and
+that is the comparison this harness exists for. The engine axis is a secondary readout.
+
+### Run
+
+```bash
+python3 joint_bench.py decoydb --target human.fasta --out human_decoy.fasta
+./run_joint.sh
+python3 joint_bench.py collate joint_results.json
+```
