@@ -522,6 +522,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // feature emitted more than once (RT slices / IM sub-ranges / charge hypotheses). Targets the
     // measured 4.6 vs 1.46 PSMs-per-peptide gap. OFF by default (delta_rt 0) - it is a deletion.
     registerTOPPSubsection_("consolidate", "Feature-level de-duplication of emitted spectra");
+    registerTOPPSubsection_("merge", "Recombine split spectra (union, not selection)");
+    registerDoubleOption_("merge:rt_window", "<sec>", 0.0, "[merge] Merge spectra sharing a precursor identity within this RT window into ONE spectrum by UNION of peaks with intensities summed. This is not consolidate: consolidate SELECTS the richest member and DISCARDS the rest (measured -12.7% peptides), while 41% of peaks are present in only one member. Measured MS1 FWHM is 3.61 s (2.61 cycles) and flat across the gradient, so ~3.6 s is one peak width -- the principled window. 0 = off.", false);
+    registerDoubleOption_("merge:mass_ppm", "<ppm>", 20.0, "[merge] Precursor m/z tolerance for deciding two spectra share an identity.", false, true);
+    registerDoubleOption_("merge:delta_im", "<1/K0>", 0.02, "[merge] Precursor ion-mobility tolerance.", false, true);
+    registerDoubleOption_("merge:mz_tol", "<Da>", 0.01, "[merge] Peak m/z tolerance when summing the union. Peaks within this of the running intensity-weighted centroid are combined.", false, true);
+    registerFlag_("merge:any_charge", "[merge] Also merge spectra whose precursor charges disagree. Off by default: 93.2% of split pairs already agree in charge, so merging across charges mostly pools genuinely different precursors.");
     registerDoubleOption_("consolidate:delta_rt", "<sec>", 0.0, "Consolidate spectra whose precursors agree within this RT window (and mass_ppm/delta_im) into ONE feature, keeping the richest spectrum. 0 = OFF. Try 5-10. Attacks emission multiplicity (ours 4.6 PSMs/peptide vs diaTracer 1.46) without changing fragment content.", false);
     registerDoubleOption_("consolidate:mass_ppm", "<ppm>", 20.0, "Precursor m/z tolerance for feature consolidation.", false, true);
     registerDoubleOption_("consolidate:delta_im", "<1/K0>", 0.02, "Precursor IM tolerance for feature consolidation. Set larger than the 12 m/z x 2 IM sub-range split to merge a feature emitted from BOTH IM sub-ranges.", false, true);
@@ -1755,6 +1761,88 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // NOTE this is a DELETION, and deletion has repeatedly cost peptides here - hence default OFF and
     // a hard kill criterion (see TRACING.md): keep only if unique peptides rise >=3%.
     //-------------------------------------------------------------
+    //-------------------------------------------------------------
+    // [merge] Recombine SPLIT spectra into one joint spectrum -- union of peaks, intensities
+    // SUMMED. This is not consolidate: consolidate SELECTS the richest member and discards the
+    // rest, which measured -12.7% peptides. Measured basis for merging instead:
+    //   * within-cycle pairs share a precursor (93.2% same charge, 7.5 ppm) and 41% of peaks
+    //     are present in only ONE member; the union is 1.355x the larger member
+    //   * ms1_split_valleys quadruples the affected groups (3,398 -> 14,379)
+    // RT window: measured MS1 FWHM on S30 is 3.61 s (2.61 cycles), flat across the gradient
+    // (1.04x end to end), and our own spread is 2.66 cycles -- so ONE FWHM is the principled
+    // window. It is 13x narrower than the 45.7 s at which an earlier analysis still saw
+    // "benefit", which is the regime where two spectra cannot be one feature.
+    //-------------------------------------------------------------
+    const double merge_rt = getDoubleOption_("merge:rt_window");
+    if (merge_rt > 0.0 && !all_out.empty())
+    {
+      const double mg_ppm = getDoubleOption_("merge:mass_ppm");
+      const double mg_im  = getDoubleOption_("merge:delta_im");
+      const double mg_mz  = getDoubleOption_("merge:mz_tol");
+      const bool   mg_z   = !getFlag_("merge:any_charge");
+      vector<MSSpectrum> kept;
+      kept.reserve(all_out.size());
+      vector<char> used(all_out.size(), 0);
+      Size n_merged = 0, n_groups = 0;
+
+      for (size_t i = 0; i < all_out.size(); ++i)
+      {
+        if (used[i]) continue;
+        const auto& pi = all_out[i].getPrecursors();
+        if (pi.empty()) { kept.push_back(std::move(all_out[i])); used[i] = 1; continue; }
+        const double mz_i = pi[0].getMZ();
+        const int    z_i  = pi[0].getCharge();
+        const double im_i = pi[0].getDriftTime();
+
+        vector<size_t> grp{i};
+        // all_out is sorted by RT, so stop as soon as the window is exceeded
+        for (size_t j = i + 1; j < all_out.size(); ++j)
+        {
+          if (all_out[j].getRT() - all_out[i].getRT() > merge_rt) break;
+          if (used[j]) continue;
+          const auto& pj = all_out[j].getPrecursors();
+          if (pj.empty()) continue;
+          if (fabs(pj[0].getMZ() - mz_i) > mz_i * mg_ppm * 1e-6) continue;
+          if (mg_z && pj[0].getCharge() != z_i) continue;
+          const double im_j = pj[0].getDriftTime();
+          if (im_i > 0 && im_j > 0 && fabs(im_j - im_i) > mg_im) continue;
+          grp.push_back(j);
+        }
+        if (grp.size() == 1) { kept.push_back(std::move(all_out[i])); used[i] = 1; continue; }
+
+        // apex = highest TIC. Its RT/IM/precursor become the merged spectrum's coordinates, but
+        // its CONTENT is the union of the whole group -- the point is not to pick the apex.
+        size_t apex = grp[0];
+        for (size_t g : grp) if (all_out[g].calculateTIC() > all_out[apex].calculateTIC()) apex = g;
+
+        vector<pair<double, double>> pk;
+        for (size_t g : grp)
+          for (const auto& p : all_out[g]) pk.emplace_back(p.getMZ(), p.getIntensity());
+        sort(pk.begin(), pk.end());
+        MSSpectrum out = all_out[apex];
+        out.clear(false);                       // keep metadata, drop peaks
+        for (size_t a = 0; a < pk.size(); )
+        {
+          double mz_sum = pk[a].first * pk[a].second, in_sum = pk[a].second;
+          size_t b = a + 1;
+          // sum every peak within mg_mz of the RUNNING centroid, so a dense cluster does not
+          // chain arbitrarily far from where it started
+          while (b < pk.size() && fabs(pk[b].first - mz_sum / in_sum) <= mg_mz)
+          { mz_sum += pk[b].first * pk[b].second; in_sum += pk[b].second; ++b; }
+          Peak1D q; q.setMZ(mz_sum / in_sum); q.setIntensity(in_sum);
+          out.push_back(q);
+          a = b;
+        }
+        for (size_t g : grp) used[g] = 1;
+        n_merged += grp.size(); ++n_groups;
+        kept.push_back(std::move(out));
+      }
+      writeLogInfo_("Spectrum merge: " + String(all_out.size()) + " -> " + String(kept.size())
+                    + " spectra (" + String(n_groups) + " groups absorbed " + String(n_merged)
+                    + " members, window " + String(merge_rt) + " s)" + rss_());
+      all_out.swap(kept);
+    }
+
     const double cons_rt = getDoubleOption_("consolidate:delta_rt");
     if (cons_rt > 0.0)
     {
@@ -1773,7 +1861,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (pi.empty()) { kept.push_back(std::move(all_out[i])); continue; }
         const double mz_i = pi[0].getMZ();
         const int z_i = pi[0].getCharge();
-        const double im_i = all_out[i].getDriftTime();
+        // BUGFIX: IM is stamped on the PRECURSOR (:1137 prec.setDriftTime), not on the
+        // MSSpectrum. getDriftTime() here returned -1 always, so "im_i > 0" was false and the
+        // mobility gate NEVER FIRED -- every consolidate result to date merged on (RT, m/z,
+        // charge) only.
+        const double im_i = pi[0].getDriftTime();
         // scan forward while RT is still within the window (sorted by RT)
         for (size_t j = i + 1; j < all_out.size(); ++j)
         {
@@ -1783,7 +1875,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (pj.empty()) continue;
           if (fabs(pj[0].getMZ() - mz_i) > mz_i * cons_ppm * 1e-6) continue;
           if (cons_z && pj[0].getCharge() != z_i) continue;
-          const double im_j = all_out[j].getDriftTime();
+          const double im_j = pj[0].getDriftTime();
           if (im_i > 0 && im_j > 0 && fabs(im_j - im_i) > cons_im) continue;
           // same feature: keep whichever carries more fragments (tie -> higher TIC)
           if (all_out[j].size() > all_out[best].size() ||
