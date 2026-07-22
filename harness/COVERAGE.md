@@ -35,9 +35,15 @@ delete the guard, and the suite must fail.
 
 | module | sites | KILLED | coverage | pure theatre |
 |---|---|---|---|---|
-| `bench2.py` | 120 | 34 | **28%** | G-B00, ~~G-B13~~ (fixed) |
-| `collate2.py` | 65 | 30 | **46%** | G-C00, G-C10 |
-| **total** | **185** | **64** | **35%** | |
+| `bench2.py` | 119 | **43** | **36%** (was 28%) | G-B00 only (was G-B00 + G-B13) |
+| `collate2.py` | 65 | 30 | 46% | G-C00, G-C10 |
+
+**Critical gate: PASSES for `bench2.py`** (4 entries). `G-B05` (cross-sample, FAILURE 1) and
+`G-B13` (raw TOCTOU, FAILURE 7) are now killed at every gated site by tests that call the
+PRODUCTION path. `G-B13` went 0/6 -> 6/6.
+
+Still open: `collate2.py G-C10` (the `WINDOWS_S23` replacement) has no test, and `collate2.py`
+has no `match=` support so its 46% carries the same-id ambiguity below.
 
 **121 of 185 guard sites are unverified claims.** The harness is NOT adoptable as the sole
 sanctioned benchmarking path in this state. `bench.py` v1 remains in use, with its
@@ -102,3 +108,17 @@ listed guards are genuinely killed.
   to report if the two disagree.
 * `collate2.py` is not yet patched with `match=` support; its coverage figure carries the
   same-id ambiguity described above.
+
+
+## Gate design: two bugs found in the gate itself
+
+The first version reported **"CRITICAL GATE PASSED (6 entries verified)"** while checking two.
+
+1. **Line-pinned entries go stale silently.** Adding tests above a guard shifted every line
+   below it; `G-B05:1387` then matched no site and passed. Entries now pin to a **message
+   fragment**, which survives edits.
+2. **Cross-module entries were skipped.** `G-C10` lives in `collate2.py`; running the gate on
+   `bench2.py` found no such site and passed it. An entry matching nothing is now an **ERROR**
+   (`CRITICAL LIST IS STALE`), not a pass.
+
+Third instance of this pattern in one session — in the tool built to detect the pattern.

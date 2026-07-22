@@ -44,10 +44,10 @@ spurious "+4.1%, does not generalise" for S30.
 |---|---|---|---|---|---|
 | S23 | 5,817 | **8,411** | **+44.6%** | 9,038 | **93.1%** |
 | S08 | 6,114 | **8,996** | **+47.1%** | 11,218 | **80.2%** |
-| S30 | 6,866 | **10,072** | **+46.7%** | *no reference* | — |
+| S30 | 6,866 | **10,072** | **+46.7%** | 11,626 | **86.6%** |
 
-**+44.6% / +47.1% / +46.7%** — consistent within 2.5 points across three samples. There is no
-diaTracer run for S30, so that row has no ratio. An earlier version of this table reported
+**+44.6% / +47.1% / +46.7%** — consistent within 2.5 points across three samples, and
+**80–93% of diaTracer** on all three. An earlier version of this table reported
 "S08, best config 7,430 → 66.2%", which was wrong twice over: 7,430 is an **S30** result, and it
 was divided by the **S08** diaTracer reference.
 

@@ -92,11 +92,16 @@ def die_sites(src, tree):
         if not (gid and gid.startswith("G-")):
             continue
 
+        end = call_end_line(src_lines, node.lineno)
         out.append({
             "guard": gid,
             "lineno": node.lineno,
-            "end_lineno": call_end_line(src_lines, node.lineno),
+            "end_lineno": end,
             "col": node.col_offset,
+            # Raw source of the call. Criticals pin to a fragment of THIS, never to a line
+            # number: adding a test above a guard shifts every line below it, and a
+            # line-pinned critical then matches nothing and passes silently. That happened.
+            "text": "".join(src_lines[node.lineno - 1:end]),
         })
     # deterministic order; dedupe identical spans (decorated/nested walks)
     seen, uniq = set(), []
@@ -228,25 +233,42 @@ def main():
     # Without a declared critical set this is only a report, and a report is what let 121
     # unverified claims ship twice. Guards covering RECURRING failures must be killed.
     if args.critical:
-        want = [l.strip() for l in Path(args.critical).read_text().splitlines()
-                if l.strip() and not l.strip().startswith("#")]
-        alive = {(r["guard"], r["lineno"]) for r in results if r["verdict"] != "KILLED"}
-        breaches = []
+        want = [l.split("#")[0].strip() for l in Path(args.critical).read_text().splitlines()]
+        want = [w for w in want if w]
+        breaches, unmatched = [], []
         for w in want:
-            g, _, ln = w.partition(":")
-            if ln:
-                if (g, int(ln)) in alive:
-                    breaches.append(w)
-            elif by.get(g, {}).get("KILLED", 0) == 0:
-                breaches.append(g + " (no site killed)")
+            mod_name, _, rest = w.partition(" ")
+            guard, _, frag = rest.partition(" ")
+            if not (mod_name and guard and frag):
+                unmatched.append("%s -- malformed (want: MODULE GUARD MESSAGE_FRAGMENT)" % w)
+                continue
+            if mod_name != mod.name:
+                continue                       # belongs to the other module's sweep
+            hits = [r for r in results
+                    if r["guard"] == guard and frag.lower() in r["text"].lower()]
+            if not hits:
+                # An entry that matches NOTHING must be an ERROR. Silently passing an
+                # unmatchable critical is how the first version of this gate reported
+                # "PASSED (6 entries)" while checking two.
+                unmatched.append("%s -- matched no guard site in %s" % (w, mod.name))
+                continue
+            for h in hits:
+                if h["verdict"] != "KILLED":
+                    breaches.append("%s %s (line %d) %s" % (mod_name, guard, h["lineno"], frag))
         print()
+        if unmatched:
+            print("CRITICAL LIST IS STALE -- these entries match nothing and were NOT checked:")
+            for u in unmatched:
+                print("    %s" % u)
         if breaches:
             print("CRITICAL GATE FAILED -- these guards claim to prevent a failure that has")
             print("ALREADY HAPPENED in this project, and deleting them changes nothing:")
             for b in breaches:
                 print("    %s" % b)
+        if breaches or unmatched:
             return 3
-        print("CRITICAL GATE PASSED (%d entries verified by mutation)" % len(want))
+        checked = sum(1 for w in want if w.split(" ")[0] == mod.name)
+        print("CRITICAL GATE PASSED for %s (%d entries verified by mutation)" % (mod.name, checked))
 
     # Non-zero while any site survives: this is a gate, not a report.
     return 1 if survived else 0

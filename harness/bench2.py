@@ -2216,6 +2216,122 @@ def selftest_bench(env):
     st.expect_abort("G-B13", "raw_identity on a file with no .d members aborts",
                     lambda: raw_identity(str(_f)), match="contains no files")
 
+    # ---- G-B13 post-run stability: the TOCTOU half ---------------------------------------
+    # Was UNVERIFIED (mutation: sites 567/581 survived). These are the sites the critical gate
+    # names, because they cover the retarget-during-the-run hole: the recipe pins S08 at
+    # construction and the converter reads the .d for HOURS afterwards. Both call the PRODUCTION
+    # verify_raw_unchanged() and are message-pinned, so neither can be satisfied by a sibling.
+    def _mk_d(path, iso_mz):
+        """Minimal but REAL .d: acquisition_identity reads GlobalMetadata and
+        DiaFrameMsMsWindows out of a genuine sqlite analysis.tdf, so a byte fixture is not
+        enough. Two tiles are sufficient to exercise the window table."""
+        path.mkdir(exist_ok=True)
+        tdf = path / "analysis.tdf"
+        if tdf.exists():
+            tdf.unlink()
+        con = sqlite3.connect(str(tdf))
+        con.execute("CREATE TABLE GlobalMetadata (Key TEXT, Value TEXT)")
+        con.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
+                        [("InstrumentName", "timsTOF"), ("AcquisitionSoftware", "selftest"),
+                         ("OneOverK0AcqRangeLower", "0.6"), ("OneOverK0AcqRangeUpper", "1.6")])
+        con.execute("CREATE TABLE DiaFrameMsMsWindows (WindowGroup INT, ScanNumBegin INT, "
+                    "ScanNumEnd INT, IsolationMz REAL, IsolationWidth REAL)")
+        con.executemany("INSERT INTO DiaFrameMsMsWindows VALUES (?,?,?,?,?)",
+                        [(1, 34, 602, iso_mz, 25.0), (1, 602, 944, iso_mz + 300.0, 25.0)])
+        con.execute("CREATE TABLE Frames (Id INT, Time REAL, MsMsType INT, NumScans INT)")
+        con.executemany("INSERT INTO Frames VALUES (?,?,?,?)",
+                        [(1, 0.5, 0, 944), (2, 1.2, 9, 944)])
+        con.commit(); con.close()
+        (path / "analysis.tdf_bin").write_bytes(b"spectra")
+        return path
+
+    _d = _mk_d(tmp / "stable.d", 700.0)
+    _pin = raw_identity(str(_d))
+
+    # unchanged input must NOT abort -- a guard that refuses everything gets bypassed by hand
+    st.expect_ok("G-B13", "an unmodified .d passes the post-run check",
+                 lambda: verify_raw_unchanged(str(_d), _pin))
+
+    # :567 -- the path now resolves somewhere else (symlink retargeted mid-run)
+    _other = _mk_d(tmp / "other.d", 900.0)
+    _link = tmp / "link.d"
+    if _link.is_symlink() or _link.exists():
+        _link.unlink()
+    _link.symlink_to(_other)
+    st.expect_abort("G-B13", "raw path retargeted during the run is detected",
+                    lambda: verify_raw_unchanged(str(_link), _pin),
+                    match="RETARGETED")
+
+    # :581 -- same path, but a member's bytes changed under us
+    (_d / "analysis.tdf_bin").write_bytes(b"spectra-MODIFIED-mid-run")
+    st.expect_abort("G-B13", "a raw member modified during the run is detected",
+                    lambda: verify_raw_unchanged(str(_d), _pin),
+                    match="changed during the run")
+
+    # :577 -- a member APPEARED or vanished (a partial re-copy of the .d mid-run)
+    (_d / "analysis.tdf_bin").write_bytes(b"spectra")          # undo the :581 modification
+    (_d / "stray.bin").write_bytes(b"appeared mid-run")
+    st.expect_abort("G-B13", "a raw member added during the run is detected",
+                    lambda: verify_raw_unchanged(str(_d), _pin),
+                    match="gained or lost files")
+    (_d / "stray.bin").unlink()
+
+    # :586 -- acquisition identity drift. Rewriting the window table also changes the file's
+    # bytes, so a physical simulation trips :581 first (message-pinning caught exactly that).
+    # The check under test is the COMPARISON, so the pin is constructed with a wrong
+    # acquisition_id and correct stat pins: every earlier check passes and only :586 can fire.
+    # FRESH fixture: earlier cases mutated _d, and a stat pin includes mtime_ns, so even
+    # rewriting identical bytes leaves _d permanently dirty against _pin.
+    _acq = _mk_d(tmp / "acq.d", 700.0)
+    _pin_bad = json.loads(json.dumps(raw_identity(str(_acq))))
+    _pin_bad["acquisition_id"] = "f" * 64
+    st.expect_abort("G-B13", "acquisition identity changing mid-run is detected",
+                    lambda: verify_raw_unchanged(str(_acq), _pin_bad),
+                    match="acquisition identity changed")
+
+    # ---- G-B05 cross-sample: the PRODUCTION comparison, not a reimplementation -------------
+    # FAILURE 1 -- a published ratio divided an S30 result by S08's diaTracer reference; the
+    # class of error occurred 3x. The existing case for this guard copies the comparison into
+    # its own body and calls die() itself, so disabling the production check at :1384 left the
+    # suite fully green (mutation-verified). These call do_convert / do_adopt directly. The
+    # digest check is the first statement after raw_identity(), so the later arguments are
+    # never reached and may be None.
+    _d0 = _mk_d(tmp / "b05.d", 700.0)          # no walrus: this interpreter is 3.7
+    _id0 = raw_identity(str(_d0))
+    # the PIN shape is not raw_identity's return shape -- do_convert reads raw_content_id
+    _pin_ok = {"raw_content_id": _id0["content_id"],
+               "acquisition_id": _id0["acquisition_id"],
+               "realpath": str(Path(str(_d0)).resolve()),
+               "stat_pins": _id0["stat_pins"]}
+    _entry = {"raw": str(_d0)}
+
+    def _bad_content():
+        bad = json.loads(json.dumps(_pin_ok))
+        bad["raw_content_id"] = "0" * 64
+        do_convert(None, None, None, "S08", None, None, None, _entry, bad)
+    st.expect_abort("G-B05", "raw content digest mismatch reaches the PRODUCTION check",
+                    _bad_content, match="raw content digest")
+
+    def _bad_acq():
+        bad = json.loads(json.dumps(_pin_ok))
+        bad["acquisition_id"] = "0" * 64
+        do_convert(None, None, None, "S08", None, None, None, _entry, bad)
+    st.expect_abort("G-B05", "acquisition identity mismatch reaches the PRODUCTION check",
+                    _bad_acq, match="acquisition identity")
+
+    # :1478 -- the adopt path (an external mzML such as diaTracer's) is scored against THIS
+    # sample's acquisition geometry, so it needs the same pin check.
+    def _bad_adopt():
+        bad = json.loads(json.dumps(_pin_ok))
+        bad["acquisition_id"] = "0" * 64
+        # arm is a dict whose "source" names the reference; the acquisition-pin check runs
+        # after that resolution, so both must be well-formed to reach it
+        do_adopt(None, None, None, "S08",
+                 {"name": "dt", "source": "references.diatracer_mzml"},
+                 {"diatracer_mzml": {"path": "/nonexistent"}}, _entry, bad)
+    st.expect_abort("G-B05", "adopt path checks acquisition pin before using an external mzML",
+                    _bad_adopt, match="acquisition identity drifted")
+
     # ---- G-B01 plan schema whitelist -------------------------------------------------------
     st.expect_abort("G-B01", "unknown top-level plan key", lambda: load_plan(
         _plan(env, [BASE_ARM, TREAT_ARM], extra={"outroot": "/tmp/x"}), reg))
