@@ -1357,10 +1357,41 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const String ms1_dump = getStringOption_("diag:dump_ms1_tsv");
     if (!ms1_dump.empty())
     {
+      // [fwhm] FWHM straight from each trace's own XIC rather than from
+      // ElutionPeakDetection, so the measurement does not depend on whether split_valleys ran.
+      // Apex, then walk outwards to half maximum with linear interpolation between samples;
+      // -1 when the trace never falls to half max on both sides (truncated peak), which must be
+      // reported rather than silently imputed -- a truncated peak is not a narrow one.
+      auto fwhm_of = [](const vector<pair<double, double>>& xic) -> double {
+        if (xic.size() < 3) return -1.0;
+        size_t ap = 0;
+        for (size_t i = 1; i < xic.size(); ++i) if (xic[i].second > xic[ap].second) ap = i;
+        const double half = xic[ap].second * 0.5;
+        if (half <= 0.0) return -1.0;
+        double lo = -1.0, hi = -1.0;
+        for (size_t i = ap; i > 0; --i)
+          if (xic[i - 1].second <= half)
+          {
+            const double d = xic[i].second - xic[i - 1].second;
+            const double f = d > 0 ? (xic[i].second - half) / d : 0.0;
+            lo = xic[i].first - f * (xic[i].first - xic[i - 1].first);
+            break;
+          }
+        for (size_t i = ap; i + 1 < xic.size(); ++i)
+          if (xic[i + 1].second <= half)
+          {
+            const double d = xic[i].second - xic[i + 1].second;
+            const double f = d > 0 ? (xic[i].second - half) / d : 0.0;
+            hi = xic[i].first + f * (xic[i + 1].first - xic[i].first);
+            break;
+          }
+        return (lo >= 0.0 && hi >= 0.0) ? hi - lo : -1.0;
+      };
       ofstream ft((ms1_dump + ".traces.tsv").c_str());
-      ft << "mz\trt\tim\tintensity\n";
+      ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\n";
       for (const auto& t : ms1_traces)
-        ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << t.intensity << '\n';
+        ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << t.intensity << '\t'
+           << fwhm_of(t.xic) << '\t' << t.xic.size() << '\n';
       ft.close();
       ofstream fp((ms1_dump + ".precursors.tsv").c_str());
       fp << "mono_mz\tcharge\trt\tim\tguessed\n";
