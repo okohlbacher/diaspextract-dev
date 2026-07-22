@@ -126,3 +126,63 @@ few hours on existing output and needs no new extraction run.**
 already captures the gain, making the extra machinery unjustified; or the peptide count falls in
 the `consolidate:delta_rt` sweep now running, which would show that within-cycle duplicates carry
 information after all.
+
+---
+
+## N+1. Learned monoisotope/charge predictor from MS1 + fragment features
+
+**Origin.** User proposal, 2026-07-22: *"correlate with MS1 precursor masses, perhaps in an ML
+based predictor including these features."*
+
+**Why this is now well-posed, when it was not this morning.** Three things changed today:
+
+1. **The target is quantified.** Charge agreement is **74.6%** against a majority-class baseline
+   of **69.6%** — inference beats "always answer z=2" by 5.0 points. That is the headroom, and
+   it is large.
+2. **Ion mobility is back in play.** The IM lever was retired on a statistics error: a
+   *share-a-label* rate was compared against `max p_z` (69.6%) instead of `sum p_z^2` (55.8%).
+   Corrected, (m/z, IM) carries **+19.2 points** of charge information over chance, not +5.4.
+   See [charge-inference.md](charge-inference.md). A *monotonic* IM prior still fails — z=4 lies
+   between z=2 and z=3 — but a **learned 2-D prior does not**, and that is precisely what a model
+   can represent and a threshold cannot.
+3. **The failure mode is localised.** ~44% of within-cycle duplicates are separated by ~1000 ppm
+   ≈ one isotope spacing: the same peptide assigned to different monoisotopes. That is the thing
+   to predict.
+
+**Labels exist.** DIA-NN references give true charge and monoisotope for ~43,499 precursors on
+S08, plus S23 and S30 — ~130k labelled precursors. Small for a transformer (DIA-BERT needed
+276M) but ample for the model class the review actually recommends.
+
+**Model class, per the 2026-07-22 review.** AlphaDIA — state of the art in this exact data type —
+scores with **46 hand-crafted features into a 10,810-parameter MLP**, *not* a transformer. Verdict
+there: transformer ~8% probability of beating the hand-crafted path; the small model is the
+recommendation. Start with gradient-boosted trees or an MLP of that size.
+
+**Feature set (all already computed or cheaply derivable):**
+
+| group | features |
+|---|---|
+| MS1 isotope | intensity ratios M/M+1/M+2, observed-vs-averagine cosine, spacing residual in ppm, number of partners found |
+| MS1–MS2 coupling | correlation of fragment XICs to the precursor XIC, fraction of fragments correlating, apex RT offset |
+| mobility | 1/K0, deviation from the (m/z, IM) charge-2 line, and the tile's `ScanNumBegin/End` band — a hard transmission constraint the code currently discards |
+| position | m/z, RT, precursor intensity, local co-isolation density |
+| redundancy | within-cycle multiplicity for this precursor (measured 2.85 mean) |
+
+**Target.** Correct charge, and correct monoisotope offset (−1 / 0 / +1 / +2), as two heads or
+one joint class.
+
+**Falsification, pre-registered.** The model must beat **both** baselines:
+* the 69.6% majority-class constant, and
+* the 74.6% shipped `count` heuristic,
+by more than the 0.17% replicate spread, on a **held-out sample** — train on S08+S30, test on
+S23. Training and testing on one sample would measure memorisation, and this project's
+characteristic failure is exactly a metric that cannot tell the two apart.
+
+**What would kill it.** Held-out charge accuracy does not beat 74.6%; or it does, but the peptide
+count does not move — which would mean charge was never the binding constraint and the real limit
+is elsewhere.
+
+**Do first.** The `isotope_errors [0,0]` experiment now running measures how much the *search
+engine* is already repairing our monoisotope errors. If Sage's correction fully absorbs them, a
+predictor buys little for closed search and its value is confined to open search — which is the
+stated purpose, but changes the cost/benefit.
