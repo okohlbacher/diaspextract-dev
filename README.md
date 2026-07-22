@@ -35,48 +35,24 @@ as a truth set. **All peptide counts are at `peptide_q <= 0.01`** — spectrum-l
 our counts by 14-16% versus diaTracer's 5-7%, because we emit more spectra per peptide and each
 gets more chances at a per-spectrum threshold.
 
-| | before | **now** | diaTracer | ratio |
-|---|---|---|---|---|
-| S23 | 5,813 | **7,949** (+36.7%) | 9,038 | **88.0%** |
-| S08 | 6,133 | **8,425** (+37.4%) | 11,218 | **75.1%** |
-| S30 | 7,430 | *running* | *no reference* | — |
+All three samples now run **matched baselines** — identical config, one node, one binary, both
+arms in a single invocation — because the first attempt compared each sample against whatever
+baseline it happened to have (MS2-split, plain, and a tuned ±25 ppm config), which produced a
+spurious "+4.1%, does not generalise" for S30.
 
-**MS1 valley splitting is now the default** (`trace:ms1_split_valleys 7.0`), costing ~1.7x wall
-time and ~25% peak RAM. Two caveats that arrived after it was made default, both of which
-matter more than the peptide count:
+| sample | matched base | **with defaults** | delta | diaTracer | ratio |
+|---|---|---|---|---|---|
+| S23 | 5,817 | **8,411** | **+44.6%** | 9,038 | **93.1%** |
+| S08 | 6,114 | **8,996** | **+47.1%** | 11,218 | **80.2%** |
+| S30 | 6,866 | **10,072** | **+46.7%** | *no reference* | — |
 
-**1. It works by emitting more, larger, dirtier spectra — not by inferring better.** Against a
-DIA-NN S23 reference:
+**+44.6% / +47.1% / +46.7%** — consistent within 2.5 points across three samples. There is no
+diaTracer run for S30, so that row has no ratio. An earlier version of this table reported
+"S08, best config 7,430 → 66.2%", which was wrong twice over: 7,430 is an **S30** result, and it
+was divided by the **S08** diaTracer reference.
 
-| | baseline | ms1split |
-|---|---|---|
-| recall of DIA-NN precursors | 69.9% | **85.4%** |
-| **charge agreement** | 49.7% | **45.8%** |
-| co-isolation contamination (net) | +10.78% | **+16.29%** |
-| median peaks/spectrum | 228 | **500 (cap-saturated)** |
-
-Recall rises 15 points, but charge agreement falls *below* baseline and contamination rises 50%.
-For a closed-search peptide count that is a win. **For open search — what this tool is for —
-worse charge annotation means more fabricated modifications.**
-
-**2. "Confirmed on two samples" was overstated.** S23 (+36.7%) and S08 (+37.4%) were each
-measured against whatever baseline that sample happened to have: MS2-split for S23, plain for
-S08, and a tuned +-25 ppm search config for S30 — three different denominators. S30 showed only
-**+4.1%**, which may be an artefact of its stronger baseline rather than a failure to generalise.
-Matched-baseline runs across all three samples are in progress.
-
-**Charge inference now defaults to `count`**, the partner-count heuristic. Against a DIA-NN
-reference on S23 it gives **71.8% charge agreement vs 49.7%** for the previous default
-(`envelope`), and it eliminates the catastrophic `4->2` confusion (10,199 cases) that fabricates
-a ~-1198 Da phantom modification at m/z 600 in open search.
-
-Both numbers deserve a caveat: **always answering z=2 would score 69.6%.** `count` beats that by
-2.2 points and the previous default was 20 points *below* it. Charge inference barely works; it
-merely stopped failing catastrophically.
-
-There is **no diaTracer run for S30**, so the S30 column has no ratio. An earlier version of
-this table reported "S08, best config 7,430 -> 66.2%", which was wrong twice over: 7,430 is an
-**S30** result, and it was being divided by the **S08** diaTracer reference.
+The two defaults responsible are `trace:ms1_split_valleys 7.0` and `charge:scoring count`. They
+are **coupled** — see below — and cost ~1.7x wall time and ~25% peak RAM.
 
 Spectrum quality, from a model-free DIA-NN-anchored assay (decoy-controlled, equal depth,
 independent of whether anything identifies the spectrum):
@@ -86,8 +62,10 @@ independent of whether anything identifies the spectrum):
 
 ## The main open defect
 
-**Charge annotation.** Agreement with a DIA-NN reference is **47.8%** against diaTracer's
-**82.6%**, dominant confusion `4->2` (15,734 cases on S08).
+**Charge annotation.** Now **74.6%** with the current defaults (was 47.8%), against diaTracer's
+**82.6%**. The catastrophic `4->2` confusion is gone. But **always answering z=2 would score
+69.6%** — so charge inference beats a constant by 5.0 points. It has stopped failing
+catastrophically rather than started working, and it remains the largest headroom in the tool.
 
 An MS1 funnel attempting to localise *where* precursors are lost was **retracted the same day it
 was produced** — see [docs/ms1-funnel.md](docs/ms1-funnel.md). A decoy floor added afterwards
