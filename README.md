@@ -117,7 +117,11 @@ spectra; always answering z=2 would score **69.6%**):
 | `count` | 71.8% | -- |
 | **`ms1split` + `count`** (default) | **74.6%** | -- |
 
-**MS1 splitting REQUIRES `count`.** On its own it drops charge agreement below baseline and
+**MS1 splitting must not ship without `count`** — an *empirical* coupling, not an architectural
+one. The two touch separate code paths (`trace:ms1_split_valleys` in `detectTraces_`,
+`charge:scoring` in `inferPrecursors_`); nothing in the code enforces the pairing, so the
+combination is a benchmark finding that a future edit could silently break. On its own MS1
+splitting drops charge agreement below baseline and
 more than triples the `4->2` confusion, which fabricates a ~-1198 Da phantom modification at
 m/z 600 -- invisible to closed search (the engine enumerates charge) and fatal to open search.
 Shipping `trace:ms1_split_valleys` without `charge:scoring count` would have been actively

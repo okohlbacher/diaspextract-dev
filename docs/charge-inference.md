@@ -70,8 +70,9 @@ will not match them. Spacing is degenerate between z and 2z; **abundance is not*
 ## CORRECTION (2026-07-21): envelope scoring is default-ON, not default-OFF
 
 An earlier version of this file claimed `charge:scoring=envelope` was an untested lever
-waiting to be enabled. It is the **default** (`registerStringOption_("charge:scoring",
-"<mode>", "envelope", ...)`). A benchmark arm passing `-charge:scoring envelope`
+waiting to be enabled. It **was** the default until 2026-07-21; the code now ships
+`registerStringOption_("charge:scoring", "<mode>", "count", ...)`. A benchmark arm passing
+`-charge:scoring envelope`
 returned byte-identical output to baseline (6509 spectrum_q / 5813 peptide_q), which is
 what exposed it.
 
