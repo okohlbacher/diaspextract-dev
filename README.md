@@ -115,3 +115,34 @@ docs/       benchmark results and architecture reviews
 ## License
 
 BSD-3-Clause. Derived from OpenMS (BSD-3-Clause) — see [NOTICE](NOTICE).
+
+## Charge inference: the two defaults are coupled, not independent
+
+Measured against a DIA-NN S23 reference (`charge agreement` = our charge vs truth on matched
+spectra; always answering z=2 would score **69.6%**):
+
+| arm | charge agreement | `4->2` errors |
+|---|---|---|
+| ms1split + ambiguity_margin | **41.7%** | 34,554 |
+| ms1split alone | 45.8% | 19,995 |
+| baseline (`envelope`) | 49.7% | 10,199 |
+| `count` | 71.8% | -- |
+| **`ms1split` + `count`** (default) | **74.6%** | -- |
+
+**MS1 splitting REQUIRES `count`.** On its own it drops charge agreement below baseline and
+more than triples the `4->2` confusion, which fabricates a ~-1198 Da phantom modification at
+m/z 600 -- invisible to closed search (the engine enumerates charge) and fatal to open search.
+Shipping `trace:ms1_split_valleys` without `charge:scoring count` would have been actively
+harmful for this tool's actual purpose.
+
+### `charge:ambiguity_margin` -- falsified, four tests
+
+| margin | peptide_q | vs `split_count` 8,411 |
+|---|---|---|
+| 0.5 | 8,408 | -0.04% |
+| 1.0 | 8,406 | -0.06% |
+| 2.0 | 8,397 | -0.2% |
+
+2.0 is the first value that can genuinely fire against an integer partner count (it admits any
+hypothesis within 2 partners of the best) and it still changes nothing. Hedging charge does not
+help; deciding it well does. Left at 0.
