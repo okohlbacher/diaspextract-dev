@@ -49,9 +49,23 @@ spurious "+4.1%, does not generalise" for S30.
 **Paired within-sample delta: +46.1%, 95% CI [+42.8%, +49.5%]** (n=3). Both arms run in one
 invocation, so sample-to-sample variance cancels and this interval is the defensible claim.
 
-**The ratio to diaTracer is NOT.** Mean 86.6%, sd 6.5, **95% CI [70.6%, 102.7%] — which includes
-parity.** Three point estimates were previously quoted as "80–93%" as if they bounded the
-quantity; they are a sample of three, and the interval is far wider than the spread suggests. An earlier version of this table reported
+**The ratio to diaTracer** is best measured under a single common FDR procedure applied to both
+tools (`bench/joint_bench.py`), which removes per-run FDR calibration as a variable:
+
+| sample | diaTracer pep | speXtract pep | ratio |
+|---|---|---|---|
+| S23 | 9,068 | 8,083 | 89.1% |
+| S08 | 10,440 | 8,881 | 85.1% |
+| S30 | 11,552 | 9,977 | 86.4% |
+
+**86.9%, 95% CI [81.7%, 92.0%] — excludes parity.** This supersedes an earlier figure of
+"80–93%" computed from each engine's own FDR, whose true interval was [70.6%, 102.7%] and did
+*not* exclude parity. Scoring both tools identically cut the spread from sd 6.5 to sd 2.1.
+
+**But we emit 4.9× the PSMs to get 0.87× the peptides** — 9.51 PSMs/peptide against diaTracer's
+1.69. Three independent benchmarks now agree on this: closed `peptide_q`, entrapment open search
+(2.82× PSMs for 1.05× modified peptides), and the joint common-FDR run. See
+[docs/benchmarks/joint-2026-07-22.md](docs/benchmarks/joint-2026-07-22.md). An earlier version of this table reported
 "S08, best config 7,430 → 66.2%", which was wrong twice over: 7,430 is an **S30** result, and it
 was divided by the **S08** diaTracer reference.
 
