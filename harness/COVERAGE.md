@@ -45,9 +45,10 @@ PRODUCTION path. `G-B13` went 0/6 -> 6/6.
 Still open: `collate2.py G-C10` (the `WINDOWS_S23` replacement) has no test, and `collate2.py`
 has no `match=` support so its 46% carries the same-id ambiguity below.
 
-**121 of 185 guard sites are unverified claims.** The harness is NOT adoptable as the sole
-sanctioned benchmarking path in this state. `bench.py` v1 remains in use, with its
-limitations known rather than disguised.
+**109 of 184 guard sites remain unverified claims.** The harness is still NOT adoptable as
+the sole sanctioned benchmarking path: the critical guards are verified, but the bulk is not,
+and `collate2.py` has had no work at all. `bench.py` v1 remains in use with its limitations
+known rather than disguised.
 
 ### Guards whose every site survived
 
@@ -55,8 +56,8 @@ limitations known rather than disguised.
 |---|---|---|
 | `G-B00` | pyyaml missing → abort | **acceptable untested.** Fires at import; the real failure mode is a loud `ImportError`. Not domain logic. |
 | `G-C00` | pyarrow/pyteomics missing → abort | same. |
-| `G-B13` | raw `.d` missing / retargeted | **was theatre — now 2/6**, both message-pinned. Sites 567–586 (post-run retarget detection) remain unverified. |
-| `G-C10` | produce stage carries no acquisition window table | **REAL GAP.** This is the guard replacing v1's hardcoded `WINDOWS_S23` applied to every sample (FAILURE 8). Lines 1382, 1530, 2126 all survive. |
+| `G-B13` | raw `.d` missing / retargeted | **FIXED: 6/6**, every site message-pinned against the production `verify_raw_unchanged`. |
+| `G-C10` | produce stage carries no acquisition window table | **STILL A REAL GAP.** The guard replacing v1's hardcoded `WINDOWS_S23` (FAILURE 8). Lines 1382, 1530, 2126 all survive. Next item. |
 
 ## The subtler defect: same-id fallthrough
 
@@ -91,8 +92,9 @@ have **already happened in this project**, held to 100% mutation coverage; every
 is reported but not gated. Claiming protection everywhere and verifying it nowhere is what
 produced two generations of theatre.
 
-**The gate currently FAILS.** That is the accurate status, and it stays visible until the
-listed guards are genuinely killed.
+**Status: PASSES for `bench2.py` (4 entries), and the `collate2.py G-C10` entry is still
+unmet.** Running the gate against `collate2.py` reports `CRITICAL LIST IS STALE` because that
+guard has no test — which is the intended behaviour, not a bug.
 
 ## Instrument limitations
 
