@@ -1,0 +1,19 @@
+# Guards covering failures that have ALREADY HAPPENED in this project.
+# Held to 100% mutation coverage. `mutate.py --critical` exits 3 if any survives.
+# This list currently FAILS by design: it states the target, not the status.
+
+# FAILURE 1 -- cross-sample comparison (published a ratio dividing an S30 result by S08's
+# reference; occurred 3x). The production content-digest check, NOT the selftest's
+# reimplementation of it at :2247.
+G-B05:1387
+G-B05:1392
+
+# FAILURE 8 -- v1 applied a hardcoded 24-tile WINDOWS_S23 to every sample. diaPASEF tiles
+# are a per-method property. This is the guard that refuses to proceed without a real table.
+G-C10:1382
+G-C10:1530
+
+# FAILURE 7 -- a 6-hour benchmark ran against a 2-day-old binary because tar silently
+# refused to overwrite a running executable.
+G-B13:567
+G-B13:581
