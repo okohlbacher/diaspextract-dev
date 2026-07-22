@@ -138,8 +138,10 @@ def read_msfragger(tsv):
             return None
         c_pep = pick("Peptide", "peptide", "Modified Peptide")
         c_scr = pick("Hyperscore", "hyperscore", "SpecEValue", "Expectation")
-        c_pro = pick("Proteins", "Protein", "protein")
-        c_spec = pick("Spectrum", "scannr", "ScanNr")
+        # MSFragger 4.4.1 emits lowercase plural `proteins`; omitting that exact spelling made
+        # the resolver abort on a perfectly good 96 MB result file.
+        c_pro = pick("proteins", "Proteins", "Protein", "protein")
+        c_spec = pick("scannum", "Spectrum", "scannr", "ScanNr")
         if not (c_pep and c_scr and c_pro):
             sys.exit("ABORT: %s: cannot resolve peptide/score/protein columns from %s"
                      % (tsv, cols))
