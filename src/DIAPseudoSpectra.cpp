@@ -1709,8 +1709,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           // Order-safety: a canonical total-order sort over all_out runs after the window loop
           // (RT, precursor m/z, charge, then fragment sequence), so emission order is already
           // thread-count-independent. Only slot CONTENTS matter here.
+          // THREAD CAP -- this region is NESTED inside the window loop (num_threads(n_conc)).
+          // Without a cap it requests the full team PER WINDOW, i.e. n_conc x omp_get_max_threads()
+          // threads on a fixed core count. That is precisely the defect diagnosed in
+          // ElutionPeakDetection.cpp:328 (a bare parallel-for with no num_threads, reached from
+          // inside this same loop, measured at 43.5% kernel time) -- reproduced here by omission.
+          // Divide the budget instead of multiplying it.
+          int p_team = 1;
+#ifdef _OPENMP
+          p_team = std::max(1, omp_get_max_threads() / std::max(n_conc, 1));
+#endif
           vector<MSSpectrum> pslot(phi > plo ? phi - plo : 0);
-          #pragma omp parallel for schedule(dynamic, 32) firstprivate(pdense)
+          #pragma omp parallel for schedule(dynamic, 32) firstprivate(pdense) num_threads(p_team)
           for (long pii = (long)plo; pii < (long)phi; ++pii)
           {
             const size_t pi = (size_t)pii;
