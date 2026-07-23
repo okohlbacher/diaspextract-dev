@@ -1,57 +1,57 @@
-# The delta-mass ray assay cannot quantify charge errors (calibration, S30)
+# Calibrating the delta-mass ray assay: it recovers ≤2.9% of charge errors
 
-## What was tested
+## What was done
 
 `corrupt_charge.py` rewrote the reported charge of a known fraction of precursors, leaving m/z
-untouched — exactly the error the tool makes in the field. The resulting neutral mass shifts by
-`(z_new − z_old)(m/z − PROTON)` with no other change to the spectrum. The assay should then see
-those PSMs as a straight ray of integer slope in (precursor m/z, Δmass).
+untouched — exactly the error the tool makes in the field. The corrupted spectra were searched
+through the symmetric −3000/+3000 Da open window and analysed by the ray decomposition.
 
-Arm 1, `--from-z 4 --to-z 2` (true z=4 reported as z=2, k = −2), symmetric ±3000 Da window:
+| arm | rewrite | k | injected | rays detected |
+|---|---|---|---|---|
+| `4to2` | true z=4 reported as z=2 | −2 | 3,865 | **0** |
+| `2to4` | true z=2 reported as z=4 | +2 | 99,984 | **0** |
 
-```
-injected                     3,865
-raw PSMs                 1,465,760
-survive 1% entrapment FDR    1,754   (0.12%)
-modified PSMs                  884
-rays detected                   {}   <- ZERO
-```
+## The bound, stated correctly
 
-**Recovery is 0%.** Not low — zero, from 3,865 injected.
+Naively 0 of 103,849 gives a 95% upper bound of 0.0029%. **That figure is wrong, and the error
+is in the experiment design, not the arithmetic.**
 
-## Why
+Errors were injected into a **random** 10% of eligible spectra. But only **0.103%** of PSMs
+survive 1% entrapment FDR in open search (1,512 of 1,468,765). So of 99,984 injected errors, only
+**~103 landed in spectra that could ever have been identified** — the rest were injected into
+spectra that produce no PSM regardless of their charge.
 
-Only **0.12%** of PSMs survive 1% entrapment FDR in open search. A spectrum with a corrupted
-precursor mass *can* still be identified — that is what open search is for — but the resulting
-PSM must clear a threshold set against 1.47M candidates. Essentially none do.
+**Correct bound: 0 of ~103 detectable → 95% upper bound 2.9% recovery.**
 
-So injected charge errors are real, and invisible by construction.
+Still decisive for the practical question: the assay recovers at most 1 charge error in 34.
 
-## What this retracts
+## Consequence
 
-**"The control fired at p ≈ 2.4×10⁻⁶"** was arithmetically correct about excess over base rate
-(26 slope-+2 events vs 8.9 expected) but is **not evidence the instrument can measure anything**.
-It detected 26 events out of an unknown true number, and the calibration puts the recovery rate
-at zero. A ratio without a denominator is not a measurement.
+**The ray assay cannot quantify charge errors.** The 26 slope-+2 events previously observed in
+the `envelope` arm cannot be converted into a real count — at ≤2.9% recovery they would imply
+≥900 true errors, but that inference rests on a bound derived from ~103 events and should not be
+quoted as a number.
 
-This is the third metric on this project to fail once its control was actually run — after the
-MS1 funnel (91.9% chance floor) and the ion-mobility charge prior (wrong null). The pattern is
-consistent: the metric was reported first and calibrated later.
+The earlier claim that "the control fired at p ≈ 2.4×10⁻⁶" remains arithmetically true about
+excess over base rate, and remains uninformative about whether the instrument can *measure*
+anything.
 
-## Consequences
+## Why recovery is so low
 
-* The entrapment open-search benchmark **cannot quantify charge errors**. Presence/absence
-  claims are also doubtful at 0/3,865.
-* More broadly: **open search at 1% entrapment FDR retains 0.12% of PSMs on pseudo-DDA spectra**.
-  Any open-search metric here describes a tiny, heavily-selected subset. That is a property of
-  the regime, not a bug in the script.
-* The **DIA-NN-anchored** charge measurement (74.6% agreement against a 69.6% majority-class
-  constant) therefore remains the better instrument for this question, despite its own
-  limitation — DIA-NN's tryptic / z2–4 / ≤2-mod space cannot contain non-canonical species.
+Not a defect in the geometry — the ray/band separation works, and was validated on synthetic
+data at 300/300 recovery with zero noise leakage. The limit is upstream: **a spectrum with a
+corrupted precursor mass rarely survives 1% entrapment FDR at all.** Open search on pseudo-DDA
+spectra retains 0.1% of PSMs, so almost everything is filtered before the geometry can see it.
 
-## Still open
+That is a property of open search on this data, not of the script.
 
-Arm 2 (`--from-z 2 --to-z 4`, k = +2, **99,984 injected** — 26× more) is running. If recovery is
-genuinely zero rather than merely small, that arm bounds it far more tightly. A non-zero result
-there would mean detectability depends on error *direction*, which would be a different and
-more interesting finding than a flat null.
+## What would make this measurable
+
+Inject into **spectra that are already identified** in an uncorrupted run, then measure recovery
+on that population. That answers the question this experiment intended to answer — "can the assay
+see a charge error in a spectrum that would otherwise identify?" — and gives a bound with useful
+power instead of one resting on ~103 events.
+
+Until then, the **DIA-NN-anchored charge measurement (74.6% agreement against a 69.6%
+majority-class constant) remains the better instrument for charge quality**, despite its own
+limitation of being blind to non-canonical species.
