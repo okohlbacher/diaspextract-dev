@@ -543,7 +543,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
     registerStringOption_("gate:coelution", "<mode>", "pearson", "[B0] Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
-    registerIntOption_("perf:trace_bands", "<n>", 0, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
+    registerIntOption_("perf:trace_bands", "<n>", 12, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable + our own RSS) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
 
@@ -1639,8 +1639,17 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // per-window band count: n_bands is the AUTO cap (threads/windows); a wide tile may exceed
         // it since bands are cheap relative to the trace work they unlock, a narrow one may not
         // reach it. Explicit -perf:trace_bands N pins every window to N.
-        const int w_bands = (getIntOption_("perf:trace_bands") > 0)
-                            ? n_bands : bands_for(win_lo, win_hi, std::max(n_bands * 4, 4));
+        // MEASURED on S30: flat 12 beats the per-window `bands_for` heuristic by 25% and beats
+        // flat 24 as well (1,844 s vs 2,483 s vs 1,987 s). The heuristic under-provisioned
+        // because it sized bands against HALO overhead, and the halo term turned out to be
+        // dominated by a much larger effect: trace CPU falls 11,168 -> 5,378 -> 2,972 s across
+        // 5/12/24 bands, i.e. banding REDUCES TOTAL WORK, not just wall time.
+        // MassTraceDetection scans candidates per apex within the band's m/z range, so halving a
+        // band halves the candidate list for every apex in it -- superlinear, and it swamps the
+        // fixed per-band halo cost. 24 bands then loses to 12 on wall time despite half the CPU,
+        // because 24 windows x 24 bands = 576 threads on 100 cores and scheduling overtakes the
+        // algorithmic gain. bands_for is kept for reference but is no longer the default path.
+        const int w_bands = std::max(1, getIntOption_("perf:trace_bands"));
         vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
         // (compact frames already released inside materializeWindow) [par-Crit-3]
         #pragma omp critical
