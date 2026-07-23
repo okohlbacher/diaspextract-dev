@@ -510,6 +510,7 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (diaTracer-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 0.0, "[way-2] Split MS2 mass traces at chromatographic local minima via ElutionPeakDetection (which MassTraceDetection never does - it only terminates on outliers, so two peptides 25 s apart within the m/z tolerance MERGE). Value is chrom_fwhm in seconds; it sets both the Savitzky-Golay window and the local-extrema half-window. 0 = OFF. Try 6-8 (peaks here are 5-30 s). width_filtering is forced off so this only SPLITS, never deletes.", false);
+    registerDoubleOption_("trace:split_valleys_fwhm", "<x>", 0.0, "[fwhm] Set the valley-splitting window as a MULTIPLE OF THE MEASURED MS1 FWHM instead of absolute seconds. Overrides trace:ms1_split_valleys when > 0. Absolute seconds cannot be right across methods: 14.0 s is +0.0% peptides on a 31 min gradient and -1.06% on a 5.6 min one. Measured MS1 FWHM is 3.61 s on S30, so the old 7.0 s default is ~1.9x FWHM and 14.0 s is ~3.9x. 0 = off (use absolute seconds).", false);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys via ElutionPeakDetection. DEFAULT 7.0 s: MassTraceDetection never splits at a local minimum, so two peptides eluting ~25 s apart within the m/z tolerance merge into ONE multi-modal trace, producing a merged precursor with the wrong monoisotope and charge. Measured +36.7% peptides on S23 and +37.4% on S08 at peptide-level FDR. Costs ~1.7x wall time and ~25% peak RAM. 0 = off.", false);
     registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
 registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Same as frame_aggregation_n but for the MS1 (PRECURSOR) map. This is the one that can add DEPTH: measurement shows we identify MORE spectra than diaTracer (3.7%% vs 2.0%% of spectra) but cover FEWER distinct peptides (4.6 vs 1.46 PSMs/peptide), i.e. we miss low-abundance PRECURSORS. Aggregating MS2 alone cannot fix that. 1 = off.", false);
@@ -527,6 +528,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerDoubleOption_("merge:mass_ppm", "<ppm>", 20.0, "[merge] Precursor m/z tolerance for deciding two spectra share an identity.", false, true);
     registerDoubleOption_("merge:delta_im", "<1/K0>", 0.02, "[merge] Precursor ion-mobility tolerance.", false, true);
     registerDoubleOption_("merge:mz_tol", "<Da>", 0.01, "[merge] Peak m/z tolerance when summing the union. Peaks within this of the running intensity-weighted centroid are combined.", false, true);
+    registerDoubleOption_("merge:min_cosine", "<x>", 0.0, "[merge] Require this normalised dot product between two spectra before merging them. Coordinate proximity is NOT the problem (the coordinate gate already admits only 1.8% different-peptide pairs); the problem is that only ~8% of emitted spectra identify at all, so a coordinate gate merges good spectra with unidentifiable ones whose peaks dilute the match. Measured reference: within-cycle pairs 0.845, same peptide across cycles 0.687, unrelated 0.007. 0 = off.", false);
+    registerFlag_("merge:sum_intensity", "[merge] Sum intensities of matching peaks instead of taking the MAX. Summing distorts the merged spectrum: members share only ~37% of peaks (Jaccard 0.374), so shared peaks get Nx and unique peaks 1x, wrecking the fragment intensity ratios the engine scores on. MAX takes each ion's best single observation. Off (i.e. MAX) by default.");
     registerFlag_("merge:any_charge", "[merge] Also merge spectra whose precursor charges disagree. Off by default: 93.2% of split pairs already agree in charge, so merging across charges mostly pools genuinely different precursors.");
     registerDoubleOption_("consolidate:delta_rt", "<sec>", 0.0, "Consolidate spectra whose precursors agree within this RT window (and mass_ppm/delta_im) into ONE feature, keeping the richest spectrum. 0 = OFF. Try 5-10. Attacks emission multiplicity (ours 4.6 PSMs/peptide vs diaTracer 1.46) without changing fragment content.", false);
     registerDoubleOption_("consolidate:mass_ppm", "<ppm>", 20.0, "Precursor m/z tolerance for feature consolidation.", false, true);
@@ -1320,13 +1323,72 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const double ms2_snr = getDoubleOption_("trace:ms2_chrom_peak_snr");
     const double ms2_minlen = getDoubleOption_("trace:ms2_min_length_sec");
     const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-    const double ms2_split = getDoubleOption_("trace:ms2_split_valleys");
+    double ms2_split = getDoubleOption_("trace:ms2_split_valleys");
     const double max_trace_len = getDoubleOption_("trace:max_trace_length_sec");
     const int agg_n = getIntOption_("trace:frame_aggregation_n");
     String ms1_span;
     vector<Trace> ms1_traces = detectTraces_(ms1_map, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span);
     writeLogInfo_("MS1 " + ms1_span);   // [merged-trace] measure, do not assume
+
+    // [fwhm] Measure the actual chromatographic peak width from the MS1 traces just built, and
+    // use it to set the MS2 valley-splitting window. chrom_fwhm is an ABSOLUTE TIME, so a fixed
+    // default cannot be right across methods: 14.0 s gave +0.0% peptides on a 31 min gradient
+    // and -1.06% on a 5.6 min one, where the same 14 s is proportionally 5.5x wider.
+    // Median, not mean: FWHM distributions are heavy-tailed and a mean is dominated by a handful
+    // of merged or truncated traces. Traces that never fall to half maximum on both sides are
+    // EXCLUDED rather than imputed -- a truncated peak is not a narrow one, and imputing it
+    // would bias the estimate downward exactly where peaks are broadest.
+    double ms1_fwhm_med = -1.0;
+    {
+      vector<double> fw;
+      fw.reserve(ms1_traces.size() / 4 + 1);
+      for (const auto& t : ms1_traces)
+      {
+        if (t.xic.size() < 5) continue;
+        size_t ap = 0;
+        for (size_t i = 1; i < t.xic.size(); ++i) if (t.xic[i].second > t.xic[ap].second) ap = i;
+        const double half = t.xic[ap].second * 0.5;
+        if (half <= 0.0) continue;
+        double lo = -1.0, hi = -1.0;
+        for (size_t i = ap; i > 0; --i)
+          if (t.xic[i - 1].second <= half)
+          { const double d = t.xic[i].second - t.xic[i - 1].second;
+            const double f = d > 0 ? (t.xic[i].second - half) / d : 0.0;
+            lo = t.xic[i].first - f * (t.xic[i].first - t.xic[i - 1].first); break; }
+        for (size_t i = ap; i + 1 < t.xic.size(); ++i)
+          if (t.xic[i + 1].second <= half)
+          { const double d = t.xic[i].second - t.xic[i + 1].second;
+            const double f = d > 0 ? (t.xic[i].second - half) / d : 0.0;
+            hi = t.xic[i].first + f * (t.xic[i + 1].first - t.xic[i].first); break; }
+        if (lo >= 0.0 && hi > lo) fw.push_back(hi - lo);
+      }
+      if (!fw.empty())
+      {
+        std::nth_element(fw.begin(), fw.begin() + fw.size() / 2, fw.end());
+        ms1_fwhm_med = fw[fw.size() / 2];
+        writeLogInfo_("Measured MS1 FWHM: median " + String(ms1_fwhm_med) + " s over "
+                      + String(fw.size()) + " traces (of " + String(ms1_traces.size())
+                      + "; truncated peaks excluded)");
+      }
+      else writeLogInfo_("Measured MS1 FWHM: NO usable traces -- falling back to absolute seconds");
+    }
+    // ms2_split is declared at :1324 but the FWHM is only known HERE, after MS1 tracing --
+    // that ordering is why only the MS2 side can use the measured width for free. Doing the
+    // same for MS1 needs a two-pass trace (measure with splitting off, then re-trace), which is
+    // a real cost and is deliberately not done blind.
+    const double sv_fwhm = getDoubleOption_("trace:split_valleys_fwhm");
+    if (sv_fwhm > 0.0 && ms1_fwhm_med > 0.0)
+    {
+      const double old_split = ms2_split;
+      ms2_split = sv_fwhm * ms1_fwhm_med;
+      writeLogInfo_("MS2 valley-split window set from measured FWHM: " + String(sv_fwhm) + " x "
+                    + String(ms1_fwhm_med) + " s = " + String(ms2_split) + " s (was "
+                    + String(old_split) + " s absolute)");
+    }
+    else if (sv_fwhm > 0.0)
+      writeLogWarn_("trace:split_valleys_fwhm requested but no FWHM could be measured; "
+                    "keeping the absolute trace:ms2_split_valleys value");
     const double iso_im_tol = getDoubleOption_("charge:iso_im_tolerance");
     const double ms2_noise = getDoubleOption_("trace:ms2_noise_threshold_int");
     writeLogInfo_("MS2 trace gate: apex > " + String(ms2_snr * ms2_noise) + " (snr " + String(ms2_snr)
@@ -1621,16 +1683,37 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         else if (rp_max <= 0)
         {
           // Share-all (default, current best): each fragment goes to EVERY gated precursor.
-          // Streamed per precursor -> memory-light.
-          for (size_t pi = plo; pi < phi; ++pi)
+          //
+          // [perf-3] PRECURSOR-LEVEL PARALLELISM. The outer loop's unit of work is the isolation
+          // window -- an ACQUISITION-METHOD CONSTANT (24 tiles) with one tile holding 23.7% of
+          // all precursors, so Amdahl caps that loop at 4.2x regardless of thread count. /proc
+          // sampling caught the tail running 1,993 s at 1.000 user cores with 21 of 22 threads
+          // in futex_wait: one window left, scoring its precursors serially. Precursors within a
+          // window are independent, so they are the correct unit.
+          //
+          // An earlier attempt at this was REVERTED for LOSING SPECTRA: it appended to the shared
+          // `bucket`, and a race dropped emissions (caught by a 15 MB smaller mzML, not by the
+          // peptide count). This writes into a PRE-SIZED slot per precursor -- no append, no
+          // critical section, so a lost write is structurally impossible. `pdense` is the scratch
+          // buffer assembleOne_ writes through, so it must be firstprivate: sharing it across
+          // threads is precisely the corruption the reverted attempt suffered.
+          //
+          // Order-safety: a canonical total-order sort over all_out runs after the window loop
+          // (RT, precursor m/z, charge, then fragment sequence), so emission order is already
+          // thread-count-independent. Only slot CONTENTS matter here.
+          vector<MSSpectrum> pslot(phi > plo ? phi - plo : 0);
+          #pragma omp parallel for schedule(dynamic, 32) firstprivate(pdense)
+          for (long pii = (long)plo; pii < (long)phi; ++pii)
           {
+            const size_t pi = (size_t)pii;
             const Precursor_& pc = precursors[pi];
             if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
             MSSpectrum ms2;
             assembleOne_(pc, win_lo, win_hi, frag_traces, frag_im, ms1_traces, fg,
                          delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
-            if (!ms2.empty()) bucket.push_back(std::move(ms2));
+            if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
           }
+          for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
         }
         else
         {
@@ -1780,6 +1863,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       const double mg_im  = getDoubleOption_("merge:delta_im");
       const double mg_mz  = getDoubleOption_("merge:mz_tol");
       const bool   mg_z   = !getFlag_("merge:any_charge");
+      const bool   mg_sum = getFlag_("merge:sum_intensity");
+      const double mg_cos = getDoubleOption_("merge:min_cosine");
       vector<MSSpectrum> kept;
       kept.reserve(all_out.size());
       vector<char> used(all_out.size(), 0);
@@ -1806,6 +1891,35 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (mg_z && pj[0].getCharge() != z_i) continue;
           const double im_j = pj[0].getDriftTime();
           if (im_i > 0 && im_j > 0 && fabs(im_j - im_i) > mg_im) continue;
+          // [merge-cos] CONTENT gate. Precursor coordinates are NOT the problem: measured on
+          // identified pairs, SAME-peptide neighbours differ by a median 9.0 ppm and 0.0074
+          // 1/K0 while DIFFERENT-peptide neighbours differ by 205,065 ppm and 0.0906, so the
+          // coordinate gate already admits only 1.8% chimeras. The problem is that only 12,380
+          // of 161,798 spectra identify at all, so a coordinate gate happily merges a good
+          // spectrum with several spectra that carry no identifiable signal -- their peaks
+          // dilute the matched fraction without contributing matches. Cosine sees that;
+          // coordinates cannot. Measured reference distribution: within-cycle pairs 0.845,
+          // same peptide across cycles 0.687, unrelated spectra 0.007.
+          if (mg_cos > 0.0)
+          {
+            const MSSpectrum& A = all_out[i];
+            const MSSpectrum& B = all_out[j];
+            double dot = 0.0, na = 0.0, nb = 0.0;
+            for (const auto& pa : A) na += (double)pa.getIntensity() * pa.getIntensity();
+            for (const auto& pb : B) nb += (double)pb.getIntensity() * pb.getIntensity();
+            if (na <= 0.0 || nb <= 0.0) continue;
+            // both are m/z-sorted, so a merge-walk is O(|A|+|B|) rather than O(|A|*|B|)
+            Size ia = 0, ib = 0;
+            while (ia < A.size() && ib < B.size())
+            {
+              const double da = A[ia].getMZ() - B[ib].getMZ();
+              if (fabs(da) <= mg_mz)
+              { dot += (double)A[ia].getIntensity() * B[ib].getIntensity(); ++ia; ++ib; }
+              else if (da < 0) ++ia;
+              else ++ib;
+            }
+            if (dot / (sqrt(na) * sqrt(nb)) < mg_cos) continue;
+          }
           grp.push_back(j);
         }
         if (grp.size() == 1) { kept.push_back(std::move(all_out[i])); used[i] = 1; continue; }
@@ -1823,15 +1937,38 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         out.clear(false);                       // keep metadata, drop peaks
         for (size_t a = 0; a < pk.size(); )
         {
-          double mz_sum = pk[a].first * pk[a].second, in_sum = pk[a].second;
+          double mz_sum = pk[a].first * pk[a].second, in_sum = pk[a].second, in_max = pk[a].second;
           size_t b = a + 1;
-          // sum every peak within mg_mz of the RUNNING centroid, so a dense cluster does not
+          // combine every peak within mg_mz of the RUNNING centroid, so a dense cluster does not
           // chain arbitrarily far from where it started
           while (b < pk.size() && fabs(pk[b].first - mz_sum / in_sum) <= mg_mz)
-          { mz_sum += pk[b].first * pk[b].second; in_sum += pk[b].second; ++b; }
-          Peak1D q; q.setMZ(mz_sum / in_sum); q.setIntensity(in_sum);
+          { mz_sum += pk[b].first * pk[b].second; in_sum += pk[b].second;
+            in_max = std::max(in_max, pk[b].second); ++b; }
+          Peak1D q; q.setMZ(mz_sum / in_sum);
+          // [merge-fix] SUM systematically distorts the spectrum. Jaccard between members is
+          // 0.374, so ~63% of peaks appear in only ONE member: summing gives shared peaks Nx and
+          // unique peaks 1x, wrecking the fragment intensity ratios the search engine scores on
+          // -- and penalising precisely the unique peaks that make merging worth doing. MAX
+          // takes each ion's best single observation, which is what a more complete spectrum of
+          // the same feature should look like.
+          q.setIntensity(mg_sum ? in_sum : in_max);
           out.push_back(q);
           a = b;
+        }
+        // [merge-fix] RE-CAP. Merge runs AFTER assembleFromList_ has already capped each
+        // spectrum at max_fragments, so merging N spectra yields up to N x max_fragments peaks
+        // that are never re-ranked. ~47% of spectra sit AT the cap, so merged spectra routinely
+        // land at 2-3x it -- far more random-match opportunities, diluting the score. Keep the
+        // top max_frags by intensity, then restore m/z order (mzML requires ascending m/z).
+        if (max_frags > 0 && (int)out.size() > max_frags)
+        {
+          vector<Peak1D> v(out.begin(), out.end());
+          std::nth_element(v.begin(), v.begin() + max_frags, v.end(),
+                           [](const Peak1D& x, const Peak1D& y) { return x.getIntensity() > y.getIntensity(); });
+          v.resize(max_frags);
+          sort(v.begin(), v.end(), [](const Peak1D& x, const Peak1D& y) { return x.getMZ() < y.getMZ(); });
+          out.clear(false);
+          for (const auto& p : v) out.push_back(p);
         }
         for (size_t g : grp) used[g] = 1;
         n_merged += grp.size(); ++n_groups;
