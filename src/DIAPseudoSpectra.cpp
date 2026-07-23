@@ -1575,6 +1575,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_());
 
+    // [timers] phase_clock_ is never called between the start of this loop and its end, so
+    // EVERYTHING said about where the loop's 85.9% goes has been inference. Two performance
+    // fixes were already attempted and reverted against a model that was never verified. These
+    // are atomic nanosecond accumulators -- one add per stage per window, so the measurement
+    // cost is unmeasurable against stages that run for minutes.
+    std::atomic<long long> t_mat{0}, t_trace{0}, t_grid{0}, t_score{0}, t_emit{0};
     #pragma omp parallel for schedule(dynamic) num_threads(n_conc)
     for (long wi = 0; wi < (long)window_list.size(); ++wi)
     {
@@ -1598,12 +1604,16 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         }
         struct Release { std::atomic<size_t>& c; size_t n; ~Release() { c -= n; } } rel{inflight, need};
         // [compact] materialise ONLY this window, and free its compact frames as we go
+        auto _t0 = std::chrono::steady_clock::now();
         PeakMap wmap = materializeWindow(*window_list[wi].second);
+        auto _t1 = std::chrono::steady_clock::now();
+        t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
         for (MSSpectrum& s : wmap) s.setMSLevel(1); // MassTraceDetection traces MS1-level only
         wmap.sortSpectra();
         // [cross-frame] sum adjacent cycles for THIS window before detecting fragment traces
         if (agg_n > 1) aggregateFrames_(wmap, agg_n, mass_ppm, delta_im);
         String ms2_span;
+        auto _t2 = std::chrono::steady_clock::now();
         vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, n_bands);
         // (compact frames already released inside materializeWindow) [par-Crit-3]
         #pragma omp critical
@@ -1628,7 +1638,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
         // Precompute the common correlation grid once per window; pdense is reused across the
         // window's precursors (this window runs on one thread). [perf]
+        auto _t3 = std::chrono::steady_clock::now();
+        t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         FragGrid fg = buildFragGrid(frag_traces);
+        auto _t4 = std::chrono::steady_clock::now();
+        t_grid += std::chrono::duration_cast<std::chrono::nanoseconds>(_t4 - _t3).count();
         // MEMORY: the XICs are now resampled into fg; scoring below only reads the SCALAR fields
         // (mz/rt/im/intensity) of each Trace. Releasing the per-trace xic vectors here is the single
         // biggest per-window win: they would otherwise stay live through the whole scoring loop, and
@@ -1719,6 +1733,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 #ifdef _OPENMP
           p_team = std::max(1, omp_get_max_threads() / std::max(n_conc, 1));
 #endif
+          auto _t5 = std::chrono::steady_clock::now();
           vector<MSSpectrum> pslot(phi > plo ? phi - plo : 0);
           #pragma omp parallel for schedule(dynamic, 32) firstprivate(pdense) num_threads(p_team)
           for (long pii = (long)plo; pii < (long)phi; ++pii)
@@ -1731,7 +1746,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                          delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
             if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
           }
+          auto _t6 = std::chrono::steady_clock::now();
+          t_score += std::chrono::duration_cast<std::chrono::nanoseconds>(_t6 - _t5).count();
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
+          t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now() - _t6).count();
         }
         else
         {
@@ -1817,6 +1836,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
 
     writeLogInfo_("All windows done." + clk_() + rss_()); // parallel-phase peak? [mem]
+    {
+      // These are CPU-seconds summed across threads, not wall time -- a stage that runs on 20
+      // threads contributes 20x its wall. That is the right denominator for "where does the work
+      // go", but it must not be read as wall time, so both are printed.
+      const double S = 1e-9;
+      const double tot = S * (t_mat + t_trace + t_grid + t_score + t_emit);
+      auto pct = [&](long long v) { return tot > 0 ? 100.0 * S * v / tot : 0.0; };
+      writeLogInfo_("Window-loop stage breakdown (CPU-seconds across all threads, "
+                    + String(tot) + " s total):");
+      writeLogInfo_("  materialize " + String(S * t_mat)   + " s (" + String(pct(t_mat))   + "%)");
+      writeLogInfo_("  trace       " + String(S * t_trace) + " s (" + String(pct(t_trace)) + "%)");
+      writeLogInfo_("  fraggrid    " + String(S * t_grid)  + " s (" + String(pct(t_grid))  + "%)");
+      writeLogInfo_("  score       " + String(S * t_score) + " s (" + String(pct(t_score)) + "%)");
+      writeLogInfo_("  emit        " + String(S * t_emit)  + " s (" + String(pct(t_emit))  + "%)");
+    }
 
     vector<MSSpectrum> all_out;
     {
