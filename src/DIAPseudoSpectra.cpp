@@ -1538,6 +1538,28 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // min(windows, threads) pinned us to 24 cores no matter the machine -- measured: 24
     // concurrent windows on a 224-core node ran at load ~20. The ceiling is now the thread
     // count, with each window split into m/z bands to supply the extra work units.
+    // [bands] PER-WINDOW band count, sized from the window itself rather than one global
+    // constant. Measured motivation: tracing is 69.3% of window-loop CPU (materialize 0.10,
+    // trace 69.34, fraggrid 1.75, score 28.81, emit 0.01), and MassTraceDetection has no OpenMP
+    // of its own -- banding is the only way to parallelise it.
+    //
+    // A global count is wrong because the HALO IS A FIXED WIDTH PER BAND (20x mass_error_ppm on
+    // each side, which is what makes the partition exact). Its overhead therefore depends on how
+    // wide the band is:
+    //     tile 328-469 Da (141 wide):  24 bands ->  5% halo overhead
+    //     tile 564-583 Da (19 wide):   24 bands -> 57% halo overhead
+    // So a wide tile tolerates many bands and a narrow one does not. Sizing per window also
+    // hands the most parallelism to the widest tile -- which holds 23.7% of all precursors and
+    // is the Amdahl tail of this loop.
+    //
+    // min_band_da = 8x the halo keeps overhead near 12% at the narrow end. Bands are capped by
+    // the thread budget so windows x bands cannot oversubscribe.
+    auto bands_for = [&](double lo, double hi, int cap) {
+      const double halo = 20.0 * getDoubleOption_("trace:mass_error_ppm") * 1e-6 * (0.5 * (lo + hi));
+      const double min_band_da = std::max(8.0 * halo, 1e-9);
+      int b = (int)std::floor((hi - lo) / min_band_da);
+      return std::max(1, std::min(b, cap));
+    };
     int n_bands = getIntOption_("perf:trace_bands");
     if (n_bands <= 0)  // auto: enough bands that windows x bands covers every thread
       n_bands = (int)std::ceil((double)n_threads / std::max<size_t>(window_list.size(), 1));
@@ -1614,7 +1636,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (agg_n > 1) aggregateFrames_(wmap, agg_n, mass_ppm, delta_im);
         String ms2_span;
         auto _t2 = std::chrono::steady_clock::now();
-        vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, n_bands);
+        // per-window band count: n_bands is the AUTO cap (threads/windows); a wide tile may exceed
+        // it since bands are cheap relative to the trace work they unlock, a narrow one may not
+        // reach it. Explicit -perf:trace_bands N pins every window to N.
+        const int w_bands = (getIntOption_("perf:trace_bands") > 0)
+                            ? n_bands : bands_for(win_lo, win_hi, std::max(n_bands * 4, 4));
+        vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
         // (compact frames already released inside materializeWindow) [par-Crit-3]
         #pragma omp critical
         {
