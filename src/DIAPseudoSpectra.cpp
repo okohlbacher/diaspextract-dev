@@ -1456,16 +1456,24 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         return (lo >= 0.0 && hi >= 0.0) ? hi - lo : -1.0;
       };
       ofstream ft((ms1_dump + ".traces.tsv").c_str());
+      // [model] 12 significant digits, not the ostream default 6: at m/z 765 six digits quantise
+      // to ~1 mDa = 1.3 ppm inside a 15 ppm isotope window, which both flips borderline partner
+      // matches and destroys the ppm-residual feature a charge model needs. Every dump written
+      // before 2026-07-23 carries that quantisation.
+      ft.precision(12);
       ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\n";
       for (const auto& t : ms1_traces)
         ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << t.intensity << '\t'
            << fwhm_of(t.xic) << '\t' << t.xic.size() << '\n';
       ft.close();
       ofstream fp((ms1_dump + ".precursors.tsv").c_str());
-      fp << "mono_mz\tcharge\trt\tim\tguessed\n";
+      fp.precision(12);
+      // [model] trace_idx makes the hypothesis -> seed-trace link explicit, so an offline replica
+      // of inferPrecursors_ can be checked row-for-row rather than assumed to agree.
+      fp << "mono_mz\tcharge\trt\tim\tguessed\ttrace_idx\n";
       for (const auto& pc : precursors)
         fp << pc.mono_mz << '\t' << pc.charge << '\t' << pc.rt << '\t' << pc.im << '\t'
-           << (pc.guessed ? 1 : 0) << '\n';
+           << (pc.guessed ? 1 : 0) << '\t' << pc.trace_idx << '\n';
       fp.close();
       writeLogInfo_("MS1 funnel dump: " + String(ms1_traces.size()) + " traces, "
                     + String(precursors.size()) + " precursors -> " + ms1_dump + ".{traces,precursors}.tsv");
