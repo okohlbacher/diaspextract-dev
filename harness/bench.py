@@ -125,17 +125,42 @@ def load_plan(path: Path) -> tuple[Plan, dict]:
 
 # ----------------------------------------------------------------------------- pre-flight
 def resolved_defaults(binary: Path) -> dict:
-    """Every registered parameter and its default, parsed from the tool's own --helphelp.
+    """Every registered parameter and its default, from the tool's own -write_ini.
 
     FAILURE 5: three arms passed values that were already the defaults and were byte-identical
     to baseline. Knowing the defaults is what makes a no-op detectable before it costs an hour.
+
+    Was parsed from --helphelp "(default: '...')" text; OpenMS 3.6 builds no longer print that,
+    so the parser silently returned {} and the FAILURE-5 guard aborted. -write_ini is the
+    authoritative source across versions: a full INI whose <ITEM> paths, minus the tool/instance
+    wrapper NODEs, are exactly the CLI parameter names (assembly:rp_max, trace:ms2_split_valleys).
     """
-    out = sh([str(binary), "--helphelp"]).stdout + sh([str(binary), "--help"]).stdout
+    import tempfile, xml.etree.ElementTree as ET
+    ini = Path(tempfile.mkdtemp()) / "defs.ini"
+    sh([str(binary), "-write_ini", str(ini)])
     defs: dict[str, str] = {}
-    for line in out.splitlines():
-        m = re.match(r"\s+(-[\w:]+)\s+(\S+)?\s*(.*?)\(default:\s*'([^']*)'\)", line)
-        if m:
-            defs[m.group(1).lstrip("-")] = m.group(4)
+    try:
+        root = ET.parse(ini).getroot()          # <PARAMETERS>
+    except Exception:
+        return defs
+    inst = None                                  # NODE[tool] > NODE["1"] = the instance section
+    for tool in root.findall("NODE"):
+        cand = tool.find('NODE[@name="1"]')
+        if cand is not None:
+            inst = cand
+            break
+    if inst is None:
+        return defs
+
+    def walk(node, prefix):
+        for ch in node:
+            nm = ch.get("name")
+            if ch.tag == "NODE":
+                walk(ch, prefix + [nm])
+            elif ch.tag in ("ITEM", "ITEMLIST"):
+                defs[":".join(prefix + [nm])] = ch.get("value", "")
+
+    walk(inst, [])
     return defs
 
 
