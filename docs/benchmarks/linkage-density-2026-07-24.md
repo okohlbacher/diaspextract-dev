@@ -289,6 +289,53 @@ attempt compared seconds to minutes and the positive control read a physically i
 class A. `coverage.py` now reads the unit from the CV accessor and aborts if the RT ranges fail to
 overlap.
 
+## Sensitivity-floor sweep: the co-elution gate is NOT the floor (5th lever closed)
+
+The coverage analysis said the missed peptides are faint, already emitted (~90% class B), and
+carry thin spectra (9 matched peaks / 8.45% matched intensity vs 12 / 17.41%). Prime suspect:
+`gate:min_correlation=0.3` admits a fragment only if its XIC correlates >=0.3 with the precursor's,
+and Pearson correlation is attenuated toward 0 as S/N falls — a gate structurally biased against
+low-abundance precursors. Pre-registered in `bench/plan_sens.yaml`: **if peptides do not rise at
+0.20 or 0.12, the gate is not the sensitivity floor.**
+
+| `gate:min_correlation` | peptides | Δ vs base | PSMs | emitted spectra | wall |
+|---|---|---|---|---|---|
+| **0.30 (base)** | **10,138** | — | 90,206 | 1,528,093 | 1456 s |
+| 0.20 | 9,829 | **−3.0%** | 90,257 | 1,532,398 | 1463 s |
+| 0.12 | 9,696 | **−4.4%** | 90,102 | 1,533,107 | 1471 s |
+
+Monotone, three points, all far outside the 0.17% replicate spread. The base arm reproduced the
+independent `plan_dechim` base to **+0.14%** (10,138 vs 10,124), so the reference is sound.
+
+**Criterion applied: peptides FELL. The co-elution gate joins the closed levers** (`max_fragments`,
+density, charge, de-chimerization, co-elution gate = five).
+
+Mechanism, and it is consistent with everything else measured: PSMs are flat to ±0.2% and emitted
+spectra move only +0.3%, so loosening the gate does not fail to find things — it **converts unique
+peptides into redundant re-identifications of peptides already covered**. Admitted low-correlation
+fragments are noise, and because Sage scores only the **top-150 by intensity**, intense noise peaks
+displace true fragments from the window that actually gets scored. Loosening any fragment-admission
+knob therefore costs peptides, which is the same lesson `rp_max=1` taught from the opposite side.
+
+**Useful residue: the derivative points the other way.** Peptides rise monotonically WITH gate
+strictness across the whole tested range (9,696 → 9,829 → 10,138), so 0.3 may itself be too loose.
+`min_correlation` 0.40 / 0.50 is the evidence-motivated next test — grounded in three measured
+points, not a hunch. Untested; do not quote a benefit until measured.
+
+### MS1 sensitivity arm: BLOCKED BY IMPLEMENTATION, not answered
+
+`ms1sens` (`trace:noise_threshold_int` 100→10, `trace:ms1_chrom_peak_snr` 3.0→1.0) ran **40 min
+with zero log progress at 1.5 of 128 cores** (RSS 79 GB) while a whole base run takes 24 min. Cause
+is architectural and already known in this project: OpenMS `MassTraceDetection` has **no OpenMP** —
+a serial greedy pass over an intensity-sorted apex list — and lowering the MS1 thresholds explodes
+that list, so runtime blows up superlinearly. `perf:trace_bands=12` did not rescue it (we would see
+~12 cores, not 1.5). Killed; **no metrics were recorded, so nothing garbage entered the results.**
+
+This is a result about the implementation, NOT about MS1 sensitivity: whether a lower MS1 floor
+would recover faint precursors remains **unmeasured**. To test it at all, either MassTraceDetection
+must be parallelised or a milder setting (e.g. noise 50 / snr 2.0) must be used. Do not record the
+MS1 direction as falsified — it was never measured.
+
 ## Harness fix landed in passing
 
 `resolved_defaults()` parsed defaults from `--helphelp` "(default: '...')" text, which OpenMS 3.6
