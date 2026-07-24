@@ -322,6 +322,34 @@ strictness across the whole tested range (9,696 → 9,829 → 10,138), so 0.3 ma
 `min_correlation` 0.40 / 0.50 is the evidence-motivated next test — grounded in three measured
 points, not a hunch. Untested; do not quote a benefit until measured.
 
+### STRICT direction: the shipped default 0.3 is TOO LOOSE — first real gain of the session
+
+The loosening sweep's derivative pointed the other way, so the same sweep was extended past the
+default. It **wins, and has not turned over**:
+
+| `gate:min_correlation` | peptides | Δ vs base | PSMs | emitted spectra |
+|---|---|---|---|---|
+| 0.12 | 9,696 | −4.0% | 90,102 | 1,533,107 |
+| 0.20 | 9,829 | −2.7% | 90,257 | 1,532,398 |
+| **0.30 (shipped)** | **~10,122** (3 reps: 10,124/10,138/10,104) | — | 90,176 | 1,528,014 |
+| 0.40 | 10,380 | **+2.7%** | 89,819 | 1,514,995 |
+| **0.50** | **10,657** | **+5.5%** | 88,130 | 1,485,454 |
+
+Base replicate spread is **0.34%**, so +2.7% and +5.5% are 8–16× noise. **PSMs FALL as peptides
+RISE** (90,176 → 88,130) — redundancy converting into coverage, which is the direction that matters
+given we over-produce PSMs ~8.9/peptide against diaTracer's 1.69. PSMs/peptide improves 8.92 → 8.27.
+
+Against diaTracer's 11,517 on the same acquisition, this narrows the peptide gap from **−12.0% to
+−7.5%** — roughly 37% of the gap closed by one parameter.
+
+**NOT adopted as a default.** Pre-registration requires replication on a second sample (S23/S08),
+and more importantly the sweep is still rising at 0.50 with no optimum located. An unbounded
+monotone trend means the parameter is standing in for something else — most likely the gate is the
+only thing suppressing the fragment fan-out that inflates our PSM/peptide ratio — and that
+mechanism should be understood before shipping a value. Extension to 0.60/0.70/0.80 is running
+(`bench/plan_strict2.yaml`), pre-registered to report "unbounded in the tested range" rather than
+pick a default if it is still climbing at 0.80.
+
 ### MS1 sensitivity arm: BLOCKED BY IMPLEMENTATION, not answered
 
 `ms1sens` (`trace:noise_threshold_int` 100→10, `trace:ms1_chrom_peak_snr` 3.0→1.0) ran **40 min
