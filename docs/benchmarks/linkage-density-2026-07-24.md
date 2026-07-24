@@ -342,13 +342,65 @@ given we over-produce PSMs ~8.9/peptide against diaTracer's 1.69. PSMs/peptide i
 Against diaTracer's 11,517 on the same acquisition, this narrows the peptide gap from **−12.0% to
 −7.5%** — roughly 37% of the gap closed by one parameter.
 
-**NOT adopted as a default.** Pre-registration requires replication on a second sample (S23/S08),
-and more importantly the sweep is still rising at 0.50 with no optimum located. An unbounded
-monotone trend means the parameter is standing in for something else — most likely the gate is the
-only thing suppressing the fragment fan-out that inflates our PSM/peptide ratio — and that
-mechanism should be understood before shipping a value. Extension to 0.60/0.70/0.80 is running
-(`bench/plan_strict2.yaml`), pre-registered to report "unbounded in the tested range" rather than
-pick a default if it is still climbing at 0.80.
+Extended (`bench/plan_strict2.yaml`) — **the curve TURNS OVER, so there is a real interior optimum
+at 0.60**, and the pre-registered "unbounded → pick nothing" clause does not fire:
+
+| `gate:min_correlation` | peptides | Δ vs base | PSMs | PSMs/peptide | emitted |
+|---|---|---|---|---|---|
+| 0.12 | 9,696 | −4.2% | 90,102 | 9.29 | 1,533,107 |
+| 0.20 | 9,829 | −2.9% | 90,257 | 9.18 | 1,532,398 |
+| **0.30 (shipped)** | **10,125** (4 reps: 10,124/10,138/10,104/10,135) | — | 90,214 | 8.90 | 1,528,014 |
+| 0.40 | 10,380 | +2.5% | 89,819 | 8.65 | 1,514,995 |
+| 0.50 | 10,657 | +5.3% | 88,130 | 8.27 | 1,485,454 |
+| **0.60** | **10,903** | **+7.7%** ← peak | 84,288 | **7.73** | 1,423,257 |
+| 0.70 | 10,675 | +5.4% | 76,813 | 7.20 | 1,302,939 |
+
+Unimodal, peak at 0.60, +7.7% over the shipped default against a **0.34% replicate spread** (4
+independent base runs across two harness invocations). Emitted spectra fall monotonically with
+strictness (1.528M → 1.303M), so past 0.60 real spectra start dropping below `min_fragments` —
+a plausible reason the curve turns.
+
+Against diaTracer's 11,517 on the same acquisition this narrows the peptide gap from **−12.0% to
+−5.3%** — ~56% of the gap closed by one parameter, while PSMs FALL 90,214 → 84,288.
+
+### RETRACTED: the +7.7% is an FDR RECALIBRATION ARTEFACT, not a sensitivity gain
+
+All three reviewers (codex, vibe, kimi) independently made this their #1 BLOCKER, and a direct
+test on data already on disk **confirms it**. Sage derives `peptide_q` from its OWN decoys per run,
+so `q<=0.01` is a different score cut in every arm. Applying ONE FIXED discriminant threshold across
+arms (`bench/fdrcheck.py`) removes that confound:
+
+| arm | q-based Δ | fixed-score Δ (s≥1.0 / 1.5 / 2.0 / 2.5) | decoys | own q≤.01 threshold |
+|---|---|---|---|---|
+| base | — | — | 217,058 | 2.1711 |
+| corr040 | +2.4% | **+1.3 / +3.3 / +14.3 / +13.6%** | 219,649 | 2.2034 |
+| corr050 | +5.1% | −0.2 / −7.0 / −7.7 / −11.5% | 217,351 | 2.1218 |
+| **corr060** | **+7.6%** | **−5.6 / −14.4 / −10.2 / −17.7%** | 203,513 | **2.1031** |
+| corr070 | +5.3% | −19.3 / −30.3 / −13.5 / −17.1% | 171,204 | 2.1010 |
+
+At **every** fixed score cut corr060 has FEWER peptides than base. The apparent gain comes entirely
+from the 1%-FDR threshold sliding down (2.1711 → 2.1031) as decoys drop (217k → 203k): tightening
+the gate deletes spectra, shifts the target-decoy balance, and lets more peptides clear q≤0.01 with
+*less* real signal. **The "+7.7%" and "56% of the gap closed" claims are withdrawn.**
+
+Only **corr040** survives both criteria (+2.4% q-based AND positive at all four fixed cuts) and is
+the one arm still worth pursuing — modestly, and only under entrapment FDR.
+
+Caveat on the test itself: `sage_discriminant_score` is a per-run LDA output, so a "fixed score" is
+not perfectly commensurable either. The direction is unambiguous (decoys down, threshold down,
+q-count up, fixed-score count down) but the decisive experiment remains **entrapment FDR**, which
+all three reviewers named as the single highest-value missing measurement — and which this project
+has never run despite quoting "1% FDR" throughout.
+
+Compounding methodological faults the reviewers caught, all valid:
+* **Winner's curse.** Seven swept points, optimum chosen on the same sample used to evaluate it, and
+  the 0.60/0.70/0.80 pre-registration was written *after* watching 0.12→0.50 rise. Only `base` has
+  replicates (n=4); every swept arm is n=1.
+* **Wrong engine for the headline.** `docs/S30-BASELINE.md` already records the MSFragger gap as
+  **−19.5%** (10,470 vs 13,014), not the −12% I quoted from Sage. Project policy says Sage flatters
+  speXtract; I published the flattered number.
+* **`rp_max=1` re-tested a closed lever.** `S30-BASELINE.md` lists `competitive` and `rp_max` 2/4/8
+  as already falsified. ~1.5 h spent re-deriving a known result.
 
 ### MS1 sensitivity arm: BLOCKED BY IMPLEMENTATION, not answered
 
