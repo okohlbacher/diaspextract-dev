@@ -82,6 +82,11 @@ namespace
   static std::string clk_() { char b[32]; snprintf(b, sizeof b, " [t=%.0fs]", phase_clock_()); return b; }
 
   bool log_overlap_ = false;   ///< [B0] gate:coelution == "logoverlap"
+  /// [wavelet] Precursor-XIC smoothing scale in SECONDS, derived from the MEASURED MS1 FWHM
+  /// (trace:wavelet_smooth x median FWHM). 0 = off. Set once, after MS1 tracing, before the
+  /// window loop -- it cannot be read from a parameter directly because the FWHM is a measurement.
+  double wl_scale_ = 0.0;
+  bool rank_by_intensity_ = false;   ///< [rank] assembly:rank_by == "intensity" (diaTracer-style)
 
   static std::string rss_()
   {
@@ -432,6 +437,78 @@ namespace
     std::function<pair<int, int>(double, double)> keyfn_;
   };
 
+  /// [wavelet] Stationary ("a trous") B3-spline wavelet smoothing of an elution profile.
+  ///
+  /// WHY. diaTracer correlates a SMOOTHED precursor XIC against RAW fragment XICs (Nat Commun
+  /// 16:95, Methods: 2D Gaussian pre-filter, then Savitzky-Golay for elongated peaks). We copied
+  /// its 0.3 correlation threshold WITHOUT copying the smoothing. Pearson r between two noisy
+  /// profiles is attenuated toward 0 as S/N falls, so an unsmoothed 0.3 is a systematically weaker
+  /// constraint than a smoothed 0.3 -- and the attenuation is worst exactly at faint precursors,
+  /// which is where the coverage analysis says we lose peptides (MISS precursors are 3.2x dimmer).
+  /// Raising the threshold to compensate was tried and produced only an FDR artefact; smoothing
+  /// attacks the cause instead of the symptom.
+  ///
+  /// A-TROUS, not a decimated DWT: no downsampling, so the output stays sample-aligned with the
+  /// input and can be scattered onto the correlation grid at the SAME RT positions. That matters
+  /// for correctness here, not just convenience -- the overlap gate counts grid points where the
+  /// precursor is non-zero, so a transform that moved or resampled points would silently change
+  /// what `min_correlation_points` means.
+  ///
+  /// B3-spline scaling filter [1,4,6,4,1]/16, dilated by 2^(j-1) at level j; c_J is a low-pass of
+  /// support ~2^J samples. J comes from the MEASURED MS1 FWHM (see atrousLevels), never a guess.
+  void atrousSmooth(const vector<double>& in, int levels, vector<double>& out)
+  {
+    static const double H[5] = {1.0 / 16, 4.0 / 16, 6.0 / 16, 4.0 / 16, 1.0 / 16};
+    const int n = (int)in.size();
+    out = in;
+    if (n < 3 || levels <= 0) return;
+    vector<double> tmp(n);
+    for (int j = 1; j <= levels; ++j)
+    {
+      const int step = 1 << (j - 1);
+      for (int i = 0; i < n; ++i)
+      {
+        double acc = 0.0;
+        for (int k = -2; k <= 2; ++k)
+        {
+          int idx = i + k * step;
+          // MIRROR both ends. Zero-padding would pull an edge-truncated peak toward zero and
+          // fabricate a downslope -- the same bias the FWHM measurement excludes truncated peaks for.
+          if (idx < 0) idx = -idx;
+          if (idx >= n) idx = 2 * (n - 1) - idx;
+          idx = std::max(0, std::min(n - 1, idx));   // degenerate after double reflection (tiny n)
+          acc += H[k + 2] * out[idx];
+        }
+        tmp[i] = acc;
+      }
+      out.swap(tmp);
+    }
+  }
+
+  /// Number of a-trous levels whose smoothing support best matches @p scale_sec at this profile's
+  /// OWN sampling. Sampling is read per-trace rather than assumed: diaPASEF cycles are regular, but
+  /// a valley-split trace can carry gaps, and a fixed level count would then smooth different
+  /// physical widths on different traces.
+  int atrousLevels(const vector<pair<double, double>>& xic, double scale_sec)
+  {
+    if (xic.size() < 5 || scale_sec <= 0.0) return 0;
+    vector<double> d;
+    d.reserve(xic.size() - 1);
+    for (size_t i = 1; i < xic.size(); ++i)
+    {
+      const double g = xic[i].first - xic[i - 1].first;
+      if (g > 0) d.push_back(g);
+    }
+    if (d.empty()) return 0;
+    nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+    const double dt = d[d.size() / 2];                 // median, not mean: gaps are heavy-tailed
+    if (dt <= 0.0) return 0;
+    const double want = scale_sec / dt;                // desired support, in SAMPLES
+    if (want < 2.0) return 0;                          // finer than one step: nothing to smooth
+    const int j = (int)std::lround(std::log2(want));
+    return std::max(0, std::min(j, 4));                // level 5 spans ~64 samples, wider than any peak here
+  }
+
   /// Build the per-window FragGrid from IM-sorted fragment traces.
   FragGrid buildFragGrid(const vector<Trace>& frags)
   {
@@ -494,6 +571,8 @@ protected:
     registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum.", false);
     registerFlag_("assembly:competitive", "Assign each fragment to only its single best-correlating precursor (de-chimerize). Shorthand for rp_max=1; the harder endpoint of the rp_max dial. [bench]");
     registerDoubleOption_("assembly:apportion", "<p>", 0.0, "[route-4] Split a shared fragment's INTENSITY across the precursors that claim it, weight w_i = corr_i^p / sum(corr^p), instead of copying it at full intensity into all of them (mean fan-out 6.45). Fragment COUNT is unchanged - only the weighting - so it sidesteps every falsified count knob (rank-pruning, competitive, min_corr, min_corr_pts). 0 = OFF. Try 1 (linear) or 2 (sharper); p->inf degenerates to competitive, which IS falsified. Share-all path only.", false);
+    registerStringOption_("assembly:rank_by", "<mode>", "correlation", "[rank] Which score decides WHICH fragments survive the assembly:max_fragments cap. 'correlation' (current) keeps the top-N best-CORRELATING; 'intensity' keeps the top-N most INTENSE, as diaTracer does (Nat Commun 16:95: 'only the top N highest intensity peaks (RF max, default 500)'). This matters because the search engine re-ranks BY INTENSITY: Sage keeps max_peaks=150 by intensity and MSFragger reads the full list. A high-intensity, mediocre-correlation fragment that our cap discards would have been scored by the engine, so a correlation-ranked cap can throw away exactly the peaks that get matched. 70-75% of our spectra sit AT the 500 cap, so the choice is live for most spectra, not a corner case.", false);
+    setValidStrings_("assembly:rank_by", {"correlation", "intensity"});
     registerIntOption_("assembly:rp_max", "<n>", 0, "Soft RP rank-pruning (DIA-Umpire style): keep each fragment in only its top-N best-correlating precursors. 0 = unlimited (share-all, the default and current best); 1 = competitive (winner-take-all). Small N (2-8) is the useful range given typical fan-out ~6. RFmax (per-precursor fragment cap) is 'max_fragments'. Runs emit a fan-out histogram so you can see whether a given rp_max actually bites. [bench]", false);
     registerFlag_("assembly:open_search_safe", "[way-4] ANNOTATION-SAFE output for BLIND/OPEN search. In open search a wrong charge is catastrophic in a way closed search hides: assigning z' instead of z shifts the neutral mass by dM=(z'-z)(m/z-1.0073), so ONE charge step at m/z 500 fabricates a ~499 Da 'modification'. Closed search barely notices (charge unset cost only 1.3%: 8,123->8,019) because the engine enumerates charge; an open engine trusts the annotation. This flag therefore: (a) emits charge UNSET for every precursor whose charge was GUESSED rather than isotope-supported, so the engine enumerates instead of trusting a default; (b) records the isotope-offset hypothesis as a meta value so delta-mass inference can correct BEFORE assigning a modification, rather than reporting phantom +-1.00335/+-2.0067 Da shifts. Use for open/variant search; leave off for closed-search peptide counting.");
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge for precursors with no isotope support: >0 assigns that charge (diaTracer-style; 2 = most common); 0 = leave charge UNSET so the search engine searches its charge range and picks the right one (recovers 3+/4+ that a forced 2 would lose).", false);
@@ -510,6 +589,8 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (diaTracer-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 0.0, "[way-2] Split MS2 mass traces at chromatographic local minima via ElutionPeakDetection (which MassTraceDetection never does - it only terminates on outliers, so two peptides 25 s apart within the m/z tolerance MERGE). Value is chrom_fwhm in seconds; it sets both the Savitzky-Golay window and the local-extrema half-window. 0 = OFF. Try 6-8 (peaks here are 5-30 s). width_filtering is forced off so this only SPLITS, never deletes.", false);
+    registerFlag_("diag:selftest_wavelet", "[wavelet] Run assertions on the a-trous smoother and exit. Tests the SHIPPED functions, not a copy: DC preservation (filter must sum to 1, or every correlation is rescaled), noise reduction, peak-height retention at the FWHM-derived scale, mirror edges (a truncated peak must not be dragged toward zero), and level selection from sampling. Exits non-zero on failure.", true);
+    registerDoubleOption_("trace:wavelet_smooth", "<x>", 0.0, "[wavelet] Smooth the PRECURSOR XIC with a stationary (a-trous) B3-spline wavelet before correlating fragments against it, at a scale of x TIMES THE MEASURED MS1 FWHM. diaTracer smooths its precursor profile (2D Gaussian + Savitzky-Golay) and then applies a 0.3 correlation threshold; we copied the 0.3 but not the smoothing. Pearson r between two NOISY profiles is attenuated toward 0 as S/N falls, so an unsmoothed 0.3 is a systematically weaker constraint than a smoothed 0.3 -- and worst at faint precursors, which is where the coverage analysis says peptides are lost. Fragment XICs stay RAW (as in diaTracer) and emitted peak intensities are unaffected. 0 = off. Try 0.25-0.5 (measured MS1 FWHM is 3.61 s on S30, so 0.5 ~ 1.8 s ~ 1.3 cycles).", false);
     registerDoubleOption_("trace:split_valleys_fwhm", "<x>", 0.0, "[fwhm] Set the valley-splitting window as a MULTIPLE OF THE MEASURED MS1 FWHM instead of absolute seconds. Overrides trace:ms1_split_valleys when > 0. Absolute seconds cannot be right across methods: 14.0 s is +0.0% peptides on a 31 min gradient and -1.06% on a 5.6 min one. Measured MS1 FWHM is 3.61 s on S30, so the old 7.0 s default is ~1.9x FWHM and 14.0 s is ~3.9x. 0 = off (use absolute seconds).", false);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys via ElutionPeakDetection. DEFAULT 7.0 s: MassTraceDetection never splits at a local minimum, so two peptides eluting ~25 s apart within the m/z tolerance merge into ONE multi-modal trace, producing a merged precursor with the wrong monoisotope and charge. Measured +36.7% peptides on S23 and +37.4% on S08 at peptide-level FDR. Costs ~1.7x wall time and ~25% peak RAM. 0 = off.", false);
     registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
@@ -543,6 +624,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
     registerStringOption_("gate:coelution", "<mode>", "pearson", "[B0] Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
+    registerIntOption_("perf:ms1_trace_bands", "<n>", 12, "[parallel] Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
     registerIntOption_("perf:trace_bands", "<n>", 12, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable + our own RSS) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
@@ -1033,10 +1115,30 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
   {
     const double G = (double)fg.rt.size();
     const vector<pair<double, double>>& p_xic = ms1_traces[pc.trace_idx].xic;
+    // [wavelet] Correlate against a SMOOTHED precursor profile, as diaTracer does. Only the
+    // INTENSITIES change: RT positions, touched grid points and the overlap count are untouched,
+    // so this cannot silently redefine the min_correlation_points gate. Fragment XICs stay RAW
+    // (diaTracer smooths only the precursor side), and emitted peak intensities are unaffected
+    // because they come from the fragment traces, not from here.
+    const vector<double>* p_int = nullptr;
+    if (wl_scale_ > 0.0)
+    {
+      const int lv = atrousLevels(p_xic, wl_scale_);
+      if (lv > 0)
+      {
+        thread_local vector<double> raw_i, sm_i;   // window loop is parallel; scratch is per-thread
+        raw_i.resize(p_xic.size());
+        for (size_t i = 0; i < p_xic.size(); ++i) raw_i[i] = p_xic[i].second;
+        atrousSmooth(raw_i, lv, sm_i);
+        p_int = &sm_i;
+      }
+    }
     vector<int> touched;
     touched.reserve(p_xic.size());
-    for (const auto& p : p_xic)
+    for (size_t pi = 0; pi < p_xic.size(); ++pi)
     {
+      const auto& p = p_xic[pi];
+      const double pval = p_int ? (*p_int)[pi] : p.second;
       auto it = lower_bound(fg.rt.begin(), fg.rt.end(), p.first);
       int gi = -1; double bd = delta_rt;
       for (auto c : {it == fg.rt.begin() ? it : prev(it), it})
@@ -1045,7 +1147,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         double d = fabs(*c - p.first);
         if (d <= bd) { bd = d; gi = (int)(c - fg.rt.begin()); }
       }
-      if (gi >= 0) { if (pdense[gi] == 0.0f) touched.push_back(gi); pdense[gi] += (float)p.second; }
+      if (gi >= 0) { if (pdense[gi] == 0.0f) touched.push_back(gi); pdense[gi] += (float)pval; }
     }
     double psum = 0, psumsq = 0, plogsum = 0;
     // plogsum normalises the precursor profile for gate:coelution=logoverlap. Constant across
@@ -1113,6 +1215,70 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
   }
 
+  /// [wavelet] Assertions on the SHIPPED a-trous smoother. Each check corresponds to a way the
+  /// transform could be wrong while still "looking smoothed" in a plot.
+  ExitCodes selftestWavelet_()
+  {
+    int fail = 0;
+    auto chk = [&](bool ok, const char* what) {
+      if (!ok) { writeLogError_(String("FAIL: ") + what); ++fail; }
+      else writeLogInfo_(String("  ok  ") + what);
+    };
+
+    // 1. DC preservation. The B3 taps must sum to exactly 1: if they do not, smoothing RESCALES
+    //    the precursor profile, and since Pearson is scale-invariant the error would be silent
+    //    here but corrupt gate:coelution=logoverlap, which is NOT scale-invariant.
+    {
+      vector<double> flat(64, 7.5), out;
+      atrousSmooth(flat, 4, out);
+      double worst = 0.0;
+      for (double v : out) worst = std::max(worst, fabs(v - 7.5));
+      chk(worst < 1e-9, "DC preserved (constant signal unchanged)");
+    }
+
+    // 2. Noise reduction, and 3. peak retention -- the two must hold TOGETHER, else "smoothing"
+    //    is either a no-op or a peak destroyer. Deterministic pseudo-noise (no RNG dependence).
+    {
+      const int n = 128;
+      vector<double> sig(n), noisy(n), out;
+      for (int i = 0; i < n; ++i)
+      {
+        const double x = (i - 64.0) / 8.0;               // Gaussian peak, sigma = 8 samples
+        sig[i] = 1000.0 * std::exp(-0.5 * x * x);
+        noisy[i] = sig[i] + 60.0 * std::sin(i * 2.7) * std::cos(i * 1.31);   // high-frequency
+      }
+      atrousSmooth(noisy, 2, out);
+      double e_in = 0, e_out = 0;
+      for (int i = 0; i < n; ++i) { e_in += fabs(noisy[i] - sig[i]); e_out += fabs(out[i] - sig[i]); }
+      chk(e_out < 0.75 * e_in, "noise reduced (residual vs clean peak shrinks >25%)");
+      chk(out[64] > 0.80 * sig[64], "peak height retained (>80% at apex)");
+    }
+
+    // 4. Mirror edges. Zero-padding would fabricate a downslope at a truncated peak -- the same
+    //    bias the FWHM estimator avoids by excluding truncated traces.
+    {
+      vector<double> edge(32, 0.0), out;
+      for (int i = 0; i < 32; ++i) edge[i] = 1000.0 - 25.0 * i;    // apex sits AT sample 0
+      atrousSmooth(edge, 2, out);
+      chk(out[0] > 0.85 * edge[0], "mirror boundary (edge apex not pulled toward zero)");
+    }
+
+    // 5. Level selection follows the SAMPLING, not a constant. Two traces of the same physical
+    //    width but different cycle times must get different level counts.
+    {
+      vector<pair<double, double>> fast, slow;
+      for (int i = 0; i < 40; ++i) fast.emplace_back(i * 0.5, 100.0);   // dt = 0.5 s
+      for (int i = 0; i < 40; ++i) slow.emplace_back(i * 2.0, 100.0);   // dt = 2.0 s
+      const int lf = atrousLevels(fast, 4.0), ls = atrousLevels(slow, 4.0);
+      chk(lf > ls, "levels scale with sampling (finer dt -> more levels)");
+      chk(atrousLevels(fast, 0.0) == 0, "scale 0 disables smoothing");
+      chk(atrousLevels(vector<pair<double, double>>(3, {1.0, 1.0}), 4.0) == 0, "too-short XIC -> 0 levels");
+    }
+
+    writeLogInfo_(fail ? "[wavelet] SELFTEST FAILED" : "[wavelet] selftest passed");
+    return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
+  }
+
   /// Build a pseudo-MS2 from a fragment list (m/z,intensity) + ranking scores: keeps top
   /// max_frags by score, drops if < min_frags, annotates the synthetic precursor. Deterministic.
   void assembleFromList_(const Precursor_& pc, double win_lo, double win_hi,
@@ -1124,8 +1290,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     {
       vector<size_t> idx(frags.size());
       for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+      // [rank] Rank by correlation (ours) or by intensity (diaTracer's "top N highest intensity").
+      // The engine re-ranks by INTENSITY downstream (Sage max_peaks=150), so a correlation-ranked
+      // cap can discard high-intensity peaks the engine would have scored. Ties break on m/z then
+      // index in BOTH modes so the output stays deterministic.
+      const bool by_int = rank_by_intensity_;
       partial_sort(idx.begin(), idx.begin() + max_frags, idx.end(), [&](size_t a, size_t b) {
-        if (frag_scores[a] != frag_scores[b]) return frag_scores[a] > frag_scores[b];
+        const double ka = by_int ? frags[a].second : frag_scores[a];
+        const double kb = by_int ? frags[b].second : frag_scores[b];
+        if (ka != kb) return ka > kb;
         if (frags[a].first != frags[b].first) return frags[a].first < frags[b].first;
         return a < b;
       });
@@ -1172,7 +1345,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const String out = getStringOption_("out");
     const double delta_im = getDoubleOption_("gate:delta_im");
     const double delta_rt = getDoubleOption_("gate:delta_rt");
+    if (getFlag_("diag:selftest_wavelet")) return selftestWavelet_();
     log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
+    rank_by_intensity_ = (getStringOption_("assembly:rank_by") == "intensity");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
@@ -1327,8 +1502,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const double max_trace_len = getDoubleOption_("trace:max_trace_length_sec");
     const int agg_n = getIntOption_("trace:frame_aggregation_n");
     String ms1_span;
+    // [parallel] MS1 tracing was UNBANDED: the call never passed a band count, so it defaulted to
+    // 1 and MassTraceDetection -- a serial greedy loop over an intensity-sorted apex list -- ran on
+    // ONE core while MS2 was banded across the machine. Invisible at default thresholds (MS1 is ~4%
+    // of frames), fatal for the MS1 sensitivity sweep, which is the one lever the literature names
+    // as the root cause of low-abundance loss in this tool class.
+    int ms1_bands = getIntOption_("perf:ms1_trace_bands");
+    if (ms1_bands < 1) ms1_bands = 1;
     vector<Trace> ms1_traces = detectTraces_(ms1_map, delta_im, getDoubleOption_("trace:noise_threshold_int"),
-                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span);
+                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
     writeLogInfo_("MS1 " + ms1_span);   // [merged-trace] measure, do not assume
 
     // [fwhm] Measure the actual chromatographic peak width from the MS1 traces just built, and
@@ -1377,6 +1559,24 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // that ordering is why only the MS2 side can use the measured width for free. Doing the
     // same for MS1 needs a two-pass trace (measure with splitting off, then re-trace), which is
     // a real cost and is deliberately not done blind.
+    // [wavelet] The smoothing scale is a MEASUREMENT, not a parameter: trace:wavelet_smooth is a
+    // multiple of the median MS1 FWHM just measured above. A fixed absolute width cannot be right
+    // across gradients (the same 14 s was +0.0% on a 31 min method and -1.06% on a 5.6 min one).
+    // Refuse rather than guess if no FWHM could be measured -- silently falling back to some
+    // absolute default is how the split_valleys work produced method-dependent results.
+    const double wl_mult = getDoubleOption_("trace:wavelet_smooth");
+    if (wl_mult > 0.0 && ms1_fwhm_med > 0.0)
+    {
+      wl_scale_ = wl_mult * ms1_fwhm_med;
+      writeLogInfo_("[wavelet] precursor-XIC smoothing ON: " + String(wl_mult) + " x measured FWHM "
+                    + String(ms1_fwhm_med) + " s = " + String(wl_scale_) + " s");
+    }
+    else if (wl_mult > 0.0)
+    {
+      wl_scale_ = 0.0;
+      writeLogWarn_("[wavelet] trace:wavelet_smooth requested but NO MS1 FWHM could be measured; "
+                    "smoothing stays OFF rather than guessing an absolute width");
+    }
     const double sv_fwhm = getDoubleOption_("trace:split_valleys_fwhm");
     if (sv_fwhm > 0.0 && ms1_fwhm_med > 0.0)
     {
