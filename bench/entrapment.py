@@ -79,8 +79,11 @@ def score(tsv, tag, ratio, q_field="peptide_q", q_cut=0.01):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", required=True, help="human FASTA (targets only, no decoys)")
-    ap.add_argument("--foreign", required=True, help="foreign proteome FASTA (entrapment)")
+    ap.add_argument("--target", help="human FASTA (targets only, no decoys)")
+    ap.add_argument("--foreign", help="foreign proteome FASTA (entrapment)")
+    ap.add_argument("--prebuilt", help="an ALREADY-concatenated target+entrapment FASTA whose "
+                    "foreign entries carry --tag. Counts are read back OUT of the file rather "
+                    "than assumed, so a mislabelled database cannot silently set the ratio.")
     ap.add_argument("--sage", required=True, help="sage binary")
     ap.add_argument("--config", required=True, help="sage config json (its fasta is overridden)")
     ap.add_argument("--out", required=True, help="working dir for the entrapment FASTA + results")
@@ -91,14 +94,25 @@ def main():
     a = ap.parse_args()
 
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    fa = out / "target_entrap.fasta"
-    if not fa.exists():
-        n_t, n_e = build_entrapment(a.target, a.foreign, fa, a.tag)
-        print("[db] %d target + %d entrapment proteins -> %s" % (n_t, n_e, fa), flush=True)
+    if a.prebuilt:
+        fa = Path(a.prebuilt)
+        n_e = sum(1 for l in open(fa) if l.startswith(">" + a.tag))
+        n_t = sum(1 for l in open(fa) if l.startswith(">")) - n_e
+        if n_e == 0:
+            sys.exit("ABORT: %s contains no '>%s' entries -- wrong tag or wrong file. Refusing to "
+                     "report an entrapment rate against a database with no entrapment." % (fa, a.tag))
+        print("[db] prebuilt %s: %d target + %d entrapment proteins" % (fa, n_t, n_e), flush=True)
     else:
-        n_t = sum(1 for l in open(a.target) if l.startswith(">"))
-        n_e = sum(1 for l in open(a.foreign) if l.startswith(">"))
-        print("[db] reusing %s (%d target + %d entrapment)" % (fa, n_t, n_e), flush=True)
+        if not (a.target and a.foreign):
+            sys.exit("ABORT: need --prebuilt, or both --target and --foreign")
+        fa = out / "target_entrap.fasta"
+        if not fa.exists():
+            n_t, n_e = build_entrapment(a.target, a.foreign, fa, a.tag)
+            print("[db] %d target + %d entrapment proteins -> %s" % (n_t, n_e, fa), flush=True)
+        else:
+            n_t = sum(1 for l in open(a.target) if l.startswith(">"))
+            n_e = sum(1 for l in open(a.foreign) if l.startswith(">"))
+            print("[db] reusing %s (%d target + %d entrapment)" % (fa, n_t, n_e), flush=True)
     ratio = n_e / max(n_t, 1)
     print("[db] entrapment/target protein ratio %.3f" % ratio, flush=True)
 

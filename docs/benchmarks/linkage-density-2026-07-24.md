@@ -416,6 +416,98 @@ would recover faint precursors remains **unmeasured**. To test it at all, either
 must be parallelised or a milder setting (e.g. noise 50 / snr 2.0) must be used. Do not record the
 MS1 direction as falsified — it was never measured.
 
+## UN-RETRACTED: entrapment FDR says the gate gain is REAL (2026-07-24, spock)
+
+The retraction above was **premature**, and the instrument that settled it is the one all three
+reviewers demanded. Entrapment search (20,416 human + 16,343 Arabidopsis `ENTRAP_` proteins, same
+`sage_deiso.json`), nominal `peptide_q<=0.01` in every row:
+
+| arm | accepted | entrapment hits | raw entrap% | est. true FDR% |
+|---|---|---|---|---|
+| base | 9,502 | 91 | 0.96% | **2.39%** |
+| corr040 | 9,811 | 89 | 0.91% | 2.27% |
+| **corr060** | **10,342** | **86** | 0.83% | **2.08%** |
+| diaTracer | 10,729 | 81 | 0.75% | **1.89%** |
+
+Poisson test — if the EXTRA peptides an arm accepts were as error-prone as base's, entrapment hits
+would grow in proportion:
+
+| arm | peptides vs base | entrapment observed | expected at base's rate | |
+|---|---|---|---|---|
+| corr040 | **+309** | 89 | 94 | −0.5σ |
+| **corr060** | **+840** | **86** | **99** | **−1.3σ** |
+| diaTracer | +1,227 | 81 | 103 | −2.1σ |
+
+**corr060 accepts 840 more peptides with NO measurable increase in errors** (86 observed against 99
+expected). That is the signature of real signal, not recalibration — an artefact would have shown
+entrapment hits growing with the accepted count.
+
+**Why `fdrcheck.py` misled me.** It compared arms at a fixed `sage_discriminant_score`. That score
+is a **per-run trained LDA output**, so its scale is NOT commensurable across runs — I flagged the
+caveat when running it and then let the retraction headline stand anyway. Fixed-score comparison is
+invalid here; direct error counting is not. Evidence ranking, weakest to strongest: nominal q-count
+(per-run calibrated) < fixed-score (invalid across per-run-trained scores) < **entrapment (counts
+errors directly)**. `bench/fdrcheck.py` is kept for the decoy/threshold diagnostics it prints, but
+its cross-arm delta must not be read as evidence.
+
+**The finding that outranks all of this: nominal 1% FDR is really ~1.9–2.4%.** Every "1% FDR"
+number in this project's history — ours and diaTracer's — is roughly **2× optimistic**. This is the
+first time the project has measured its own error rate rather than modelling it.
+
+**And the gap to diaTracer is much smaller than reported**: 10,342 vs 10,729 under one
+entrapment-controlled search = **−3.6%**, against the −12.0% (Sage) and −19.5% (MSFragger) nominal
+figures. diaTracer is also the cleanest arm (1.89%), so part of its lead is a stricter effective
+threshold, not extra signal.
+
+Caveat, stated because the counts are small: entrapment hits are 81–91, so Poisson noise is ±9–10
+and the FDR *differences between arms* are NOT individually significant. The defensible claim is
+"+840 peptides at no measurable error cost", not "corr060 has a significantly lower error rate".
+Replication on S23/S08 and under MSFragger is still required before the default moves.
+
+## Implemented after the review (2026-07-24)
+
+Four changes, each traceable to a review finding or to the diaTracer paper (Nat Commun 16:95),
+none to parameter search — which matters, because parameter search on this file already produced
+one retracted result.
+
+**1. Band-parallel MS1 tracing (`perf:ms1_trace_bands`, default 12) — MEASURED, 6.4×.**
+The cause was not "MassTraceDetection is serial" but simpler: **the MS1 call never passed a band
+count**, so it defaulted to 1 while MS2 was banded across the machine. On the exact config that
+previously ran 40 min with zero log progress:
+
+| | unbanded | banded |
+|---|---|---|
+| peak CPU in MS1 phase | **152%** | **967%** |
+| MS1 trace phase | no progress in 36 min | completes |
+
+This unblocks the MS1 sensitivity floor, which the literature names as the root cause of
+low-abundance loss for this entire tool class — DIA-Umpire lineage: *"a pseudospectrum is created
+only if a peptide generates detectable signal in the MS1 data, which can limit sensitivity for
+low-abundance species."* That is our miss profile exactly (MISS precursors 3.2× dimmer).
+
+**2. Wavelet smoothing of the precursor XIC (`trace:wavelet_smooth`, default 0 = off).**
+Stationary (à trous) B3-spline, scale = multiple of the **measured** MS1 FWHM. The literature
+cross-check found we had copied diaTracer's **0.3 correlation threshold without copying its
+smoothing** (2D Gaussian + Savitzky-Golay on the precursor profile). Pearson r between two noisy
+profiles is attenuated toward 0 as S/N falls, so an unsmoothed 0.3 is a systematically weaker
+constraint — and worst at faint precursors. Raising the threshold to compensate was tried and
+produced only the FDR artefact above; this attacks the cause. À trous (undecimated) is required,
+not preferred: output stays sample-aligned, so the touched grid points — and therefore what
+`gate:min_correlation_points` means — are unchanged. Fragment XICs stay RAW, as in diaTracer.
+Verified by `-diag:selftest_wavelet` against the SHIPPED functions (DC preservation, noise
+reduction, peak retention, mirror edges, level-vs-sampling): 7/7 pass.
+
+**3. Intensity ranking of the fragment cap (`assembly:rank_by`, default `correlation`).**
+diaTracer keeps the "top N highest intensity peaks"; we keep the top N best-correlating. The
+engine re-ranks **by intensity** downstream (Sage `max_peaks=150`), so a correlation-ranked cap can
+discard exactly the peaks that would have been scored. 70–75% of our spectra sit at the cap.
+
+**4. Entrapment FDR (`bench/entrapment.py`).**
+The measurement this project has never made. Counts errors directly against a foreign proteome
+(20,416 human + 16,343 Arabidopsis) instead of trusting a per-run decoy calibration — the axis
+that produced the retraction above. Reports raw entrapment fraction AND size-corrected FDR, never
+the corrected figure alone.
+
 ## Harness fix landed in passing
 
 `resolved_defaults()` parsed defaults from `--helphelp` "(default: '...')" text, which OpenMS 3.6
