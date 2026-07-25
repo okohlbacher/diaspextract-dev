@@ -1721,6 +1721,17 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     vector<pair<pair<int, int>, vector<CompactFrame>*>> window_list;
     window_list.reserve(ms2_by_window.size());
     for (auto& kv : ms2_by_window) window_list.emplace_back(kv.first, &kv.second);
+    // [heavy-first] Process the biggest windows FIRST. With n_conc slots and unequal windows,
+    // a small window admitted late runs nearly alone in the tail; starting the largest first
+    // gives the scheduler the whole run to overlap it. The widest tile holds ~23.7% of all
+    // precursors, so tail order dominates wall time. Cost proxy = compact bytes (peaks to trace),
+    // which correlates with both trace and score work. Output order is unaffected: a canonical
+    // total-order sort over all emitted spectra runs after the loop, so reordering here is safe.
+    {
+      auto wbytes = [](const vector<CompactFrame>& fr) { size_t b = 0; for (const auto& f : fr) b += f.bytes(); return b; };
+      std::stable_sort(window_list.begin(), window_list.end(),
+                       [&](const auto& a, const auto& b) { return wbytes(*a.second) > wbytes(*b.second); });
+    }
     vector<vector<MSSpectrum>> win_out(window_list.size());
     // Fan-out histogram (only filled when rp_max>0): buckets = #precursors each fragment gates,
     // BEFORE capping. Answers "does this rp_max actually bite?" Buckets: 1,2,3,4,5,6-10,11-25,26-50,51+.
@@ -1849,7 +1860,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // fixed per-band halo cost. 24 bands then loses to 12 on wall time despite half the CPU,
         // because 24 windows x 24 bands = 576 threads on 100 cores and scheduling overtakes the
         // algorithmic gain. bands_for is kept for reference but is no longer the default path.
-        const int w_bands = std::max(1, getIntOption_("perf:trace_bands"));
+        // [auto-band-fix] Use the RESOLVED n_bands, not the raw option. In auto mode
+        // (perf:trace_bands=0) n_bands was computed as ceil(threads/windows) at the top and
+        // n_conc was sized from it, but the actual call here re-read the raw 0 and max(1,0)=1
+        // traced every window SERIALLY while the log advertised multiple bands. Passing n_bands
+        // keeps the advertised and actual band counts identical. Explicit values pass through
+        // unchanged (n_bands == the option when the option is > 0).
+        const int w_bands = n_bands;
         vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
         // (compact frames already released inside materializeWindow) [par-Crit-3]
         #pragma omp critical
