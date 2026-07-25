@@ -536,11 +536,34 @@ against the −12% (nominal Sage) and −19.5% (nominal MSFragger) figures. On S
 error rate is *below* diaTracer's, so at equal FDR the gap narrows further. The true standing vs
 diaTracer is low-single-digit percent, not double digit.
 
-**Still gated:** default not yet changed. Two reasons remain — (1) MSFragger cross-engine
-confirmation (attempted; MSFragger reads our OpenMS mzML fine now, but crashes in database indexing
-on the entrapment+decoy FASTA — a separate issue, deferred); (2) the winning value (0.5 vs 0.6) is
-within Poisson noise of the entrapment counts, so "tighten to ~0.5–0.6" is the finding, not a
-single number.
+### MSFragger cross-engine (2026-07-25): the peptide GAIN is Sage-specific, the FDR gain is not
+
+MSFragger now runs on our mzML (two blockers fixed: empty `labile_fragment_ion_series`, and
+valueless cvParams → `Scans=0`, patched by `bench/fix_mzml_cvparams.py`). Same entrapment DB,
+target-decoy FDR on hyperscore applied identically to both engines:
+
+| engine | base (acc / FDR) | corr060 (acc / FDR) | Δ peptides |
+|---|---|---|---|
+| Sage | 9,502 / 2.39% | 10,342 / 2.08% | **+8.8%** |
+| MSFragger | 10,032 / 1.67% | 10,026 / 1.42% | **−0.1% (flat)** |
+
+**The +7–14% peptide gain does NOT replicate under MSFragger.** The FDR improvement DOES (both
+engines get cleaner: Sage 2.39→2.08%, MSFragger 1.67→1.42%). Coherent reading: Sage's base
+UNDER-performs MSFragger's base (9,502 vs 10,032 under entrapment); tightening removes
+low-correlation fragments that confuse Sage's linear discriminant, closing that gap — but
+MSFragger's hyperscore is already robust to those fragments, so it has nothing to gain. The
+tightening compensates for a Sage-specific scoring weakness, it is not a universal extraction
+improvement. This is exactly the engine-dependence the search-engine policy warns about, and it is
+why Sage-only would have shipped a misleading +7% default.
+
+**Decision: do NOT change the shipped default on this evidence.** Tightening is defensible as a
+Sage-development convenience (neutral-to-positive on MSFragger via lower FDR, positive on Sage
+counts), but the "+7% peptides" headline is retracted as a universal claim — it is a Sage artefact
+the entrapment control on Sage alone could not expose, because entrapment measures error, not
+cross-engine reproducibility.
+
+Also gated: 0.5 vs 0.6 is within Poisson noise of the entrapment counts, so "tighten to ~0.5-0.6"
+was always a range, not a value.
 
 ## Implemented after the review (2026-07-24)
 

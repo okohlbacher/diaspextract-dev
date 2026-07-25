@@ -1,39 +1,43 @@
 #!/usr/bin/env python3
-"""Add value="" to valueless cvParams so MSFragger can read an OpenMS-written mzML.
+"""Add value="" to every valueless <cvParam> so MSFragger's batmass-io can read an OpenMS mzML.
 
-OpenMS emits cvParams with no `value` attribute for terms that carry no value --
-`instrument model`, `centroid spectrum`, `m/z array`, `32-bit float`, and others. That is
-LEGAL: in the mzML schema `value` is optional.
+OpenMS writes boolean-type cvParams with NO value attribute (legal mzML 1.1: e.g.
+<cvParam ... name="centroid spectrum"/>). batmass-io (MSFragger's reader) calls String.trim() on
+the missing value, NPEs on the spectrum, and silently reports "Scans = 0" -- the file looks empty
+and MSFragger searches nothing. This is the reader's bug, not the file's, but the fix lives here:
+give every cvParam a value.
 
-MSFragger's reader (batmass-io) calls String.trim() on getValue() without a null check, so it
-reports `Scans = 0` and rejects the whole file as corrupted. diaTracer writes value="" on every
-cvParam, which is why its files read.
-
-So this is an interoperability defect in OUR output, not in the benchmark: an OpenMS-written
-mzML cannot be searched with one of the two most widely used engines. The proper fix belongs in
-the writer; this streaming pass unblocks measurement in the meantime. Symmetrically, diaTracer's
-mzML needs patching before SAGE can read it (missing selected ion m/z) -- both tools ship files
-that one major engine rejects.
-
-Single pass, no XML parsing: the files are 5-19 GB.
+Streaming, line-oriented: the 14.8 GB file never lands in memory. Only cvParam TAGS are touched;
+the base64 binary arrays (the bulk) pass through untouched. A cvParam that already has value= is
+left exactly as-is, so RT/mz/intensity values are never altered.
 """
 import re, sys
 
-# a cvParam element that has no value= attribute
-PAT = re.compile(r'(<cvParam\b(?:(?!value=)[^>])*?)(/?>)')
+SRC, DST = sys.argv[1], sys.argv[2]
+# match a whole <cvParam ...> or <cvParam .../> tag
+TAG = re.compile(rb"<cvParam\b[^>]*?/?>")
 
-def fix(inp, out):
-    n = 0
-    with open(inp, "r", encoding="utf-8", errors="replace") as f, \
-         open(out, "w", encoding="utf-8") as g:
-        for line in f:
-            if "<cvParam" in line and "value=" not in line:
-                line, k = PAT.subn(r'\1 value=""\2', line)
-                n += k
-            g.write(line)
-    return n
 
-if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        sys.exit("usage: %s IN.mzML OUT.mzML" % sys.argv[0])
-    print("added value=\"\" to %d cvParams -> %s" % (fix(sys.argv[1], sys.argv[2]), sys.argv[2]))
+def fix(tag):
+    if b"value=" in tag:
+        return tag                                  # already has a value -> untouched
+    # insert value="" just before the closing (/> or >), preserving self-closing form
+    if tag.endswith(b"/>"):
+        return tag[:-2].rstrip() + b' value=""/>'
+    return tag[:-1].rstrip() + b' value=""'  + b'>'
+
+
+n_lines = n_fixed = 0
+with open(SRC, "rb") as fi, open(DST, "wb") as fo:
+    for line in fi:
+        n_lines += 1
+        if b"<cvParam" in line and b"value=" not in line:
+            new, k = TAG.subn(lambda m: fix(m.group(0)), line)
+            n_fixed += k
+            fo.write(new)
+        else:
+            fo.write(line)
+        if n_lines % 20_000_000 == 0:
+            sys.stderr.write("  ...%d lines, %d cvParams fixed\n" % (n_lines, n_fixed))
+            sys.stderr.flush()
+sys.stderr.write("done: %d lines, %d valueless cvParams patched -> %s\n" % (n_lines, n_fixed, DST))
