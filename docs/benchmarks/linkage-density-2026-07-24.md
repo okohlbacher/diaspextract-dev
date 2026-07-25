@@ -505,6 +505,43 @@ there first. Not adopted; not worth an entrapment run on a flat count.
 one is a measured null (wavelet), two are falsified (intensity ranking, MS1 sensitivity). The
 genuine peptide gain this session remains the entrapment-confirmed `min_correlation` tightening.
 
+## Cross-dataset validation of the min_correlation winner (S23 + S08, 2026-07-25)
+
+The S30 gate result was one sample; policy requires a second before the default moves. Tested
+base/0.5/0.6 on S23 and S08, one binary, one invocation each, then entrapment-scored.
+
+**Nominal peptides (`peptide_q<=0.01`, human-only `sage_deiso`) — replicates on all three, and at
+corr060 reaches near-parity with diaTracer:**
+
+| sample | base | corr050 | corr060 | Δ @0.60 | diaTracer | corr060 vs dt |
+|---|---|---|---|---|---|---|
+| S30 | ~10,120 (4 reps) | 10,657 | 10,903 | **+7.7%** | 11,517 | −5.3% |
+| S23 | 8,406 | 8,833 | 8,938 | **+6.3%** | 8,948 | **−0.1%** |
+| S08 | 8,983 | 9,870 | 10,059 | **+12.0%** | 10,242 | −1.8% |
+
+**Entrapment true FDR — the win is unambiguous: peptides UP and error DOWN, on all three:**
+
+| sample | base (acc / FDR) | corr060 (acc / FDR) | diaTracer (acc / FDR) |
+|---|---|---|---|
+| S30 | 9,502 / 2.39% | 10,342 / **2.08%** | 10,729 / 1.89% |
+| S23 | 8,016 / 2.40% | 8,459 / **1.95%** | 8,652 / 2.05% |
+| S08 | 8,452 / 1.71% | 9,622 / **1.53%** | 10,037 / 2.09% |
+
+Tightening the gate does not just add error-free peptides — it **lowers the measured error rate
+while adding peptides** on every sample. That is the opposite of the recalibration signature that
+retracted the first reading. The lever is confirmed real and portable.
+
+**Gap to diaTracer, entrapment-matched (corr060):** S30 −3.6%, S23 −2.2%, S08 −4.1% (mean ~−3.3%),
+against the −12% (nominal Sage) and −19.5% (nominal MSFragger) figures. On S23 and S08 our corr060
+error rate is *below* diaTracer's, so at equal FDR the gap narrows further. The true standing vs
+diaTracer is low-single-digit percent, not double digit.
+
+**Still gated:** default not yet changed. Two reasons remain — (1) MSFragger cross-engine
+confirmation (attempted; MSFragger reads our OpenMS mzML fine now, but crashes in database indexing
+on the entrapment+decoy FASTA — a separate issue, deferred); (2) the winning value (0.5 vs 0.6) is
+within Poisson noise of the entrapment counts, so "tighten to ~0.5–0.6" is the finding, not a
+single number.
+
 ## Implemented after the review (2026-07-24)
 
 Four changes, each traceable to a review finding or to the diaTracer paper (Nat Commun 16:95),
