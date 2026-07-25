@@ -464,6 +464,47 @@ and the FDR *differences between arms* are NOT individually significant. The def
 "+840 peptides at no measurable error cost", not "corr060 has a significantly lower error rate".
 Replication on S23/S08 and under MSFragger is still required before the default moves.
 
+## The four literature-motivated changes, benchmarked — three fail, and the failures are informative
+
+Five arms, one binary, one invocation (ibminode05). Nominal `peptide_q<=0.01`:
+
+| arm | change | peptides | vs base | verdict |
+|---|---|---|---|---|
+| base | — | 10,104 | — | — |
+| wl025 | wavelet 0.25×FWHM | 10,069 | −0.35% | flat (within 0.34% noise) |
+| wl050 | wavelet 0.50×FWHM | 10,101 | −0.03% | **flat — clean null** |
+| rankint | intensity ranking | 9,855 | **−2.5%** | **falsified** |
+| ms1sens | MS1 floor lowered | 5,605 | **−44.5%** | **falsified** |
+
+**ms1sens — the physics, not a bug.** Parallelization worked (2.4 h vs never), and the diagnostics
+explain the collapse: lowering the MS1 floor produced **66.6M MS1 traces vs 4.9M (13.6×)** and
+**9.5M emitted spectra vs 1.5M (6.2×)**. The tool now emits a pseudo-spectrum at every noise blip;
+those flood the target-decoy competition and bury real IDs. The literature premise — "a
+pseudo-spectrum is created only if there is MS1 signal" — cuts both ways: relaxing it does not
+surface faint real precursors, it manufactures spurious ones. **The MS1 floor is load-bearing at
+its current setting.** The MS1 sensitivity direction is falsified; the parallelization that made
+the test possible is kept (it is correct and free at default thresholds).
+
+**rankint — falsified, against the literature's own logic.** Ranking the 500-fragment cap by
+intensity (as diaTracer does) LOST 2.5%. The reasoning "the engine re-ranks by intensity, so keep
+intense peaks" was incomplete: our correlation-ranked cut is already a *quality* filter, and
+replacing it with raw intensity lets co-eluting-neighbour peaks into the kept set. The correlation
+ranking is doing real de-noising work that diaTracer gets from its smoothed-XIC feature detection
+instead. Closed.
+
+**wavelet — a clean flat null.** Smoothing engaged correctly (`0.5 × 3.61 s = 1.81 s`, confirmed in
+the log) and moved nothing at nominal FDR. Two honest readings, not yet separated: (a) the
+grid-Pearson correlation is already robust enough that pre-smoothing the precursor is redundant, or
+(b) the benefit is real but only visible under entrapment / on the faint tail, which the nominal
+count cannot see. Given the gate sweep already showed a real entrapment-confirmed gain from
+*tightening the correlation constraint*, (a) is the more likely explanation — smoothing and a
+higher threshold are two routes to the same "trust the correlation more" effect, and the gate got
+there first. Not adopted; not worth an entrapment run on a flat count.
+
+**Net:** of the four post-review changes, one is a pure infrastructure win (MS1 banding, 6.4×),
+one is a measured null (wavelet), two are falsified (intensity ranking, MS1 sensitivity). The
+genuine peptide gain this session remains the entrapment-confirmed `min_correlation` tightening.
+
 ## Implemented after the review (2026-07-24)
 
 Four changes, each traceable to a review finding or to the diaTracer paper (Nat Commun 16:95),
