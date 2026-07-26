@@ -679,6 +679,25 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     if (max_len > 0.0) p.setValue("max_trace_length", max_len);
     mtd.setParameters(p);
 
+    // [epd-parallel] Reusable valley-split step. Called from a balanced parallel-for below, so 12
+    // chunks split concurrently instead of once serially. Lock-free now that OpenMS EPD is patched
+    // (patches/openms-epd-lockfree.patch); 96 concurrent callers (8 windows x 12 chunks) do not
+    // contend. Output is order-independent downstream: MS2 traces are canonically re-sorted right
+    // after detectTraces_, and ms1_traces are canonically sorted before inferPrecursors_.
+    auto do_split = [&](vector<MassTrace>& in) -> vector<MassTrace> {
+      if (split_valleys <= 0.0 || in.empty()) return std::move(in);
+      ElutionPeakDetection epd;
+      epd.setLogType(ProgressLogger::NONE);
+      Param ep = epd.getParameters();
+      ep.setValue("chrom_fwhm", split_valleys);
+      ep.setValue("width_filtering", "off");
+      ep.setValue("masstrace_snr_filtering", "false");
+      epd.setParameters(ep);
+      vector<MassTrace> out; out.reserve(in.size());
+      epd.detectPeaks(in, out);
+      return out;
+    };
+
     vector<MassTrace> mts;
     if (bands > 1)
     {
@@ -756,40 +775,35 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // everything under it. ElutionPeakDetection is the OpenMS stage that actually smooths and splits
     // at local minima - we never ran it. width_filtering is forced to "off" because "fixed" is a
     // DELETION filter ([min_fwhm,max_fwhm]) and blanket deletion is on the falsified list.
-    if (split_valleys > 0.0 && !mts.empty())
+    // [epd-parallel] Valley-splitting is the dominant serial phase (EPD-off S30 20:46 vs 28:40 for
+    // MS2 alone). It is per-trace independent, so run it as a BALANCED parallel-for over the merged
+    // traces -- more chunks than threads + dynamic schedule so no chunk's long traces stall the
+    // rest. Lock-free (patched OpenMS), so the 8 concurrent windows above never contend. Trace SET
+    // is identical to one serial split (per-trace, deterministic); only order differs, and both
+    // consumers are order-independent (MS2 re-sorted after detectTraces_, MS1 sorted before
+    // inferPrecursors_). Reverted once for a -0.8% "regression" that was actually the ms1_traces
+    // determinism bug, now fixed.
+    if (split_valleys > 0.0 && mts.size() > 1)
     {
-      ElutionPeakDetection epd;
-      Param ep = epd.getParameters();
-      ep.setValue("chrom_fwhm", split_valleys);      // sets SG window AND the local-extrema half-window
-      ep.setValue("width_filtering", "off");         // never delete on width - only split
-      ep.setValue("masstrace_snr_filtering", "false");
-      epd.setParameters(ep);
-      // MEMORY: detectPeaks(mts, split) materialises the ENTIRE output while the entire input
-      // is still live -- measured as ~2.9 GB of a ~5.8 GB per-window peak, the single largest
-      // term. Feed it in batches instead and free each batch as it is consumed, so the
-      // transient is one batch rather than a full second copy. [compact]
-      const size_t BATCH = 250000;
+      const int nthreads = std::max(1, bands);
+      const int nchunk = std::max(1, bands * 4);      // 4x chunks vs threads -> dynamic load balance
       const size_t n_in = mts.size();
-      vector<MassTrace> out;
-      out.reserve(n_in);                              // split only ever grows the count
-      for (size_t b = 0; b < n_in; b += BATCH)
+      vector<vector<MassTrace>> parts(nchunk);
+      #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+      for (int ci = 0; ci < nchunk; ++ci)
       {
-        const size_t e = std::min(n_in, b + BATCH);
-        vector<MassTrace> chunk(std::make_move_iterator(mts.begin() + b),
-                                std::make_move_iterator(mts.begin() + e));
-        // release the consumed slice's heap NOW, not at end of loop (MassTrace has no swap())
-        for (size_t i = b; i < e; ++i) mts[i] = MassTrace();
-        vector<MassTrace> part;
-        epd.detectPeaks(chunk, part);
-        vector<MassTrace>().swap(chunk);
-        for (auto& t : part) out.push_back(std::move(t));
+        const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
+        if (lo >= hi) continue;
+        vector<MassTrace> chunk(std::make_move_iterator(mts.begin() + lo),
+                                std::make_move_iterator(mts.begin() + hi));
+        parts[ci] = do_split(chunk);
       }
-      if (!out.empty())
-      {
-        if (span_log) *span_log += " | valley-split " + String(n_in) + " -> " + String(out.size())
-                                 + " traces (" + String((int)(1000.0 * out.size() / n_in) / 10.0) + "%)";
-        mts.swap(out);
-      }
+      size_t tot = 0; for (auto& pth : parts) tot += pth.size();
+      vector<MassTrace> out; out.reserve(tot);
+      for (auto& pth : parts) { for (auto& t : pth) out.push_back(std::move(t)); vector<MassTrace>().swap(pth); }
+      if (span_log) *span_log += " | valley-split " + String(n_in) + " -> " + String(out.size())
+                               + " traces (" + String((int)(1000.0 * out.size() / std::max<size_t>(n_in,1)) / 10.0) + "%)";
+      mts.swap(out);
     }
     // [merged-trace] instrumentation: is trace merging actually happening? Log the RT-span
     // distribution. Peaks are 5-30 s here, so a large p90/max means multi-modal merged traces.
