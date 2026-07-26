@@ -645,6 +645,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     setValidStrings_("charge:scoring", {"envelope", "count"});
     registerDoubleOption_("charge:ambiguity_margin", "<x>", 0.0, "[route-3] If a different-charge hypothesis scores within this margin of the best, emit it too (diaTracer retains multiple charges when ambiguous). 0 = single charge per precursor.", false);
     registerFlag_("assembly:dedup_precursors", "[route-4] Collapse precursor hypotheses that are the same species (same charge, m/z within ppm, co-eluting RT, co-located IM). Measured redundancy: 4.6 identified spectra per unique peptide vs diaTracer's 1.46.");
+    registerFlag_("assembly:require_isotope_support", "[emission] Drop precursor hypotheses with NO isotope partner (the 'guessed' singletons, ~40% of emission) instead of assigning them a default charge. Emission is over-GENERATION of distinct low-quality precursors, not redundancy, so merge/dedup cannot cut it (oracle: same-coordinate collapse only 1.1-1.3x); this gate can. Measured on S30 (2026-07-26): drops 603,858 of 1,528,113 spectra (-39.5%) for 78 of 10,036 peptides (-0.78%) -- guessed spectra identify at 1.30%% vs 11.39%% for supported (8.8x). The 0.78%% are low-abundance/no-envelope species (the open-search caveat), so keep this OFF by default and confirm FDR-recalibrated peptides on any run that enables it.");
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. [adv-fix] Was 0.05 = 5x the fragment gate, which is indefensible: isotopes of ONE species share essentially identical mobility, so 0.05 admits cross-species partners that corrupt both the envelope cosine and the co-elution score. 0.01 matches the fragment gate.", false);
     // ponytail: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
   }
@@ -1333,6 +1334,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     prec.setDriftTime(pc.im);
     prec.setDriftTimeUnit(DriftTimeUnit::VSSC);
     out.setPrecursors({prec});
+    // [provenance] Stamp the inference class onto the emitted spectrum so identified peptides can be
+    // joined back to guessed (no isotope support) vs isotope-supported precursors -- the number that
+    // sets the peptide cost of an isotope-support gate. Written as a <userParam> in the mzML.
+    out.setMetaValue("spx_guessed", (int)(pc.guessed ? 1 : 0));
   }
 
   /// Per-precursor assembly: this precursor claims every fragment passing its gate (a fragment may
@@ -1648,6 +1653,17 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // Closed search hides the difference (engine enumerates); open search does not.
     for (auto& pc : precursors)
       if (pc.charge == 0) { pc.guessed = true; pc.charge = open_safe ? 0 : default_charge; ++n_default; }
+    // [emission] Isotope-support gate: drop the guessed singletons rather than emit them. They are
+    // coordinate-distinct (merge/dedup cannot cut them) and identify 8.8x less often; dropping all
+    // guessed cost 0.78% peptides for -39.5% emission on S30. OFF by default (open-search caveat).
+    if (getFlag_("assembly:require_isotope_support"))
+    {
+      const size_t before = precursors.size();
+      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
+                       [](const Precursor_& pc){ return pc.guessed; }), precursors.end());
+      writeLogInfo_("require_isotope_support: dropped " + String(before - precursors.size())
+                    + " guessed precursors, " + String(precursors.size()) + " isotope-supported remain");
+    }
     // [ms1-funnel] Measured recall against a DIA-NN truth set is 74.3% vs diaTracer's 84.4%, but a
     // single number cannot say WHERE a precursor is lost: no MS1 trace at all, a trace that never
     // became a hypothesis, or a hypothesis that never produced a spectrum. Dump both upstream
