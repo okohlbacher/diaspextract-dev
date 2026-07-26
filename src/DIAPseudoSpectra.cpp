@@ -1596,6 +1596,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                   + ", min_length " + String(ms2_minlen) + " s");
     const bool env_scoring = (getStringOption_("charge:scoring") == "envelope");
     const double ambig_margin = getDoubleOption_("charge:ambiguity_margin");
+    // [determinism] Canonically order the MS1 traces before precursor inference. inferPrecursors_
+    // is a GREEDY seed-and-mark-used loop; its output depends on ms1_traces' CONTAINER ORDER, and
+    // that order is non-deterministic -- MS1 detectTraces_ runs at top level so EPD's internal
+    // parallel-for is active and appends split traces in thread-completion order. The greedy
+    // seed sort already tie-breaks on index (a<b), but the index maps to a different physical
+    // trace each run. Result: ~0.7% run-to-run peptide wobble, and the deterministic -0.8% when a
+    // parallel change reshuffled the order. A total physical sort here mirrors the MS2-side sort
+    // that already exists (fragment traces are canonicalised right after detectTraces_) and makes
+    // the whole tool reproducible -- which also makes the emitted-count/peptide correctness gate
+    // MEASURABLE. [adv-review kimi/codex 2026-07-26]
+    sort(ms1_traces.begin(), ms1_traces.end(), [](const Trace& a, const Trace& b) {
+      if (a.mz != b.mz) return a.mz < b.mz;
+      if (a.rt != b.rt) return a.rt < b.rt;
+      if (a.im != b.im) return a.im < b.im;
+      return a.intensity < b.intensity;
+    });
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring, ambig_margin);
     if (getFlag_("assembly:dedup_precursors"))
