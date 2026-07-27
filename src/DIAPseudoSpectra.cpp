@@ -1430,11 +1430,19 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     //-------------------------------------------------------------
     // Input normalization / validation [C-4]
     //-------------------------------------------------------------
-    IMFormat imf = IMTypes::determineIMFormat(exp, 1);
-    if (imf == IMFormat::NONE)
+    // [stream] The streaming path fills ms1_map/ms2_by_window directly via an IM-aware consumer
+    // (PickCompactConsumer calls ensureIMArrayName), leaving `exp` EMPTY -- so the exp-based IM check
+    // only applies to the non-streaming load. Running it on the streamed (empty) `exp` wrongly aborted
+    // with "no ion-mobility data at MS1", which is why native pre-centroiding aggregation could never
+    // be benchmarked. Streamed data is guarded by the ms1_map.empty() check below instead.
+    if (!streamed)
     {
-      writeLogError_("Error: input has no ion-mobility data at MS1. DIAPseudoSpectra requires diaPASEF (IM DIA) input.");
-      return ILLEGAL_PARAMETERS;
+      IMFormat imf = IMTypes::determineIMFormat(exp, 1);
+      if (imf == IMFormat::NONE)
+      {
+        writeLogError_("Error: input has no ion-mobility data at MS1. DIAPseudoSpectra requires diaPASEF (IM DIA) input.");
+        return ILLEGAL_PARAMETERS;
+      }
     }
     // ponytail: assumes 1/K0 (VSSC). ms/CCS conversion and FAIMS rejection are Phase 2 [M-2].
 
