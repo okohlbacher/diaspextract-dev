@@ -310,3 +310,21 @@ reweighted). sigma=0.005 optimal so far. Validation pending: entrapment FDR (is 
 (both-engines), finer sigma. Also refutes the search-side hypothesis for OUR benchmark (chimera
 -2.2%/-11.7%; and we searched diaTracer's spectra through the SAME bare Sage, so the 9,989 vs 11,517
 gap is extraction, not a FragPipe/rescoring confound).
+
+---
+
+## FULL diaTracer COMPARISON, BOTH ENGINES (S30) — IM-weighting is Sage-specific
+
+| | Sage (peptide_q<=0.01) | MSFragger (TD 1% FDR) |
+|---|---|---|
+| baseline-gate | 9,989 | 11,033 |
+| ours-best (IM sigma=0.005) | 10,394 (+4.1%) | 11,060 (+0.2%) |
+| diaTracer | 11,517 | 13,932 |
+| ours / diaTracer | 90% | 79% |
+
+Entrapment (Sage): baseline target=9,304 @2.33% -> imw005 target=9,798 @2.26% (+5.3% target at LOWER
+true FDR -> the Sage gain is genuine signal). BUT the +4.1% is SAGE-SPECIFIC: flat (+0.2%) on MSFragger
+(Sage keeps top-150 by intensity so the IM reweight rescues faint fragments; MSFragger's scoring is
+already robust to them). And the diaTracer gap is WIDER on MSFragger (79%) than Sage (90%) -- diaTracer's
+spectra carry structure MSFragger exploits that ours lack. So IM-weighting is a real but engine-specific
+partial win; the core spectrum-content gap persists and is worse on diaTracer's native engine.
