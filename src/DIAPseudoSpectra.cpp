@@ -87,6 +87,7 @@ namespace
   /// window loop -- it cannot be read from a parameter directly because the FWHM is a measurement.
   double wl_scale_ = 0.0;
   bool rank_by_intensity_ = false;   ///< [rank] assembly:rank_by == "intensity" (diaTracer-style)
+  double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
 
   static std::string rss_()
   {
@@ -573,6 +574,7 @@ protected:
     registerDoubleOption_("assembly:apportion", "<p>", 0.0, "[route-4] Split a shared fragment's INTENSITY across the precursors that claim it, weight w_i = corr_i^p / sum(corr^p), instead of copying it at full intensity into all of them (mean fan-out 6.45). Fragment COUNT is unchanged - only the weighting - so it sidesteps every falsified count knob (rank-pruning, competitive, min_corr, min_corr_pts). 0 = OFF. Try 1 (linear) or 2 (sharper); p->inf degenerates to competitive, which IS falsified. Share-all path only.", false);
     registerStringOption_("assembly:rank_by", "<mode>", "correlation", "[rank] Which score decides WHICH fragments survive the assembly:max_fragments cap. 'correlation' (current) keeps the top-N best-CORRELATING; 'intensity' keeps the top-N most INTENSE, as diaTracer does (Nat Commun 16:95: 'only the top N highest intensity peaks (RF max, default 500)'). This matters because the search engine re-ranks BY INTENSITY: Sage keeps max_peaks=150 by intensity and MSFragger reads the full list. A high-intensity, mediocre-correlation fragment that our cap discards would have been scored by the engine, so a correlation-ranked cap can throw away exactly the peaks that get matched. 70-75% of our spectra sit AT the 500 cap, so the choice is live for most spectra, not a corner case.", false);
     setValidStrings_("assembly:rank_by", {"correlation", "intensity"});
+    registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "[recall] Down-weight each emitted fragment's intensity by a Gaussian of its ion-mobility distance from the precursor, exp(-(dIM)^2 / 2 sigma^2). TIMS precedes fragmentation so a TRUE fragment shares the precursor's 1/K0 exactly; a co-isolating interferent at the edge of the gate:delta_im band is suppressed. WITHIN-spectrum (no fragment removed or redistributed across precursors) so it escapes the fan-out depletion that falsified competitive/apex/deconvolution, and directly un-buries faint true fragments under the engine's intensity top-150. 0 = off. Try ~0.005 (half the 0.01 IM gate). [bench]", false);
     registerIntOption_("assembly:rp_max", "<n>", 0, "Soft RP rank-pruning (DIA-Umpire style): keep each fragment in only its top-N best-correlating precursors. 0 = unlimited (share-all, the default and current best); 1 = competitive (winner-take-all). Small N (2-8) is the useful range given typical fan-out ~6. RFmax (per-precursor fragment cap) is 'max_fragments'. Runs emit a fan-out histogram so you can see whether a given rp_max actually bites. [bench]", false);
     registerFlag_("assembly:open_search_safe", "[way-4] ANNOTATION-SAFE output for BLIND/OPEN search. In open search a wrong charge is catastrophic in a way closed search hides: assigning z' instead of z shifts the neutral mass by dM=(z'-z)(m/z-1.0073), so ONE charge step at m/z 500 fabricates a ~499 Da 'modification'. Closed search barely notices (charge unset cost only 1.3%: 8,123->8,019) because the engine enumerates charge; an open engine trusts the annotation. This flag therefore: (a) emits charge UNSET for every precursor whose charge was GUESSED rather than isotope-supported, so the engine enumerates instead of trusting a default; (b) records the isotope-offset hypothesis as a meta value so delta-mass inference can correct BEFORE assigning a modification, rather than reporting phantom +-1.00335/+-2.0067 Da shifts. Use for open/variant search; leave off for closed-search peptide counting.");
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge for precursors with no isotope support: >0 assigns that charge (diaTracer-style; 2 = most common); 0 = leave charge UNSET so the search engine searches its charge range and picks the right one (recovers 3+/4+ that a forced 2 would lose).", false);
@@ -1352,8 +1354,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     vector<double> frag_scores;
     scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
                      min_corr_pts, pdense, [&](size_t fi, double c) {
-      frags.emplace_back(frag_traces[fi].mz, frag_traces[fi].intensity);
-      frag_scores.push_back(c * frag_traces[fi].intensity);
+      double inten = frag_traces[fi].intensity;
+      if (im_weight_sigma_ > 0.0)                       // [recall] Gaussian IM-proximity weight
+      {
+        const double dim = frag_im[fi] - pc.im;
+        inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
+      }
+      frags.emplace_back(frag_traces[fi].mz, inten);
+      frag_scores.push_back(c * inten);
     });
     assembleFromList_(pc, win_lo, win_hi, frags, frag_scores, min_frags, max_frags, out);
   }
@@ -1367,6 +1375,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     if (getFlag_("diag:selftest_wavelet")) return selftestWavelet_();
     log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
     rank_by_intensity_ = (getStringOption_("assembly:rank_by") == "intensity");
+    im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
