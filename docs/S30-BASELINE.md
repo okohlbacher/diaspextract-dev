@@ -21,6 +21,30 @@ conclusions in this project, and single-sample iteration removes that class of e
 `ms2_chrom_peak_snr 1.0`, `ms2_noise_threshold_int 10`, `ms2_min_length_sec 0`,
 `ms2_split_valleys 7.0`.
 
+## Measurement methodology (2026-07-28) — variance model + estimator fix
+
+* **BOTH engines are DETERMINISTIC: run-to-run sigma = 0.** Re-searching one mzML (S30 corr_power=2)
+  3x: Sage 10,802/10,802/10,802 AND MSFragger 11,560/11,560/11,560. So ALL benchmark peptide counts
+  are EXACT; n=1 is justified for both. CONSEQUENCE: the MSFragger k-curve non-monotonicity
+  (11,402/11,560/11,482/11,751 across k=1..4) is NOT run-to-run noise -- it is a REAL (non-smooth)
+  response to the different inputs (codex called this in review; now measured). The earlier "MSFragger
+  is a noisy guardrail" framing was WRONG on the noise: MSFragger numbers are exact, just non-monotonic
+  in k (its optimum k differs from Sage's). The ONLY stochastic uncertainty in the whole benchmark is
+  the entrapment FDR estimate (small n), which the bootstrap CI below now quantifies.
+* **Entrapment estimator was wrong TWO ways (fixed in `bench/entrapment.py`, codex #12):**
+  (1) it counted peptides SHARED between human and Arabidopsis as entrapment -> inflated the fraction
+  ~2.5x (S30 base entrap 222 -> correctly 86 foreign-ONLY). (2) it used the PROTEIN ratio (0.800); the
+  correct PEPTIDE-hypothesis ratio (in-silico tryptic, Sage rules) is 0.6805, correction 1/r = 1.469.
+* **Corrected absolute FDR at nominal 1% peptide_q is ~1.0-1.45%, NOT the ~2.3% previously reported** --
+  the tool is WELL-CALIBRATED. With 95% bootstrap CIs (n_entrap ~ 60-90 -> noisy):
+  S30 base 1.34% [1.06-1.65] / corr2 1.20% [0.95-1.46]; S08 base 1.01% / corr2 1.08%; S23 base 1.45%
+  [1.15-1.77] / corr2 1.18% [0.91-1.47]. **The arm FDR CIs OVERLAP** -> the earlier "FDR improved
+  2.33->2.13%" was an estimator+noise artifact. Correct statement: **corr_power adds +9-10% target
+  peptides at an entrapment FDR statistically INDISTINGUISHABLE from base** (more peptides, same FDR).
+* **Consequence for future levers:** the +1-3% regime (im_weight increments, cap sweeps, rescoring
+  features) needs this CI machinery + MSFragger replicate sigma to be falsifiable; do not decide small
+  levers on point estimates.
+
 ## Decision rule
 
 * **Progress** = peptides ≥ 10,072 and PSMs/peptide not worse.
