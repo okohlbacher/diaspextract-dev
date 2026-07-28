@@ -104,3 +104,30 @@ scoring (three implementations), **`gate:variance_support` (Q1, union-support Pe
 DROP on unanimous 3-CLI analysis; it measures support co-LOCALISATION not co-elution SHAPE and reads
 faint fragments' censored shoulders as anti-correlation, e.g. precursor-8/frag-5/overlap-3 scores
 G-Pearson +0.47 but union −0.50. G-Pearson already ≈ robust cosine, so [B0] was cosmetic).**
+
+## Spectrum COLLAPSE (same precursor across cycles) — FALSIFIED for quality (2026-07-28)
+Tested on the OPEN-search entrapment results (simulation on existing PSMs, no re-search): group rank-1
+PSMs by precursor coordinate ACROSS RT (charge + expmass 10 ppm + IM 0.01, single-link chained over a
+10 s RT gap), keep one (or top-N) per group, RECOMPUTE the corrected entrapment FDR from scores.
+
+| rule | spx kept | reduction | targets @1% FDR | dt targets |
+|---|---|---|---|---|
+| full            | 558,255 | 1.00x | **8,273** | 9,743 |
+| apex (ID-agnostic) | 86,842 | 6.43x | 3,342 (-60%) | 4,491 (-54%) |
+| best (ORACLE)   | 86,842 | 6.43x | 4,390 (-47%) | 5,089 |
+| top3 / top5 / top10 (collapse + chimeric report_psms) | 132k/155k/190k | 4.2x/3.6x/2.9x | 5,448/5,767/6,603 | 6,068/6,672/7,422 |
+
+**The multiple-testing-burden hypothesis is REFUTED.** Every arm's FDR CI sits at ~0.6-1.3%: collapse
+removes true AND entrapment PSMs PROPORTIONALLY, so the FDR does not improve -- peptides are simply
+lost. Emitting fewer spectra does NOT buy open-search sensitivity.
+**It is INTRINSIC, not a speXtract defect:** diaTracer collapses the same way (-24% at top10, -54% at
+apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- speXtract
+just emits 1.33x more spectra per feature (6.43 vs 4.84). The across-cycle multiplicity is INDEPENDENT
+EVIDENCE (each cycle = a different noise realisation + co-isolation mixture, another shot at a different
+co-eluting peptide), not redundancy. Consistent with the long-standing "across-cycle spread 2.66 is
+CORRECT (MS1 FWHM = 2.61 cycles)" finding.
+**Residual option, untested:** TRUE merging (union of peaks -> better S/N) could in principle ADD IDs
+rather than select among existing ones; this simulation only bounds the SELECT-among-existing case. But
+it must beat a -20%..-60% deficit and it blends interferents across RT, so it is not promising.
+**Practical use:** collapse is a SPEED/recall knob, not a quality lever -- top10 gives 2.94x fewer
+spectra (much cheaper search) for -20% peptides, if total pipeline time ever matters more than recall.
