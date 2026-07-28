@@ -161,3 +161,30 @@ corruption the reviewers warned about. Do not ship the guard for it.
 choose WHICH peak is the mono by averagine cosine of the envelope starting there. Corrects BOTH
 directions, and every found peak is still consumed, so de-isotoping and emission stay unchanged (only the
 reported precursor mass moves) -- which also removes the emission confound from the experiment.
+
+### Attempt 2 result + the finding that STOPS this line of work (2026-07-29)
+`charge:mono_averagine_select` raw cosine repeated the envelope scorer's documented short-vector trap
+(`len` shrinks as the candidate mono moves right -> short vectors score high -> too-HEAVY mono). Adding
+the same evidence weight the envelope scorer uses, (len-1)/3 capped at 1, largely fixed that:
+| metric | control | guard 0.5 | msel raw | **msel + evidence weight** |
+|---|---|---|---|---|
+| emission | 924,255 | 1,005,353 | 924,716 | **924,552** |
+| -1 bin | 7,616 | 2,734 | 2,314 | **4,015 (-47%)** |
+| +1 bin | 4,697 | 23,994 | 21,591 | **12,188** |
+| unmod | 31.2% | 24.3% | 26.4% | **32.0% (best)** |
+| isotope-shift | **8.20%** | 16.43% | 15.24% | **9.48%** |
+| open targets @FDR | 8,887 @1.29% | 8,939 @1.28% | 8,916 @1.33% | 8,932 @1.33% |
+| closed Sage | 10,802 | 11,697 | 11,458 | 11,279 |
+Pre-registered criterion was total isotope-shift BELOW 8.20% with both +-1 bins down: **NOT MET (9.48%)**.
+Stopped rather than running a 4th variant. Both flags stay default-OFF, documented, for reproducibility.
+
+**THE FINDING THAT MATTERS — the -1 artefact is NOT the open-search recall lever (my hypothesis was WRONG).**
+Open-search targets are FLAT across all four arms (8,887 / 8,939 / 8,916 / 8,932; every CI overlaps)
+even though the -1 population was cut 47-70%. Reason, obvious in hindsight: **a -1-shifted precursor is
+still IDENTIFIED** -- it appears in the delta-mass histogram AS an identified PSM at -1.003 Da. Open
+search does not lose the peptide, it mislabels it with a phantom modification. So the monoisotope
+artefact is a **PTM-INTERPRETATION problem (real, and it matters for blind-PTM correctness, our actual
+differentiator), NOT a recall problem.** It cannot explain the 8,887 vs 9,989 open-search gap; do not
+spend more effort here expecting recall. The open-search recall gap needs a different explanation --
+candidates not yet tested: our 924k vs diaTracer's 700k emission competing in the huge open search
+space, fragment quality on the faint tail, or precursor mass ACCURACY (ppm) rather than isotope offset.

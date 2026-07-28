@@ -1011,7 +1011,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               double mx = 0.0; for (double v : obs) mx = std::max(mx, v);
               if (mx <= 0.0) continue;
               for (double& v : obs) v /= mx;
-              const double cs = cosineSim(obs, theo);
+              // [adv-fix] The SAME trap the envelope scorer documents below: the cosine of a short
+              // vector is nearly always high, and `len` SHRINKS as the candidate mono moves right,
+              // so raw cosine systematically prefers a too-HEAVY mono. Measured (first cut, raw
+              // cosine): -1 bin 7,616 -> 2,314 as intended, but +1 exploded 4,697 -> 21,591 and the
+              // unmodified fraction fell 31.2% -> 26.4%, at flat emission -- i.e. precursors that
+              // were CORRECT were pushed one isotope right. Weight by evidence exactly as the
+              // envelope scorer does: (n-1)/3 capped at 1 (4 isotopes 1.00, 3 -> 0.67, 2 -> 0.33).
+              const double cs = cosineSim(obs, theo) * std::min(1.0, (double)(len - 1) / 3.0);
               if (cs > best_cos) { best_cos = cs; best_c = c; }
             }
             mono = (best_c < nL) ? ms1[lefts[nL - 1 - best_c]].mz : s.mz;
