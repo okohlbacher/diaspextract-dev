@@ -88,6 +88,8 @@ namespace
   double wl_scale_ = 0.0;
   bool rank_by_intensity_ = false;   ///< [rank] assembly:rank_by == "intensity" (diaTracer-style)
   double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
+  double mono_guard_ = 0.0;          ///< [mono-guard] averagine slack on leftward isotope steps (0=off)
+  bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
 
@@ -653,6 +655,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerDoubleOption_("charge:ambiguity_margin", "<x>", 0.0, "[route-3] If a different-charge hypothesis scores within this margin of the best, emit it too (diaTracer retains multiple charges when ambiguous). 0 = single charge per precursor.", false);
     registerFlag_("assembly:dedup_precursors", "[route-4] Collapse precursor hypotheses that are the same species (same charge, m/z within ppm, co-eluting RT, co-located IM). Measured redundancy: 4.6 identified spectra per unique peptide vs diaTracer's 1.46.");
     registerFlag_("assembly:require_isotope_support", "[emission] Drop precursor hypotheses with NO isotope partner (the 'guessed' singletons, ~40% of emission) instead of assigning them a default charge. Emission is over-GENERATION of distinct low-quality precursors, not redundancy, so merge/dedup cannot cut it (oracle: same-coordinate collapse only 1.1-1.3x); this gate can. Measured on S30 (2026-07-26): drops 603,858 of 1,528,113 spectra (-39.5%) for 78 of 10,036 peptides (-0.78%) -- guessed spectra identify at 1.30%% vs 11.39%% for supported (8.8x). The 0.78%% are low-abundance/no-envelope species (the open-search caveat), so keep this OFF by default and confirm FDR-recalibrated peptides on any run that enables it.");
+    registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "[mono-guard] Reject a leftward isotope step (the walk that defines the MONOISOTOPE in charge:scoring=count) when the candidate peak is too weak to be a real lighter isotope under averagine. The partner search matches m/z, RT and IM but NEVER intensity, so it can latch onto a noise peak or a co-eluting species one isotope spacing below the true monoisotope -- making the reported precursor mass ~1.00335 Da TOO LIGHT. Closed search hides this (the engine enumerates isotope_errors and corrects it for free); OPEN/blind search turns it into a phantom -1.003 Da modification, and it is our single largest open-search delta-mass artefact on S30 (8.20%% isotope-shifted PSMs vs diaTracer's 3.46%%). The bound is averagine's LOOSEST: stepping from isotope m+1 to m the lighter peak is >= (m+1)/lambda times the heavier one, minimised at m=0 -> 1/lambda (lambda = 0.000594*neutral mass), so a value of 1.0 enforces exactly that minimum and never rejects a legitimate envelope; smaller values add slack for noise. 0 = off (old behaviour). [bench]", false);
+    registerFlag_("charge:mono_averagine_select", "[mono-select] Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves. [bench]");
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. [adv-fix] Was 0.05 = 5x the fragment gate, which is indefensible: isotopes of ONE species share essentially identical mobility, so 0.05 admits cross-species partners that corrupt both the envelope cosine and the co-elution score. 0.01 matches the fragment gate.", false);
     // ponytail: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
   }
@@ -946,17 +950,71 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         {
           vector<size_t> partners;
           double mono = s.mz;
+          double prev_int = s.intensity;
+          vector<long> lefts;
           for (int k = 1; k <= 5; ++k)          // lighter partners define the monoisotope
           {
             long j = findPartner(s.mz - k * ISO / z);
             if (j < 0) break;                   // BREAK on first miss (contiguous only)
-            partners.push_back((size_t)j); mono = ms1[j].mz;
+            // [mono-guard] A LEFTWARD step asserts the new peak is a LIGHTER ISOTOPE of the same
+            // peptide, but findPartner only checks m/z, RT and IM -- never intensity. So the walk
+            // happily latches onto a noise peak or a co-eluting species' peak that happens to sit
+            // one isotope spacing below, and the monoisotope ends up one isotope TOO LIGHT.
+            // Closed search hides this (the engine enumerates isotope_errors [-1,2] and corrects it
+            // for free); OPEN search cannot, so it becomes a phantom -1.003 Da "modification" --
+            // measured as our single largest open-search delta-mass artefact on S30.
+            // Averagine bounds how weak a genuine lighter isotope may be: stepping from isotope m+1
+            // to m, theo[m]/theo[m+1] = (m+1)/lambda, minimised at m=0 -> 1/lambda. Requiring the
+            // candidate to reach that (times a slack factor) rejects the latch without touching a
+            // real envelope.
+            if (mono_guard_ > 0.0)
+            {
+              const double neutral = (s.mz - k * ISO / z) * z - z * PROTON_;
+              const double lam = std::max(0.10, 0.000594 * neutral);
+              if (ms1[j].intensity < mono_guard_ * prev_int / lam) break;
+            }
+            lefts.push_back(j);
+            partners.push_back((size_t)j); mono = ms1[j].mz; prev_int = ms1[j].intensity;
           }
+          vector<long> rights;
           for (int k = 1; k <= 5; ++k)          // heavier partners add confidence
           {
             long j = findPartner(s.mz + k * ISO / z);
             if (j < 0) break;
+            rights.push_back(j);
             partners.push_back((size_t)j);
+          }
+          // [mono-select] Choosing the monoisotope by "furthest-left peak reached" is a STOPPING
+          // rule, and a stopping rule can only trade over-reach (-1.003 Da) for under-reach (+1.003
+          // Da) -- measured: the guard above cut the -1 artefact 64% but tripled +1, because a walk
+          // that stops early also leaves the M+1 peak unconsumed, so it later seeds its OWN
+          // precursor one isotope too heavy. Make it a SCORING decision instead: walk the full run,
+          // then pick which peak IS the monoisotope by averagine fit of the envelope starting
+          // there. Corrects both directions, and every found peak is still marked used below, so
+          // de-isotoping and emission are untouched (only the reported mono m/z changes).
+          if (mono_select_ && !lefts.empty())
+          {
+            const int nL = (int)lefts.size();
+            vector<double> runI;                                  // ascending m/z: lefts, seed, rights
+            for (int i = nL - 1; i >= 0; --i) runI.push_back(ms1[lefts[i]].intensity);
+            runI.push_back(s.intensity);
+            for (long j : rights) runI.push_back(ms1[j].intensity);
+            double best_cos = -1.0; int best_c = nL;              // default: seed is the mono
+            vector<double> theo, obs;
+            for (int c = 0; c <= nL; ++c)                         // mono cannot be right of the seed
+            {
+              const int len = std::min(4, (int)runI.size() - c);
+              if (len < 2) break;                                 // need >=2 peaks to score a shape
+              const double neutral = (s.mz - (double)(nL - c) * ISO / z) * z - z * PROTON_;
+              averagineRatios(neutral, len, theo);
+              obs.assign(runI.begin() + c, runI.begin() + c + len);
+              double mx = 0.0; for (double v : obs) mx = std::max(mx, v);
+              if (mx <= 0.0) continue;
+              for (double& v : obs) v /= mx;
+              const double cs = cosineSim(obs, theo);
+              if (cs > best_cos) { best_cos = cs; best_c = c; }
+            }
+            mono = (best_c < nL) ? ms1[lefts[nL - 1 - best_c]].mz : s.mz;
           }
           const int n = 1 + (int)partners.size();
           if (n > best_n) { best_n = n; best_z = z; best_mono = mono; best_partners = partners; }
@@ -1411,6 +1469,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
     rank_by_intensity_ = (getStringOption_("assembly:rank_by") == "intensity");
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
+    mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
+    mono_select_ = getFlag_("charge:mono_averagine_select");
     var_support_ = getFlag_("gate:variance_support");
     corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");

@@ -131,3 +131,33 @@ rather than select among existing ones; this simulation only bounds the SELECT-a
 it must beat a -20%..-60% deficit and it blends interferents across RT, so it is not promising.
 **Practical use:** collapse is a SPEED/recall knob, not a quality lever -- top10 gives 2.94x fewer
 spectra (much cheaper search) for -20% peptides, if total pipeline time ever matters more than recall.
+
+## Monoisotope -1.003 Da open-search artefact: STOPPING guard FALSIFIED, scoring fix under test (2026-07-28)
+The open-search re-baseline found our largest delta-mass artefact is a **-1.003 Da population** (top bin
+7,616 PSMs; 8.20% isotope-shifted vs diaTracer 3.46%): the `charge:scoring=count` walk defines the
+monoisotope as the FURTHEST-LEFT peak it can reach, and `findPartner` matches m/z + RT + IM but **never
+intensity**, so it latches onto noise or a co-eluting species one isotope below the true mono. Closed
+search HIDES this (Sage enumerates `isotope_errors [-1,2]` and corrects it for free); open/blind search
+turns it into a phantom -1 Da modification.
+
+**Attempt 1 — `charge:mono_averagine_guard` (a STOPPING rule): FALSIFIED.** Require the leftward
+candidate to reach the averagine minimum 1/lambda times the previous peak. At slack 0.5 on S30:
+| metric | control | guard 0.5 |
+|---|---|---|
+| -1 Da bin | 7,616 | **2,734 (-64%, the target WORKED)** |
+| +1 Da bin | 4,697 | **23,994 (+411%)** |
+| total isotope-shift | 8.20% | **16.43% (WORSE)** |
+| open targets @ FDR | 8,887 @1.29% | 8,939 @1.28% (flat, CIs overlap) |
+| closed Sage | 10,802 | 11,697 (+8.3%) |
+| emission | 924,255 | 1,005,353 (+8.8%) |
+**A stopping rule can only trade over-reach for under-reach**, and worse: a walk that halts early leaves
+the M+1 peak unconsumed by `used[]`, so it later seeds its OWN precursor one isotope too heavy -- that is
+BOTH the +1 explosion and the +8.8% emission (one cause, two symptoms). Open search did not improve.
+NOTE the closed-search 11,697 (> diaTracer 11,517) is NOT a quality win to bank: peptides/1k spectra is
+11.7 -> 11.6, i.e. the gain tracks the extra emission -- exactly the over-emission-rewards-closed-search
+corruption the reviewers warned about. Do not ship the guard for it.
+
+**Attempt 2 — `charge:mono_averagine_select` (a SCORING decision): under test.** Walk the full run, then
+choose WHICH peak is the mono by averagine cosine of the envelope starting there. Corrects BOTH
+directions, and every found peak is still consumed, so de-isotoping and emission stay unchanged (only the
+reported precursor mass moves) -- which also removes the emission confound from the experiment.
