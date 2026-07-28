@@ -88,6 +88,8 @@ namespace
   double wl_scale_ = 0.0;
   bool rank_by_intensity_ = false;   ///< [rank] assembly:rank_by == "intensity" (diaTracer-style)
   double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
+  bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
+  double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
 
   static std::string rss_()
   {
@@ -149,6 +151,7 @@ namespace
     double im = 0.0;
     size_t trace_idx = 0;    ///< index into ms1 traces
     bool guessed = false;    ///< [way-4] charge was DEFAULTED, not isotope-supported
+    int n_isotopes = 0;      ///< [Q4] isotope peaks behind the mono call (0/1 = weak, mono ±1.00335 uncertain)
   };
 
   /// MassTraceDetection locates the per-peak IM array by the exact name
@@ -575,6 +578,7 @@ protected:
     registerStringOption_("assembly:rank_by", "<mode>", "correlation", "[rank] Which score decides WHICH fragments survive the assembly:max_fragments cap. 'correlation' (current) keeps the top-N best-CORRELATING; 'intensity' keeps the top-N most INTENSE, as diaTracer does (Nat Commun 16:95: 'only the top N highest intensity peaks (RF max, default 500)'). This matters because the search engine re-ranks BY INTENSITY: Sage keeps max_peaks=150 by intensity and MSFragger reads the full list. A high-intensity, mediocre-correlation fragment that our cap discards would have been scored by the engine, so a correlation-ranked cap can throw away exactly the peaks that get matched. 70-75% of our spectra sit AT the 500 cap, so the choice is live for most spectra, not a corner case.", false);
     setValidStrings_("assembly:rank_by", {"correlation", "intensity"});
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "[recall] Down-weight each emitted fragment's intensity by a Gaussian of its ion-mobility distance from the precursor, exp(-(dIM)^2 / 2 sigma^2). TIMS precedes fragmentation so a TRUE fragment shares the precursor's 1/K0 exactly; a co-isolating interferent at the edge of the gate:delta_im band is suppressed. WITHIN-spectrum (no fragment removed or redistributed across precursors) so it escapes the fan-out depletion that falsified competitive/apex/deconvolution, and directly un-buries faint true fragments under the engine's intensity top-150. 0 = off. Try ~0.005 (half the 0.01 IM gate). [bench]", false);
+    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "[Q2] Multiply each emitted fragment's intensity by corr^k (k>=0), where corr is the fragment-precursor co-elution score. EMIT-ONLY (excluded from the max_fragments cap key), so it preserves peak membership and only re-ranks the intensities the search engine sees toward well-correlating (true co-eluting) fragments and away from bright interferents; WITHIN-spectrum so it escapes fan-out depletion. DEFAULT 2.0 since 2026-07-28: validated on S30 (tuning) + S08 + S23 (held out) at frozen k=2 -- +8-10%% Sage / +5-8%% MSFragger over base on all three, both engines, at controlled empirical FDR; k=2 sits one step below the ~k=3 Sage peak (the safe side of the crossover where c^k starts crushing the faint tail). 0 = off (pre-2026-07-28 behaviour). Dimensionless + bounded (c in [0.3,1]) so it transfers across instruments, unlike assembly:im_weight_sigma. [bench]", false);
     registerIntOption_("assembly:rp_max", "<n>", 0, "Soft RP rank-pruning (DIA-Umpire style): keep each fragment in only its top-N best-correlating precursors. 0 = unlimited (share-all, the default and current best); 1 = competitive (winner-take-all). Small N (2-8) is the useful range given typical fan-out ~6. RFmax (per-precursor fragment cap) is 'max_fragments'. Runs emit a fan-out histogram so you can see whether a given rp_max actually bites. [bench]", false);
     registerFlag_("assembly:open_search_safe", "[way-4] ANNOTATION-SAFE output for BLIND/OPEN search. In open search a wrong charge is catastrophic in a way closed search hides: assigning z' instead of z shifts the neutral mass by dM=(z'-z)(m/z-1.0073), so ONE charge step at m/z 500 fabricates a ~499 Da 'modification'. Closed search barely notices (charge unset cost only 1.3%: 8,123->8,019) because the engine enumerates charge; an open engine trusts the annotation. This flag therefore: (a) emits charge UNSET for every precursor whose charge was GUESSED rather than isotope-supported, so the engine enumerates instead of trusting a default; (b) records the isotope-offset hypothesis as a meta value so delta-mass inference can correct BEFORE assigning a modification, rather than reporting phantom +-1.00335/+-2.0067 Da shifts. Use for open/variant search; leave off for closed-search peptide counting.");
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge for precursors with no isotope support: >0 assigns that charge (diaTracer-style; 2 = most common); 0 = leave charge UNSET so the search engine searches its charge range and picks the right one (recovers 3+/4+ that a forced 2 would lose).", false);
@@ -626,6 +630,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
     registerStringOption_("gate:coelution", "<mode>", "pearson", "[B0] Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
+    registerFlag_("gate:variance_support", "[Q1] Compute the Pearson co-elution variance over the UNION SUPPORT of the precursor and fragment profiles (points where either is non-zero) rather than the full RT grid G (~1300). Fixes the [B0] zero-padding: a fragment present in a handful of grid points is no longer scored against ~1300 implicit zeros, and the score no longer depends on grid size. Only affects gate:coelution=pearson. Retune gate:min_correlation when enabling -- the score scale changes. [bench]");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 12, "[parallel] Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
     registerIntOption_("perf:trace_bands", "<n>", 12, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable + our own RSS) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
@@ -961,6 +966,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         pc0.rt = s.rt; pc0.im = s.im;
         pc0.mono_mz = best_mono;
         pc0.charge = best_z;                    // 0 => unknown, default_charge applied later
+        pc0.n_isotopes = best_n;                // [Q4] envelope confidence for the mono call
         out.push_back(pc0);
         used[seed] = true;
         for (size_t j : best_partners) used[j] = true;   // de-isotope
@@ -1056,6 +1062,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       });
       const Hyp& best = hyps[0];
       pc.mono_mz = best.mono; pc.charge = best.z;
+      pc.n_isotopes = 1 + (int)best.partners.size();   // [Q4] envelope confidence for the mono call
       out.push_back(pc);
       used[seed] = true;
       for (size_t j : best.partners) used[j] = true;
@@ -1070,6 +1077,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (best.score - hyps[h].score > ambig_margin) break;
           Precursor_ alt = pc;
           alt.mono_mz = hyps[h].mono; alt.charge = hyps[h].z;
+          alt.n_isotopes = 1 + (int)hyps[h].partners.size();   // [Q4]
           out.push_back(alt);
           break;                            // at most one alternative
         }
@@ -1201,7 +1209,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // profile overlap in log space, summed ONLY where the precursor has signal, normalised to
         // [0,1]. No zero padding, no dependence on G.
         double c;
-        if (log_overlap_)
+        if (var_support_ && !log_overlap_)                             // [Q1] pearson-only, per the flag doc
+        {
+          // [Q1] Pearson over the UNION SUPPORT (points where precursor OR fragment is non-zero),
+          // not the full grid G. Removes the [B0] zero-padding: no ~1300 implicit zeros inflating
+          // sparse fragments, no dependence on grid size. n = |touched U f.support|. fsum/fsumsq
+          // over f.support are accumulated here (support is tiny, so a second pass is negligible).
+          double fsum = 0.0, fsumsq = 0.0;
+          for (size_t k = fg.supBegin(fi), ke = fg.supEnd(fi); k < ke; ++k)
+          { double fv = (double)fg.flat[k].second; fsum += fv; fsumsq += fv * fv; }
+          double n = (double)(touched.size() + (fg.supEnd(fi) - fg.supBegin(fi)) - (size_t)overlap);
+          double pm = psum / n, fm = fsum / n;
+          double pv2 = psumsq - n * pm * pm, fv2 = fsumsq - n * fm * fm;
+          if (pv2 <= 0.0 || fv2 <= 0.0) continue;                      // degenerate on union support
+          c = (dot - n * pm * fm) / std::sqrt(pv2 * fv2);
+        }
+        else if (log_overlap_)
         {
           // Normalise BOTH log-profiles to unit sum, then intersect. The first attempt divided
           // the intersection by the precursor's total log-intensity alone, which made the score
@@ -1340,6 +1363,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // joined back to guessed (no isotope support) vs isotope-supported precursors -- the number that
     // sets the peptide cost of an isotope-support gate. Written as a <userParam> in the mzML.
     out.setMetaValue("spx_guessed", (int)(pc.guessed ? 1 : 0));
+    // [Q4] Isotope-offset hypothesis for open/blind search: the number of isotope peaks behind the
+    // mono call. 0/1 => the mono is weakly determined and could be off by +-k*1.00335 Da, so a
+    // downstream delta-mass corrector should treat a near-integer-Da delta as an isotope miscall to
+    // reassign rather than a real modification. This is the metadata assembly:open_search_safe's doc
+    // promised but never wrote (only spx_guessed was stamped). Harmless in closed search (ignored).
+    out.setMetaValue("spx_n_isotopes", pc.n_isotopes);
   }
 
   /// Per-precursor assembly: this precursor claims every fragment passing its gate (a fragment may
@@ -1360,7 +1389,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         const double dim = frag_im[fi] - pc.im;
         inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
       }
-      frags.emplace_back(frag_traces[fi].mz, inten);
+      // [Q2] correlation-power weight applies ONLY to the emitted (engine-visible) intensity, NOT the
+      // internal cap key. Otherwise frag_scores = base*c^(k+1) double-hits borderline-c faint fragments
+      // at the 500-cap (73% of spectra sit at it) -- a confound. IM-weight is orthogonal (IM-on-c) so it
+      // legitimately feeds both; corr_power is c-on-c, so keep the cap key at base*c.
+      double emit_inten = inten;
+      if (corr_power_ > 0.0 && c > 0.0) emit_inten *= std::pow(c, corr_power_);
+      frags.emplace_back(frag_traces[fi].mz, emit_inten);
       frag_scores.push_back(c * inten);
     });
     assembleFromList_(pc, win_lo, win_hi, frags, frag_scores, min_frags, max_frags, out);
@@ -1376,6 +1411,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
     rank_by_intensity_ = (getStringOption_("assembly:rank_by") == "intensity");
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
+    var_support_ = getFlag_("gate:variance_support");
+    corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
@@ -2404,6 +2441,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     for (auto& s : all_out) out_exp.addSpectrum(std::move(s));
     const Size n_out = out_exp.size();
     addDataProcessing_(out_exp, getProcessingInfo_(DataProcessing::DATA_PROCESSING));
+    // [provenance] Record the emitted-intensity reweighting so an identical historical command line is
+    // still reproducible after assembly:corr_power's default changed 0->2 (2026-07-28). Without this,
+    // the same command produces different intensities across tool versions with no trace of why.
+    out_exp.setMetaValue("spx:corr_power", corr_power_);
+    out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
+    out_exp.setMetaValue("spx:require_isotope_support", (int)getFlag_("assembly:require_isotope_support"));
     FileHandler().storeExperiment(out, out_exp, {FileTypes::MZML}, log_type_);
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out);
     return EXECUTION_OK;
