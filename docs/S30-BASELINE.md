@@ -338,3 +338,10 @@ headlines must be RE-MEASURED under the SDK path before publication. Determinism
 threads-100 semantic/byte hash) running. Two-tier calibration product conflict stands: license-blocked
 users (the stated market) get -8 ppm masses from the open fallback -- an open true-polynomial port or
 loud two-tier disclosure is a v0.2.0 gate.
+
+### cp0 ablation result (2026-09-01): corr_power SURVIVES the calibration fix — provisionality condition 1/3 cleared
+corr_power=0 + vendor-cal = 11,017 vs corr_power=2 + vendor-cal = 12,128. The 2x2 (closed Sage):
+old-cal cp0 9,989 / cp2 10,802 (+8.1%); vendor-cal cp0 11,017 / cp2 12,128 (+10.1%). The levers are
+independent and additive (mild positive synergy); corr_power's +8-10% validation was NOT a
+calibration artifact. Note the cp0 arm also ran vendor IM, so the m/z-vs-IM attribution of the
+calibration gain itself still awaits the IM-isolation arm (condition 2/3); S08/S23 = condition 3/3.
