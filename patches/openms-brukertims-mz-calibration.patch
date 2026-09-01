@@ -1,6 +1,6 @@
---- src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 11:12:43.062880173 +0200
-+++ src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 17:50:39.775165052 +0200
-@@ -921,6 +921,73 @@
+--- src/openms/source/FORMAT/BrukerTimsFile.cpp
++++ src/openms/source/FORMAT/BrukerTimsFile.cpp
+@@ -921,6 +921,104 @@
      }
    }
  
@@ -12,6 +12,9 @@
 +#include <sqlite3.h>
 +#include <OpenMS/FORMAT/TdfMzCalibration.h>
 +namespace {
++// File-local (never crosses a DSO boundary, unlike an inline header static): which m/z
++// calibration the last load used. Stamped onto the MSExperiment so it travels with the data.
++std::string g_mz_calibration = "unset";
 +class TdfTableTof2MzConverter final : public Tof2MzConverter
 +{
 +  spextract::TdfMzCalibration cal_;
@@ -22,7 +25,11 @@
 +    const std::string tdf = d_dir + "/analysis.tdf";
 +    sqlite3* db = nullptr;
 +    if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
-+      throw std::runtime_error("TdfMzCalibration: cannot open " + tdf);
++    {
++      const std::string why = db ? sqlite3_errmsg(db) : "out of memory";
++      sqlite3_close(db);   // sqlite allocates the handle even on failure
++      throw std::runtime_error("TdfMzCalibration: cannot open " + tdf + ": " + why);
++    }
 +    sqlite3_stmt* st = nullptr;
 +    int nrows = 0;
 +    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM MzCalibration", -1, &st, nullptr) == SQLITE_OK
@@ -31,32 +38,56 @@
 +    if (nrows != 1)
 +    { sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: " + std::to_string(nrows) + " MzCalibration rows, expected exactly 1"); }
 +    if (sqlite3_prepare_v2(db,
-+          "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2 "
++          "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 "
 +          "FROM MzCalibration LIMIT 1", -1, &st, nullptr) == SQLITE_OK
 +        && sqlite3_step(st) == SQLITE_ROW)
 +    {
++      for (int col = 0; col <= 10; ++col)
++      {
++        const int ct = sqlite3_column_type(st, col);
++        if (ct != SQLITE_INTEGER && ct != SQLITE_FLOAT)
++        { sqlite3_finalize(st); sqlite3_close(db);
++          throw std::runtime_error("TdfMzCalibration: MzCalibration column " + std::to_string(col)
++                                   + " is NULL or non-numeric"); }
++      }
 +      cal_.model_type = sqlite3_column_int(st, 0);
 +      cal_.digitizer_timebase = sqlite3_column_double(st, 1);
 +      cal_.digitizer_delay = sqlite3_column_double(st, 2);
 +      cal_.C0 = sqlite3_column_double(st, 3); cal_.C1 = sqlite3_column_double(st, 4);
 +      cal_.C2 = sqlite3_column_double(st, 5); cal_.T1_ref = sqlite3_column_double(st, 6);
 +      cal_.dC1 = sqlite3_column_double(st, 7); cal_.dC2 = sqlite3_column_double(st, 8);
++      cal_.C3 = sqlite3_column_double(st, 9);  cal_.C4 = sqlite3_column_double(st, 10);
 +    }
 +    sqlite3_finalize(st); st = nullptr;
 +    if (!cal_.isSupported())
 +    { const std::string why = cal_.unsupportedReason(); sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: " + why); }
-+    if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) == SQLITE_OK)
++    if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) != SQLITE_OK)
++    { sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: cannot read Frames.T1"); }
 +    {
-+      while (sqlite3_step(st) == SQLITE_ROW)
++      int rc;
++      while ((rc = sqlite3_step(st)) == SQLITE_ROW)
 +      {
 +        const size_t id = (size_t)sqlite3_column_int64(st, 0);
++        if (id > 100000000u)   // sparse/corrupt frame ids must not drive an unbounded resize
++        { sqlite3_finalize(st); sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: implausible Frames.Id " + std::to_string(id)); }
 +        if (id >= frame_t1_.size()) frame_t1_.resize(id + 1, cal_.T1_ref);
-+        frame_t1_[id] = sqlite3_column_double(st, 1);
++        // A NULL T1 reads as 0.0 through sqlite3_column_double, which would silently apply the FULL
++        // dC1*T1_ref temperature correction (~250 ppm) instead of none. Fall back to the reference
++        // temperature (= no correction) rather than inventing one.
++        frame_t1_[id] = (sqlite3_column_type(st, 1) == SQLITE_NULL)
++                          ? cal_.T1_ref : sqlite3_column_double(st, 1);
 +      }
++      if (rc != SQLITE_DONE)   // a partial read would silently leave frames at T1_ref
++      { sqlite3_finalize(st); sqlite3_close(db);
++        throw std::runtime_error("TdfMzCalibration: Frames.T1 read ended early (sqlite rc "
++                                 + std::to_string(rc) + ")"); }
 +    }
 +    sqlite3_finalize(st);
 +    sqlite3_close(db);
 +  }
++  // frame_id 0 is not a real Bruker frame (Frames.Id is 1-based); one pristine OpenMS DDA path
++  // converts with a hardcoded 0. Slot 0 therefore holds T1_ref by construction = no temperature
++  // correction (<=0.7 ppm on the files measured). Documented rather than incidental.
 +  inline double b_(uint32_t frame_id) const
 +  { return cal_.frameFactor(frame_id < frame_t1_.size() ? frame_t1_[frame_id] : cal_.T1_ref); }
 +  void convert(uint32_t frame_id, double* mzs, const double* tofs, uint32_t size) override final
@@ -74,7 +105,7 @@
    // =====================================================================
    // Helper: open TimsDataHandle with tiered calibration strategy
    // =====================================================================
-@@ -977,7 +1044,13 @@
+@@ -977,7 +1075,14 @@
            handle->scan2inv_ion_mobility_converter =
              BrukerScan2InvIonMobilityConverterFactory::instance(sdk_path)
                .produce(*handle, pcs);
@@ -85,38 +116,65 @@
 +          // Swap the m/z converter too: tims_index_to_mz applies Bruker`s full per-frame calibration.
 +          handle->tof2mz_converter =
 +            BrukerTof2MzConverterFactory::instance(sdk_path).produce(*handle, pcs);
++          g_mz_calibration = "bruker_sdk";
 +          OPENMS_LOG_INFO << "TIMS calibration: Bruker SDK (m/z + ion mobility)"
                            << (pcs != NoPressureCompensation ? " (pressure_comp=on)" : "")
                            << std::endl;
            return handle;
-@@ -1000,6 +1073,30 @@
+@@ -1000,6 +1105,40 @@
        }
      }
  
-+    // 2b. [speXtract table-mz] EXACT license-free m/z from the MzCalibration table (any strategy
++    // 2b. [speXtract table-mz] EXACT license-free m/z from the MzCalibration table.
++    // Gated on strategy: an explicit LINEAR request must still get the linear chord (otherwise we
++    // silently override the user AND step 4 logs 'linear (GlobalMetadata)', which would be false).
++    if (strategy == Strategy::AUTO || strategy == Strategy::RATIONAL)
++    // (originally: any strategy
 +    // where the SDK did not already install a vendor m/z converter). Falls back to the linear chord
 +    // only if the table is absent/unsupported.
 +    try
 +    {
 +      handle->tof2mz_converter = std::make_unique<TdfTableTof2MzConverter>(path_string);
++      g_mz_calibration = "tdf_table_modeltype1";
 +      OPENMS_LOG_INFO << "TOF m/z calibration: TDF MzCalibration table model (exact, license-free)" << std::endl;
 +    }
 +    catch (const std::exception& e)
 +    {
 +      // FAIL CLOSED: the legacy chord is -5..-11 ppm wrong; emitting that silently is the defect
 +      // this converter exists to remove, so an unusable calibration is an error, not a warning.
-+      if (std::getenv("SPEXTRACT_ALLOW_CHORD_FALLBACK") == nullptr)
++      const char* allow_env = std::getenv("SPEXTRACT_ALLOW_CHORD_FALLBACK");
++      // Only an explicit "1" opts in: getenv() != nullptr would treat
++      // SPEXTRACT_ALLOW_CHORD_FALLBACK=0 (and "") as ENABLE, defeating the whole point.
++      if (allow_env == nullptr || std::string(allow_env) != "1")
 +      {
 +        throw Exception::FileNotReadable(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
 +          String("exact TOF->m/z calibration unavailable (") + e.what() +
 +          "). The legacy linear-in-sqrt fallback is -5..-11 ppm biased; set "
 +          "SPEXTRACT_ALLOW_CHORD_FALLBACK=1 to use it anyway.");
 +      }
++      g_mz_calibration = "legacy_chord_APPROXIMATE";
 +      OPENMS_LOG_WARN << "TDF table m/z model unavailable (" << e.what()
-+                      << "); SPEXTRACT_ALLOW_CHORD_FALLBACK set -> linear-in-sqrt approximation"
++                      << "); SPEXTRACT_ALLOW_CHORD_FALLBACK=1 -> linear-in-sqrt approximation"
 +                      << " (-5..-11 ppm bias)" << std::endl;
 +    }
++    }  // end strategy gate
 +
      // 3. Try rational model from TimsCalibration table (AUTO or RATIONAL)
      if (strategy == Strategy::AUTO || strategy == Strategy::RATIONAL)
      {
+@@ -1529,6 +1668,7 @@
+   void BrukerTimsFile::load(const String& path, MSExperiment& exp, const Config& config)
+   {
+     exp.clear(true);
++    g_mz_calibration = "unset";   // never report a stale value from a previous file
+     auto handle = openTimsDataHandle(path, config);
+ 
+     String tdf_path = path + "/analysis.tdf";
+@@ -1551,6 +1691,7 @@
+     loadExperimentalSettings_(path, exp);
+ 
+     // Sort by RT, interleaved across MS levels
++    exp.setMetaValue("spx:mz_calibration", g_mz_calibration);   // [provenance] travels with the data
+     exp.sortSpectra(true);
+     exp.updateRanges();
+   }

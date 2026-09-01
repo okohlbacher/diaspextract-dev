@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <limits>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -103,7 +104,13 @@ int main(int argc, char** argv)
   if (bad.isSupported()) { std::fprintf(stderr, "C4 != 0 must be rejected\n"); return 1; }
   bad.C4 = 0.0; bad.C2 = -1e-6;
   if (bad.isSupported()) { std::fprintf(stderr, "C2 < 0 must be rejected\n"); return 1; }
-  bad.C2 = 0.0; bad.C1 = 0.0;
+  bad.C2 = 0.0;   // a NULL/text C2 arrives as 0.0 and selects the known-bad pure-sqrt law
+  if (bad.isSupported()) { std::fprintf(stderr, "C2 == 0 must be rejected\n"); return 1; }
+  bad.C2 = 1e-3; bad.C1 = 1e-300;   // positive but implausible: b*b overflows -> silent m/z 0
+  if (bad.isSupported()) { std::fprintf(stderr, "implausible C1 must be rejected\n"); return 1; }
+  bad.C1 = 155279.0; bad.C0 = std::nan("");
+  if (bad.isSupported()) { std::fprintf(stderr, "NaN must be rejected\n"); return 1; }
+  bad.C0 = 279.3; bad.C1 = 0.0;
   if (bad.isSupported()) { std::fprintf(stderr, "C1 <= 0 must be rejected\n"); return 1; }
 
   // unphysical TOF must NOT return a plausible mass (silent-wrongness guard)
@@ -122,8 +129,8 @@ int main(int argc, char** argv)
   { std::fprintf(stderr, "m/z must increase with tof\n"); return 1; }
   // the t <= C0 guard: force it with a calibration whose zero sits above the arrival time
   spextract::TdfMzCalibration late = ok; late.C0 = 1e9;
-  if (late.tofToMz(1e5, late.frameFactor(late.T1_ref)) != 0.0)
-  { std::fprintf(stderr, "t <= C0 must yield 0.0, not a plausible-looking mass\n"); return 1; }
+  if (!std::isnan(late.tofToMz(1e5, late.frameFactor(late.T1_ref))))
+  { std::fprintf(stderr, "t <= C0 must yield NaN, not a plausible-looking mass\n"); return 1; }
 
   std::printf("OK  %d golden cases, %d files: max %.6f ppm; C2 ablation %.2f ppm; round trip + negative paths pass\n",
               n_cases, n_files, worst, worst_noc2);
