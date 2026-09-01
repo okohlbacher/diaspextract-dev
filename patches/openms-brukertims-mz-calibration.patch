@@ -121,17 +121,16 @@
                            << (pcs != NoPressureCompensation ? " (pressure_comp=on)" : "")
                            << std::endl;
            return handle;
-@@ -1000,6 +1105,40 @@
+@@ -1000,6 +1105,39 @@
        }
      }
  
 +    // 2b. [speXtract table-mz] EXACT license-free m/z from the MzCalibration table.
 +    // Gated on strategy: an explicit LINEAR request must still get the linear chord (otherwise we
 +    // silently override the user AND step 4 logs 'linear (GlobalMetadata)', which would be false).
++    // (Only where the SDK did not already install a vendor m/z converter -- that path returns early.)
 +    if (strategy == Strategy::AUTO || strategy == Strategy::RATIONAL)
-+    // (originally: any strategy
-+    // where the SDK did not already install a vendor m/z converter). Falls back to the linear chord
-+    // only if the table is absent/unsupported.
++    {
 +    try
 +    {
 +      handle->tof2mz_converter = std::make_unique<TdfTableTof2MzConverter>(path_string);
@@ -162,7 +161,7 @@
      // 3. Try rational model from TimsCalibration table (AUTO or RATIONAL)
      if (strategy == Strategy::AUTO || strategy == Strategy::RATIONAL)
      {
-@@ -1529,6 +1668,7 @@
+@@ -1529,6 +1667,7 @@
    void BrukerTimsFile::load(const String& path, MSExperiment& exp, const Config& config)
    {
      exp.clear(true);
@@ -170,7 +169,7 @@
      auto handle = openTimsDataHandle(path, config);
  
      String tdf_path = path + "/analysis.tdf";
-@@ -1551,6 +1691,7 @@
+@@ -1551,6 +1690,7 @@
      loadExperimentalSettings_(path, exp);
  
      // Sort by RT, interleaved across MS levels
