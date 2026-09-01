@@ -58,3 +58,39 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
 5. **Our residual ppm (+1.5..+3.2) is consistently 2-4 ppm above diaTracer's (-1.4..+0.3)** on the
    same files with the same engine -> ours, not the instrument (centroiding/mono-reporting).
 6. Emission ~1.32x diaTracer stands; per-1k-spectra efficiency still favours diaTracer.
+
+## PRE-TAG FINDINGS (2026-09-01, after the 3-way adversarial review)
+
+### 1. Determinism must be re-scoped: output IS thread-count dependent
+`bench/semantic_digest.py` hashes the mzML from `<spectrumList` onwards, because two runs can never
+be byte-identical for TWO reasons that each already cost this project a false "determinism FAIL":
+OpenMS stamps a wall-clock `MS:1000747 completion time`, AND the header records the run's own
+parameters -- so a threads-8 file and a threads-100 file differ in the header BY CONSTRUCTION.
+That retroactively explains the July r1-vs-imw005 md5 mismatch recorded as unexplained.
+**But with both artefacts removed, the SPECTRUM DATA still differs between threads 8 and 100.**
+So: bit-determinism holds (as previously verified) at FIXED thread count; it does NOT hold across
+thread counts. Every benchmark in this project used `-threads 100`, so no published number is
+affected -- but the claim must be stated as "deterministic at fixed thread count", and the
+fixed-thread check is now an explicit gate (running).
+
+### 2. The pipeline is CHAOTICALLY SENSITIVE -- cross-binary comparisons carry ~2% uncertainty
+Replacing the quadratic root `(-b+sqrt(disc))/(2c)` with the algebraically identical but
+cancellation-free `2(t-C0)/(b+sqrt(disc))` -- a ~1e-11 relative change, i.e. ~1e-5 ppm -- moved
+emission 921,938 -> 923,713 (+0.19%) and closed Sage 11,976 -> 12,200 (+1.9%). Greedy trace/gate
+thresholds amplify last-ulp differences. **CONSEQUENCE: the 0.06% "noise floor" in the decision rule
+is a SAME-BINARY figure. Comparisons across code versions carry ~2%.** The corr_power (+8-10%) and
+calibration (+6-11%) results are far above that; every small lever ever decided across a rebuild is
+not. 11,976 and 12,200 are the same number in this sense; the doc keeps 11,976 (the arm that was
+actually benchmarked end-to-end).
+
+### 3. dPeptides/dppm measured directly (the review's proposed control)
+A UNIFORM affine m/z rescale changes no peak, no intensity, no count and no mass difference beyond
+1e-6 relative -- the content channel is exactly zero by construction, unlike the nonlinear chord bow.
+FRAGMENT-channel only (an early regex bug shifted arrays but not `selected ion m/z`, which usefully
+isolated the channel): baseline 11,976; -1.5 ppm 11,934 (-42); +1.5 ppm 11,939 (-37); -3.0 ppm
+11,811 (-165). Symmetric and quadratic-ish about zero -- the signature of mass accuracy feeding the
+score, and an independent confirmation that the calibration gain is an identification-yield effect.
+Precursor-channel and both-channel arms running.
+**Governance consequence (review's "thing everybody missed"): peptides@1%FDR is partly a
+mass-calibration measurement, so 11,976 is only comparable to future numbers taken at the same
+residual ppm. Any future lever must report its ppm median beside its count.**
