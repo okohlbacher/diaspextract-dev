@@ -345,3 +345,19 @@ old-cal cp0 9,989 / cp2 10,802 (+8.1%); vendor-cal cp0 11,017 / cp2 12,128 (+10.
 independent and additive (mild positive synergy); corr_power's +8-10% validation was NOT a
 calibration artifact. Note the cp0 arm also ran vendor IM, so the m/z-vs-IM attribution of the
 calibration gain itself still awaits the IM-isolation arm (condition 2/3); S08/S23 = condition 3/3.
+
+### Table-model calibration: 3-FILE RESULT (open path, no vendor .so; 2026-09-01)
+| file | old chord | **TDF-table model** | gain | vendor-SDK | ppm (table) |
+|---|---|---|---|---|---|
+| S30 | 10,802 | **11,976** | +10.9% | 12,128 | +1.49 [-2.4,+5.4] |
+| S08 |  9,735 | **10,333** | +6.1%  | -- | +3.19 [-0.8,+7.1] |
+| S23 |  9,032 | **9,891**  | +9.5%  | -- | +2.29 [-1.7,+6.3] |
+**The calibration gain GENERALISES: +6-11% closed Sage on all three files with NO vendor library.**
+Provisionality conditions on the re-based reference: (1) cp0 ablation CLEARED; (2) IM-isolation
+ANSWERED FOR FREE -- the table arm is vendor-exact m/z + OPEN (rational) IM, the sdkcal arm was
+vendor both: S30 11,976 vs 12,128 => ~93% of the +12.3% is m/z-side, ~1.3% (152 peptides) is the
+vendor-IM contribution; (3) S08/S23 re-validated above. **New open-path reference: S30 = 11,976**
+(the 12,128 SDK number stays as the vendor-oracle upper bound, not the shipping config).
+Residual +1.5..+3.2 ppm persists across all files and BOTH calibration paths -> consistent with the
+centroiding/mono-reporting hypothesis (Option I), not the m/z axis. diaTracer per-file ppm + S08/S23
+head-to-head running to test whether part of it is instrument/per-file rather than ours.
