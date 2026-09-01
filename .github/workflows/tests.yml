@@ -1,0 +1,16 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Calibration golden test (no vendor lib, cluster or raw data needed)
+        run: python3 tests/test_calibration.py
+      - name: Entrapment estimator self-check
+        run: python3 tests/test_entrapment.py
+      - name: Analysis scripts parse cleanly
+        run: python3 -m py_compile bench/entrapment.py bench/entrap_apply.py bench/open_ptm_score.py bench/collapse_sim.py
