@@ -10,8 +10,8 @@ Selection rules:
   apex  = highest ms2_intensity in group            -> REALISTIC (ID-agnostic, an actual tool could do this)
   full  = no collapse (control)
 """
-import sys, csv, argparse, random
-sys.path.insert(0, "/scratch/kohlbach/prof")
+import sys, os, csv, argparse, random
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # entrapment.py is a sibling
 from entrapment import peptide_ratio, _bootstrap_fdr
 
 def load(tsv, tag="ENTRAP_"):
