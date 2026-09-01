@@ -10,6 +10,10 @@ jobs:
           python-version: '3.12'
       - name: Calibration golden test (no vendor lib, cluster or raw data needed)
         run: python3 tests/test_calibration.py
+      - name: Calibration golden test (C++ -- the code that actually ships)
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -I src -o /tmp/test_cal_cpp tests/test_calibration_cpp.cpp
+          /tmp/test_cal_cpp tests/calibration_golden.json
       - name: Entrapment estimator self-check
         run: python3 tests/test_entrapment.py
       - name: Analysis scripts parse cleanly

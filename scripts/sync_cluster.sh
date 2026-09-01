@@ -22,6 +22,9 @@ fi
 SHA=$(shasum -a 256 "$SRC" | cut -d' ' -f1)
 GITREV="$(git rev-parse --short HEAD)${DIRTY}"
 scp -q "$SRC" "$NODE":"${REMOTE_SRC}.new"
+# the calibration model is header-only and lives in THIS repo; the OpenMS patch includes it, so it
+# must travel with every deploy or the cluster build silently uses a stale copy
+scp -q src/TdfMzCalibration.h "$NODE":/scratch/kohlbach/OpenMS/src/openms/include/OpenMS/FORMAT/
 ssh "$NODE" "set -eu
   mkdir /scratch/kohlbach/.deploy.lock 2>/dev/null || { echo 'REFUSED: another deploy holds the lock' >&2; exit 1; }
   trap 'rmdir /scratch/kohlbach/.deploy.lock' EXIT

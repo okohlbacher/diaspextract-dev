@@ -16,12 +16,13 @@ patches/openms-brukertims-mz-calibration.patch implements):
 Two regressions this catches:
   * dropping the C2*m term -- the bug in the widely-copied open implementation (timsrust-calibration,
     adapted then disabled by mzdata): -11..-40 ppm on this data;
-  * dropping the dC1 temperature term: ~0.6 ppm.
+  * dropping the dC1 temperature term: ~0.67 ppm on C1, i.e. ~0.33 ppm on m/z (the golden
+    files span only ~0.03 K, so this guard is deliberately loose at 0.1 ppm).
 Run: python3 tests/test_calibration.py
 """
 import json, math, os, sys
 
-TOL_PPM = 0.001          # the model reproduces the vendor library to ~3e-5 ppm; 0.001 is ample
+TOL_PPM = 0.0001         # measured max is 2.6e-5 ppm; 1e-4 keeps headroom without being vacuous
 NO_C2_MIN_PPM = 5.0      # dropping C2 must be caught: it is worth >>5 ppm
 NO_TEMP_MIN_PPM = 0.1    # dropping the temperature term must be visible
 
