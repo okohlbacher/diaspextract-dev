@@ -6,6 +6,7 @@
 // $Authors: OpenMS-DIAtracer project $
 // --------------------------------------------------------------------------
 
+#include <OpenMS/FORMAT/TdfMzCalibration.h>   // spextract::calibrationProvenance()
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -2511,6 +2512,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // [provenance] Record the emitted-intensity reweighting so an identical historical command line is
     // still reproducible after assembly:corr_power's default changed 0->2 (2026-07-28). Without this,
     // the same command produces different intensities across tool versions with no trace of why.
+    // [provenance] WHICH m/z calibration produced this file. Without it an archived mzML is not
+    // attributable to a calibration path and a silent fallback would be invisible afterwards.
+    out_exp.setMetaValue("spx:mz_calibration", spextract::calibrationProvenance());
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     out_exp.setMetaValue("spx:require_isotope_support", (int)getFlag_("assembly:require_isotope_support"));

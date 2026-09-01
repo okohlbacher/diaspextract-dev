@@ -97,7 +97,11 @@ int main(int argc, char** argv)
   if (bad.isSupported()) { std::fprintf(stderr, "ModelType 2 must be rejected\n"); return 1; }
   bad.model_type = 1; bad.dC2 = 1e-9;
   if (bad.isSupported()) { std::fprintf(stderr, "dC2 != 0 must be rejected\n"); return 1; }
-  bad.dC2 = 0.0; bad.C1 = 0.0;
+  bad.dC2 = 0.0; bad.C3 = 1e-9;
+  if (bad.isSupported()) { std::fprintf(stderr, "C3 != 0 must be rejected\n"); return 1; }
+  bad.C3 = 0.0; bad.C4 = 1e-9;
+  if (bad.isSupported()) { std::fprintf(stderr, "C4 != 0 must be rejected\n"); return 1; }
+  bad.C4 = 0.0; bad.C1 = 0.0;
   if (bad.isSupported()) { std::fprintf(stderr, "C1 <= 0 must be rejected\n"); return 1; }
 
   std::printf("OK  %d golden cases, %d files: max %.6f ppm; C2 ablation %.2f ppm; round trip + negative paths pass\n",

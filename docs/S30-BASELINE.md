@@ -369,9 +369,12 @@ diaTracer had ONLY ever been measured on S30; S08/S23 references created here un
 | S30 | **11,976** | 11,517 | **104.0%** | +1.49 | -1.37 |
 | S08 | **10,333** | 10,242 | **100.9%** | +3.19 | +0.27 |
 | S23 | **9,891**  |  8,948 | **110.5%** | +2.29 | -0.60 |
-**speXtract now matches or exceeds diaTracer on closed Sage on ALL THREE files** (100.9-110.5%) --
-no vendor library, open BSD path. Entrapment FDR is comparable (dt S08 1.24% [0.99-1.54], S23 1.22%
-[0.96-1.53]; ours S30 1.26% [1.00-1.51]) -> the gains are not FDR inflation.
+**speXtract reaches 100.9-110.5% of diaTracer on closed Sage across the three files** -- no vendor
+library, open BSD path. STATISTICALLY (n=3 paired): mean 105.1%, 95% CI [93.0, 117.3] = consistent
+with PARITY, not an advantage; the earlier phrasing "matches or exceeds on ALL THREE files" was
+over-claiming on S08's +91. CORRECTION (review F4): the "ours 1.26% [1.00-1.51]" entrapment figure
+quoted here came from the **sdkcal** arm, a different converter -- **the shipping table-model arm's
+entrapment FDR has NOT been measured on any file**; that is an owed measurement, not a passed check.
 CAVEATS THAT STAND: (a) emission is still ~1.32x dt, so per-spectrum efficiency still favours dt --
 publish the emission column with any count row; (b) MSFragger arm pending (dt led 82% there; that
 engine's gap is search/detection-side); (c) single cohort/instrument -- public-PXD replication is

@@ -29,16 +29,30 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
 | S23 | --    | +2.29 | --    | -0.60 |
 
 ## What the matrix says
-1. **The calibration fix is real and generalises** on Sage: +6-11% on all three files, from the
-   file's own MzCalibration table, no vendor library.
+1. **The calibration fix is real and generalises** on Sage: +8.8% mean, 95% CI [+2.7, +15.0] (n=3
+   paired), from the file's own MzCalibration table, no vendor library. IMPORTANT FRAMING (review):
+   this is an IDENTIFICATION-YIELD effect, not better pseudo-spectra -- emission moved -0.23% and the
+   spectra are informationally near-identical; Sage converts a corrected mass axis into yield because
+   mass error is a discriminant FEATURE. And since diaTracer's spectra always carried vendor
+   calibration, every earlier head-to-head was biased AGAINST us by this same mechanism: **the
+   +6-11% is the removal of a self-inflicted handicap, not a lead over diaTracer.**
 2. **The table model reproduces the vendor SDK** (S30 11,976 vs 12,128; the 1.3% delta is the
    vendor IM converter, not m/z) and is exact against the vendor oracle (2.5e-5 ppm, tests/).
-3. **MSFragger is INSENSITIVE to input calibration** (flat across chord/table/SDK on all 3 files) --
-   its internal calibrate_mass absorbs a -8 ppm bias completely. Predicted by the 2026-09-01 review;
-   now measured on 9 arms. Consequence: the calibration work cannot be credited with any MSFragger
-   gain, and MSFragger is USELESS as a calibration-quality readout.
-4. **The engine asymmetry is the headline honesty problem: we lead on Sage (101-110%) and trail on
-   MSFragger (82-89%) on EVERY file.** Any public claim must show both engines. The MSFragger gap is
+3. **MSFragger is INSENSITIVE to input calibration** (flat across chord/table/SDK on all 3 files).
+   CORRECTED REASON (adversarial review 2026-09-01): NOT "calibrate_mass absorbs it" -- that was
+   inferred from a default we never set (bench/run_joint.sh writes msfragger.params without
+   calibrate_mass) and never verified in the engine log. The real reason is our HARNESS: the
+   MSFragger arm is scored by a raw-hyperscore target-decoy walk with NO rescoring
+   (bench/joint_bench.py, bench/score_msf.py), and hyperscore is matched-fragment count and
+   intensity -- it contains no mass-error term, so it is structurally near-blind to an m/z shift.
+   Sage's discriminant, by contrast, uses delta_mass and average_ppm as FEATURES. The conclusion
+   survives (MSFragger is useless as a calibration readout) but the mechanism is scoring-function
+   blindness, not engine-side recalibration. Its flatness does, however, BOUND the spectral-content
+   channel at |delta| <= 1%.
+4. **The engine asymmetry is the headline honesty problem -- and n=3 statistics make it worse for us:
+   Sage 105.1% mean, 95% CI [93.0, 117.3] = CONSISTENT WITH PARITY, NOT AN ADVANTAGE; MSFragger
+   85.0%, 95% CI [76.7, 93.2] = a STATISTICALLY SUPPORTED DEFICIT.** "Matches or exceeds on all
+   three files" is not a defensible claim (S08's +91 peptides is inside noise). Any public claim must show both engines. The MSFragger gap is
    search/detection-side (it survives perfect masses) -- consistent with the earlier finding that
    ~34% of missed peptides already have a near-threshold PSM.
 5. **Our residual ppm (+1.5..+3.2) is consistently 2-4 ppm above diaTracer's (-1.4..+0.3)** on the
