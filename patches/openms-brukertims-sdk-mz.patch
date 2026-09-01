@@ -1,0 +1,17 @@
+--- /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp.orig	2026-09-01 11:12:43.062880173 +0200
++++ /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 11:12:43.077879967 +0200
+@@ -977,7 +977,13 @@
+           handle->scan2inv_ion_mobility_converter =
+             BrukerScan2InvIonMobilityConverterFactory::instance(sdk_path)
+               .produce(*handle, pcs);
+-          OPENMS_LOG_INFO << "TIMS calibration: Bruker SDK"
++          // [speXtract sdk-mz] The SDK branch previously upgraded ONLY the ion-mobility converter,
++          // leaving m/z on the linear-in-sqrt two-point baseline -- measured -5..-11 ppm low across
++          // the acquisition range (median -8.3 ppm on identified peptides vs the vendor conversion).
++          // Swap the m/z converter too: tims_index_to_mz applies Bruker`s full per-frame calibration.
++          handle->tof2mz_converter =
++            BrukerTof2MzConverterFactory::instance(sdk_path).produce(*handle, pcs);
++          OPENMS_LOG_INFO << "TIMS calibration: Bruker SDK (m/z + ion mobility)"
+                           << (pcs != NoPressureCompensation ? " (pressure_comp=on)" : "")
+                           << std::endl;
+           return handle;

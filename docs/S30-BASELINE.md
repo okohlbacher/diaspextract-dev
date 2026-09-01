@@ -260,3 +260,30 @@ delta dimension is dominated by non-PTM structure (lattice + integer-Da junk = 5
 classes) — a tool-CLASS finding worth publishing; and speXtract's one distinctive open-search defect
 is the -18 ppm mass bias (fixable), vs diaTracer's up-ladder envelope artifacts. Step 02 (emission
 arm) runs AS REGISTERED with a nearzero-stratified secondary readout, scored under this v3 metric.
+
+## THE -8 ppm MASS BIAS: mechanism found + fixed (2026-09-01, follows the step-01 nearzero finding)
+**Every speXtract-reported m/z to date carries a systematic, m/z-dependent -5..-11 ppm error**
+(median -8.3 ppm on identified precursors; dt control -1.1 ppm on the same raw data).
+**Mechanism (proven by direct comparison against Bruker's timsdata library via ctypes):** the loader
+(BrukerTimsFile -> opentims++) converts TOF->m/z with `OpenSourceTof2MzConverter (linear-in-sqrt)` --
+a TWO-POINT chord fit to just (MzAcqRangeLower=100, MzAcqRangeUpper=1700, DigitizerNumSamples): error
+~0 at the anchors, bowing to -10.8 ppm mid-range, frame-independent -- reproducing every observed
+feature (flat in RT and mass-in-ppm; the "IM trend" is the m/z-dependence in disguise; temperature was
+a red herring, dC2=0 and dT1 tiny). The loader's SDK branch (OPENMS_BRUKER_SDK_PATH) upgraded ONLY the
+ion-mobility converter -- the m/z converter was never swapped (and the env var was never set anyway).
+**Fix: patches/openms-brukertims-sdk-mz.patch** -- 3 lines: the SDK branch now also installs
+`BrukerTof2MzConverterFactory` (vendor per-frame calibration via tims_index_to_mz). Requires
+OPENMS_BRUKER_SDK_PATH pointing at a local Bruker timsdata .so (present on the cluster from fp-tools;
+used locally, never redistributed; without it the tool falls back to the open model as before).
+The open-model inaccuracy is itself reportable upstream (opentims; also explains why mzdata disabled
+its own m/z model port).
+**Why mzPeak was NOT the answer (user directive "pull latest mzPeak", researched 2026-09-01):** spec
+is draft 0.9 / prototype v0.1.0 / breaking layout change 2026-07-14 / no releases; the current
+TDF->mzpeak converter stores RAW TOF indices and its own m/z path uses the same two-point model
+(mzdata implemented the true vendor model 0.66.3 but disabled it 0.66.5 as "not consistently better");
+the OpenMS in-tree MzPeakFile is unmerged/dormant and keyed to a superseded spelling. mzPeak re-poses
+the calibration problem; it does not solve it.
+**Impact on prior results:** closed-search counts unaffected (+-25 ppm tolerance absorbed -8 ppm);
+step-01 v3 open-search numbers stand AS MEASURED but the nearzero class (5,415 vs 1,432) was this bug.
+Decisive arm `sdkcal` running: vendor-calibrated re-extraction -> expect ppm median -> ~-1, nearzero
+to collapse toward dt's level, and possibly small closed gains (tighter effective tolerance).
