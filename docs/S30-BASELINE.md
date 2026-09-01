@@ -287,3 +287,24 @@ the calibration problem; it does not solve it.
 step-01 v3 open-search numbers stand AS MEASURED but the nearzero class (5,415 vs 1,432) was this bug.
 Decisive arm `sdkcal` running: vendor-calibrated re-extraction -> expect ppm median -> ~-1, nearzero
 to collapse toward dt's level, and possibly small closed gains (tighter effective tolerance).
+
+### sdkcal CONFIRMED (2026-09-01): vendor m/z calibration is the new benchmark configuration
+| metric | pre-fix (corr2) | **sdkcal (corr2 + vendor m/z)** | diaTracer |
+|---|---|---|---|
+| ppm median (open IDs) | -8.29 [-12.5,-4.0] | **+1.74 [-2.4,+6.1]** | -1.10 [-3.8,+1.2] |
+| closed Sage | 10,802 | **12,128 (+12.3%)** | 11,517 -> **we lead, 105.3%** |
+| closed Sage entrapment | 10,381 @1.20% | **11,435 @1.26% [1.00-1.51]** | -- (FDR unchanged -> gain is real) |
+| closed MSFragger | 11,560 | 11,460 (-0.9%, FLAT) | 13,932 (82.3%) -> Sage-specific gain |
+| emission | 924,255 | 922,132 (~unchanged) | 700,434 |
+| open unmod @1% | 6,907 (87.5%) | **7,566 (95.9%)** | 7,890 |
+| open nearzero @1% | 5,415 (3.8x dt) | **2,769 (1.9x)** | 1,432 |
+| open knownPTM @1% | 4,878 | 6,058 (total; ambiguity-excluded units ~85% of dt) | 4,651 |
+**Decision: OPENMS_BRUKER_SDK_PATH + patches/openms-brukertims-sdk-mz.patch = REQUIRED benchmark
+config from now on; closed-Sage reference re-based 10,802 -> 12,128.** Caveats carried into review:
+(1) the +12% is Sage-specific (MSFragger flat -- its gap is search/detection-side, consistent with
+prior reviews); (2) EVERY pre-2026-09-01 number was measured at -8 ppm, INCLUDING the corr_power
+validation and all falsifications -- corr_power=0 ablation under vendor-cal launched (sdkcal_cp0);
+S08/S23 holdout re-validation owed; falsified-lever re-audit only where a lever plausibly interacted
+with mass accuracy; (3) knownPTM ambiguous fraction unchanged (34.7% vs dt 14%) but the bins are now
+physically separable at +-4 ppm -- the 1,610-unit Amidation bin (1.4% raw entrap) deserves real
+chemical scrutiny rather than automatic dismissal as spill.
