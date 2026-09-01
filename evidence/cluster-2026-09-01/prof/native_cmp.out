@@ -1,0 +1,10 @@
+=== native pre-centroiding aggregation (baselines: gate 9,989 / imw005 10,394 / diaTracer 11,517) ===
+[nat_ms1] extract () ...
+[stream] frame-by-frame load done: 33553 frames, MS1 1343, windows 24 (native ms2_neighbors=0) [t=0s] [RSS 53580364 kB, peak 59613364 kB]
+Wrote 2483023 pseudo-MS2 spectra to /scratch/kohlbach/prof/nat_ms1/pseudo.mzML
+  nat_ms1: Sage_pep=10321  entrap_target=9524  entrap_frac=2.41%
+[nat_ms1_imw] extract (-assembly:im_weight_sigma 0.005) ...
+[stream] frame-by-frame load done: 33553 frames, MS1 1343, windows 24 (native ms2_neighbors=0) [t=0s] [RSS 53579436 kB, peak 59610332 kB]
+Wrote 2483023 pseudo-MS2 spectra to /scratch/kohlbach/prof/nat_ms1_imw/pseudo.mzML
+  nat_ms1_imw: Sage_pep=10770  entrap_target=9929  entrap_frac=2.31%
+NATIVE_DONE

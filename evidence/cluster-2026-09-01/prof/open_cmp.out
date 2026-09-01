@@ -1,0 +1,22 @@
+[spx_human] open search ...
+  spx_human: 903747 rows
+[dt_human] open search ...
+  dt_human: 697249 rows
+=== DELTA-MASS DIAGNOSTIC (human.fasta, 1% FDR) ===
+
+spx: 160248 PSMs @1%FDR | unmod 31.2% | isotope-shift 8.20% | modified 68.8%
+  top delta-mass bins (Da: count): -1:7616, +16:4914, +1:4697, -2:3611, +43:3375, -3:2977, -4:2857, -5:2850, +0:2702, +12:1712, +14:1676, +2:1610
+
+dt: 121010 PSMs @1%FDR | unmod 8.9% | isotope-shift 3.46% | modified 91.1%
+  top delta-mass bins (Da: count): +1:2389, +2:2287, +3:2227, +4:2064, +5:1904, +16:1808, -2:1766, -3:1650, +6:1631, +12:1599, -6:1566, -4:1534
+[spx_entrap] open search ...
+  spx_entrap: 905817 rows
+[dt_entrap] open search ...
+  dt_entrap: 697847 rows
+=== OPEN-SEARCH ENTRAPMENT FDR ===
+peptide-hypothesis ratio = 0.6805 (1/r = 1.469)
+
+arm             target entrap   raw%   FDR%       FDR 95% CI
+spx_open          8887     78  0.87%  1.29%   1.01-1.59%
+dt_open           9989     73  0.73%  1.07%   0.85-1.33%
+OPEN_DONE

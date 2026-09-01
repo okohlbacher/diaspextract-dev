@@ -1,0 +1,10 @@
+[wait] for idle node ...
+[r1] extract (gate + IM 0.005, dynamic p_team) ...
+Wrote 924255 pseudo-MS2 spectra to /scratch/kohlbach/prof/r1/pseudo.mzML
+DIAPseudoSpectra took 32:53 m (wall), 17:10:01 h (CPU), 14:50 m (system), 16:55:10 h (user); Peak Memory Usage: 128411 MB.
+	Percent of CPU this job got: 3119%
+[verify] spectra vs imw005 (expect identical 924255) + md5:
+  r1 spectra=924255  (imw005=924255)
+  r1 mzML md5:    e15799d85ff6020abe24b1fe60118379
+  imw005 md5:     fc050a2eac54f53eb58276524d9eb659
+R1_DONE (baseline wall: imw005 19:30; gate 19:38)
