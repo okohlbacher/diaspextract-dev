@@ -1,5 +1,5 @@
---- /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp.orig	2026-09-01 11:12:43.062880173 +0200
-+++ /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 17:50:39.775165052 +0200
+--- src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 11:12:43.062880173 +0200
++++ src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 17:50:39.775165052 +0200
 @@ -921,6 +921,73 @@
      }
    }

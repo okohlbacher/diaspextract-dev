@@ -12,12 +12,24 @@ against an OpenMS installation but lives outside the OpenMS source tree.
 
 ## Build
 
+Needs OpenMS with `WITH_OPENTIMS` (to read Bruker `.d`). **Apply this repo's OpenMS patches first:**
+
 ```bash
-cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
-cmake --build build -j
+scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
+# then rebuild the OpenMS DIAPseudoSpectra target
 ```
 
-Requires OpenMS built with `WITH_OPENTIMS` for Bruker `.d` input.
+**Why this is not optional.** Without the calibration patch the Bruker reader converts TOF to m/z with
+a two-point linear-in-sqrt chord that is **-5 to -11 ppm biased** (m/z dependent) on every file we
+measured, costing roughly **6-11% of closed-search peptide identifications**. The build says nothing
+about it; the run log names the calibration used, and every emitted mzML records it in the
+`spx:mz_calibration` userParam (`tdf_table_modeltype1` | `bruker_sdk` | `legacy_chord_APPROXIMATE`).
+An unsupported calibration table now **fails closed** rather than silently producing biased masses;
+`SPEXTRACT_ALLOW_CHORD_FALLBACK=1` opts back into the old behaviour.
+
+Verified against OpenMS `3.6.0-pre-exported-20260717`. Other versions may need the patch rebased.
+Optionally, `OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library instead (an
+oracle for cross-checking; not required, not redistributed).
 
 ## Run
 
@@ -30,53 +42,31 @@ repository (measured: -18.4% peak RSS combined, of which compaction alone is -6.
 
 ## Where it stands
 
-Measured against diaTracer on the same samples, and against a DIA-NN reference annotation used
-as a truth set. **All peptide counts are at `peptide_q <= 0.01`** — spectrum-level FDR overstates
-our counts by 14-16% versus diaTracer's 5-7%, because we emit more spectra per peptide and each
-gets more chances at a per-spectrum threshold.
+Measured 2026-09-01 on three diaPASEF acquisitions (one cohort, one instrument), both engines,
+identical search settings for both tools. Full matrix: `docs/BENCHMARK-MATRIX-2026-09-01.md`.
 
-All three samples now run **matched baselines** — identical config, one node, one binary, both
-arms in a single invocation — because the first attempt compared each sample against whatever
-baseline it happened to have (MS2-split, plain, and a tuned ±25 ppm config), which produced a
-spurious "+4.1%, does not generalise" for S30.
+| | S30 | S08 | S23 | vs diaTracer |
+|---|---|---|---|---|
+| **Sage** peptides @1% FDR | 11,976 | 10,333 | 9,891 | 104.0 / 100.9 / 110.5% -- mean 105.1%, 95% CI [93.0, 117.3] |
+| **MSFragger** peptidoforms @1% | 11,463 | 11,465 | 9,404 | 82.3 / 83.9 / 88.7% -- mean 85.0%, 95% CI [76.7, 93.2] |
+| median precursor mass error | +1.5 ppm | +3.2 | +2.3 | diaTracer -1.4 / +0.3 / -0.6 |
+| pseudo-spectra emitted | ~0.92 M | | | ~1.32x diaTracer |
 
-| sample | matched base | **with defaults** | delta | diaTracer | ratio |
-|---|---|---|---|---|---|
-| S23 | 5,817 | **8,411** | **+44.6%** | 9,038 | **93.1%** |
-| S08 | 6,114 | **8,996** | **+47.1%** | 11,218 | **80.2%** |
-| S30 | 6,866 | **10,072** | **+46.7%** | 11,626 | **86.6%** |
+Read honestly: **on Sage the result is consistent with parity, not an advantage; on MSFragger there
+is a statistically supported deficit.** speXtract also emits ~1.32x more spectra, so per-spectrum
+efficiency still favours diaTracer. The MSFragger gap survives perfect masses, so it is
+search/detection-side, not calibration.
 
-**Paired within-sample delta: +46.1%, 95% CI [+42.8%, +49.5%]** (n=3). Both arms run in one
-invocation, so sample-to-sample variance cancels and this interval is the defensible claim.
+The 2026-09-01 calibration fix is worth +6-11% closed-search peptides on Sage. It is an
+identification-*yield* effect, not better spectra (emission moved -0.2%): mass error is a feature of
+Sage's discriminant. Since diaTracer's spectra always carried vendor-calibrated masses, every earlier
+comparison was biased against the open path -- **this is the removal of a self-inflicted handicap,
+not a lead.**
 
-**The ratio to diaTracer** is best measured under a single common FDR procedure applied to both
-tools (`bench/joint_bench.py`), which removes per-run FDR calibration as a variable:
-
-| sample | diaTracer pep | speXtract pep | ratio |
-|---|---|---|---|
-| S23 | 9,068 | 8,083 | 89.1% |
-| S08 | 10,440 | 8,881 | 85.1% |
-| S30 | 11,552 | 9,977 | 86.4% |
-
-**86.9%, 95% CI [81.7%, 92.0%] — excludes parity.** This supersedes an earlier figure of
-"80–93%" computed from each engine's own FDR, whose true interval was [70.6%, 102.7%] and did
-*not* exclude parity. Scoring both tools identically cut the spread from sd 6.5 to sd 2.1.
-
-**But we emit 4.9× the PSMs to get 0.87× the peptides** — 9.51 PSMs/peptide against diaTracer's
-1.69. Three independent benchmarks now agree on this: closed `peptide_q`, entrapment open search
-(2.82× PSMs for 1.05× modified peptides), and the joint common-FDR run. See
-[docs/benchmarks/joint-2026-07-22.md](docs/benchmarks/joint-2026-07-22.md). An earlier version of this table reported
-"S08, best config 7,430 → 66.2%", which was wrong twice over: 7,430 is an **S30** result, and it
-was divided by the **S08** diaTracer reference.
-
-The two defaults responsible are `trace:ms1_split_valleys 7.0` and `charge:scoring count`. They
-are **coupled** — see below — and cost ~1.7x wall time and ~25% peak RAM.
-
-Spectrum quality, from a model-free DIA-NN-anchored assay (decoy-controlled, equal depth,
-independent of whether anything identifies the spectrum):
-
-- **2.3x** more intensity on the correct precursor's fragments than diaTracer (5.79% vs 2.52% net)
-- **30% less** co-isolation contamination (+7.50% vs +10.70% net)
+Determinism: bit-reproducible at a **fixed thread count** (`bench/semantic_digest.py` compares the
+spectrum data, ignoring the wall-clock stamp and the recorded parameters, which can never match
+across differing invocations). Output does differ across thread counts, and last-ulp code changes
+cascade to ~2% in peptide counts -- so compare like with like.
 
 ## The main open defect
 
