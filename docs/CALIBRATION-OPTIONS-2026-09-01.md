@@ -57,3 +57,34 @@ by codex, kimi, vibe of options A-H.
   control running to attribute).
 - Option 1 dissolves the two-tier product conflict (license-blocked users get ~2-4 ppm open-path
   masses); the vendor SDK remains the benchmark/best path.
+
+## REASSESSMENT (user directive "polynomials are not dead", 2026-09-01) — the polynomial IS the answer
+
+Empirical results that invalidate the ranking above for TDF inputs:
+1. **Model-family check vs the vendor oracle:** the 2-param sqrt-chord (which the review said to
+   refit) CANNOT represent vendor truth (max residual 13.0 ppm); a QUADRATIC in sqrt-space fits it
+   to 0.0001 ppm, frame-stable to ~1e-7 across the run -> ONE per-run polynomial suffices.
+2. **The closed form was derived and verified EXACT (3e-5 ppm max, all 3 files):**
+   t_ns = C0 + (1e6/sqrt(C1_eff))*sqrt(m) + C2*m,  C1_eff = C1*(1+dC1*(T1_ref-T1_frame)/1e6),
+   t_ns = tof*DigitizerTimebase + DigitizerDelay -- ALL constants from the TDF MzCalibration table.
+   Clean-room numeric derivation against locally-licensed vendor output; no vendor code consulted.
+   use_recalibrated_state made zero difference on these files; temperature term = the 0.6 ppm
+   residual of the C2-less form.
+3. **Upstream bug found:** the reference open implementation (timsrust-calibration; adapted by
+   mzdata then disabled as "not consistently better") DROPS the C2*m term -> -11..-40 ppm vs vendor
+   on this data. That omission, not translation subtlety, is why the port "wasn't better".
+   Report upstream.
+4. **Implemented:** TdfTableTof2MzConverter in the loader (patches/openms-brukertims-mz-calibration.patch,
+   supersedes+includes the sdk-mz patch): m/z priority = vendor SDK (if env set) > TDF-table exact
+   model > legacy chord (warn). License-free, deterministic, no fitting.
+
+**Reassessed ranking:**
+1. **H1 table-driven exact model (implemented)** -- vendor-exact open path for ALL TDF users incl.
+   license-blocked; dissolves the two-tier gate entirely. 3-file comparison arms running.
+2. **Option I (centroiding/mono forensics)** -- unchanged; still the only fix for the +1.7 ppm
+   residual + mass-degraded tail (which are downstream of ANY axis calibration).
+3. **B+C statistical fit** -- demoted to (a) QC/verification layer on top of H1, (b) fallback for
+   non-TDF inputs or ModelType != 1 files. Its 1.5-4 ppm bet is now the fallback-of-the-fallback.
+4. **E isotope-spacing QC** -- unchanged (diagnostic).
+D remains legally dead; F remains premature; the vendor SDK remains as cross-check/benchmark oracle.
+detctrl determinism control VOIDED (self-kill + mid-run rebuild) -- re-run on the settled binary.

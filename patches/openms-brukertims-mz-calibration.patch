@@ -1,0 +1,132 @@
+--- /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp.orig	2026-09-01 11:12:43.062880173 +0200
++++ /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp	2026-09-01 14:11:43.725392300 +0200
+@@ -921,6 +921,93 @@
+     }
+   }
+ 
++// [speXtract table-mz] License-free EXACT TOF->m/z conversion from the TDF MzCalibration table
++// (ModelType 1). Derived numerically against Bruker timsdata output and verified to <5e-5 ppm on
++// three diaPASEF files (S30/S08/S23, 2026-09-01):
++//   t_ns   = tof_index * DigitizerTimebase + DigitizerDelay
++//   C1_eff = C1 * (1 + dC1*(T1_ref - T1_frame)/1e6)          (temperature compensation)
++//   solve   C2*u^2 + (1e6/sqrt(C1_eff))*u + (C0 - t_ns) = 0,  m/z = u^2
++// The widely-copied open reimplementation (timsrust-calibration / mzdata) DROPS the C2*m term and is
++// -11..-40 ppm off on this data; the previous linear-in-sqrt chord fallback was -5..-11 ppm.
++#include <sqlite3.h>
++namespace {
++class TdfTableTof2MzConverter final : public Tof2MzConverter
++{
++  double tb_, dly_, C0_, C1_, C2_, T1ref_, dC1_;
++  std::vector<double> frame_t1_;   // indexed by frame id
++public:
++  explicit TdfTableTof2MzConverter(const std::string& d_dir)
++  {
++    const std::string tdf = d_dir + "/analysis.tdf";
++    sqlite3* db = nullptr;
++    if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
++      throw std::runtime_error("TdfTableTof2MzConverter: cannot open " + tdf);
++    sqlite3_stmt* st = nullptr;
++    int model_type = -1;
++    if (sqlite3_prepare_v2(db,
++          "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1 "
++          "FROM MzCalibration LIMIT 1", -1, &st, nullptr) == SQLITE_OK
++        && sqlite3_step(st) == SQLITE_ROW)
++    {
++      model_type = sqlite3_column_int(st, 0);
++      tb_ = sqlite3_column_double(st, 1); dly_ = sqlite3_column_double(st, 2);
++      C0_ = sqlite3_column_double(st, 3); C1_ = sqlite3_column_double(st, 4);
++      C2_ = sqlite3_column_double(st, 5); T1ref_ = sqlite3_column_double(st, 6);
++      dC1_ = sqlite3_column_double(st, 7);
++    }
++    sqlite3_finalize(st);
++    if (model_type != 1 || C1_ <= 0.0)
++    { sqlite3_close(db); throw std::runtime_error("TdfTableTof2MzConverter: unsupported MzCalibration (ModelType != 1)"); }
++    // number of MzCalibration rows: >1 would need per-frame row mapping -- refuse rather than guess
++    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM MzCalibration", -1, &st, nullptr) == SQLITE_OK
++        && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) != 1)
++    { sqlite3_finalize(st); sqlite3_close(db); throw std::runtime_error("TdfTableTof2MzConverter: multiple MzCalibration rows unsupported"); }
++    sqlite3_finalize(st);
++    if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) == SQLITE_OK)
++    {
++      while (sqlite3_step(st) == SQLITE_ROW)
++      {
++        const size_t id = (size_t)sqlite3_column_int64(st, 0);
++        if (id >= frame_t1_.size()) frame_t1_.resize(id + 1, T1ref_);
++        frame_t1_[id] = sqlite3_column_double(st, 1);
++      }
++    }
++    sqlite3_finalize(st);
++    sqlite3_close(db);
++  }
++  inline double beff_(uint32_t frame_id) const
++  {
++    const double t1 = frame_id < frame_t1_.size() ? frame_t1_[frame_id] : T1ref_;
++    const double cf = 1.0 + (dC1_ * (T1ref_ - t1)) / 1e6;
++    return 1e6 / std::sqrt(C1_ * cf);
++  }
++  inline double one_(double tof, double B) const
++  {
++    const double t = tof * tb_ + dly_;
++    if (std::abs(C2_) < 1e-12) return std::pow((t - C0_) / B, 2.0);   // degenerate: pure sqrt law
++    const double disc = B * B - 4.0 * C2_ * (C0_ - t);
++    const double u = (-B + std::sqrt(std::max(disc, 0.0))) / (2.0 * C2_);
++    return u * u;
++  }
++  void convert(uint32_t frame_id, double* mzs, const double* tofs, uint32_t size) override final
++  { const double B = beff_(frame_id); for (uint32_t i = 0; i < size; ++i) mzs[i] = one_(tofs[i], B); }
++  void convert(uint32_t frame_id, double* mzs, const uint32_t* tofs, uint32_t size) override final
++  { const double B = beff_(frame_id); for (uint32_t i = 0; i < size; ++i) mzs[i] = one_((double)tofs[i], B); }
++  void inverse_convert(uint32_t frame_id, uint32_t* tofs, const double* mzs, uint32_t size) override final
++  {
++    const double B = beff_(frame_id);
++    for (uint32_t i = 0; i < size; ++i)
++    {
++      const double u = std::sqrt(std::max(mzs[i], 0.0));
++      const double t = C0_ + B * u + C2_ * mzs[i];
++      tofs[i] = (uint32_t)std::max(0.0, std::round((t - dly_) / tb_));
++    }
++  }
++  std::string description() override final { return "TdfTableTof2MzConverter (MzCalibration ModelType 1 + temperature)"; }
++};
++} // namespace
++
++
+   // =====================================================================
+   // Helper: open TimsDataHandle with tiered calibration strategy
+   // =====================================================================
+@@ -977,7 +1064,13 @@
+           handle->scan2inv_ion_mobility_converter =
+             BrukerScan2InvIonMobilityConverterFactory::instance(sdk_path)
+               .produce(*handle, pcs);
+-          OPENMS_LOG_INFO << "TIMS calibration: Bruker SDK"
++          // [speXtract sdk-mz] The SDK branch previously upgraded ONLY the ion-mobility converter,
++          // leaving m/z on the linear-in-sqrt two-point baseline -- measured -5..-11 ppm low across
++          // the acquisition range (median -8.3 ppm on identified peptides vs the vendor conversion).
++          // Swap the m/z converter too: tims_index_to_mz applies Bruker`s full per-frame calibration.
++          handle->tof2mz_converter =
++            BrukerTof2MzConverterFactory::instance(sdk_path).produce(*handle, pcs);
++          OPENMS_LOG_INFO << "TIMS calibration: Bruker SDK (m/z + ion mobility)"
+                           << (pcs != NoPressureCompensation ? " (pressure_comp=on)" : "")
+                           << std::endl;
+           return handle;
+@@ -1000,6 +1093,20 @@
+       }
+     }
+ 
++    // 2b. [speXtract table-mz] EXACT license-free m/z from the MzCalibration table (any strategy
++    // where the SDK did not already install a vendor m/z converter). Falls back to the linear chord
++    // only if the table is absent/unsupported.
++    try
++    {
++      handle->tof2mz_converter = std::make_unique<TdfTableTof2MzConverter>(path_string);
++      OPENMS_LOG_INFO << "TOF m/z calibration: TDF MzCalibration table model (exact, license-free)" << std::endl;
++    }
++    catch (const std::exception& e)
++    {
++      OPENMS_LOG_WARN << "TDF table m/z model unavailable (" << e.what()
++                      << "); falling back to linear-in-sqrt approximation (-5..-11 ppm bias)" << std::endl;
++    }
++
+     // 3. Try rational model from TimsCalibration table (AUTO or RATIONAL)
+     if (strategy == Strategy::AUTO || strategy == Strategy::RATIONAL)
+     {
