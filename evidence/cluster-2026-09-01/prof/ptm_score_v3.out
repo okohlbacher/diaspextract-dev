@@ -1,0 +1,63 @@
+# open_ptm_score v3  2026-09-01T10:21:52
+# invocation: open_ptm_score.py spx=open_spx_entrap/results.sage.tsv dt=open_dt_entrap/results.sage.tsv
+# script sha256/16: e9f5b64b2d1f01bd   estimator ratio: 0.6805
+# tol = max(0.008 Da, 12.0 ppm x calcmass); conservative (e+1)/r walk; tie-grouped
+
+=== spx ===  input open_spx_entrap/results.sage.tsv  sha256/16 455056be80e1ada8
+  unmod     @1.0%:   6907 targets  (e=46, achieved 1.00%, CI [0.72-1.28], cutoff 1.079, units 7305)
+  nearzero  @1.0%:   5415 targets  (e=35, achieved 0.98%, CI [0.68-1.28], cutoff 1.108, units 5977)
+  isotope   @1.0%:   7737 targets  (e=51, achieved 0.99%, CI [0.74-1.24], cutoff 1.122, units 10008)
+  knownPTM  @1.0%:   4878 targets  (e=32, achieved 0.99%, CI [0.66-1.33], cutoff 1.109, units 7140)
+  other     @1.0%:  40160 targets  (e=272, achieved 1.00%, CI [0.88-1.11], cutoff 1.113, units 413223)
+  unique peptides with best hypothesis in unmod|nearzero (target strand): 6547
+  per-name (DESCRIPTIVE; @1% shown only when accepted entrapment >= 10):
+    other:-1Da                         @1%: 1894 (e=11)   units   2215, raw entrap 3.1%
+    isotope:iso-1                      @1%: 1790 (e=11)   units   1890, raw entrap 1.4%
+    other:-499Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1608, raw entrap 36.3%
+    other:-490Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1576, raw entrap 35.5%
+    other:-498Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1570, raw entrap 35.9%
+    other:-487Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1559, raw entrap 35.4%
+    other:-486Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1547, raw entrap 36.1%
+    other:-496Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1544, raw entrap 35.8%
+    other:-497Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1534, raw entrap 35.8%
+    other:-489Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1524, raw entrap 37.0%
+    other:-495Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1513, raw entrap 36.6%
+    other:-485Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1499, raw entrap 34.1%
+    other:-491Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1487, raw entrap 36.4%
+    other:-488Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1483, raw entrap 34.6%
+    other:-493Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1483, raw entrap 36.6%
+    other:-492Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1454, raw entrap 38.8%
+    other:-494Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1454, raw entrap 35.3%
+    other:-4Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1426, raw entrap 5.3%
+    other:-5Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1425, raw entrap 4.4%
+    other:-471Da                       @1%: n/a (insufficient entrapment evidence, e=0)   units   1424, raw entrap 35.1%
+
+=== dt ===  input open_dt_entrap/results.sage.tsv  sha256/16 aaa0ef708652698e
+  unmod     @1.0%:   7890 targets  (e=50, achieved 0.95%, CI [0.69-1.19], cutoff 0.439, units 7944)
+  nearzero  @1.0%:   1432 targets  (e=8, achieved 0.92%, CI [0.31-1.44], cutoff 0.773, units 1782)
+  isotope   @1.0%:   8826 targets  (e=59, achieved 1.00%, CI [0.73-1.23], cutoff 0.717, units 11248)
+  knownPTM  @1.0%:   4651 targets  (e=30, achieved 0.98%, CI [0.63-1.30], cutoff 0.729, units 7036)
+  other     @1.0%:  72747 targets  (e=494, achieved 1.00%, CI [0.91-1.09], cutoff 0.753, units 374141)
+  unique peptides with best hypothesis in unmod|nearzero (target strand): 6164
+  per-name (DESCRIPTIVE; @1% shown only when accepted entrapment >= 10):
+    other:+4Da                         @1%: n/a (insufficient entrapment evidence, e=5)   units   1515, raw entrap 8.2%
+    other:+12Da                        @1%: n/a (insufficient entrapment evidence, e=6)   units   1504, raw entrap 6.4%
+    other:-3Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1456, raw entrap 7.6%
+    other:+17Da                        @1%: n/a (insufficient entrapment evidence, e=5)   units   1450, raw entrap 8.3%
+    other:+5Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1446, raw entrap 7.5%
+    other:+2Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1439, raw entrap 7.6%
+    other:+6Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1434, raw entrap 8.3%
+    other:+7Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1419, raw entrap 7.2%
+    other:-16Da                        @1%: n/a (insufficient entrapment evidence, e=5)   units   1412, raw entrap 9.6%
+    other:+3Da                         @1%: n/a (insufficient entrapment evidence, e=6)   units   1401, raw entrap 8.6%
+    other:-2Da                         @1%: n/a (insufficient entrapment evidence, e=5)   units   1385, raw entrap 7.4%
+    other:+13Da                        @1%: n/a (insufficient entrapment evidence, e=6)   units   1368, raw entrap 7.9%
+    other:-5Da                         @1%: n/a (insufficient entrapment evidence, e=3)   units   1357, raw entrap 8.3%
+    other:-4Da                         @1%: n/a (insufficient entrapment evidence, e=5)   units   1355, raw entrap 8.3%
+    other:-6Da                         @1%: n/a (insufficient entrapment evidence, e=4)   units   1338, raw entrap 7.2%
+    other:+19Da                        @1%: n/a (insufficient entrapment evidence, e=0)   units   1330, raw entrap 10.5%
+    other:+21Da                        @1%: n/a (insufficient entrapment evidence, e=5)   units   1330, raw entrap 9.0%
+    other:+8Da                         @1%: n/a (insufficient entrapment evidence, e=4)   units   1328, raw entrap 8.9%
+    other:-7Da                         @1%: n/a (insufficient entrapment evidence, e=5)   units   1324, raw entrap 8.8%
+    other:+18Da                        @1%: n/a (insufficient entrapment evidence, e=5)   units   1321, raw entrap 9.6%
+PTM3_EXIT=0

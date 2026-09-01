@@ -1,0 +1,13 @@
+spx nearzero@1%: 7099  dt unmod@1%: 7015  spx unmod@1%: 4885
+OVERLAP spx-nearzero & dt-unmod: 4976  (70.1% of spx nearzero)
+OVERLAP spx-nearzero & spx-unmod: 4240 (double-listed peptides)
+spx (unmod|nearzero) UNION peptides: 7744   dt unmod: 7015
+spx nearzero delta stats: median -0.0162 Da, IQR [-0.0230,-0.0116], positive 6.2%
+delta-vs-calcmass slope: -18.30 ppm  (ppm-coherent slope => calibration; ~0 => centroid scatter)
+dt  nearzero delta stats: median -0.0091 Da, positive 40.9%, slope -26.68 ppm  (control)
+NZ_EXIT=0
+dt (unmod|nearzero) UNION: 8079   (spx union was 7,744)
+spx nearzero same-scan vs OWN closed: same-peptide 6350 (89.4%), different 50 (0.7%), scan absent in closed 699 (9.8%)
+msf_dt(13,932 form-level): sequence-level target peptides @1% TD-FDR = 12752  (of 386667 sequences)
+msf_q2k2(11,560 form-level): sequence-level target peptides @1% TD-FDR = 11055  (of 344894 sequences)
+NZ2_EXIT=0

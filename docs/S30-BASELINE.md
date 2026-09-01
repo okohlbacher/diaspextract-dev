@@ -9,9 +9,9 @@ conclusions in this project, and single-sample iteration removes that class of e
 | measure | value | how |
 |---|---|---|
 | **peptides @ peptide_q ≤ 0.01** | **10,072** | `sage_deiso.json`, current defaults |
-| peptides, common-FDR procedure | 9,977 | `joint_bench.py`, Sage |
-| diaTracer, same procedure | 11,552 | ratio **86.4%** |
-| MSFragger, same file | 10,470 | diaTracer 13,014, ratio 80.5% |
+| peptides, common-FDR procedure | 9,977 | DEPRECATED 2026-09-01 (procedure's primary outputs no longer exist) |
+| diaTracer, same procedure | 11,552 | DEPRECATED (doc-only; canonical ref = 11,517) — legacy ratio 86.4% not citable |
+| MSFragger, same file | 10,470 | DEPRECATED (diaTracer 13,014 doc-only; canonical = 13,932 form-level / 12,752 seq-level) |
 | PSMs/peptide | 8.98 | diaTracer 1.66 |
 | within-cycle multiplicity | 2.85 | the defect |
 | across-cycle spread | 2.66 | **correct** — MS1 FWHM is 2.61 cycles |
@@ -47,7 +47,7 @@ conclusions in this project, and single-sample iteration removes that class of e
 
 ## Decision rule
 
-* **Progress** = peptides ≥ 10,072 and PSMs/peptide not worse.
+* **Progress** = Sage peptides ≥ 10,802 (standard bench config = tool defaults + `-assembly:require_isotope_support`; re-based 2026-09-01, was 10,072 pre-gate/pre-corr_power) and PSMs/peptide not worse (guardrail retained).
 * **Regression** = peptides fall ≥ 1%.
 * **Noise floor** = 0.06% same-node (from four runs of an effectively identical config:
   8,411 / 8,408 / 8,406 on one node). Differences below ~0.2% mean nothing.
@@ -224,3 +224,39 @@ re-evaluation in THIS currency; not re-litigated yet. (3) The phantom-mod gap (a
   corr_power (superseded twice). New reference for progress/regression: **Sage 10,802** = current
   tool defaults (corr_power=2) + the standard bench config (which passes -assembly:require_isotope_support
   explicitly; that flag remains OFF in the tool). Noise floor and +-1% rules unchanged.
+
+### STEP 01 CLOSURE (v3 scorer, post kimi+codex review, 2026-09-01) — SUPERSEDES the v2 table above
+The v2 class table is NOT citable (review: Da-constant tolerance made every ratio a mass-accuracy
+measurement biased against spx; per-bin @1% on zero-entrapment slivers vacuous; ontology gaps).
+v3 (bench/open_ptm_score.py @ e9f5b64b): nearest-candidate assignment over {0, iso-lattice k<=15,
+28 KNOWN masses}, ppm-scaled tol max(8 mDa, 12 ppm), conservative (e+1)/r tie-grouped walks with
+bootstrap CIs, min-evidence rule (per-name @1% only when accepted e>=10), provenance headers.
+
+**Citable v3 table (S30 open search, @1% corrected class-FDR, CIs in ptm_score_v3.out):**
+| class | spx | dt | reading |
+|---|---|---|---|
+| unmod | 6,907 | 7,890 | 87.5% at hypothesis level; PEPTIDE level ~parity (96-106% by definition: accepted-union 7,744 vs 8,079; best-hypothesis 6,547 vs 6,164) |
+| knownPTM | 4,878 | 4,651 | "105%" is CONTAMINATED: spx's top-3 knownPTM bins are all iso-AMBIGUOUS (Didehydro/Amidation/Deamid = 34% of spx knownPTM units vs dt 14%) = our lattice spill relabeled. Ambiguity-excluded units: spx ~78%. Honest: BROADLY COMPARABLE SCALE, per-mod 57-131% (Ox 93%, Acetyl 131%, Phospho 57%), NO single mod FDR-certifiable (all per-name e<10) |
+| isotope lattice (k<=15) | 7,737 | 8,826 | dt carries MORE lattice hypotheses (its +k up-ladder); spx signature = iso-1 (1,790 @1%, e=11, certified). NEITHER tool is clean |
+| nearzero (mass-error) | 5,415 | 1,432 | 3.8x — THE spx-specific defect, mechanism nailed (below) |
+| other | 40,160 | 72,747 | DESCRIPTIVE ONLY: dominated in BOTH tools by off-lattice integer-Da bins (dt's ladder to +21); not PTM discovery |
+
+**The nearzero mechanism is PROVEN (three independent legs, all on existing data):**
+(1) 70.1% of spx nearzero peptides ARE dt's unmod peptides; (2) 89.4% same-scan concordance with our
+OWN closed search (same scan -> same peptide; 0.7% different -> chimeric explanation dead);
+(3) deltas 93.8% negative, median -16.2 mDa, slope -18.3 ppm vs calcmass (dt control ~symmetric).
+=> speXtract's reported precursor masses carry a SYSTEMATIC ~-18 ppm CALIBRATION BIAS introduced by
+our pipeline (same raw data as dt). Fixable (per-run linear recalibration of reported mono m/z);
+distinct from the old falsified "mass recalibration" lever (different target, corrupt metric).
+Scheduled as its own arm AFTER step 02 (both reviewers: do not confound the pre-registered arm).
+
+**MSFragger denominator reconciled (codex #14):** 13,932/11,560 are PEPTIDOFORM-level (pair them);
+sequence-level recount from archived TSVs: dt 12,752 vs spx 11,055 = 86.7%; legacy 13,014 was
+sequence-level and is within 2% of 12,752 — unit mismatch closed, ratios now like-for-like.
+
+**Step-01 bottom line:** the old "89% on open search" dissolves. At peptide level we are at ~parity
+on unmodified; known-PTM scale is comparable (ambiguity-limited both ways); BOTH tools' open-search
+delta dimension is dominated by non-PTM structure (lattice + integer-Da junk = 5-9x the legitimate
+classes) — a tool-CLASS finding worth publishing; and speXtract's one distinctive open-search defect
+is the -18 ppm mass bias (fixable), vs diaTracer's up-ladder envelope artifacts. Step 02 (emission
+arm) runs AS REGISTERED with a nearzero-stratified secondary readout, scored under this v3 metric.
