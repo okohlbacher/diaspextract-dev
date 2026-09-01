@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 NODE=${1:-ibminode05}
 SRC=src/DIAPseudoSpectra.cpp
 REMOTE_SRC=/scratch/kohlbach/OpenMS/src/topp/DIAPseudoSpectra.cpp
-if [ -n "$(git status --porcelain -- "$SRC")" ]; then
+if [ -n "$(git status --porcelain -- "$SRC" src/TdfMzCalibration.h)" ]; then
   if [ "${2:-}" != "--allow-dirty" ]; then
     echo "REFUSED: $SRC has staged or unstaged changes. Commit first, or pass --allow-dirty." >&2; exit 1
   fi
@@ -20,11 +20,19 @@ else
   DIRTY=""
 fi
 SHA=$(shasum -a 256 "$SRC" | cut -d' ' -f1)
+HDR_SHA=$(shasum -a 256 src/TdfMzCalibration.h | cut -d' ' -f1)
 GITREV="$(git rev-parse --short HEAD)${DIRTY}"
 scp -q "$SRC" "$NODE":"${REMOTE_SRC}.new"
 # the calibration model is header-only and lives in THIS repo; the OpenMS patch includes it, so it
 # must travel with every deploy or the cluster build silently uses a stale copy
 scp -q src/TdfMzCalibration.h "$NODE":/scratch/kohlbach/OpenMS/src/openms/include/OpenMS/FORMAT/
+# Refuse to deploy into a tree that has lost the calibration patch: it would build fine, silently
+# revert masses to the -5..-11 ppm chord, and record a clean-looking provenance [kimi review].
+ssh "$NODE" "grep -q TdfMzCalibration /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
+  echo "REFUSED: the cluster OpenMS tree has no calibration patch applied." >&2
+  echo "  run: scripts/apply_openms_patches.sh /scratch/kohlbach/OpenMS   (on the node)" >&2
+  exit 1; }
+
 ssh "$NODE" "set -eu
   mkdir /scratch/kohlbach/.deploy.lock 2>/dev/null || { echo 'REFUSED: another deploy holds the lock' >&2; exit 1; }
   trap 'rmdir /scratch/kohlbach/.deploy.lock' EXIT
@@ -37,7 +45,7 @@ ssh "$NODE" "set -eu
   fi
   OMSVER=\$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
   EPD=/scratch/kohlbach/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
-  { printf 'src_sha256=%s\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\n' \
+  { printf 'src_sha256=%s\ncalibration_header_sha256=$HDR_SHA\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\n' \
       '$SHA' '$GITREV' \"\$(date -Is)\" \"\$(sha256sum bin/DIAPseudoSpectra | cut -d' ' -f1)\" \
       \"\$OMSVER\" \"\$(sha256sum \$EPD | cut -d' ' -f1)\" \"\$(grep -c 'speXtract\|lock' \$EPD || true)\"
   } > bin/DIAPseudoSpectra.provenance.tmp && mv bin/DIAPseudoSpectra.provenance.tmp bin/DIAPseudoSpectra.provenance

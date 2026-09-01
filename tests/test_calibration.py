@@ -6,8 +6,11 @@ were produced by Bruker's own timsdata library on three diaPASEF files (S30/S08/
 TOF positions each) and are stored in tests/calibration_golden.json, so this test needs NO vendor
 library, NO cluster and NO raw data.
 
-Model (derived numerically against the vendor oracle; the exact formula the C++ converter in
-patches/openms-brukertims-mz-calibration.patch implements):
+Model (derived numerically against the vendor oracle). NOTE this is an INDEPENDENT re-implementation
+of the model, not a copy of the shipped C++: it uses the textbook quadratic root where
+src/TdfMzCalibration.h uses the cancellation-free form. That is deliberate -- two independent
+implementations agreeing on the vendor numbers is a stronger check than one implementation tested
+twice. tests/test_calibration_cpp.cpp is the one that exercises the code that actually ships.
 
     t_ns   = tof * DigitizerTimebase + DigitizerDelay
     C1_eff = C1 * (1 + dC1 * (T1_ref - T1_frame) / 1e6)          # temperature compensation
@@ -16,13 +19,15 @@ patches/openms-brukertims-mz-calibration.patch implements):
 Two regressions this catches:
   * dropping the C2*m term -- the bug in the widely-copied open implementation (timsrust-calibration,
     adapted then disabled by mzdata): -11..-40 ppm on this data;
-  * dropping the dC1 temperature term: ~0.67 ppm on C1, i.e. ~0.33 ppm on m/z (the golden
-    files span only ~0.03 K, so this guard is deliberately loose at 0.1 ppm).
+  * dropping the dC1 temperature term: ~0.67 ppm. (m is proportional to C1_eff, NOT its square
+    root, so dC1*dT/1e6 lands on m/z undiminished -- an earlier note here claimed ~0.33 ppm by
+    applying a spurious halving; the measured guard value 0.669 confirms 0.67. The golden files
+    span only ~0.03 K, so the guard threshold stays loose at 0.1 ppm.)
 Run: python3 tests/test_calibration.py
 """
 import json, math, os, sys
 
-TOL_PPM = 0.0001         # measured max is 2.6e-5 ppm; 1e-4 keeps headroom without being vacuous
+TOL_PPM = 0.0001         # measured max 2.6e-5 ppm; matches the C++ test's tolerance exactly
 NO_C2_MIN_PPM = 5.0      # dropping C2 must be caught: it is worth >>5 ppm
 NO_TEMP_MIN_PPM = 0.1    # dropping the temperature term must be visible
 

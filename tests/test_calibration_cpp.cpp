@@ -67,7 +67,7 @@ int main(int argc, char** argv)
       const double b = cal.frameFactor(t1);
       const double got = cal.tofToMz(tof, b);
       const double ppm = std::fabs(got - mz) / mz * 1e6;
-      if (ppm > 1e-3)
+      if (ppm > 1e-4)   // same tolerance as the python twin; measured max is 2.6e-5
       {
         std::fprintf(stderr, "FAIL frame %.0f tof %.0f: got %.6f want %.6f (%.6f ppm)\n",
                      frame, tof, got, mz, ppm);
