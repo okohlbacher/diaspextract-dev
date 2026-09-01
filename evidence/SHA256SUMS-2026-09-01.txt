@@ -10,3 +10,6 @@ d3820543a31bfa2a556e04f91719204ce0ac6f34dcca6670314a13df87064625  sage v0.14.7 x
 56b15a35060e1aa3b38508eed5e1b21ce697918bad75b450307160c86c652112  MSFragger-4.4.1.jar              (non-redistributable; version+hash only)
 29392d8085a1a3e5256688986d9acdf389992aebf937a4e8b860a0ea69cd14f9  DIAPseudoSpectra binary          (cluster build of the source below)
 859ea1e2dc9da82006b1a50f6485465813ff2ab427c5c5c60061970c2b1ee3a8  src/DIAPseudoSpectra.cpp         (== repo @ d4686f0, verified identical repo<->cluster 2026-09-01)
+# Appended 2026-09-01 (calibration step):
+a97086132c64bed75496f7da02aa43a741a8dba4b1dc031e194cd9c51a6f3e9d  libtimsdata-2-21-0-4.so (PRERELEASE TDF-SDK 2.21.0; archived to ceph tools/; local use only per EULA; Bruker notes a tims_index_to_mz change in this line)
+# Patched-loader provenance: patch applies to OpenMS 3.6.0-pre-exported-20260717 (tarball, no git; EPD sha in OPENMS-STATE.txt on ceph)

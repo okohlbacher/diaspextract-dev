@@ -283,7 +283,8 @@ TDF->mzpeak converter stores RAW TOF indices and its own m/z path uses the same 
 (mzdata implemented the true vendor model 0.66.3 but disabled it 0.66.5 as "not consistently better");
 the OpenMS in-tree MzPeakFile is unmerged/dormant and keyed to a superseded spelling. mzPeak re-poses
 the calibration problem; it does not solve it.
-**Impact on prior results:** closed-search counts unaffected (+-25 ppm tolerance absorbed -8 ppm);
+**Impact on prior results:** [CORRECTED by review: the original "closed counts unaffected" claim
+here was falsified by sdkcal itself, +12.3% -- candidate-window inclusion was never the only channel];
 step-01 v3 open-search numbers stand AS MEASURED but the nearzero class (5,415 vs 1,432) was this bug.
 Decisive arm `sdkcal` running: vendor-calibrated re-extraction -> expect ppm median -> ~-1, nearzero
 to collapse toward dt's level, and possibly small closed gains (tighter effective tolerance).
@@ -292,7 +293,7 @@ to collapse toward dt's level, and possibly small closed gains (tighter effectiv
 | metric | pre-fix (corr2) | **sdkcal (corr2 + vendor m/z)** | diaTracer |
 |---|---|---|---|
 | ppm median (open IDs) | -8.29 [-12.5,-4.0] | **+1.74 [-2.4,+6.1]** | -1.10 [-3.8,+1.2] |
-| closed Sage | 10,802 | **12,128 (+12.3%)** | 11,517 -> **we lead, 105.3%** |
+| closed Sage | 10,802 | **12,128 (+12.3%)** | 11,517 (scoped claim only -- see review verdict below) |
 | closed Sage entrapment | 10,381 @1.20% | **11,435 @1.26% [1.00-1.51]** | -- (FDR unchanged -> gain is real) |
 | closed MSFragger | 11,560 | 11,460 (-0.9%, FLAT) | 13,932 (82.3%) -> Sage-specific gain |
 | emission | 924,255 | 922,132 (~unchanged) | 700,434 |
@@ -308,3 +309,32 @@ S08/S23 holdout re-validation owed; falsified-lever re-audit only where a lever 
 with mass accuracy; (3) knownPTM ambiguous fraction unchanged (34.7% vs dt 14%) but the bins are now
 physically separable at +-4 ppm -- the 1,610-unit Amidation bin (1.4% raw entrap) deserves real
 chemical scrutiny rather than automatic dismissal as spill.
+
+### Calibration-step adversarial review verdict (kimi + codex, 2026-09-01) — 12,128 is PROVISIONAL
+Convergent verdict: the chord mechanism is the proven DOMINANT cause of the old raw-axis bias, but the
+step over-claimed in four ways, now corrected:
+1. **Attribution not isolated:** setting the env var flipped BOTH converters (m/z AND ion mobility) --
+   the SDK IM swap engaged for the first time ever alongside the m/z patch. Part of the +12.3% could be
+   IM-side; ALL prior IM-dependent results (incl. im_weight's validation) silently ran on the open IM
+   model. IM-isolation arm required (m/z vendor + IM open).
+2. **12,128 = provisional S30/vendor-SDK regression oracle, NOT a validated reference** until: cp0
+   ablation (running), the IM-isolation arm, and S08/S23 re-validation under vendor-cal.
+3. **"Leads diaTracer" is not citable.** Maximum defensible wording (codex): "On S30, using Sage and
+   the vendor-SDK calibration configuration, speXtract yielded 5.3% more closed-search peptides; under
+   MSFragger it yielded 17.7% fewer." Per-1k-spectra efficiency: spx 13.2 vs dt 16.4 (dt +25%) -- the
+   emission column stays in any public row. MSFragger flatness is UNINFORMATIVE (its default
+   calibrate_mass auto-corrects input bias), not evidence against the fix.
+4. **Residual defect remains:** sdkcal centers +1.74 ppm vs dt -1.10 (2.8 ppm apart, quartiles
+   symmetric -- earlier "right-skewed" claim wrong) and nearzero is halved, not closed (1.9x dt).
+   Candidates: our centroiding/mono reporting point. Paired same-feature spx-vs-dt reported-m/z
+   comparison is the discriminator. The -18 ppm (step-01 regression slope on the truncated nearzero
+   subset) vs -8.3 ppm (median, all IDs) are different statistics of the same defect -- reconciled here.
+Hardening obligations recorded: benchmark must FAIL CLOSED on a missing/wrong SDK path (silent
+fallback = known-wrong masses); opentims' BrukerTof2MzConverter DISCARDS tims_index_to_mz's return
+code (silent incomplete-buffer risk -- fix when the patch is vendored properly); SDK identity pinned
+in evidence/SHA256SUMS (sha a9708613..., PRERELEASE TDF-SDK 2.21.0 -- Bruker notes a tims_index_to_mz
+implementation change in this line); patch base = OpenMS 3.6.0-pre-exported-20260717 tarball; runtime
+headlines must be RE-MEASURED under the SDK path before publication. Determinism check (threads-8 vs
+threads-100 semantic/byte hash) running. Two-tier calibration product conflict stands: license-blocked
+users (the stated market) get -8 ppm masses from the open fallback -- an open true-polynomial port or
+loud two-tier disclosure is a v0.2.0 gate.
