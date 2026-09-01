@@ -188,3 +188,39 @@ differentiator), NOT a recall problem.** It cannot explain the 8,887 vs 9,989 op
 spend more effort here expecting recall. The open-search recall gap needs a different explanation --
 candidates not yet tested: our 924k vs diaTracer's 700k emission competing in the huge open search
 space, fragment quality on the faint tail, or precursor mass ACCURACY (ppm) rather than isotope offset.
+
+## STEP 01 (2026-09-01): the metric re-denominated + denominators reconciled
+
+### A. Delta-mass-BIN-level open-search scoring (bench/open_ptm_score.py v2, corrected estimator)
+Unit = (peptide, delta-bin); classes scored separately: unmod (|d|<=8 mDa), nearzero (8-900 mDa =
+mass-error tail, NOT a mod), artifact (iso lattice +-k*1.00335, k=1..9), known (curated Unimod list),
+other (off-lattice, per-BIN FDR walks for top bins -- pooled class FDR let junk bins ride; the spx
+-485..-499 Da window-edge wall at ~36% raw entrap collapses to ~30-80 @1% under per-bin walks).
+| class @1% corrected FDR | speXtract | diaTracer | ratio |
+|---|---|---|---|
+| unmodified | 4,885 | 7,015 | 70% |
+| known-PTM (the raison-d'etre number) | 2,692 | 3,092 | **87%** |
+| isotope-artifact (k<=9) | 4,073 | 3,611 | 1.13x (v1's "2.4x artifact" was a k<=3-grid artifact of its own: dt's big envelope ladder is ON-lattice at k>=4; ours skews to iso-1) |
+| **nearzero mass-error (8-900 mDa)** | **7,099** | **2,814** | **2.5x -- NEW finding** |
+| other (off-lattice) | 44,143 | 78,244 | 56% (interpret with care: correlated bins; contains e.g. -0.984 amidation-type masses off the iso lattice) |
+**Findings:** (1) In the honest currency diaTracer leads every legitimate class; the old
+"89% targets@FDR" UNDERSTATED the unmod gap (70%) and roughly matched known-PTM (87%).
+(2) NEW: spx's near-zero mass-error tail is 2.5x dt's, and spx unmod+nearzero = 11,984 vs dt 9,829 --
+much of our "missing unmodified" population is IDENTIFIED but MASS-DEGRADED (precursor 8-900 mDa off),
+i.e. an interpretation-quality defect (like the -1 Da class), pointing at PRECURSOR MASS ACCURACY.
+NOTE: "mass recalibration" sits in the falsified list, but it was falsified ON THE CORRUPT CLOSED
+METRIC -- exactly the class of falsification the 2026-09-01 review said may need re-audit. Flagged for
+re-evaluation in THIS currency; not re-litigated yet. (3) The phantom-mod gap (artifact class) is
++13%, not 2.4x -- the earlier headline overstated it by using a too-short isotope grid.
+
+### B. Denominators reconciled (the "no ratio is citable" blocker)
+- **CANONICAL diaTracer references from 2026-09-01 on: Sage 11,517** (dt_s30/results.sage.tsv,
+  nominal peptide_q<=0.01 -- re-verified today; TSV archived to ceph) and **MSFragger 13,932**
+  (msf_dt/fixed.tsv via score_msf_td target-decoy; archived).
+- **11,552 / 13,014 are DEPRECATED**: products of the 2026-07-22 joint common-FDR procedure whose
+  primary outputs (joint_results.json et al.) exist in NO file on the cluster -- doc-only numbers.
+  Not to be used in ratios. The frozen table's 86.4%/80.5% ratios are legacy.
+- **Decision-rule re-base:** the frozen threshold 10,072 predates the isotope-support gate AND
+  corr_power (superseded twice). New reference for progress/regression: **Sage 10,802** = current
+  tool defaults (corr_power=2) + the standard bench config (which passes -assembly:require_isotope_support
+  explicitly; that flag remains OFF in the tool). Noise floor and +-1% rules unchanged.
