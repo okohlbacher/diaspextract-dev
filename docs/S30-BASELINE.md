@@ -361,3 +361,20 @@ vendor-IM contribution; (3) S08/S23 re-validated above. **New open-path referenc
 Residual +1.5..+3.2 ppm persists across all files and BOTH calibration paths -> consistent with the
 centroiding/mono-reporting hypothesis (Option I), not the m/z axis. diaTracer per-file ppm + S08/S23
 head-to-head running to test whether part of it is instrument/per-file rather than ours.
+
+### FIRST 3-FILE HEAD-TO-HEAD vs diaTracer (Sage closed, corrected calibration, 2026-09-01)
+diaTracer had ONLY ever been measured on S30; S08/S23 references created here under identical config.
+| file | speXtract (table model) | diaTracer | ratio | our ppm | dt ppm |
+|---|---|---|---|---|---|
+| S30 | **11,976** | 11,517 | **104.0%** | +1.49 | -1.37 |
+| S08 | **10,333** | 10,242 | **100.9%** | +3.19 | +0.27 |
+| S23 | **9,891**  |  8,948 | **110.5%** | +2.29 | -0.60 |
+**speXtract now matches or exceeds diaTracer on closed Sage on ALL THREE files** (100.9-110.5%) --
+no vendor library, open BSD path. Entrapment FDR is comparable (dt S08 1.24% [0.99-1.54], S23 1.22%
+[0.96-1.53]; ours S30 1.26% [1.00-1.51]) -> the gains are not FDR inflation.
+CAVEATS THAT STAND: (a) emission is still ~1.32x dt, so per-spectrum efficiency still favours dt --
+publish the emission column with any count row; (b) MSFragger arm pending (dt led 82% there; that
+engine's gap is search/detection-side); (c) single cohort/instrument -- public-PXD replication is
+still the external-claim gate; (d) our ppm residual (+1.5..+3.2) is 2-4 ppm ABOVE diaTracer's
+(-1.4..+0.3) on every file: dt's per-file spread (-1.37/+0.27/-0.60) is small and centred, so the
+residual is OURS (centroiding/mono-reporting, Option I), NOT a per-file instrument property.
