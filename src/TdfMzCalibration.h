@@ -46,8 +46,7 @@ struct TdfMzCalibration
   double T1_ref = 0.0;  ///< reference digitizer temperature for the calibration
   double dC1 = 0.0;     ///< ppm/K drift of C1
   double dC2 = 0.0;     ///< drift of C2 -- NOT modelled; must be 0 (see isSupported)
-  double C3 = 0.0;      ///< higher-order term -- NOT modelled; must be 0
-  double C4 = 0.0;      ///< higher-order term -- NOT modelled; must be 0
+  double C3 = 0.0, C4 = 0.0;   ///< higher-order terms -- NOT modelled; must be 0
 
   /// Why this calibration cannot be used, or empty if it can. Fail closed, never approximate.
   std::string unsupportedReason() const
@@ -55,8 +54,8 @@ struct TdfMzCalibration
     if (model_type != 1) return "MzCalibration ModelType " + std::to_string(model_type) + " != 1";
     if (!(C1 > 0.0)) return "MzCalibration C1 <= 0";
     if (dC2 != 0.0) return "MzCalibration dC2 != 0 (temperature drift of C2 is not modelled)";
-    if (C3 != 0.0) return "MzCalibration C3 != 0 (higher-order term is not modelled)";
-    if (C4 != 0.0) return "MzCalibration C4 != 0 (higher-order term is not modelled)";
+    if (C3 != 0.0 || C4 != 0.0) return "MzCalibration C3/C4 != 0 (higher-order terms are not modelled)";
+    if (C2 < 0.0) return "MzCalibration C2 < 0 (outside the modelled/verified regime)";
     if (!(digitizer_timebase > 0.0)) return "DigitizerTimebase <= 0";
     return std::string();
   }
@@ -81,10 +80,14 @@ struct TdfMzCalibration
     // Stable root of C2*u^2 + b*u + (C0 - t) = 0: the textbook form (-b + sqrt(disc))/(2*C2)
     // subtracts two nearly equal numbers (b ~ 2.5e3, C2 ~ 1e-3), throwing away ~4 digits.
     // u = 2*(t - C0) / (b + sqrt(disc)) is algebraically identical and cancellation-free.
+    // t < C0 is unphysical (arrival before the calibration zero) and would yield a NEGATIVE u whose
+    // square is a plausible-looking but WRONG mass -- the exact silent-wrongness this file exists to
+    // prevent. Both it and a negative discriminant return 0.0, which callers see as an out-of-range
+    // peak rather than a credible m/z.
     const double disc = b * b - 4.0 * C2 * (C0 - t);
-    if (disc < 0.0) return 0.0;
+    if (disc < 0.0 || t <= C0) return 0.0;
     const double denom = b + std::sqrt(disc);
-    if (denom == 0.0) return 0.0;
+    if (!(denom > 0.0)) return 0.0;
     const double u = 2.0 * (t - C0) / denom;
     return u * u;
   }
@@ -96,14 +99,5 @@ struct TdfMzCalibration
     return (t - digitizer_delay) / digitizer_timebase;
   }
 };
-
-/// Which m/z calibration the loader actually used, for stamping into the output. Set once during
-/// file load, read at write time: without it an archived mzML is not attributable to a calibration
-/// path, and a silent fallback would be invisible after the fact.
-inline std::string& calibrationProvenance()
-{
-  static std::string provenance = "unset";
-  return provenance;
-}
 
 } // namespace spextract

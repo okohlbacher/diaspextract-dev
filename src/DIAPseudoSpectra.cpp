@@ -6,7 +6,6 @@
 // $Authors: OpenMS-DIAtracer project $
 // --------------------------------------------------------------------------
 
-#include <OpenMS/FORMAT/TdfMzCalibration.h>   // spextract::calibrationProvenance()
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -2514,7 +2513,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // the same command produces different intensities across tool versions with no trace of why.
     // [provenance] WHICH m/z calibration produced this file. Without it an archived mzML is not
     // attributable to a calibration path and a silent fallback would be invisible afterwards.
-    out_exp.setMetaValue("spx:mz_calibration", spextract::calibrationProvenance());
+    // The value travels ON THE LOADED EXPERIMENT (set by BrukerTimsFile), not through a header
+    // static: an inline static can be duplicated across a shared-library boundary, in which case
+    // the tool would read its own copy and always report "unset" [vibe/claude review 2026-09-01].
+    out_exp.setMetaValue("spx:mz_calibration",
+                         exp.metaValueExists("spx:mz_calibration")
+                           ? exp.getMetaValue("spx:mz_calibration") : DataValue("unset"));
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     out_exp.setMetaValue("spx:require_isotope_support", (int)getFlag_("assembly:require_isotope_support"));

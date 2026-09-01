@@ -101,8 +101,29 @@ int main(int argc, char** argv)
   if (bad.isSupported()) { std::fprintf(stderr, "C3 != 0 must be rejected\n"); return 1; }
   bad.C3 = 0.0; bad.C4 = 1e-9;
   if (bad.isSupported()) { std::fprintf(stderr, "C4 != 0 must be rejected\n"); return 1; }
-  bad.C4 = 0.0; bad.C1 = 0.0;
+  bad.C4 = 0.0; bad.C2 = -1e-6;
+  if (bad.isSupported()) { std::fprintf(stderr, "C2 < 0 must be rejected\n"); return 1; }
+  bad.C2 = 0.0; bad.C1 = 0.0;
   if (bad.isSupported()) { std::fprintf(stderr, "C1 <= 0 must be rejected\n"); return 1; }
+
+  // unphysical TOF must NOT return a plausible mass (silent-wrongness guard)
+  spextract::TdfMzCalibration ok;
+  ok.model_type = 1; ok.digitizer_timebase = 0.125; ok.digitizer_delay = 25655.375;
+  ok.C0 = 279.3262846272992; ok.C1 = 155279.13067653627; ok.C2 = 0.001260061434461731;
+  ok.T1_ref = 25.693668980735552; ok.dC1 = 20.0;
+  if (!ok.isSupported()) { std::fprintf(stderr, "reference calibration must be supported\n"); return 1; }
+  const double bb = ok.frameFactor(ok.T1_ref);
+  // tof = 0 is still physical here: t = delay (25655) is far above C0 (279), and the model correctly
+  // returns the acquisition floor, ~m/z 100 (MzAcqRangeLower). Assert that rather than assuming 0.
+  const double mz_at_zero = ok.tofToMz(0.0, bb);
+  if (!(mz_at_zero > 99.0 && mz_at_zero < 101.0))
+  { std::fprintf(stderr, "tof=0 should give the ~100 m/z acquisition floor, got %.6f\n", mz_at_zero); return 1; }
+  if (!(ok.tofToMz(1e5, bb) > mz_at_zero))
+  { std::fprintf(stderr, "m/z must increase with tof\n"); return 1; }
+  // the t <= C0 guard: force it with a calibration whose zero sits above the arrival time
+  spextract::TdfMzCalibration late = ok; late.C0 = 1e9;
+  if (late.tofToMz(1e5, late.frameFactor(late.T1_ref)) != 0.0)
+  { std::fprintf(stderr, "t <= C0 must yield 0.0, not a plausible-looking mass\n"); return 1; }
 
   std::printf("OK  %d golden cases, %d files: max %.6f ppm; C2 ablation %.2f ppm; round trip + negative paths pass\n",
               n_cases, n_files, worst, worst_noc2);
