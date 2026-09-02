@@ -119,7 +119,14 @@ namespace spx
         if (std::sscanf(tp->c_str(), "%lf,%lf", &c0, &c1) != 2 || !(c1 > 0)) throw std::runtime_error("mzpeak: bad transform_params " + *tp);
 
         // (2) the vendor tdf: gunzip vendor/analysis.tdf.gz to a temp file, read MzCalibration + Frames.T1
-        std::vector<char> gz = readMember_(z, "vendor/analysis.tdf.gz");
+        // --no-vendor archives have no embedded tdf: accept a sidecar via SPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz>
+        std::vector<char> gz;
+        if (const char* side = std::getenv("SPEXTRACT_MZPEAK_TDF"))
+        {
+          FILE* sf = std::fopen(side, "rb"); if (!sf) throw std::runtime_error(std::string("mzpeak: cannot read SPEXTRACT_MZPEAK_TDF ") + side);
+          char b[1 << 16]; size_t n; while ((n = std::fread(b, 1, sizeof b, sf)) > 0) gz.insert(gz.end(), b, b + n); std::fclose(sf);
+        }
+        else gz = readMember_(z, "vendor/analysis.tdf.gz");
         char tmpl[] = "/tmp/spx_mzpeak_tdf_XXXXXX"; int fd = mkstemp(tmpl); if (fd < 0) throw std::runtime_error("mzpeak: mkstemp");
         close(fd);
         { z_stream zs{}; inflateInit2(&zs, 16 + MAX_WBITS); FILE* out = std::fopen(tmpl, "wb");

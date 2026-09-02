@@ -273,3 +273,14 @@ fix: a synchronous single-threaded decode mode for callers that parallelise exte
 `MZBegin` lookups instead of a per-band scan, and skipping fragments whose support < min_corr_pts before the
 dot product: digest identical to P1; WINDOW_LOOP 763 s (vs 759 s), total 15:43, peak RSS 101.8 GB (vs 105.6).
 The loop is not bound by either loop; kept as the cheaper code path, not counted as a win.
+**A4(i) allocator A/B, first arm (17:57, `LD_PRELOAD=libtcmalloc_minimal.so.4` on the R3 binary):** byte-identical;
+total 15:49 (vs 15:43 glibc, noise), **peak RSS 94.3 GB vs 101.8 GB (−7.5 GB, −7%)**, system time 5:12 vs 10:11.
+A memory win, not a wall win at 100 threads. Full `libtcmalloc.so.4` arm running.
+**A4(i) second arm (18:13, full `libtcmalloc.so.4`):** byte-identical; peak RSS 97.5 GB (glibc 101.8, tcmalloc_minimal
+94.3); wall 15:45 (noise). Verdict: tcmalloc_minimal is the better allocator arm (−7% RSS, wall-neutral, half the
+system time); adopt via `LD_PRELOAD` in the benchmark harness, link in CMake only when a release build follows.
+**A3(iv) `perf:ms1_trace_bands=48` (18:31): WORSE and not output-identical.** MS1_TRACE 144 s at 2.9x (vs 61-80 s at
+12 bands, 5.1x) and 922,899 spectra vs 922,902 -- the MS1 band partition is NOT exact (traces near band edges),
+so the knob is quality-affecting (BC-3 was right). Keep 12; drop A3(iv).
+**D1 first attempt (18:32) aborted:** the cluster copy of the S30 archive is the --no-vendor one, so
+`vendor/analysis.tdf.gz` is absent; the loader now accepts `SPEXTRACT_MZPEAK_TDF=<sidecar>`; rerun in flight.

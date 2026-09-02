@@ -24,6 +24,17 @@
   length change and had falsely flagged two spectrum-identical files. Loader batch size does NOT change content
   (922,902 spectra, 0 differ; Sage set identical), and **neither does the thread count**: threads 8 == threads 100 on two pairs with the fixed digest, retracting the 2026-09-01 "thread-count dependent" finding. Output is byte-identical spectrum data at any thread count and loader batch.
 
+### Scoring / assembly
+- **E5:** `apportion` and `rp_max` now go through the same emitted-intensity weights as the default path
+  (`weighted_()`); they had silently bypassed `corr_power`/`im_weight`, so every earlier A/B of those flags was
+  confounded. First clean apportion run: -3.9% peptides (falsified again; NNLS cut).
+- Under test (env switches, defaults unchanged): `SPEXTRACT_MZ_ESTIMATOR=apex` (+2.6% Sage peptides on S30,
+  MSFragger gate pending), `SPEXTRACT_PICK_MZ_MODE=seed|top3` (pick-level m/z), `SPEXTRACT_DROP_PREC_ISO=1`
+  (drop the precursor's M+1..M+3 from fragment lists; 28%/25% of spectra carried them).
+- Output-identical: band partition by binary search (R3), early skip of fragments below `min_corr_pts` support.
+- Help texts of falsified flags (`rp_max`, `consolidate`, `merge`) now say so; `charge:iso_im_tolerance` help
+  no longer contradicts its default.
+
 ### Docs
 - `docs/BACKLOG-ANALYSIS-2026-09-02.md`: every open issue with status, root cause, fix, gate; reviewed by kimi + codex
   (`docs/reviews/`). Confirmed today: apportion/rp_max bypass corr_power (E5); 28% of spectra carry the precursor M+1 as a

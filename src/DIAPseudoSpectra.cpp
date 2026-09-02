@@ -152,6 +152,7 @@ namespace
   bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
+  bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
 
   static std::string rss_()
   {
@@ -1458,6 +1459,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (fabs(f.rt - pc.rt) > delta_rt) continue;                   // RT gate
         if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
+        // [C9 A/B, 2026-09-02] 28% of emitted spectra carry the precursor's M+1 and 25% its M+2 as
+        // "fragments" (unfragmented survivors). SPEXTRACT_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
+        if (drop_prec_iso_ && pc.charge > 0)
+        {
+          bool iso = false;
+          for (int k = 1; k <= 3 && !iso; ++k) iso = fabs(f.mz - (pc.mono_mz + k * 1.00335 / pc.charge)) < 0.01;
+          if (iso) continue;
+        }
         double dot = 0; int overlap = 0;
         // [R2-late, 2026-09-02] overlap <= support, so a fragment with fewer support points than
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
