@@ -474,3 +474,12 @@ Mean ratio 109.2% (n=3 paired; 09-01 was 105.1%). Entrapment of the S30 apex arm
 S30: 11,927 vs 11,463 (+4.1%; 85.6% of diaTracer's 13,932). Runtime note: S08 (1.23 M spectra, the largest file)
 26:51 wall / 156 GB peak; S23 15:28 / 109 GB. The apex arm outputs are the new benchmark reference
 (`d7_apex`, `d13_apex_s08`, `d13_apex_s23`); the mean-estimator numbers stay as the 09-01 row.
+
+### C1(b) rescoring A/B, first two attempts (2026-09-02, 21:30)
+FragPipe 24.0 headless (Basic-Search workflow, 25 ppm, our human_decoy FASTA) on the S30 apex arm and on diaTracer.
+MSBooster (DIA-NN predictions) aborts on OUR pepXML both with and without spectrum prediction: "Prediction missing
+in file for REM[15.9949]DQTM[15.9949]AANAQK|3" (a PSM whose peptide DIA-NN's predictor does not emit). diaTracer's
+arm completed: **18,670 peptides / 37,086 PSMs at 1% (Percolator + Philosopher sequential/picked)** vs 13,932
+peptidoforms in the raw-hyperscore walk -- rescoring is worth +34% on diaTracer's spectra, which is exactly why the
+comparison must be made on both. Third attempt running: MSBooster off, Percolator on MSFragger features only, both
+tools (like-for-like).
