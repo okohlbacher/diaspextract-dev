@@ -31,6 +31,16 @@ Verified against OpenMS `3.6.0-pre-exported-20260717`. Other versions may need t
 Optionally, `OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library instead (an
 oracle for cross-checking; not required, not redistributed).
 
+### Optional: `.mzpeak` input (mzPeak C++ library)
+
+Build the library once against the same Arrow/Parquet/libzip OpenMS uses (`scripts/build_mzpeak_lib.sh`;
+GCC 13 / Arrow 23 need `patches/spx_ranges_to.h` and `patches/mzpeak-cpp-arrow23.py`, both applied by the
+script), then configure speXtract with `-DMZPEAK_ROOT=<checkout>`. Inside an OpenMS source tree use
+`patches/openms-topp-mzpeak-cmake.py` instead. ims-compact archives store raw TOF behind a two-point
+transform; the loader recovers the exact TDF calibration from the embedded `vendor/analysis.tdf.gz` (or
+`SPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz>` for `--no-vendor` archives) and refuses to run without it unless
+`SPEXTRACT_MZPEAK_EXACT=0`.
+
 ## Run
 
 ```bash
