@@ -41,6 +41,13 @@
 - Help texts of falsified flags (`rp_max`, `consolidate`, `merge`) now say so; `charge:iso_im_tolerance` help
   no longer contradicts its default.
 
+### Benchmark findings
+- MSFragger gap is content-side: FragPipe rescoring (Percolator, MSBooster off for both) gives 13,211 vs diaTracer
+  15,947 peptides (82.8%; raw-hyperscore walk 85.6%) -- rescoring lifts both tools and leaves the ratio; ours has
+  8.6 PSMs/peptide vs 2.0. Entrapment of the shipping arm: 1.28% / 0.95% / 1.32% at nominal 1% on S30/S08/S23.
+- Falsified today (kept in docs so they are not re-proposed): apportion (clean, -3.9%), precursor-isotope stripping
+  (-2.3%), median/seed/top3 m/z estimators, 48 MS1 trace bands (slower, not output-identical), MALLOC_ARENA_MAX=4.
+
 ### Docs
 - `docs/BACKLOG-ANALYSIS-2026-09-02.md`: every open issue with status, root cause, fix, gate; reviewed by kimi + codex
   (`docs/reviews/`). Confirmed today: apportion/rp_max bypass corr_power (E5); 28% of spectra carry the precursor M+1 as a

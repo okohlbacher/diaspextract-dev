@@ -483,3 +483,22 @@ arm completed: **18,670 peptides / 37,086 PSMs at 1% (Percolator + Philosopher s
 peptidoforms in the raw-hyperscore walk -- rescoring is worth +34% on diaTracer's spectra, which is exactly why the
 comparison must be made on both. Third attempt running: MSBooster off, Percolator on MSFragger features only, both
 tools (like-for-like).
+
+### C1(b) RESCORING A/B, like-for-like (2026-09-02, 21:46): rescoring does NOT close the MSFragger gap
+FragPipe 24.0 headless, Basic-Search (MSFragger 25 ppm, our human_decoy FASTA) -> Percolator -> Philosopher
+(sequential, picked, 1% peptide), MSBooster OFF for both (it aborts on our pepXML, see above):
+| S30 arm | peptides @1% | PSMs @1% | PSMs / peptide | ratio spx/dt |
+|---|---|---|---|---|
+| speXtract apex | 13,211 | 113,685 | 8.6 | — |
+| diaTracer | 15,947 | 31,700 | 2.0 | **82.8%** |
+| (raw-hyperscore walk, for reference) | 11,927 vs 13,932 | | | 85.6% |
+| (diaTracer + MSBooster RT+spectra) | 18,670 | 37,086 | 2.0 | ours unavailable |
+Rescoring lifts both tools (+11% / +14%) and the ratio does not move (85.6 -> 82.8%). So the MSFragger deficit is
+not a scoring-function artefact that a rescorer repairs: the 3,600 diaTracer-only peptides have no competitive PSM
+in our output at all. Together with H3 (identical scores on shared peptides) this points at CONTENT/coverage of the
+faint tail -- emission competition or missing fragments -- not at search-side handling. Our 8.6 PSMs per peptide vs
+diaTracer's 2.0 is the over-emission signature: Percolator's peptide-level FDR gives redundancy nothing.
+**Decision (plan step 8):** the next attribution arms are content-side: (c) the emission-controlled arm (pre-registered
+step 02: quality-gate 924k -> ~700k + diaTracer-precursor-matched sub-arm, both engines, full FDR curves) and (d) the
+oracle-fragment arm. The learned charge/mono predictor stays conditional on (d). A MSBooster-tolerant rerun (var mods
+capped identically for both tools) is owed for the +17% predictions bring diaTracer.
