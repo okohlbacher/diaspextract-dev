@@ -571,3 +571,9 @@ funnel: no hypothesis or < min_frags). This is the first mechanistic, per-peptid
 **Pre-registered arms (running next, both engines):** (a) `gate:min_correlation 0.2`, (b) `trace:ms2_noise_threshold_int 5`,
 (c) both. Prediction: the dt-only matched-ion deficit shrinks toward 0 and the MSFragger ratio rises above 90%;
 falsifier: the deficit stays at +2 (then the missing ions are not in our traces at all -> MS2 aggregation / detector).
+
+### CONTENT CANDIDATE 1 FALSIFIED (2026-09-03, 01:52): corr_power=2 helps MSFragger too
+`-assembly:corr_power 0` on the apex arm: Sage 11,502 (−8.3% vs 12,537; only-cp2 1,640 / only-cp0 605) and
+**MSFragger 11,429 (−4.2% vs 11,927)**. The correlation-power intensity reshaping is a win on both engines (first
+MSFragger measurement of it; the July +8-10% was Sage-only). Intensity structure is not what MSFragger dislikes in our
+faint-tail spectra. Remaining content candidate: fragment coverage (the +2 matched-ion deficit) -- arms running.
