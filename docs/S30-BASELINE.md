@@ -462,3 +462,15 @@ The −2.4 ppm fragment offset vs diaTracer survives BOTH the trace estimator (a
 (weighted/seed/top3) -- it is not produced by anything in our reporting chain after the TOF->m/z conversion, which is
 the same exact model on both sides (2.5e-5 ppm). What remains: diaTracer's own fragment m/z reporting/recalibration.
 That is not a defect to chase on our side; the precursor axis is where our reporting differs (apex fixed a third).
+
+### APEX estimator: 3-FILE RESULT + entrapment (2026-09-02, 20:57) -- the new open-path reference
+| file | mean estimator (09-01 reference) | **apex (new default)** | gain | diaTracer (Sage) | ratio | paired precursor ppm vs dt (mean → apex) | fragment |
+|---|---|---|---|---|---|---|---|
+| S30 | 12,217 | **12,537** | +2.6% | 11,517 | **108.9%** | +1.12 → +0.78 | −2.41 |
+| S08 | 10,333 | **10,789** | +4.4% | 10,242 | **105.3%** | +2.63 → +1.47 | −1.95 |
+| S23 | 9,891 | **10,156** | +2.7% | 8,948 | **113.5%** | +1.48 → +1.17 | −2.13 |
+Mean ratio 109.2% (n=3 paired; 09-01 was 105.1%). Entrapment of the S30 apex arm: **1.28% [1.03-1.53]** at nominal 1%
+(table/mean arm 1.37% [1.10-1.64]; diaTracer 1.22-1.24% on S08/S23) -- the gain is not bought with FDR. MSFragger on
+S30: 11,927 vs 11,463 (+4.1%; 85.6% of diaTracer's 13,932). Runtime note: S08 (1.23 M spectra, the largest file)
+26:51 wall / 156 GB peak; S23 15:28 / 109 GB. The apex arm outputs are the new benchmark reference
+(`d7_apex`, `d13_apex_s08`, `d13_apex_s23`); the mean-estimator numbers stay as the 09-01 row.

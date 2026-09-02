@@ -31,7 +31,8 @@
 - **Reported m/z of every trace is now the APEX member's m/z** (`SPEXTRACT_MZ_ESTIMATOR=apex`, the new default;
   `mean` restores the OpenMS intensity-weighted centroid): S30 +2.6% Sage (12,537 vs 12,217) and +4.1% MSFragger
   (11,927 vs 11,463) with the paired precursor mass error vs diaTracer +1.12 -> +0.78 ppm. Both-engines gate passed;
-  S08/S23 and entrapment on the apex arm in progress.
+  generalises: S08 +4.4% (10,789), S23 +2.7% (10,156); mean ratio vs diaTracer on Sage 105.1% -> 109.2%;
+  entrapment of the apex arm 1.28% [1.03-1.53] at nominal 1%.
 - Under test (env switches, defaults unchanged): `SPEXTRACT_PICK_MZ_MODE=seed|top3` (pick-level m/z; the -2.4 ppm
   fragment offset vs diaTracer is upstream of the trace estimator), `SPEXTRACT_DROP_PREC_ISO=1` (drop the precursor's
   M+1..M+3 from fragment lists; 28%/25% of spectra carried them -- FALSIFIED, -2.3%, keep off), `SPEXTRACT_MZPEAK_EXACT=1` (exact calibration for
