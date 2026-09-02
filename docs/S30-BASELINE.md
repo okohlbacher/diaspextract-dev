@@ -449,3 +449,16 @@ restores the OpenMS centroid). Owed next: S08/S23 apex arms (Sage) and entrapmen
 28.4% / 24.8% (M+1 / M+2 within 10 ppm) to 0.2% / 0.2%, and Sage drops **12,537 -> 12,249 (-2.3%**, only-apex
 1,061 / only-dropiso 773; same binary, env switch). The unfragmented precursor isotopes in a pseudo-MS/MS spectrum are
 useful to the engine (or their removal lets weaker peaks refill the 500-cap). Keep them; switch stays off.
+
+### Pick-level m/z modes FALSIFIED (2026-09-02, 20:00) -- and the fragment offset is not in our estimator chain
+`pickIMCluster:mz_mode` (OpenMS PeakPickerIM patch; default `weighted` = unchanged, verified byte-identical to the
+apex-default run):
+| pick m/z | spectra | Sage @1% | vs apex default (12,537) | paired precursor / fragment ppm vs dt |
+|---|---|---|---|---|
+| weighted (default) | 927,813 | 12,537 | identical | +0.78 / −2.41 |
+| seed (most intense point) | 896,143 | 12,196 | −2.7% | +0.73 / −2.38 |
+| top3 (weighted mean of 3) | 926,359 | 12,325 | −1.7% | +0.70 / −2.42 |
+The −2.4 ppm fragment offset vs diaTracer survives BOTH the trace estimator (apex/median/mean) and the pick centroid
+(weighted/seed/top3) -- it is not produced by anything in our reporting chain after the TOF->m/z conversion, which is
+the same exact model on both sides (2.5e-5 ppm). What remains: diaTracer's own fragment m/z reporting/recalibration.
+That is not a defect to chase on our side; the precursor axis is where our reporting differs (apex fixed a third).
