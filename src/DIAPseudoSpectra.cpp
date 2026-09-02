@@ -2035,6 +2035,17 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       writeLogInfo_("require_isotope_support: dropped " + String(before - precursors.size())
                     + " guessed precursors, " + String(precursors.size()) + " isotope-supported remain");
     }
+    // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
+    // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
+    // emission without touching fragment sharing. Pre-registered falsifier in S30-BASELINE.
+    if (const char* mi = std::getenv("SPEXTRACT_MIN_ISOTOPES"))
+    {
+      const int k = std::atoi(mi); const size_t before = precursors.size();
+      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
+                       [k](const Precursor_& pc){ return pc.n_isotopes < k; }), precursors.end());
+      writeLogInfo_("SPEXTRACT_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
+                    + " precursors with fewer isotope peaks, " + String(precursors.size()) + " remain");
+    }
     // [ms1-funnel] Measured recall against a DIA-NN truth set is 74.3% vs diaTracer's 84.4%, but a
     // single number cannot say WHERE a precursor is lost: no MS1 trace at all, a trace that never
     // became a hypothesis, or a hypothesis that never produced a spectrum. Dump both upstream
