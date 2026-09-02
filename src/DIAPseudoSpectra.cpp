@@ -240,7 +240,13 @@ namespace
   Trace toTrace(const MassTrace& mt)
   {
     Trace t;
-    t.mz = mt.getCentroidMZ();
+    // [C2 A/B, 2026-09-02] reported m/z estimator. Default = OpenMS centroid (intensity-weighted mean over
+    // the trace). Paired vs diaTracer on shared peptides our precursor m/z is +1.5..+2.6 ppm high and our
+    // fragment m/z ~2 ppm low, so the estimator is under test: SPEXTRACT_MZ_ESTIMATOR=apex|median|mean.
+    static const std::string mz_est = std::getenv("SPEXTRACT_MZ_ESTIMATOR") ? std::getenv("SPEXTRACT_MZ_ESTIMATOR") : "mean";
+    if (mz_est == "apex" && mt.getSize() > 0) t.mz = mt[mt.findMaxByIntPeak(false)].getMZ();
+    else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); t.mz = m2.getCentroidMZ(); }
+    else t.mz = mt.getCentroidMZ();
     t.rt = mt.getCentroidRT();
     t.im = mt.getCentroidIM();
     t.intensity = mt.getMaxIntensity(false);
@@ -761,7 +767,7 @@ protected:
     setValidStrings_("assembly:rank_by", {"correlation", "intensity"});
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "[recall] Down-weight each emitted fragment's intensity by a Gaussian of its ion-mobility distance from the precursor, exp(-(dIM)^2 / 2 sigma^2). TIMS precedes fragmentation so a TRUE fragment shares the precursor's 1/K0 exactly; a co-isolating interferent at the edge of the gate:delta_im band is suppressed. WITHIN-spectrum (no fragment removed or redistributed across precursors) so it escapes the fan-out depletion that falsified competitive/apex/deconvolution, and directly un-buries faint true fragments under the engine's intensity top-150. 0 = off. Try ~0.005 (half the 0.01 IM gate). [bench]", false);
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "[Q2] Multiply each emitted fragment's intensity by corr^k (k>=0), where corr is the fragment-precursor co-elution score. EMIT-ONLY (excluded from the max_fragments cap key), so it preserves peak membership and only re-ranks the intensities the search engine sees toward well-correlating (true co-eluting) fragments and away from bright interferents; WITHIN-spectrum so it escapes fan-out depletion. DEFAULT 2.0 since 2026-07-28: validated on S30 (tuning) + S08 + S23 (held out) at frozen k=2 -- +8-10%% Sage / +5-8%% MSFragger over base on all three, both engines, at controlled empirical FDR; k=2 sits one step below the ~k=3 Sage peak (the safe side of the crossover where c^k starts crushing the faint tail). 0 = off (pre-2026-07-28 behaviour). Dimensionless + bounded (c in [0.3,1]) so it transfers across instruments, unlike assembly:im_weight_sigma. [bench]", false);
-    registerIntOption_("assembly:rp_max", "<n>", 0, "Soft RP rank-pruning (DIA-Umpire style): keep each fragment in only its top-N best-correlating precursors. 0 = unlimited (share-all, the default and current best); 1 = competitive (winner-take-all). Small N (2-8) is the useful range given typical fan-out ~6. RFmax (per-precursor fragment cap) is 'max_fragments'. Runs emit a fan-out histogram so you can see whether a given rp_max actually bites. [bench]", false);
+    registerIntOption_("assembly:rp_max", "<n>", 0, "FALSIFIED on S30 (2026-07, all cross-precursor redistributions lost peptides; note the A/B ran with corr_power silently OFF until 2026-09-02 [E5]) -- keep 0. Soft RP rank-pruning (DIA-Umpire style): keep each fragment in only its top-N best-correlating precursors. 0 = unlimited (share-all, the default); 1 = competitive (winner-take-all). Small N (2-8) is the useful range given typical fan-out ~6. RFmax (per-precursor fragment cap) is 'max_fragments'. Runs emit a fan-out histogram so you can see whether a given rp_max actually bites. [bench]", false);
     registerFlag_("assembly:open_search_safe", "[way-4] ANNOTATION-SAFE output for BLIND/OPEN search. In open search a wrong charge is catastrophic in a way closed search hides: assigning z' instead of z shifts the neutral mass by dM=(z'-z)(m/z-1.0073), so ONE charge step at m/z 500 fabricates a ~499 Da 'modification'. Closed search barely notices (charge unset cost only 1.3%: 8,123->8,019) because the engine enumerates charge; an open engine trusts the annotation. This flag therefore: (a) emits charge UNSET for every precursor whose charge was GUESSED rather than isotope-supported, so the engine enumerates instead of trusting a default; (b) records the isotope-offset hypothesis as a meta value so delta-mass inference can correct BEFORE assigning a modification, rather than reporting phantom +-1.00335/+-2.0067 Da shifts. Use for open/variant search; leave off for closed-search peptide counting.");
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge for precursors with no isotope support: >0 assigns that charge (diaTracer-style; 2 = most common); 0 = leave charge UNSET so the search engine searches its charge range and picks the right one (recovers 3+/4+ that a forced 2 would lose).", false);
 
@@ -793,14 +799,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // measured 4.6 vs 1.46 PSMs-per-peptide gap. OFF by default (delta_rt 0) - it is a deletion.
     registerTOPPSubsection_("consolidate", "Feature-level de-duplication of emitted spectra");
     registerTOPPSubsection_("merge", "Recombine split spectra (union, not selection)");
-    registerDoubleOption_("merge:rt_window", "<sec>", 0.0, "[merge] Merge spectra sharing a precursor identity within this RT window into ONE spectrum by UNION of peaks with intensities summed. This is not consolidate: consolidate SELECTS the richest member and DISCARDS the rest (measured -12.7% peptides), while 41% of peaks are present in only one member. Measured MS1 FWHM is 3.61 s (2.61 cycles) and flat across the gradient, so ~3.6 s is one peak width -- the principled window. 0 = off.", false);
+    registerDoubleOption_("merge:rt_window", "<sec>", 0.0, "FALSIFIED on S30 (every merge/collapse variant lost peptides) -- keep 0 = OFF. [merge] Merge spectra sharing a precursor identity within this RT window into ONE spectrum by UNION of peaks; matching peaks take the MAX intensity by default (merge:sum_intensity sums instead). This is not consolidate: consolidate SELECTS the richest member and DISCARDS the rest (measured -12.7% peptides), while 41% of peaks are present in only one member. Measured MS1 FWHM is 3.61 s (2.61 cycles) and flat across the gradient, so ~3.6 s is one peak width -- the principled window. 0 = off.", false);
     registerDoubleOption_("merge:mass_ppm", "<ppm>", 20.0, "[merge] Precursor m/z tolerance for deciding two spectra share an identity.", false, true);
     registerDoubleOption_("merge:delta_im", "<1/K0>", 0.02, "[merge] Precursor ion-mobility tolerance.", false, true);
     registerDoubleOption_("merge:mz_tol", "<Da>", 0.01, "[merge] Peak m/z tolerance when summing the union. Peaks within this of the running intensity-weighted centroid are combined.", false, true);
     registerDoubleOption_("merge:min_cosine", "<x>", 0.0, "[merge] Require this normalised dot product between two spectra before merging them. Coordinate proximity is NOT the problem (the coordinate gate already admits only 1.8% different-peptide pairs); the problem is that only ~8% of emitted spectra identify at all, so a coordinate gate merges good spectra with unidentifiable ones whose peaks dilute the match. Measured reference: within-cycle pairs 0.845, same peptide across cycles 0.687, unrelated 0.007. 0 = off.", false);
     registerFlag_("merge:sum_intensity", "[merge] Sum intensities of matching peaks instead of taking the MAX. Summing distorts the merged spectrum: members share only ~37% of peaks (Jaccard 0.374), so shared peaks get Nx and unique peaks 1x, wrecking the fragment intensity ratios the engine scores on. MAX takes each ion's best single observation. Off (i.e. MAX) by default.");
     registerFlag_("merge:any_charge", "[merge] Also merge spectra whose precursor charges disagree. Off by default: 93.2% of split pairs already agree in charge, so merging across charges mostly pools genuinely different precursors.");
-    registerDoubleOption_("consolidate:delta_rt", "<sec>", 0.0, "Consolidate spectra whose precursors agree within this RT window (and mass_ppm/delta_im) into ONE feature, keeping the richest spectrum. 0 = OFF. Try 5-10. Attacks emission multiplicity (ours 4.6 PSMs/peptide vs diaTracer 1.46) without changing fragment content.", false);
+    registerDoubleOption_("consolidate:delta_rt", "<sec>", 0.0, "FALSIFIED on S30 (-12.7% peptides at 5 s; every merge/collapse variant lost) -- keep 0 = OFF. Consolidate spectra whose precursors agree within this RT window (and mass_ppm/delta_im) into ONE feature, keeping the richest spectrum. Attacks emission multiplicity (ours 4.6 PSMs/peptide vs diaTracer 1.46) without changing fragment content.", false);
     registerDoubleOption_("consolidate:mass_ppm", "<ppm>", 20.0, "Precursor m/z tolerance for feature consolidation.", false, true);
     registerDoubleOption_("consolidate:delta_im", "<1/K0>", 0.02, "Precursor IM tolerance for feature consolidation. Set larger than the 12 m/z x 2 IM sub-range split to merge a feature emitted from BOTH IM sub-ranges.", false, true);
     registerFlag_("consolidate:same_charge_only", "Only merge spectra that also agree in charge (safer; leaves genuine multi-charge observations intact).");
@@ -837,7 +843,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerFlag_("assembly:require_isotope_support", "[emission] Drop precursor hypotheses with NO isotope partner (the 'guessed' singletons, ~40% of emission) instead of assigning them a default charge. Emission is over-GENERATION of distinct low-quality precursors, not redundancy, so merge/dedup cannot cut it (oracle: same-coordinate collapse only 1.1-1.3x); this gate can. Measured on S30 (2026-07-26): drops 603,858 of 1,528,113 spectra (-39.5%) for 78 of 10,036 peptides (-0.78%) -- guessed spectra identify at 1.30%% vs 11.39%% for supported (8.8x). The 0.78%% are low-abundance/no-envelope species (the open-search caveat), so keep this OFF by default and confirm FDR-recalibrated peptides on any run that enables it.");
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "[mono-guard] Reject a leftward isotope step (the walk that defines the MONOISOTOPE in charge:scoring=count) when the candidate peak is too weak to be a real lighter isotope under averagine. The partner search matches m/z, RT and IM but NEVER intensity, so it can latch onto a noise peak or a co-eluting species one isotope spacing below the true monoisotope -- making the reported precursor mass ~1.00335 Da TOO LIGHT. Closed search hides this (the engine enumerates isotope_errors and corrects it for free); OPEN/blind search turns it into a phantom -1.003 Da modification, and it is our single largest open-search delta-mass artefact on S30 (8.20%% isotope-shifted PSMs vs diaTracer's 3.46%%). The bound is averagine's LOOSEST: stepping from isotope m+1 to m the lighter peak is >= (m+1)/lambda times the heavier one, minimised at m=0 -> 1/lambda (lambda = 0.000594*neutral mass), so a value of 1.0 enforces exactly that minimum and never rejects a legitimate envelope; smaller values add slack for noise. 0 = off (old behaviour). [bench]", false);
     registerFlag_("charge:mono_averagine_select", "[mono-select] Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves. [bench]");
-    registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. [adv-fix] Was 0.05 = 5x the fragment gate, which is indefensible: isotopes of ONE species share essentially identical mobility, so 0.05 admits cross-species partners that corrupt both the envelope cosine and the co-elution score. 0.01 matches the fragment gate.", false);
+    registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. Default 0.05 (= 5x the fragment gate). A reviewer argued 0.01 (isotopes of one species share mobility, so 0.05 can admit cross-species partners), but 0.01 has NOT been measured on S30; change only behind the S30 set gate.", false);
     // ponytail: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
   }
 
@@ -1616,6 +1622,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     out.setMetaValue("spx_n_isotopes", pc.n_isotopes);
   }
 
+  /// [E5, 2026-09-02] The ONE place the emitted-intensity weights live. Returns {cap-key intensity,
+  /// emitted intensity}: the IM-proximity weight feeds both (IM-on-c, orthogonal to correlation); the
+  /// [Q2] correlation-power weight feeds ONLY the emitted (engine-visible) intensity -- putting it in the
+  /// cap key made frag_scores = base*c^(k+1) and double-hit borderline-c faint fragments at the 500-cap.
+  /// Until today apportion and rp_max emitted RAW intensities, so every A/B of those flags silently
+  /// compared corr_power=2 against corr_power=0.
+  pair<double, double> weighted_(double base, double c, double dim) const
+  {
+    double inten = base;
+    if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
+    double emit_inten = inten;
+    if (corr_power_ > 0.0 && c > 0.0) emit_inten *= std::pow(c, corr_power_);
+    return {inten, emit_inten};
+  }
+
   /// Per-precursor assembly: this precursor claims every fragment passing its gate (a fragment may
   /// be shared across precursors -> chimeric). Leaves @p out empty on failure.
   void assembleOne_(const Precursor_& pc, double win_lo, double win_hi,
@@ -1628,18 +1649,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     vector<double> frag_scores;
     scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
                      min_corr_pts, pdense, [&](size_t fi, double c) {
-      double inten = frag_traces[fi].intensity;
-      if (im_weight_sigma_ > 0.0)                       // [recall] Gaussian IM-proximity weight
-      {
-        const double dim = frag_im[fi] - pc.im;
-        inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
-      }
-      // [Q2] correlation-power weight applies ONLY to the emitted (engine-visible) intensity, NOT the
-      // internal cap key. Otherwise frag_scores = base*c^(k+1) double-hits borderline-c faint fragments
-      // at the 500-cap (73% of spectra sit at it) -- a confound. IM-weight is orthogonal (IM-on-c) so it
-      // legitimately feeds both; corr_power is c-on-c, so keep the cap key at base*c.
-      double emit_inten = inten;
-      if (corr_power_ > 0.0 && c > 0.0) emit_inten *= std::pow(c, corr_power_);
+      const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);
       frags.emplace_back(frag_traces[fi].mz, emit_inten);
       frag_scores.push_back(c * inten);
     });
@@ -2341,8 +2351,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
                              min_corr_pts, pdense, [&](size_t fi, double c) {
               const double w = wsum[fi] > 0.0f ? std::pow(std::max(c, 0.0), apportion) / wsum[fi] : 1.0;
-              const double inten = frag_traces[fi].intensity * w;
-              frags.emplace_back(frag_traces[fi].mz, inten);
+              const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity * w, c, frag_im[fi] - pc.im);   // [E5]
+              frags.emplace_back(frag_traces[fi].mz, emit_inten);
               frag_scores.push_back(c * inten);
             });
             MSSpectrum ms2;
@@ -2451,8 +2461,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               // this fragment's corr for THIS precursor (from its kept top-k list)
               double c = -1.0;
               for (auto& cp : topk[fi]) if (cp.second == kv2.first) { c = cp.first; break; }
-              frags.emplace_back(frag_traces[fi].mz, frag_traces[fi].intensity);
-              frag_scores.push_back(c * frag_traces[fi].intensity);
+              const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);   // [E5]
+              frags.emplace_back(frag_traces[fi].mz, emit_inten);
+              frag_scores.push_back(c * inten);
             }
             MSSpectrum ms2;
             assembleFromList_(pc, win_lo, win_hi, frags, frag_scores, min_frags, max_frags, ms2);

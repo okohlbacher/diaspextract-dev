@@ -254,3 +254,18 @@ Pre-registered gate (LOAD <= 45 s, stage digests identical, Sage set identical):
 in the OpenMS loader patch (`[speXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD ctx and
 FrameCentroider, ordered hand-off) and the consumer (`flushMS1_`: parallel MS1 pick). Remaining wall is
 83% window loop; LOAD is now 4%. Baseline for the next measures: 15:21.
+**B3 CLOSED (15:14): output is identical across thread counts.** Re-digested with the fixed script: final_t8 ==
+final_t100 (`2a1dc5fd…`) and sdkcal_det8 == sdkcal (`0cacb566…`). The 2026-09-01 "spectrum data still differs
+between threads 8 and 100" was the `<indexList>` offset artefact. Per-spectrum check on the threads-8 vs threads-100 pair: 923,713 spectra, 0 differ. Claim to ship: byte-identical
+spectrum data at any thread count and any loader batch (three independent pairs today).
+**mzPeak input, final (15:23, parallel MS1 pick + thread-local reader):** LOAD 104.2 s (80.5x, CPU 8,392 s, system
+time still 1 h 04 min -> the reader's decode path, not re-opening, burns it), total **17:04 vs 15:21 from `.d`**,
+Sage 10,785 vs 12,217 (unchanged −11.7%). Provenance stamp verified in the output:
+`spx:mz_calibration = mzpeak_two_point_transform (...) archive=S30_v092_archive.mzpeak`. Verdict stands: keep `.d`
+as the primary input; mzPeak input is 11% slower and 12% less sensitive until the archive carries the exact
+calibration.
+**Why the mzPeak reader burns 1 h of system time (15:24, from `/usr/bin/time -v`):** voluntary context switches
+52.9 M (mzPeak) vs 0.69 M (`.d`) at the same page-fault count (131 M vs 135 M) and zero major faults. That is
+futex ping-pong inside the library's decode path (its per-reader mutex and/or the `util/executor` thread pool
+behind `get_spectra_batch`), i.e. ~50 M lock hand-offs for 33 k spectra -- not I/O, not allocation. Library-side
+fix: a synchronous single-threaded decode mode for callers that parallelise externally, or one shared executor.

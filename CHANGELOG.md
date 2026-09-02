@@ -22,7 +22,7 @@
 ### Determinism
 - `bench/semantic_digest.py` now stops at `</spectrumList>`: the trailing `<indexList>` byte offsets shift with any header
   length change and had falsely flagged two spectrum-identical files. Loader batch size does NOT change content
-  (922,902 spectra, 0 differ; Sage set identical). The 8-vs-100-thread comparison must be re-measured with the fixed digest.
+  (922,902 spectra, 0 differ; Sage set identical), and **neither does the thread count**: threads 8 == threads 100 on two pairs with the fixed digest, retracting the 2026-09-01 "thread-count dependent" finding. Output is byte-identical spectrum data at any thread count and loader batch.
 
 ### Docs
 - `docs/BACKLOG-ANALYSIS-2026-09-02.md`: every open issue with status, root cause, fix, gate; reviewed by kimi + codex

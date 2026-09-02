@@ -67,7 +67,7 @@ be byte-identical for TWO reasons that each already cost this project a false "d
 OpenMS stamps a wall-clock `MS:1000747 completion time`, AND the header records the run's own
 parameters -- so a threads-8 file and a threads-100 file differ in the header BY CONSTRUCTION.
 That retroactively explains the July r1-vs-imw005 md5 mismatch recorded as unexplained.
-**But with both artefacts removed, the SPECTRUM DATA still differs between threads 8 and 100.**
+**But with both artefacts removed, the SPECTRUM DATA still differs between threads 8 and 100.** [RETRACTED 2026-09-02: a THIRD artefact -- the trailing `<indexList>` byte offsets, which the digest also hashed -- explains it; with the digest stopped at `</spectrumList>` threads 8 and 100 are identical on two pairs. See RUNTIME-PLAN B3.]
 So: bit-determinism holds (as previously verified) at FIXED thread count; it does NOT hold across
 thread counts. Every benchmark in this project used `-threads 100`, so no published number is
 affected -- but the claim must be stated as "deterministic at fixed thread count", and the

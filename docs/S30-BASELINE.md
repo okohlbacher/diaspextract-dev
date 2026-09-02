@@ -381,3 +381,30 @@ engine's gap is search/detection-side); (c) single cohort/instrument -- public-P
 still the external-claim gate; (d) our ppm residual (+1.5..+3.2) is 2-4 ppm ABOVE diaTracer's
 (-1.4..+0.3) on every file: dt's per-file spread (-1.37/+0.27/-0.60) is small and centred, so the
 residual is OURS (centroiding/mono-reporting, Option I), NOT a per-file instrument property.
+
+### C2 PAIRED m/z bias vs diaTracer (2026-09-02, 15:14) -- the residual is ours, in BOTH directions
+Same (peptide, charge) identified by both tools at 1% (best PSM per tool), so selection bias is excluded:
+| file | shared pairs | precursor ppm ours / dt / **paired ours−dt** | fragment ppm **paired ours−dt** | by charge (paired, precursor) | by m/z tercile |
+|---|---|---|---|---|---|
+| S08 (tbl_s08 vs dt3_s08) | 10,091 | +5.17 / +2.13 / **+2.63** [p10 −2.6, p90 +10.3] | **−1.99** [−4.5, +0.5] | z2 +3.12, z3 +1.77, z4 +1.96 | low +1.87, mid +3.35, high +2.62 |
+| S23 (tbl_s23 vs dt3_s23) | 9,094 | +3.78 / +1.97 / **+1.48** [−3.4, +8.4] | **−2.08** [−4.4, +0.3] | z2 +1.96, z3 +0.53, z4 +0.29 | low +0.42, mid +1.88, high +1.87 |
+| **S30** (d2_P1 = HEAD table arm vs dt_s30_closed, fresh diaTracer Sage run = 11,517 peptides, reproducing the matrix reference) | 11,191 | +3.58 / +2.05 / **+1.12** [−3.7, +7.7] | **−2.41** [−4.7, +0.1] | z2 +1.59, z3 +0.31, z4 +0.54 | low +0.05, mid +1.62, high +1.49 |
+Reading: on the same raw file and the same exact m/z axis, our REPORTED precursor m/z sits +1.5..+2.6 ppm
+above diaTracer's and our REPORTED fragment m/z sits ~2 ppm below -- two different centroid/reporting
+conventions (precursor: MS1 trace m/z estimator, larger at z=2 and in the mid/high m/z terciles; fragment:
+MS2 trace m/z estimator), not a calibration offset (which would move both the same way). Both feed Sage's
+discriminant (precursor_ppm, average_ppm) and the 20 ppm fragment tolerance. Next: locate the two estimators
+(`Trace.mz` for MS1 and MS2 traces: intensity-weighted mean over the trace vs apex) and A/B an apex /
+top-k-weighted estimator behind the S30 set gate, reporting ppm beside the count. S30 pair running
+Three-file pattern: the precursor bias is z=2-dominated (z3/z4 near zero on S30/S23) and absent in the lowest m/z tercile -- an isotope/mono-envelope effect (our reported mono for z=2 mid/high-m/z precursors sits a fraction of a ppm-scaled isotope offset high?) rather than a uniform centroid shift; the FRAGMENT bias is uniform −2.0..−2.4 ppm on all three files and is the one that touches the 20 ppm search tolerance and Sage's average_ppm feature (−3 ppm uniform shift cost −165 peptides on 09-01). Estimator A/B (apex / median vs weighted mean) queued behind the E5 gate.
+
+### C3 MEASURED (2026-09-02, 16:41): entrapment FDR of the SHIPPING table-model arm
+`entrap_apply.py` (peptide-hypothesis ratio 0.6805, corrected estimator) on a Sage entrapment search of the HEAD
+output (d2_P1, table-model calibration, parallel loader -- byte-identical to every run today):
+| arm | targets @1% | entrapment | raw % | **FDR %** | 95% CI |
+|---|---|---|---|---|---|
+| **table model (shipping, HEAD)** | 11,489 | 107 | 0.92 | **1.37** | 1.10-1.64 |
+| vendor-SDK calibration (09-01 arm) | 11,435 | 98 | 0.85 | 1.26 | 1.00-1.51 |
+The owed measurement (review F4) is now made: the shipping arm's true FDR at nominal 1% is ~1.4%, inside the
+same band as the vendor-calibrated arm (CIs overlap), so the open-path calibration gain is not bought with
+FDR. S08/S23 table arms running (`entrap_s08_tbl`, `entrap_s23_tbl`).

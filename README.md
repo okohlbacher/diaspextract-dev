@@ -63,10 +63,19 @@ Sage's discriminant. Since diaTracer's spectra always carried vendor-calibrated 
 comparison was biased against the open path -- **this is the removal of a self-inflicted handicap,
 not a lead.**
 
-Determinism: bit-reproducible at a **fixed thread count** (`bench/semantic_digest.py` compares the
-spectrum data, ignoring the wall-clock stamp and the recorded parameters, which can never match
-across differing invocations). Output does differ across thread counts, and last-ulp code changes
-cascade to ~2% in peptide counts -- so compare like with like.
+Determinism: the spectrum data is **byte-identical at any thread count and any loader batch size**
+(verified 2026-09-02 on three independent pairs: threads 8 vs 100 twice, loader batch 64 vs 256;
+`bench/semantic_digest.py` hashes `<spectrumList>`..`</spectrumList>`, excluding the wall-clock
+stamp, the recorded parameters and the trailing byte-offset index, none of which can match across
+invocations -- the last of these had produced two false "differs" verdicts before it was excluded).
+Last-ulp *code* changes still cascade to ~2% in peptide counts, so compare builds by the accepted
+peptide SET and the ppm median, not by raw counts.
+
+Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **15:21 wall, 106 GB peak RSS**
+(2026-09-02; was 33:05 on 09-01 -- the serial floor was the MS1 path, now parallel). The loader is
+4% of the run; the window loop is 83%. Reading from `.mzpeak` instead of `.d` is supported
+(build-optional, mzPeak C++ library) but is slower (17:04) and, until the archive carries the exact
+TDF calibration, 12% less sensitive -- `.d` is the primary input.
 
 ## The main open defect
 
