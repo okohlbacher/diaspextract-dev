@@ -12,6 +12,7 @@ Hashing from <spectrumList onwards compares what the science depends on: the spe
 """
 import hashlib, sys
 MARK = b"<spectrumList"
+END = b"</spectrumList>"
 def digest(path):
     h = hashlib.sha256()
     started = False
@@ -29,6 +30,13 @@ def digest(path):
                     continue
                 started = True
                 c = buf[i:]
+            # stop at </spectrumList>: the trailing <indexList> holds byte OFFSETS, which shift with any
+            # header-length change (a 4-byte longer <software> version stamp moved every offset and
+            # falsely flagged two spectrum-identical files as different, 2026-09-02)
+            j = c.find(END)
+            if j >= 0:
+                h.update(c[:j + len(END)])
+                break
             h.update(c)
     if not started:
         raise SystemExit(f"{path}: no {MARK!r} found")

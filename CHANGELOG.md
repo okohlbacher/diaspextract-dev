@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+### Runtime
+- **MS1 path parallelised** (loader `[speXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and
+  `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). S30/100 threads: LOAD 445 s -> 39 s,
+  total 22:22 -> **15:21**; spectrum data byte-identical, Sage peptide set identical.
+- Decode-once frame-major parallel MS2 loader (`[speXtract par-load]`), batched parallel MS2 pick; per-phase `[perf]`
+  table and `[perf-load]` decode/hand-off/pick timers; `SPEXTRACT_LOAD_ONLY=1` for load-only profiling.
+- Falsified and recorded: `MALLOC_ARENA_MAX=4` (10x slower at 100 threads), loader batch depth (64/256/1024 flat).
+
+### Input
+- **Streaming `.mzpeak` input** (`src/MzPeakStreamLoad.h`, build-optional `-DMZPEAK_ROOT`) on the mzPeak C++ library
+  (OpenMS/mzpeak fork trunk); reads ims-compact archives with per-window mobility bands (works around name-only band
+  params and NULL `precursor_index`). Benchmarked: not faster (the floor was the MS1 pick), and -11.7% peptides from the
+  archive's two-point TOF transform (fragment error +10 ppm) -- see docs/RUNTIME-PLAN-2026-09-02.md and the converter
+  handoff. Output stamps `spx:mz_calibration = mzpeak_two_point_transform ...` for this path.
+- Library build recipe for GCC 13 / Arrow 23 (`scripts/build_mzpeak_lib.sh`, `patches/spx_ranges_to.h`,
+  `patches/mzpeak-cpp-arrow23.py`).
+
+### Determinism
+- `bench/semantic_digest.py` now stops at `</spectrumList>`: the trailing `<indexList>` byte offsets shift with any header
+  length change and had falsely flagged two spectrum-identical files. Loader batch size does NOT change content
+  (922,902 spectra, 0 differ; Sage set identical). The 8-vs-100-thread comparison must be re-measured with the fixed digest.
+
+### Docs
+- `docs/BACKLOG-ANALYSIS-2026-09-02.md`: every open issue with status, root cause, fix, gate; reviewed by kimi + codex
+  (`docs/reviews/`). Confirmed today: apportion/rp_max bypass corr_power (E5); 28% of spectra carry the precursor M+1 as a
+  fragment (C9); false mzPeak calibration provenance (fixed).
+
 ## v0.2.0 — 2026-09-02
 
 First release with a verified calibration, tests, and CI. Supersedes v0.1.0, which was tagged on the

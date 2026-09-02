@@ -29,3 +29,15 @@ else()
 endif()
 
 install(TARGETS DIAPseudoSpectra RUNTIME DESTINATION bin)
+
+# Optional streaming .mzpeak input through the mzPeak C++ library (github.com/OpenMS/mzpeak).
+# -DMZPEAK_ROOT=<checkout with include/ and a built libmzpeak in build*/>. Without it the tool
+# still builds and reads .mzpeak only through OpenMS' non-streaming MzPeakFile.
+if(MZPEAK_ROOT)
+  find_library(MZPEAK_LIB NAMES mzpeak PATHS ${MZPEAK_ROOT} PATH_SUFFIXES build build-release buildfix REQUIRED)
+  find_package(Arrow REQUIRED)
+  find_package(Parquet REQUIRED)
+  target_compile_definitions(DIAPseudoSpectra PRIVATE SPEXTRACT_WITH_MZPEAK)
+  target_include_directories(DIAPseudoSpectra PRIVATE ${MZPEAK_ROOT}/include)
+  target_link_libraries(DIAPseudoSpectra PRIVATE ${MZPEAK_LIB} Parquet::parquet_static Arrow::arrow_static zip)
+endif()

@@ -6,6 +6,7 @@
 // $Authors: OpenMS-DIAtracer project $
 // --------------------------------------------------------------------------
 
+#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACT_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -31,10 +32,11 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <cstdlib>     // getenv
+#include <cstring>     // memcpy
+#include <exception>   // exception_ptr
 #ifdef _OPENMP
 #include <omp.h>
-#include <cstdlib>     // getenv
-#include <exception>   // exception_ptr
 #endif
 
 using namespace OpenMS;
@@ -88,6 +90,7 @@ namespace
   /// unattributed, which is how you optimise the wrong thing. Every phase is timed; the table is
   /// printed unconditionally at the end so a benchmark log always says where the time went.
   struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; };
+  inline double& flush_wall_() { static double v = 0; return v; }   // [perf-load] pick inside LOAD
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
@@ -420,6 +423,30 @@ namespace
     return f;
   }
 
+
+  /// [det] Order-insensitive 64-bit digest of a stage's numeric output, for localising
+  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACT_DET=1.
+  static uint64_t detDigest_(vector<uint64_t> bits)
+  {
+    std::sort(bits.begin(), bits.end());
+    uint64_t h = 1469598103934665603ULL;
+    for (uint64_t b : bits) { h ^= b; h *= 1099511628211ULL; }
+    return h;
+  }
+  static bool detOn_() { static const bool on = std::getenv("SPEXTRACT_DET") != nullptr; return on; }
+  static uint64_t traceDigest_(const vector<Trace>& ts)
+  {
+    vector<uint64_t> b; b.reserve(ts.size() * 3);
+    for (const auto& t : ts)
+    {
+      uint64_t u; double v;
+      v = t.mz; std::memcpy(&u, &v, 8); b.push_back(u);
+      v = t.rt; std::memcpy(&u, &v, 8); b.push_back(u);
+      v = t.intensity; std::memcpy(&u, &v, 8); b.push_back(u);
+    }
+    return detDigest_(std::move(b));
+  }
+
   /// Rebuild a PeakMap for ONE window from its compact frames, for MassTraceDetection.
   /// Frames are consumed (cleared) as they are materialised so the compact store shrinks in step.
   PeakMap materializeWindow(vector<CompactFrame>& frames)
@@ -485,15 +512,17 @@ namespace
     {
       const int n = (int)buf_.size();
       if (n == 0) return;
+      const double _tf0 = phase_clock_();
       std::vector<CompactFrame> compacted((size_t)n);
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
       // SPEXTRACT_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
       // scheduling-sensitivity from downstream chaos (kimi, plan review). [pick-det]
       static const bool par_pick = std::getenv("SPEXTRACT_PICK_SERIAL") == nullptr;
+      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACT_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
       std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
       // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers (codex, plan review)
-      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1) if(par_pick)
+      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACT_PICK_STATIC=1 -> static (history-vs-race probe)
       for (int i = 0; i < n; ++i)
       {
         try
@@ -517,21 +546,48 @@ namespace
         stats_ += st[(size_t)i];
         windows_[key_[(size_t)i]].push_back(std::move(compacted[(size_t)i]));
       }
+      flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
     }
 
   protected:
     void consumeMS1Spectrum_(MapType::SpectrumType& s) override
     {
-      // MS1 stays a PeakMap: it is only ~4% of frames (1,343 of 33,553) and MassTraceDetection
-      // needs it whole for the run-level precursor pass. Flush first so MS1 keeps its position
-      // relative to the MS2 frames around it.
-      flush_();
-      ensureIMArrayName(s);
-      if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker_.pickIMCluster(s);
-      ensureIMArrayName(s);
-      ms1_.addSpectrum(std::move(s));
+      // MS1 stays a PeakMap (MassTraceDetection needs it whole), but its pick is NOT small: 1,343
+      // frames x ~690k raw peaks = 37% of all peaks, and it used to run serially here (~400 s of
+      // LOAD, measured 2026-09-02). Buffer and pick in parallel like MS2; order is kept by index.
+      ms1_buf_.push_back(std::move(s));
       ++frames_seen;
+      if (ms1_buf_.size() >= kBatch) flushMS1_();
+    }
+
+    void flushMS1_()
+    {
+      const int n = (int)ms1_buf_.size();
+      if (n == 0) return;
+      const double _tf0 = phase_clock_();
+      PeakPickerIM picker = picker_;
+      std::exception_ptr pick_err;
+      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
+      for (int i = 0; i < n; ++i)
+      {
+        try
+        {
+          auto& s = ms1_buf_[(size_t)i];
+          ensureIMArrayName(s);
+          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+          ensureIMArrayName(s);
+        }
+        catch (...)
+        {
+          #pragma omp critical(pick_err_ms1)
+          if (!pick_err) pick_err = std::current_exception();
+        }
+      }
+      if (pick_err) std::rethrow_exception(pick_err);
+      for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
+      ms1_buf_.clear();
+      flush_wall_() += phase_clock_() - _tf0;
     }
 
     void consumeSwathSpectrum_(MapType::SpectrumType& s, size_t /*swath_nr*/) override
@@ -541,13 +597,14 @@ namespace
       const double c = prec[0].getMZ();
       const double lo = c - prec[0].getIsolationWindowLowerOffset();
       const double hi = c + prec[0].getIsolationWindowUpperOffset();
+      flushMS1_();                                   // MS1 arrives first; pick it before any MS2 work
       key_.push_back(keyfn_(lo, hi));
       buf_.push_back(std::move(s));                  // pick+compact deferred to flush_()
       ++frames_seen;
       if (buf_.size() >= kBatch) flush_();
     }
 
-    void ensureMapsAreFilled_() override { flush_(); }   // pick up the tail
+    void ensureMapsAreFilled_() override { flushMS1_(); flush_(); }   // pick up the tails
 
   private:
     /// ponytail: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
@@ -557,6 +614,7 @@ namespace
     std::vector<MapType::SpectrumType> buf_;
     std::vector<pair<int, int>> key_;
     PeakPickerIM& picker_;
+    std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
     map<pair<int, int>, vector<CompactFrame>>& windows_;
     PeakMap& ms1_;
     CompactStats& stats_;
@@ -1639,12 +1697,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
       try
       {
-        BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
+        if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
+        {
+#ifdef SPEXTRACT_WITH_MZPEAK
+          spx::loadMzPeakStreaming(in, consumer, getIntOption_("threads"));   // consumer counts frames itself
+#else
+          throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
+#endif
+        }
+        else BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
         streamed = true;
         phase_stats_()["LOAD(stream)"].wall = phase_clock_();      // [perf-instr] start-to-here
         phase_stats_()["LOAD(stream)"].cpu  = cpu_seconds_();
         phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
         if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
+        writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
+        if (std::getenv("SPEXTRACT_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -1784,6 +1852,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     double _t_ms1 = phase_clock_(), _c_ms1 = cpu_seconds_();   // [perf-instr]
     vector<Trace> ms1_traces = detectTraces_(ms1_map, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+    if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_traces)));
     { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
       st.wall += phase_clock_() - _t_ms1; st.cpu += cpu_seconds_() - _c_ms1; st.rss_end_mb = rss_mb_(); }
     writeLogInfo_("MS1 " + ms1_span);   // [merged-trace] measure, do not assume
@@ -1891,6 +1960,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring, ambig_margin);
+    if (detOn_())
+    {
+      vector<uint64_t> b;
+      for (const auto& pc : precursors) { uint64_t u; double v; v = pc.rt; std::memcpy(&u, &v, 8); b.push_back(u); v = pc.im; std::memcpy(&u, &v, 8); b.push_back(u); }
+      writeLogInfo_("[det] precursors n=" + String(precursors.size()) + " digest=" + String(detDigest_(std::move(b))));
+    }
     if (getFlag_("assembly:dedup_precursors"))
     {
       const size_t before = precursors.size();
@@ -2146,6 +2221,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // [compact] materialise ONLY this window, and free its compact frames as we go
         auto _t0 = std::chrono::steady_clock::now();
         PeakMap wmap = materializeWindow(*window_list[wi].second);
+        if (detOn_())   // [det] compact store digest BEFORE tracing: splits "pick" from "trace+assemble"
+        {
+          // materializeWindow consumed the frames; digest the materialised map instead (same content)
+          vector<uint64_t> b;
+          for (const auto& sp : wmap) for (const auto& pk : sp) { uint64_t u; double v = pk.getMZ(); std::memcpy(&u, &v, 8); b.push_back(u); float f = pk.getIntensity(); uint32_t w; std::memcpy(&w, &f, 4); b.push_back(w); }
+          #pragma omp critical
+          writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " compact n=" + String(b.size() / 2) + " digest=" + String(detDigest_(std::move(b))));
+        }
         auto _t1 = std::chrono::steady_clock::now();
         t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
         for (MSSpectrum& s : wmap) s.setMSLevel(1); // MassTraceDetection traces MS1-level only
@@ -2175,6 +2258,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // unchanged (n_bands == the option when the option is > 0).
         const int w_bands = n_bands;
         vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
+        if (detOn_())
+        {
+          #pragma omp critical
+          writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " frag traces n=" + String(frag_traces.size()) + " digest=" + String(traceDigest_(frag_traces)));
+        }
         // (compact frames already released inside materializeWindow) [par-Crit-3]
         #pragma omp critical
         {
@@ -2660,6 +2748,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // The value travels ON THE LOADED EXPERIMENT (set by BrukerTimsFile), not through a header
     // static: an inline static can be duplicated across a shared-library boundary, in which case
     // the tool would read its own copy and always report "unset" [vibe/claude review 2026-09-01].
+#ifdef SPEXTRACT_WITH_MZPEAK
+    if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
+      out_exp.setMetaValue("spx:mz_calibration", spx::lastMzPeakCalibration());   // [codex #13] not BrukerTimsFile's state
+    else
+#endif
     out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
