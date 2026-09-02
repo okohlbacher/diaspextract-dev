@@ -169,7 +169,7 @@
      // 3. Try rational model from TimsCalibration table (AUTO or RATIONAL)
      if (strategy == Strategy::AUTO || strategy == Strategy::RATIONAL)
      {
-@@ -1448,71 +1587,106 @@
+@@ -1448,71 +1587,120 @@
      startProgress(0, total_work, "Streaming DIA-PASEF MS2 frames");
      Size progress_count = 0;
  
@@ -206,11 +206,18 @@
 +        // per frame slot: one spectrum per window of the group (empty = skipped)
 +        std::vector<std::vector<MSSpectrum>> out((size_t)n);
 +
-+        #pragma omp parallel for schedule(dynamic, 4)
++        // chunk 1: chunk 4 over a 256-frame batch made 64 chunks = 64 workers (codex, plan review).
++        // The vendor SDK converter's thread-safety is not vouched for here -> serial unless opted in.
++        static const bool par_ok = (g_mz_calibration.find("sdk") == std::string::npos)
++                                   || std::getenv("SPEXTRACT_SDK_PARALLEL") != nullptr;
++        std::exception_ptr load_err;
++        #pragma omp parallel for schedule(dynamic, 1) if(par_ok)
 +        for (int k = 0; k < n; ++k)
          {
 -          setProgress(progress_count++);
 -          TimsFrame& frame = handle->get_frame(frame_ids[i]);
++          try
++          {
 +          // thread-local decode state: the ONLY reason opentims is not thread-safe is the shared
 +          // buffer + shared ZSTD_DCtx in the handle; passing our own removes it.
 +          static thread_local std::unique_ptr<ZSTD_DCtx, size_t(*)(ZSTD_DCtx*)> tl_ctx(ZSTD_createDCtx(), &ZSTD_freeDCtx);
@@ -275,7 +282,12 @@
 +            DataArrays::FloatDataArray im_array;
 +            IMDataConverter::setIMUnit(im_array, DriftTimeUnit::VSSC);
 +            for (uint32_t pk = 0; pk < frame.num_peaks; ++pk)
-+            {
+             {
+-              Peak1D peak;
+-              peak.setMZ(mzs[p]);
+-              peak.setIntensity(static_cast<double>(intensities[p]));
+-              spec.push_back(peak);
+-              im_array.push_back(static_cast<float>(inv_ion_mobilities[p]));
 +              if (inv_ion_mobilities[pk] >= win->im_lower && inv_ion_mobilities[pk] <= win->im_upper)
 +              {
 +                Peak1D peak;
@@ -286,20 +298,18 @@
 +              }
 +            }
 +            if (!spec.empty())
-             {
--              Peak1D peak;
--              peak.setMZ(mzs[p]);
--              peak.setIntensity(static_cast<double>(intensities[p]));
--              spec.push_back(peak);
--              im_array.push_back(static_cast<float>(inv_ion_mobilities[p]));
++            {
 +              spec.getFloatDataArrays().push_back(std::move(im_array));
 +              spec.setIMPeakType(IMPeakType::IM_PROFILE);
 +              spec.sortByPosition();   // TIMS order is (scan, m/z-within-scan); consumers assume global m/z order
              }
--          }
++            slot.push_back(std::move(spec));   // keep the slot (possibly empty spectrum) to preserve window index
+           }
 -
 -          if (!spec.empty())
--          {
++          }
++          catch (...)
+           {
 -            spec.getFloatDataArrays().push_back(std::move(im_array));
 -            spec.setIMPeakType(IMPeakType::IM_PROFILE);
 -            // Sort peaks by m/z (and the IM float data array alongside).
@@ -308,9 +318,11 @@
 -            // chromatogram extraction assumes globally m/z-sorted input.
 -            spec.sortByPosition();
 -            consumer.consumeSpectrum(spec);
-+            slot.push_back(std::move(spec));   // keep the slot (possibly empty spectrum) to preserve window index
++            #pragma omp critical(load_err)
++            if (!load_err) load_err = std::current_exception();
            }
          }
++        if (load_err) std::rethrow_exception(load_err);
 +
 +        // serial hand-off in (frame, window) order -- the consumer is not thread-safe
 +        for (int k = 0; k < n; ++k)
@@ -321,7 +333,7 @@
        }
      }
      endProgress();
-@@ -1526,9 +1700,12 @@
+@@ -1526,9 +1714,12 @@
      load(path, exp, Config());
    }
  
@@ -334,7 +346,7 @@
      auto handle = openTimsDataHandle(path, config);
  
      String tdf_path = path + "/analysis.tdf";
-@@ -1551,6 +1728,7 @@
+@@ -1551,6 +1742,7 @@
      loadExperimentalSettings_(path, exp);
  
      // Sort by RT, interleaved across MS levels
@@ -342,3 +354,13 @@
      exp.sortSpectra(true);
      exp.updateRanges();
    }
+--- src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
++++ src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
+@@ -125,6 +125,7 @@
+     /// Exported from libOpenMS on purpose: a header-inline static would be duplicated across the
+     /// DSO boundary (OpenMS builds with hidden visibility), so the caller would read its own copy
+     /// and always see "unset". Covers BOTH the load() and the streaming paths.
++    static const std::string& lastMzCalibration();
+ 
+     void load(const String& path, MSExperiment& exp);
+     /// @overload with explicit configuration
