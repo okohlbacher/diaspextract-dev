@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(speXtract VERSION 0.1.0 LANGUAGES CXX)
+project(speXtract VERSION 0.2.0 LANGUAGES CXX)
 
 # speXtract is a STANDALONE application that links against an existing OpenMS
 # installation. It is deliberately not part of the OpenMS source tree: OpenMS is a
