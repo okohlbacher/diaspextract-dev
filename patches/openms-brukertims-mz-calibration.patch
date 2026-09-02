@@ -1,3 +1,13 @@
+--- src/openms/include/OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h
++++ src/openms/include/OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h
+@@ -141,6 +141,7 @@
+     int sgolay_polynomial_order_{3};
+     double ppm_tolerance_cluster_{50.0};
+     double im_tolerance_cluster_{0.1};
++    std::string mz_mode_{"weighted"};   // [speXtract pick-mz] weighted | seed | top3
+ 
+     double ppm_tolerance_elution_{50.0};
+ 
 --- src/openms/source/FORMAT/BrukerTimsFile.cpp
 +++ src/openms/source/FORMAT/BrukerTimsFile.cpp
 @@ -17,6 +17,14 @@
@@ -508,6 +518,46 @@
      exp.sortSpectra(true);
      exp.updateRanges();
    }
+--- src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp
++++ src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp
+@@ -698,6 +698,8 @@
+       // --- PickIMCluster parameters ---
+       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
+       defaults_.setValue("pickIMCluster:im_tolerance_cluster", 0.1, "Ion mobility tolerance for clustering (in 1/K0 units). For CCS data, use larger values (e.g., 10-20).");
++      defaults_.setValue("pickIMCluster:mz_mode", "weighted", "[speXtract pick-mz] reported m/z of a cluster: weighted (intensity-weighted mean, default) | seed (most intense point) | top3 (weighted mean of the 3 most intense points)");
++      defaults_.setValidStrings("pickIMCluster:mz_mode", {"weighted", "seed", "top3"});
+       // --- PickIMElutionProfiles parameters ---
+       defaults_.setValue("pickIMElutionProfiles:ppm_tolerance_elution", 50.0, "Mass trace m/z tolerance in ppm");
+ 
+@@ -714,6 +716,7 @@
+ 
+       ppm_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:ppm_tolerance_cluster");
+       im_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:im_tolerance_cluster");
++      mz_mode_ = param_.getValue("pickIMCluster:mz_mode").toString();   // [speXtract pick-mz]
+ 
+       ppm_tolerance_elution_ = (double)param_.getValue("pickIMElutionProfiles:ppm_tolerance_elution");
+ 
+@@ -1184,8 +1187,19 @@
+           }
+ 
+           if (sum_intensity > std::numeric_limits<double>::epsilon()) {
++            double out_mz = sum_mz_intensity / sum_intensity;   // [speXtract pick-mz]
++            if (mz_mode_ == "seed") out_mz = points[seed_original_idx].mz;
++            else if (mz_mode_ == "top3")
++            {
++              std::vector<OpenMS::Size> byi(current_cluster_indices.begin(), current_cluster_indices.end());
++              std::partial_sort(byi.begin(), byi.begin() + std::min<size_t>(3, byi.size()), byi.end(),
++                                [&](OpenMS::Size x, OpenMS::Size y) { return points[x].intensity > points[y].intensity; });
++              double s3 = 0, m3 = 0;
++              for (size_t k = 0; k < std::min<size_t>(3, byi.size()); ++k) { s3 += points[byi[k]].intensity; m3 += points[byi[k]].mz * points[byi[k]].intensity; }
++              if (s3 > 0) out_mz = m3 / s3;
++            }
+             averaged_points.emplace_back(
+-              sum_mz_intensity / sum_intensity,
++              out_mz,
+               sum_im_intensity / sum_intensity,
+               static_cast<float>(sum_intensity),
+               0 // Original index is meaningless for averaged points
 --- src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
 +++ src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
 @@ -125,6 +125,7 @@

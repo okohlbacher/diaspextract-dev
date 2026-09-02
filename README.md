@@ -74,8 +74,10 @@ peptide SET and the ppm median, not by raw counts.
 Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **15:21 wall, 106 GB peak RSS**
 (2026-09-02; was 33:05 on 09-01 -- the serial floor was the MS1 path, now parallel). The loader is
 4% of the run; the window loop is 83%. Reading from `.mzpeak` instead of `.d` is supported
-(build-optional, mzPeak C++ library) but is slower (17:04) and, until the archive carries the exact
-TDF calibration, 12% less sensitive -- `.d` is the primary input.
+(build-optional, mzPeak C++ library) but slower (17:04); the archive's two-point TOF transform costs
+12% of identifications, so the loader recovers the exact TDF calibration from the embedded
+`vendor/analysis.tdf.gz` (or a `SPEXTRACT_MZPEAK_TDF=` sidecar) by default and fails closed without
+it (-1% vs `.d` then). `.d` remains the primary input.
 
 ## The main open defect
 
