@@ -57,13 +57,15 @@ identical search settings for both tools. Full matrix: `docs/BENCHMARK-MATRIX-20
 
 | | S30 | S08 | S23 | vs diaTracer |
 |---|---|---|---|---|
-| **Sage** peptides @1% FDR | 11,976 | 10,333 | 9,891 | 104.0 / 100.9 / 110.5% -- mean 105.1%, 95% CI [93.0, 117.3] |
-| **MSFragger** peptidoforms @1% | 11,463 | 11,465 | 9,404 | 82.3 / 83.9 / 88.7% -- mean 85.0%, 95% CI [76.7, 93.2] |
-| median precursor mass error | +1.5 ppm | +3.2 | +2.3 | diaTracer -1.4 / +0.3 / -0.6 |
-| pseudo-spectra emitted | ~0.92 M | | | ~1.32x diaTracer |
+| **Sage** peptides @1% FDR (apex estimator, 2026-09-02) | 12,537 | 10,789 | 10,156 | 108.9 / 105.3 / 113.5% -- mean 109.2%, 95% CI [99.0, 119.4] |
+| Sage, previous estimator (2026-09-01) | 11,976 | 10,333 | 9,891 | 104.0 / 100.9 / 110.5% -- mean 105.1%, 95% CI [93.0, 117.3] |
+| **MSFragger** peptidoforms @1% | 11,927 (apex; 11,463 before) | 11,465 | 9,404 | 85.6 / 83.9 / 88.7% (S08/S23 not yet re-run with apex) |
+| entrapment FDR at nominal 1% (shipping arm) | 1.28% [1.03-1.53] | 0.95% [0.72-1.18] | 1.32% [1.04-1.59] | diaTracer 1.24 / 1.22% on S08/S23 |
+| precursor mass error, paired vs diaTracer on shared peptides | +0.78 ppm | +1.47 | +1.17 | fragment: -2.4 / -2.0 / -2.1 (diaTracer-side reporting) |
+| pseudo-spectra emitted | ~0.93 M | 1.23 M | 0.84 M | ~1.32x diaTracer |
 
-Read honestly: **on Sage the result is consistent with parity, not an advantage; on MSFragger there
-is a statistically supported deficit.** speXtract also emits ~1.32x more spectra, so per-spectrum
+Read honestly: **on Sage the result is now at or above parity (lower CI bound 99%); on MSFragger the
+deficit stands and is statistically supported.** speXtract also emits ~1.32x more spectra, so per-spectrum
 efficiency still favours diaTracer. The MSFragger gap survives perfect masses, so it is
 search/detection-side, not calibration.
 
