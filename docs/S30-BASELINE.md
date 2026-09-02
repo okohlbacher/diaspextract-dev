@@ -443,3 +443,9 @@ Default change is gated on the standing rule: **MSFragger on d7_apex before apex
 MSFragger ratio vs diaTracer 82.3% -> 85.6%. Same binary (env switch), so the same-binary floor applies; both
 engines move the same way; ppm beside the count improved. Default changed in code (`SPEXTRACT_MZ_ESTIMATOR=mean`
 restores the OpenMS centroid). Owed next: S08/S23 apex arms (Sage) and entrapment on the apex arm (queued).
+
+### C9 FALSIFIED (2026-09-02, 19:05): dropping the precursor's M+1..M+3 from fragment lists LOSES peptides
+`SPEXTRACT_DROP_PREC_ISO=1` on the apex-default binary: isotope contamination of the emitted lists falls from
+28.4% / 24.8% (M+1 / M+2 within 10 ppm) to 0.2% / 0.2%, and Sage drops **12,537 -> 12,249 (-2.3%**, only-apex
+1,061 / only-dropiso 773; same binary, env switch). The unfragmented precursor isotopes in a pseudo-MS/MS spectrum are
+useful to the engine (or their removal lets weaker peaks refill the 500-cap). Keep them; switch stays off.

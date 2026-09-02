@@ -34,7 +34,7 @@
   S08/S23 and entrapment on the apex arm in progress.
 - Under test (env switches, defaults unchanged): `SPEXTRACT_PICK_MZ_MODE=seed|top3` (pick-level m/z; the -2.4 ppm
   fragment offset vs diaTracer is upstream of the trace estimator), `SPEXTRACT_DROP_PREC_ISO=1` (drop the precursor's
-  M+1..M+3 from fragment lists; 28%/25% of spectra carried them), `SPEXTRACT_MZPEAK_EXACT=1` (exact calibration for
+  M+1..M+3 from fragment lists; 28%/25% of spectra carried them -- FALSIFIED, -2.3%, keep off), `SPEXTRACT_MZPEAK_EXACT=1` (exact calibration for
   mzPeak input from the embedded or sidecar `analysis.tdf.gz`).
 - Output-identical: band partition by binary search (R3), early skip of fragments below `min_corr_pts` support.
 - Help texts of falsified flags (`rp_max`, `consolidate`, `merge`) now say so; `charge:iso_im_tolerance` help

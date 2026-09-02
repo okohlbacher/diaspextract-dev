@@ -44,7 +44,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 | C6 | Native pre-centroiding aggregation | **MEASURED 07-27 (pre-calibration, Sage only)**: `native_ms1_neighbors=1` Sage +7.8%, entrapment 2.31%, at 2.7× emission | RUNTIME-QUALITY Q3 | gain is real but bought with emission | re-test under corrected calibration, both engines, WITH a post-aggregation gate that holds emission ≤ 1.4×; falsifier: peptides@matched-entrapment ≤ baseline | 1 day of runs; only with the gate |
 | C7 | `assembly:apportion` / NNLS (BACKLOG 1) | **FALSIFIED CLEANLY 16:46** (E5 fixed, corr_power applied): apportion=1.0 → 11,742 vs 12,217 share-all (−3.9%, symdiff 1,234/759) | cross-precursor apportionment loses peptides, with or without the weights | **NNLS cut**; do not re-propose cross-precursor redistribution | closed |
 | C8 | Open-search: step 01 done on S30; step 02 emission-controlled arm not run; PTM ambiguity 34.7% vs 14% known-PTM bins and the 1,610-unit Amidation bin uninvestigated | CONFIRMED | S30-BASELINE §303–311 | — | step 02 as pre-registered (v3 scorer, full FDR curves); one script on existing output for the Amidation bin | 1 week; hours |
-| C9 | Precursor isotopes leak into fragment lists | **MEASURED today (E9): of 200,000 S30 pseudo-spectra, 28.4% contain M+1 and 24.8% contain M+2 within 10 ppm; M itself 0.2%** | `iso_frag_check.py` on d2_P1 | only the mono peak is excluded from the fragment list | exclude M..M+3/z within tolerance at assembly | one S30 run; gate: set overlap, both engines |
+| C9 | Precursor isotopes leak into fragment lists | **MEASURED (28.4% M+1, 24.8% M+2) and the fix FALSIFIED 19:05**: dropping M+1..M+3 → 12,249 vs 12,537 (−2.3%, same binary) while contamination fell to 0.2% | d12_dropiso | the survivors are useful to the engine, not noise | keep them; `SPEXTRACT_DROP_PREC_ISO` stays off | closed |
 | C10 | Public-PXD replication | not done | patient data unreproducible in principle | — | diaTracer paper's public diaPASEF data, both tools, both engines | 1–2 weeks; gate for any public number |
 
 ## D. mzPeak / converter / reader
@@ -94,7 +94,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 **Week 2 — resolve the MSFragger attribution instead of naming it**
 8. C1(a) matched-precursor score distributions (free) → C1(b) rescoring A/B on both tools (ratio, not "half") → C1(d) oracle-fragment arm. Only then decide between C1(c) emission-controlled arm and C5 learned predictor.
 9. ~~D1 isolation A/B~~ **DONE**: exact calibration recovers 91% of the loss (12,082 vs 10,785; `.d` 12,217); exact path is the mzPeak default.
-10. C9 isotope exclusion at assembly (one run, both engines, set gate).
+10. ~~C9 isotope exclusion~~ **FALSIFIED** (−2.3%): the precursor isotopes in the list help the engine.
 
 **Weeks 3–4 — the arms that change the product**
 11. C1(c)/C8 step 02 emission-controlled open-search arm (pre-registered, v3 scorer, full FDR curves).
