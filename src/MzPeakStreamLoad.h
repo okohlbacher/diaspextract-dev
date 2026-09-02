@@ -248,9 +248,19 @@ namespace spx
     std::vector<std::vector<MzPeakWin>> wins(n);
     std::vector<std::size_t> ms1, ms2;
     std::unique_ptr<MzPeakExactMz> exact;
-    if (std::getenv("SPEXTRACT_MZPEAK_EXACT") && std::string(std::getenv("SPEXTRACT_MZPEAK_EXACT")) == "1")
+    // DEFAULT ON (2026-09-02 18:58): with the exact model recovered from the tdf, mzPeak input gives 12,082 Sage
+    // peptides vs 10,785 with the archive's two-point transform (and 12,217 from .d): the transform was 91% of the
+    // loss. Fail closed like the .d path: no tdf (embedded or SPEXTRACT_MZPEAK_TDF sidecar) -> error, unless
+    // SPEXTRACT_MZPEAK_EXACT=0 explicitly accepts the two-point m/z.
+    const char* ex = std::getenv("SPEXTRACT_MZPEAK_EXACT");
+    if (!(ex && std::string(ex) == "0"))
     {
-      exact = std::make_unique<MzPeakExactMz>(path);
+      try { exact = std::make_unique<MzPeakExactMz>(path); }
+      catch (const std::exception& e)
+      {
+        throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set SPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or SPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
+      }
       lastMzPeakCalibration() = "tdf_table_modeltype1 (recovered from the archive's two-point transform + embedded vendor/analysis.tdf.gz) archive=" + path.substr(path.find_last_of('/') + 1);
     }
     for (std::size_t i = 0; i < n; ++i)

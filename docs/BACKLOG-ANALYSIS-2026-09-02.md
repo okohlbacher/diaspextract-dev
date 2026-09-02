@@ -51,7 +51,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 
 | # | issue | status | evidence | root cause | fix | owner |
 |---|---|---|---|---|---|---|
-| D1 | mzPeak input: −11.7% peptides, fragment error +10.05 vs +3.39 ppm | MEASURED; **attribution = leading hypothesis** (two-point transform, ~7 ppm bow) — confounded by the IM axis (converter ModelType-2 vs our rational; vendor-IM alone was worth ~1.3% on 09-01), the band reconstruction, +0.3% spectra | Sage on d3_MZP vs d2_P1 | archive carries only `mzpeak:transform_params` | **A/B that isolates it**: exact m/z on the same archive (read `MzCalibration` from the embedded `vendor/analysis.tdf.gz`) with IM, bands, RT, reader and binary held fixed; falsifier: ≈12,217 peptides with high set overlap → m/z; else the IM axis | speXtract 1 day; converter (handoff §5) |
+| D1 | mzPeak input: −11.7% peptides, fragment error +10.05 vs +3.39 ppm | **ISOLATED 18:58**: with the exact calibration recovered from the tdf (same archive, same reader, same binary) **12,082 peptides (−1.1% vs `.d`)**, paired ppm vs the `.d` run +0.00/+0.00 → the two-point transform was **91%** of the loss; the residual ~1% is the IM axis | d10_MZPexact | archive carries only `mzpeak:transform_params` | exact path now DEFAULT and fail-closed (tdf embedded or sidecar); converter ask (handoff §5) unchanged | closed for speXtract |
 | D2 | `--ims-chunked` aborts on TDF | CONFIRMED | S30 + S08 | facet-layout mismatch in the writer | converter (handoff §1) | converter |
 | D3 | archive 4.5–5.6% larger than `tdf_bin` | MEASURED | — | per-peak f64 1/K0 (0.57) + tof (0.52) | converter question (handoff §2) | converter |
 | D4 | band as name-only CV params; `precursor_index` NULL → reader attaches both ions to precursor 0 | CONFIRMED | `spx_band2` | converter metadata + reader attach key | worked around (flatten + match by m/z, 0.05 Da); converter/reader fix (handoff §3–4) | converter + library |
@@ -93,7 +93,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 
 **Week 2 — resolve the MSFragger attribution instead of naming it**
 8. C1(a) matched-precursor score distributions (free) → C1(b) rescoring A/B on both tools (ratio, not "half") → C1(d) oracle-fragment arm. Only then decide between C1(c) emission-controlled arm and C5 learned predictor.
-9. D1 isolation A/B (exact m/z from the embedded tdf on the same archive; IM/bands/RT fixed) — settles the converter ask with one number.
+9. ~~D1 isolation A/B~~ **DONE**: exact calibration recovers 91% of the loss (12,082 vs 10,785; `.d` 12,217); exact path is the mzPeak default.
 10. C9 isotope exclusion at assembly (one run, both engines, set gate).
 
 **Weeks 3–4 — the arms that change the product**

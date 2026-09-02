@@ -284,3 +284,13 @@ system time); adopt via `LD_PRELOAD` in the benchmark harness, link in CMake onl
 so the knob is quality-affecting (BC-3 was right). Keep 12; drop A3(iv).
 **D1 first attempt (18:32) aborted:** the cluster copy of the S30 archive is the --no-vendor one, so
 `vendor/analysis.tdf.gz` is absent; the loader now accepts `SPEXTRACT_MZPEAK_TDF=<sidecar>`; rerun in flight.
+
+## D1 ISOLATED (18:58): the two-point transform is 91% of the mzPeak loss; exact calibration recovers it
+| S30 input | Sage @1% | vs `.d` (12,217) | paired precursor / fragment ppm vs the `.d` run |
+|---|---|---|---|
+| `.mzpeak`, archive two-point transform | 10,785 | −11.7% | (vs dt: +8.60 / +10.05) |
+| **`.mzpeak`, exact calibration recovered** (tof from the inverted transform + MzCalibration and Frames.T1 from the tdf) | **12,082** | **−1.1%** (symdiff 1,186 / 1,051) | **+0.00 / +0.00** — the m/z axis is identical to the `.d` path |
+The remaining −1.1% is the IM axis / band reconstruction (converter-recalibrated 1/K0 vs our rational calibration; ~1.3%
+vendor-IM effect measured on 09-01). `SPEXTRACT_MZPEAK_EXACT` is now ON by default and fails closed without a tdf
+(embedded `vendor/analysis.tdf.gz` or `SPEXTRACT_MZPEAK_TDF=` sidecar); `=0` accepts the two-point m/z explicitly.
+Provenance: `spx:mz_calibration = tdf_table_modeltype1 (recovered from the archive's two-point transform + ...)`.
