@@ -111,3 +111,21 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 - **D6** false mzPeak calibration provenance — fixed in code.
 - **E1 (tests/CI)** exist since v0.2.0; only the determinism smoke test remains.
 - OpenMS in-tree `MzPeakFile` (0 spectra on ims-compact) — closed for speXtract (bypassed); open only as a separate OpenMS product.
+
+## Status at 20:10 (end of the first day of the plan)
+
+Done and committed today: A1 (MS1 path, 22:22 → 15:21, byte-identical), B2/B3 (both retracted — digest artefact; output is
+byte-identical at any thread count and batch), C2 (paired bias measured on 3 files; apex estimator +2.6% Sage / +4.1%
+MSFragger → new default; pick-level modes falsified; the −2.4 ppm fragment offset is diaTracer-side reporting), C3
+(entrapment 0.95–1.37% on 3 files), C7 (apportion falsified cleanly; NNLS cut), C9 (isotope exclusion falsified, −2.3%),
+D1 (two-point transform = 91% of the mzPeak loss; exact path recovers it and is the default), D6 (provenance), E3/E4/E5/E7/E10,
+R3 + early skip (identical, no gain), A4(i) (tcmalloc_minimal −7% RSS, wall-neutral), A3(iv) (48 MS1 bands: worse, not identical).
+
+Running: apex on S08/S23 + entrapment of the apex arm (`bench_apex23.sh`), then the FragPipe MSBooster/Percolator
+rescoring A/B on both tools (`bench_rescore.sh`, C1 b).
+
+Next (in order): read the rescoring ratio → decide between the emission-controlled arm (step 02) and the oracle-fragment
+arm for the MSFragger attribution; C6 native aggregation re-test WITH an emission gate; E1 determinism smoke test in CI
+(needs a public-derived fixture); C10 public-PXD replication + v0.3.0 (README rewrite, executable rename, `main`
+fast-forward). Not doing: cross-precursor redistribution of any kind, MS1 band count changes, isotope stripping,
+median/seed m/z estimators.
