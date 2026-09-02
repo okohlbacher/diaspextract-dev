@@ -433,3 +433,13 @@ Same binary -> the 0.06% same-binary floor applies; +2.6% is real on Sage. The p
 the way to diaTracer; the FRAGMENT bias does not move at all -> the −2.4 ppm fragment offset is upstream of the
 trace estimator (the IM-cluster pick's centroid, or diaTracer reporting the apex RAW peak), a separate A/B.
 Default change is gated on the standing rule: **MSFragger on d7_apex before apex becomes the default** (queued).
+
+### APEX estimator passes the both-engines gate -> NEW DEFAULT (2026-09-02, 18:42)
+| S30 | Sage @1% | MSFragger @1% (raw-hyperscore walk) | precursor ppm paired vs dt |
+|---|---|---|---|
+| table model, mean estimator (until today) | 12,217 | 11,463 | +1.12 |
+| **table model, APEX estimator** | **12,537 (+2.6%)** | **11,927 (+4.1%)** | **+0.78** |
+| diaTracer | 11,517 | 13,932 | — |
+MSFragger ratio vs diaTracer 82.3% -> 85.6%. Same binary (env switch), so the same-binary floor applies; both
+engines move the same way; ppm beside the count improved. Default changed in code (`SPEXTRACT_MZ_ESTIMATOR=mean`
+restores the OpenMS centroid). Owed next: S08/S23 apex arms (Sage) and entrapment on the apex arm (queued).

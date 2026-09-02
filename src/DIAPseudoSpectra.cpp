@@ -244,7 +244,9 @@ namespace
     // [C2 A/B, 2026-09-02] reported m/z estimator. Default = OpenMS centroid (intensity-weighted mean over
     // the trace). Paired vs diaTracer on shared peptides our precursor m/z is +1.5..+2.6 ppm high and our
     // fragment m/z ~2 ppm low, so the estimator is under test: SPEXTRACT_MZ_ESTIMATOR=apex|median|mean.
-    static const std::string mz_est = std::getenv("SPEXTRACT_MZ_ESTIMATOR") ? std::getenv("SPEXTRACT_MZ_ESTIMATOR") : "mean";
+    // DEFAULT = apex since 2026-09-02 18:42: +2.6% Sage (12,537 vs 12,217) AND +4.1% MSFragger (11,927 vs 11,463)
+    // on S30 with the precursor bias vs diaTracer +1.12 -> +0.78 ppm; "mean" restores the OpenMS centroid.
+    static const std::string mz_est = std::getenv("SPEXTRACT_MZ_ESTIMATOR") ? std::getenv("SPEXTRACT_MZ_ESTIMATOR") : "apex";
     if (mz_est == "apex" && mt.getSize() > 0) t.mz = mt[mt.findMaxByIntPeak(false)].getMZ();
     else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); t.mz = m2.getCentroidMZ(); }
     else t.mz = mt.getCentroidMZ();
