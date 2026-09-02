@@ -117,3 +117,8 @@ Post-hoc on the archived TSVs, same global raw-hyperscore 1% walk that produced 
   test for the latter running: MSFragger with override_charge=1, z=1..5, both tools.
 - **"Is there additional information MSFragger can use?" -- No.** Nothing diaTracer writes that we
   do not is consumed by scoring. The deficit is in what we emit, not what we annotate.
+- **Charge-corruption test (override_charge=1, z=1..5 for every spectrum, both tools, 2026-09-02):**
+  speXtract 10,750 -> **11,238 (+488, +4.5%)**; diaTracer 13,004 -> 13,276 (+272, +2.1%). Gap 2,254 ->
+  2,038: **wrong charge labels explain ~10% of the MSFragger gap** (kimi's estimate was 16-35%). They
+  cost us twice what they cost diaTracer, so charge assignment is worth ~+490 peptides on MSFragger
+  on its own; the remaining ~2,000 is tail coverage/quality of what we emit for faint precursors.
