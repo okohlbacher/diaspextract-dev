@@ -533,3 +533,22 @@ real faint peptides on Sage (−6.4%). The deficit is per-precursor CONTENT of t
 rescoring A/B (ratio unchanged after Percolator) and H3 (identical scores on shared peptides). Sub-arm 2 (matched
 precursor population) is the direct test of that and is running. Side result: `SPEXTRACT_MIN_ISOTOPES=3` is a
 legitimate speed/emission knob (−39% spectra, −23% wall, −0.9% MSFragger, −6.4% Sage) -- not a default.
+
+### STEP 02 sub-arm 2 RESULT (2026-09-02, 22:49): SAME PRECURSORS, SAME 85% -- the deficit is per-precursor content
+Reference: diaTracer's 700,434 S30 pseudo-spectra (RT/m/z/z). Of our 1,105,532 precursor hypotheses 445,008 match one
+(10 s / 10 ppm / z); emitting only those gives 432,579 spectra.
+| S30 arm | spectra | Sage @1% | MSFragger @1% | MSFragger ratio vs dt |
+|---|---|---|---|---|
+| apex (all precursors) | 927,813 | 12,537 | 11,927 | 85.6% |
+| **diaTracer-precursor-matched** | 432,579 | 11,903 (103% of dt's 11,517) | **11,842** | **85.0%** |
+| diaTracer | 700,434 | 11,517 | 13,932 | — |
+With the precursor POPULATION held to diaTracer's, the MSFragger ratio does not move (85.0%). Together with sub-arm 1
+(emission −39%: 84.8%), the rescoring A/B (Percolator: 82.8%) and H3 (identical scores on shared peptides), every
+search-side and population-side explanation is now excluded. What is left is the CONTENT of the spectra we emit for the
+precursors diaTracer also emits: for ~3,600 peptides our spectrum of the same precursor does not reach MSFragger's
+1% threshold while diaTracer's does, and on Sage it does. Candidates, in test order: (1) the intensity reshaping
+`corr_power=2` (a Sage win that MSFragger's rank-based hyperscore may dislike -- never measured on MSFragger; cp0 arm
+launched); (2) fragment coverage of the faint tail (our ~55 fragments vs diaTracer's ~500 per spectrum, top-150 cap in
+MSFragger); (3) the oracle-fragment arm (true fragments at true charge/mono) to bound what content can give.
+Note also: only 62% of diaTracer's emissions have a matching precursor of ours -- the other 38% are either duplicates
+on diaTracer's side or precursors we never hypothesise (the MS1 funnel), a separate coverage question.
