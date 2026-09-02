@@ -405,6 +405,18 @@ output (d2_P1, table-model calibration, parallel loader -- byte-identical to eve
 |---|---|---|---|---|---|
 | **table model (shipping, HEAD)** | 11,489 | 107 | 0.92 | **1.37** | 1.10-1.64 |
 | vendor-SDK calibration (09-01 arm) | 11,435 | 98 | 0.85 | 1.26 | 1.00-1.51 |
+| **S08 table model (shipping)** | 9,736 | 63 | 0.64 | **0.95** | 0.72-1.18 |
+| S08 diaTracer | 9,953 | 84 | 0.84 | 1.24 | 0.99-1.54 |
+| **S23 table model (shipping)** | 9,462 | 85 | 0.89 | **1.32** | 1.04-1.59 |
+| S23 diaTracer | 8,581 | 71 | 0.82 | 1.22 | 0.96-1.53 |
 The owed measurement (review F4) is now made: the shipping arm's true FDR at nominal 1% is ~1.4%, inside the
 same band as the vendor-calibrated arm (CIs overlap), so the open-path calibration gain is not bought with
-FDR. S08/S23 table arms running (`entrap_s08_tbl`, `entrap_s23_tbl`).
+FDR. On all three files the shipping arm's true FDR at nominal 1% is 0.95-1.37%, inside diaTracer's band on the two files where it exists (1.22-1.24%): the 3-file closed-search parity claim now carries its FDR control.
+
+### C7: `assembly:apportion` FALSIFIED CLEANLY (2026-09-02, 16:46) -- the first A/B with corr_power actually applied
+Every earlier apportion/rp_max A/B compared corr_power=2 (share-all) against corr_power=0 (the variant) because those
+branches bypassed the emit weights (E5, fixed 15:05). Re-run with the weights applied: apportion=1.0 -> Sage 11,742
+vs 12,217 share-all (**-3.9%**, only-share-all 1,234 / only-apportion 759). Same verdict as July, now clean:
+cross-precursor intensity apportionment loses peptides. Consequence: BACKLOG item 1 (NNLS unmixing onto the MS1
+basis) is cut -- its prerequisite ("apportion shows a signal") failed under the correct measurement. Side note: the
+apportion path ran the window loop at 6.1x (3,658 s) -- an hour-long run -- irrelevant now that it is dead.
