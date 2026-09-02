@@ -269,3 +269,7 @@ calibration.
 futex ping-pong inside the library's decode path (its per-reader mutex and/or the `util/executor` thread pool
 behind `get_spectra_batch`), i.e. ~50 M lock hand-offs for 33 k spectra -- not I/O, not allocation. Library-side
 fix: a synchronous single-threaded decode mode for callers that parallelise externally, or one shared executor.
+**R3 + early short-trace skip (17:41): byte-identical, no measurable wall gain.** Band partition by two
+`MZBegin` lookups instead of a per-band scan, and skipping fragments whose support < min_corr_pts before the
+dot product: digest identical to P1; WINDOW_LOOP 763 s (vs 759 s), total 15:43, peak RSS 101.8 GB (vs 105.6).
+The loop is not bound by either loop; kept as the cheaper code path, not counted as a win.

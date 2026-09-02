@@ -420,3 +420,16 @@ vs 12,217 share-all (**-3.9%**, only-share-all 1,234 / only-apportion 759). Same
 cross-precursor intensity apportionment loses peptides. Consequence: BACKLOG item 1 (NNLS unmixing onto the MS1
 basis) is cut -- its prerequisite ("apportion shows a signal") failed under the correct measurement. Side note: the
 apportion path ran the window loop at 6.1x (3,658 s) -- an hour-long run -- irrelevant now that it is dead.
+
+### C2 estimator A/B (2026-09-02, 17:22): APEX m/z for traces is +2.6% peptides (same binary, env switch)
+`SPEXTRACT_MZ_ESTIMATOR` selects the reported m/z of every trace in `toTrace()`; default = OpenMS centroid
+(intensity-weighted mean over the trace's members).
+| estimator | spectra | Sage @1% | vs share-all default (12,217) | paired precursor ppm vs dt | paired fragment ppm vs dt |
+|---|---|---|---|---|---|
+| mean (default) | 922,902 | 12,217 | — | +1.12 | −2.41 |
+| **apex** (max-intensity member's m/z) | 927,813 | **12,537 (+2.6%)** | only-default 757 / only-apex 1,077 | **+0.78** | −2.41 |
+| median | 920,021 | 12,099 (−1.0%) | 756 / 638 | +1.18 | −2.36 |
+Same binary -> the 0.06% same-binary floor applies; +2.6% is real on Sage. The precursor bias moves a third of
+the way to diaTracer; the FRAGMENT bias does not move at all -> the −2.4 ppm fragment offset is upstream of the
+trace estimator (the IM-cluster pick's centroid, or diaTracer reporting the apex RAW peak), a separate A/B.
+Default change is gated on the standing rule: **MSFragger on d7_apex before apex becomes the default** (queued).

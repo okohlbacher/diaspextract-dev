@@ -933,9 +933,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           MSSpectrum t; t.setRT(s.getRT()); t.setMSLevel(1);
           OpenMS::DataArrays::FloatDataArray ia;
           ia.setName(Constants::UserParam::ION_MOBILITY);
-          for (Size i = 0; i < s.size(); ++i)
-            if (s[i].getMZ() >= lo && s[i].getMZ() < hi)
-            { t.push_back(s[i]); if (ima && i < ima->size()) ia.push_back((*ima)[i]); }
+          // [R3, 2026-09-02] spectra arrive m/z-sorted (loader sortByPosition), so the band's peak range is
+          // two lower_bounds instead of a scan of every peak for every band (O(bands x peaks) -> O(bands log
+          // peaks)). Same peaks in the same order -> byte-identical; the scan stays as the unsorted fallback.
+          Size i0 = 0, i1 = s.size();
+          if (s.isSorted())
+          {
+            i0 = (Size)(s.MZBegin(lo) - s.begin());
+            i1 = (Size)(s.MZBegin(hi) - s.begin());
+            t.reserve(i1 - i0); ia.reserve(i1 - i0);
+            for (Size i = i0; i < i1; ++i) { t.push_back(s[i]); if (ima && i < ima->size()) ia.push_back((*ima)[i]); }
+          }
+          else
+            for (Size i = 0; i < s.size(); ++i)
+              if (s[i].getMZ() >= lo && s[i].getMZ() < hi)
+              { t.push_back(s[i]); if (ima && i < ima->size()) ia.push_back((*ima)[i]); }
           if (!t.empty()) { t.getFloatDataArrays().push_back(std::move(ia)); sub[b].addSpectrum(std::move(t)); }
         }
       }
@@ -1447,6 +1459,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
         double dot = 0; int overlap = 0;
+        // [R2-late, 2026-09-02] overlap <= support, so a fragment with fewer support points than
+        // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
+        // Output-identical by construction (the guard's continue is the only thing it would reach).
+        if (fg.supEnd(fi) - fg.supBegin(fi) < (size_t)std::max(min_corr_pts, 0)) continue;
         for (size_t k = fg.supBegin(fi), ke = fg.supEnd(fi); k < ke; ++k)
         { const auto& gv = fg.flat[k]; float pv = pdense[gv.first]; if (pv != 0.0f) { dot += (double)pv * gv.second; ++overlap; } }
         if (overlap < min_corr_pts) continue;                          // overlap guard [H-4]
@@ -1703,6 +1719,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       Param sp = spicker.getParameters();
       sp.setValue("pickIMCluster:im_tolerance_cluster", getDoubleOption_("gate:delta_im"));
       sp.setValue("pickIMCluster:ppm_tolerance_cluster", getDoubleOption_("trace:mass_error_ppm"));
+      if (const char* m = std::getenv("SPEXTRACT_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
       spicker.setParameters(sp);
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
       try

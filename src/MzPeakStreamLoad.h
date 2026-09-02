@@ -20,6 +20,24 @@
 #include <mzpeak/spectrum.h>
 #include <mzpeak/spectrum_metadata.h>
 
+// [D1 exact m/z] the archive stores raw TOF behind a two-point transform; the exact ModelType-1 calibration
+// lives only in the embedded vendor/analysis.tdf.gz. Recover tof = round((sqrt(mz) - c0) / c1) and re-apply
+// TdfMzCalibration per frame. Enabled with SPEXTRACT_MZPEAK_EXACT=1.
+#include <OpenMS/FORMAT/TdfMzCalibration.h>   // installed by the OpenMS patch (same header as src/TdfMzCalibration.h)
+#include <zip.h>
+#include <zlib.h>
+#if __has_include(<SQLiteCpp/SQLiteCpp.h>)
+#include <SQLiteCpp/SQLiteCpp.h>   // OpenMS' in-tree extern (src/openms/extern/SQLiteCpp); not installed by OpenMS
+#define SPX_HAVE_SQLITECPP 1
+#endif
+#include <arrow/api.h>
+#include <arrow/io/memory.h>
+#include <parquet/file_reader.h>
+#include <parquet/arrow/schema.h>
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
+
 #include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/METADATA/Precursor.h>
 #include <OpenMS/CONCEPT/Exception.h>
@@ -33,6 +51,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cstring>
+#include <stdexcept>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -45,12 +65,119 @@ namespace spx
   /// library; NOT the TDF table model). Stamped into the output instead of BrukerTimsFile's state.
   inline std::string& lastMzPeakCalibration() { static std::string s = "unset"; return s; }
 
+
+  /// Exact TOF->m/z for an ims-compact archive: (c0, c1) from the peaks table's column metadata, the
+  /// MzCalibration row and Frames.T1 from the embedded vendor tdf. Throws on anything missing (fail closed).
+  struct MzPeakExactMz
+  {
+    double c0 = 0, c1 = 0;
+    spextract::TdfMzCalibration cal;
+    std::vector<double> t1_by_frame;          // index = Frames.Id
+    bool enabled = false;
+
+    static std::vector<char> readMember_(zip_t* z, const char* name, zip_int64_t from = 0, zip_int64_t len = -1)
+    {
+      zip_int64_t idx = zip_name_locate(z, name, 0);
+      if (idx < 0) throw std::runtime_error(std::string("mzpeak: member missing: ") + name);
+      zip_stat_t st; zip_stat_index(z, (zip_uint64_t)idx, 0, &st);
+      if (len < 0) len = (zip_int64_t)st.size - from;
+      zip_file_t* f = zip_fopen_index(z, (zip_uint64_t)idx, 0);
+      if (!f) throw std::runtime_error(std::string("mzpeak: cannot open member ") + name);
+      if (from > 0 && zip_fseek(f, from, SEEK_SET) != 0) { zip_fclose(f); throw std::runtime_error(std::string("mzpeak: cannot seek in ") + name + " (member not stored?)"); }
+      std::vector<char> buf((size_t)len); zip_int64_t got = 0;
+      while (got < len) { zip_int64_t n = zip_fread(f, buf.data() + got, (zip_uint64_t)(len - got)); if (n <= 0) break; got += n; }
+      zip_fclose(f);
+      if (got != len) throw std::runtime_error(std::string("mzpeak: short read of ") + name);
+      return buf;
+    }
+
+    explicit MzPeakExactMz(const std::string& path)
+    {
+      int err = 0; zip_t* z = zip_open(path.c_str(), ZIP_RDONLY, &err);
+      if (!z) throw std::runtime_error("mzpeak: zip_open failed on " + path);
+      try
+      {
+        // (1) two-point transform params from the parquet footer of spectra_peaks.parquet (stored member)
+        zip_int64_t idx = zip_name_locate(z, "spectra_peaks.parquet", 0);
+        if (idx < 0) throw std::runtime_error("mzpeak: spectra_peaks.parquet missing");
+        zip_stat_t st; zip_stat_index(z, (zip_uint64_t)idx, 0, &st);
+        std::vector<char> tail = readMember_(z, "spectra_peaks.parquet", (zip_int64_t)st.size - 8, 8);
+        uint32_t flen; std::memcpy(&flen, tail.data(), 4);
+        if (std::string(tail.data() + 4, 4) != "PAR1") throw std::runtime_error("mzpeak: peaks member is not parquet");
+        std::vector<char> footer = readMember_(z, "spectra_peaks.parquet", (zip_int64_t)st.size - 8 - flen, flen);
+        uint32_t flen2 = flen;
+        std::shared_ptr<parquet::FileMetaData> md = parquet::FileMetaData::Make(footer.data(), &flen2);
+        std::shared_ptr<arrow::Schema> schema;
+        parquet::ArrowReaderProperties props;
+        PARQUET_THROW_NOT_OK(parquet::arrow::FromParquetSchema(md->schema(), props, md->key_value_metadata(), &schema));
+        auto point = schema->GetFieldByName("point");
+        if (!point) throw std::runtime_error("mzpeak: no 'point' column");
+        auto tof = std::dynamic_pointer_cast<arrow::StructType>(point->type())->GetFieldByName("tof");
+        if (!tof || !tof->metadata()) throw std::runtime_error("mzpeak: no tof column / metadata (not an ims-compact archive?)");
+        auto tp = tof->metadata()->Get("mzpeak:transform_params");
+        if (!tp.ok()) throw std::runtime_error("mzpeak: tof column has no mzpeak:transform_params");
+        if (std::sscanf(tp->c_str(), "%lf,%lf", &c0, &c1) != 2 || !(c1 > 0)) throw std::runtime_error("mzpeak: bad transform_params " + *tp);
+
+        // (2) the vendor tdf: gunzip vendor/analysis.tdf.gz to a temp file, read MzCalibration + Frames.T1
+        std::vector<char> gz = readMember_(z, "vendor/analysis.tdf.gz");
+        char tmpl[] = "/tmp/spx_mzpeak_tdf_XXXXXX"; int fd = mkstemp(tmpl); if (fd < 0) throw std::runtime_error("mzpeak: mkstemp");
+        close(fd);
+        { z_stream zs{}; inflateInit2(&zs, 16 + MAX_WBITS); FILE* out = std::fopen(tmpl, "wb");
+          zs.next_in = (Bytef*)gz.data(); zs.avail_in = (uInt)gz.size(); std::vector<char> ob(1 << 20); int rc;
+          do { zs.next_out = (Bytef*)ob.data(); zs.avail_out = (uInt)ob.size(); rc = inflate(&zs, Z_NO_FLUSH);
+               if (rc != Z_OK && rc != Z_STREAM_END) { std::fclose(out); inflateEnd(&zs); throw std::runtime_error("mzpeak: gunzip of analysis.tdf.gz failed"); }
+               std::fwrite(ob.data(), 1, ob.size() - zs.avail_out, out); } while (rc != Z_STREAM_END);
+          inflateEnd(&zs); std::fclose(out); }
+#ifndef SPX_HAVE_SQLITECPP
+        throw std::runtime_error("mzpeak exact m/z needs SQLiteCpp headers at build time (OpenMS extern); rebuild inside the OpenMS tree");
+#else
+        {
+          SQLite::Database db(std::string(tmpl), SQLite::OPEN_READONLY);
+          SQLite::Statement q(db, "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 FROM MzCalibration");
+          if (!q.executeStep()) throw std::runtime_error("mzpeak: no MzCalibration row in the embedded tdf");
+          cal.model_type = q.getColumn(0).getInt(); cal.digitizer_timebase = q.getColumn(1).getDouble(); cal.digitizer_delay = q.getColumn(2).getDouble();
+          cal.C0 = q.getColumn(3).getDouble(); cal.C1 = q.getColumn(4).getDouble(); cal.C2 = q.getColumn(5).getDouble(); cal.T1_ref = q.getColumn(6).getDouble();
+          cal.dC1 = q.getColumn(7).getDouble(); cal.dC2 = q.getColumn(8).getDouble(); cal.C3 = q.getColumn(9).getDouble(); cal.C4 = q.getColumn(10).getDouble();
+          if (q.executeStep()) throw std::runtime_error("mzpeak: more than one MzCalibration row");
+          if (!cal.isSupported()) throw std::runtime_error("mzpeak: " + cal.unsupportedReason());
+          SQLite::Statement f(db, "SELECT Id, T1 FROM Frames");
+          while (f.executeStep())
+          {
+            const long id = f.getColumn(0).getInt64(); if (id < 0 || id > 10000000) throw std::runtime_error("mzpeak: implausible Frames.Id");
+            if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
+            t1_by_frame[(size_t)id] = f.getColumn(1).isNull() ? cal.T1_ref : f.getColumn(1).getDouble();
+          }
+        }
+#endif
+        std::remove(tmpl);
+        enabled = true;
+      }
+      catch (...) { zip_close(z); throw; }
+      zip_close(z);
+    }
+
+    /// Recover the integer tof from the archive's two-point m/z and re-apply the exact model.
+    void exact(std::vector<double>& mz, long frame_id) const
+    {
+      const double b = cal.frameFactor(frame_id >= 0 && (size_t)frame_id < t1_by_frame.size() ? t1_by_frame[(size_t)frame_id] : cal.T1_ref);
+      for (double& v : mz)
+      {
+        const double tof = std::llround((std::sqrt(v) - c0) / c1);
+        const double e = cal.tofToMz(tof, b);
+        if (std::isfinite(e)) v = e;
+      }
+    }
+  };
+
   /// One decoded frame split per window (index-aligned with `wins` of that frame).
   inline void frameToSpectra_(const MzPeak::Spectrum& sp, double rt, std::size_t frame_idx,
-                              const std::vector<MzPeakWin>& wins, std::vector<OpenMS::MSSpectrum>& out)
+                              const std::vector<MzPeakWin>& wins, std::vector<OpenMS::MSSpectrum>& out,
+                              const MzPeakExactMz* exact = nullptr, long frame_id = -1)
   {
     using namespace OpenMS;
-    const std::vector<double>& mz = sp.mz();
+    std::vector<double> mz_exact;
+    if (exact && exact->enabled) { mz_exact = sp.mz(); exact->exact(mz_exact, frame_id); }
+    const std::vector<double>& mz = (exact && exact->enabled) ? mz_exact : sp.mz();
     const std::vector<float>& in = sp.intensity();
     const std::vector<double>& im = sp.ion_mobility_array();
     const std::size_t n = std::min(mz.size(), in.size());
@@ -110,13 +237,21 @@ namespace spx
     const std::size_t n = spectra.size();
     lastMzPeakCalibration() = "mzpeak_two_point_transform (library-applied MS:1003825 from the archive; not the TDF MzCalibration model) archive=" + path.substr(path.find_last_of('/') + 1);
     std::vector<double> rt(n);
+    std::vector<long> frame_id(n, -1);
     std::vector<std::vector<MzPeakWin>> wins(n);
     std::vector<std::size_t> ms1, ms2;
+    std::unique_ptr<MzPeakExactMz> exact;
+    if (std::getenv("SPEXTRACT_MZPEAK_EXACT") && std::string(std::getenv("SPEXTRACT_MZPEAK_EXACT")) == "1")
+    {
+      exact = std::make_unique<MzPeakExactMz>(path);
+      lastMzPeakCalibration() = "tdf_table_modeltype1 (recovered from the archive's two-point transform + embedded vendor/analysis.tdf.gz) archive=" + path.substr(path.find_last_of('/') + 1);
+    }
     for (std::size_t i = 0; i < n; ++i)
     {
       MzPeak::Spectrum sp = spectra[i];
       const auto& md = sp.metadata();
       rt[i] = md.retention_time.value_or(0.0);
+      { const std::string& id = md.id; const auto pos = id.find("frame="); if (pos != std::string::npos) frame_id[i] = std::atol(id.c_str() + pos + 6); }
       if (md.ms_level.value_or(1) == 1) { wins[i] = {MzPeakWin{0, 0, -1e9, 1e9}}; ms1.push_back(i); continue; }
       // Selected ions carry the per-window 1/K0 band. mzpeak-convert 0.9.x writes precursor_index
       // as NULL and the band as NAME-ONLY CV params; the reader then attaches every ion of the
@@ -183,7 +318,7 @@ namespace spx
             std::vector<MzPeak::Spectrum> got = tsp.get_spectra_batch(want);
             auto& slot = out[(std::size_t)c]; slot.resize(want.size());
             for (std::size_t k = 0; k < want.size() && k < got.size(); ++k)
-              frameToSpectra_(got[k], rt[want[k]], want[k], wins[want[k]], slot[k]);
+              frameToSpectra_(got[k], rt[want[k]], want[k], wins[want[k]], slot[k], exact.get(), frame_id[want[k]]);
           }
           catch (...)
           {
