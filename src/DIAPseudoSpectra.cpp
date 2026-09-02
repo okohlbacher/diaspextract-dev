@@ -381,7 +381,17 @@ namespace
   /// from many frames onto two artificial, perfectly-aligned mobility values — manufacturing spurious
   /// traces out of nothing. NaN also passed straight through clamp into llround (UB on unsigned
   /// conversion). Dropping + counting is the only defensible behaviour.
-  struct CompactStats { size_t no_im_array = 0, size_mismatch = 0, bad_mz = 0, bad_im = 0, kept = 0; };
+  struct CompactStats
+  {
+    size_t no_im_array = 0, size_mismatch = 0, bad_mz = 0, bad_im = 0, kept = 0;
+    /// merge per-frame stats after a parallel batch [perf-load]
+    CompactStats& operator+=(const CompactStats& o)
+    {
+      no_im_array += o.no_im_array; size_mismatch += o.size_mismatch;
+      bad_mz += o.bad_mz; bad_im += o.bad_im; kept += o.kept;
+      return *this;
+    }
+  };
 
   /// Convert one picked MSSpectrum into the compact form (drops everything tracing does not read).
   CompactFrame compactify(const MSSpectrum& s, CompactStats& st)
@@ -462,11 +472,44 @@ namespace
 
     size_t frames_seen = 0;
 
+    /// [perf-load] Pick+compact a BATCH of buffered frames in parallel, then append in arrival
+    /// order. OpenMS hands frames over a strictly serial `for (fid..) consumeSpectrum(spec)` loop,
+    /// so before this the peak picking of 1.26e9 peaks ran on ONE thread and was 53% of total wall
+    /// (measured: 1046 s wall, parallel factor 1.0). Buffering here parallelises it without
+    /// touching the reader. Appending strictly by buffer index keeps the output order -- and hence
+    /// the emitted spectra -- identical to the serial path.
+    void flush_()
+    {
+      const int n = (int)buf_.size();
+      if (n == 0) return;
+      std::vector<CompactFrame> compacted((size_t)n);
+      std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
+      PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
+      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 8)
+      for (int i = 0; i < n; ++i)
+      {
+        auto& s = buf_[(size_t)i];
+        ensureIMArrayName(s);
+        if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+        ensureIMArrayName(s);
+        compacted[(size_t)i] = compactify(s, st[(size_t)i]);
+        s.clear(true);                                  // raw frame dies here, inside the loop
+      }
+      for (int i = 0; i < n; ++i)
+      {
+        stats_ += st[(size_t)i];
+        windows_[key_[(size_t)i]].push_back(std::move(compacted[(size_t)i]));
+      }
+      buf_.clear(); key_.clear();
+    }
+
   protected:
     void consumeMS1Spectrum_(MapType::SpectrumType& s) override
     {
       // MS1 stays a PeakMap: it is only ~4% of frames (1,343 of 33,553) and MassTraceDetection
-      // needs it whole for the run-level precursor pass.
+      // needs it whole for the run-level precursor pass. Flush first so MS1 keeps its position
+      // relative to the MS2 frames around it.
+      flush_();
       ensureIMArrayName(s);
       if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker_.pickIMCluster(s);
       ensureIMArrayName(s);
@@ -481,16 +524,20 @@ namespace
       const double c = prec[0].getMZ();
       const double lo = c - prec[0].getIsolationWindowLowerOffset();
       const double hi = c + prec[0].getIsolationWindowUpperOffset();
-      ensureIMArrayName(s);
-      if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker_.pickIMCluster(s);
-      ensureIMArrayName(s);
-      windows_[keyfn_(lo, hi)].push_back(compactify(s, stats_));   // raw frame dies here
+      key_.push_back(keyfn_(lo, hi));
+      buf_.push_back(std::move(s));                  // pick+compact deferred to flush_()
       ++frames_seen;
+      if (buf_.size() >= kBatch) flush_();
     }
 
-    void ensureMapsAreFilled_() override {}          // we own the containers; nothing to finalise
+    void ensureMapsAreFilled_() override { flush_(); }   // pick up the tail
 
   private:
+    /// ponytail: 64 frames is ~250 MB of raw buffer at ~37k peaks/frame -- enough to fill 100
+    /// threads, small next to the 12 GB compact store. Raise only if profiling says so.
+    static constexpr size_t kBatch = 64;
+    std::vector<MapType::SpectrumType> buf_;
+    std::vector<pair<int, int>> key_;
     PeakPickerIM& picker_;
     map<pair<int, int>, vector<CompactFrame>>& windows_;
     PeakMap& ms1_;
@@ -1523,6 +1570,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
   ExitCodes main_(int, const char**) override
   {
+    phase_clock_();   // [perf-instr] fix the epoch HERE: it is a first-call static, and the
+                      // streaming path first touched it only AFTER loading, so load time was
+                      // invisible and every [t=..] was relative to post-load. [codex review]
     const String in = getStringOption_("in");
     const String out = getStringOption_("out");
     const double delta_im = getDoubleOption_("gate:delta_im");
