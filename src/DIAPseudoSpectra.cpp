@@ -2046,6 +2046,25 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       writeLogInfo_("SPEXTRACT_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
                     + " precursors with fewer isotope peaks, " + String(precursors.size()) + " remain");
     }
+    // [step-02 sub-arm 2] SPEXTRACT_PRECURSOR_LIST=<tsv: rt_sec mz z, header line> keeps only precursors that
+    // MATCH a listed one (|dRT| <= 10 s, |dm/z| <= 10 ppm, same z or listed z == 0). With diaTracer's own
+    // precursor list this is the precursor-matched sub-arm: identical precursor population, our spectra.
+    if (const char* pl = std::getenv("SPEXTRACT_PRECURSOR_LIST"))
+    {
+      struct Ref { double mz, rt; int z; };
+      std::vector<Ref> refs; std::ifstream f(pl); std::string line; std::getline(f, line);   // header
+      while (std::getline(f, line)) { std::istringstream ls(line); Ref r{}; if (ls >> r.rt >> r.mz >> r.z) refs.push_back(r); }
+      std::sort(refs.begin(), refs.end(), [](const Ref& a, const Ref& b){ return a.mz < b.mz; });
+      const size_t before = precursors.size();
+      precursors.erase(std::remove_if(precursors.begin(), precursors.end(), [&](const Precursor_& pc) {
+        const double tol = pc.mono_mz * 10e-6;
+        auto lo = std::lower_bound(refs.begin(), refs.end(), pc.mono_mz - tol, [](const Ref& r, double v){ return r.mz < v; });
+        for (auto it = lo; it != refs.end() && it->mz <= pc.mono_mz + tol; ++it)
+          if (std::fabs(it->rt - pc.rt) <= 10.0 && (it->z == 0 || pc.charge == 0 || it->z == pc.charge)) return false;
+        return true; }), precursors.end());
+      writeLogInfo_("SPEXTRACT_PRECURSOR_LIST: " + String(refs.size()) + " reference precursors; kept "
+                    + String(precursors.size()) + " of " + String(before) + " (matched within 10 s / 10 ppm / z)");
+    }
     // [ms1-funnel] Measured recall against a DIA-NN truth set is 74.3% vs diaTracer's 84.4%, but a
     // single number cannot say WHERE a precursor is lost: no MS1 trace at all, a trace that never
     // became a hypothesis, or a hypothesis that never produced a spectrum. Dump both upstream

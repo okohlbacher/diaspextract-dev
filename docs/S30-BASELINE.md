@@ -519,3 +519,17 @@ Prediction if the MSFragger deficit is EMISSION COMPETITION: with the same precu
 moves toward parity (>= 95%). Prediction if it is PER-PRECURSOR CONTENT (fragment coverage of the faint tail): the
 ratio stays near 85% even with matched precursors. Gates: emission count, Sage set vs the apex arm, MSFragger raw
 walk vs msf_dt. Runs after sub-arm 1 (`bench_match.sh`, d15_matched).
+
+### STEP 02 sub-arm 1 RESULT (2026-09-02, 22:34): EMISSION COMPETITION IS NOT THE MSFRAGGER MECHANISM
+| S30 arm | precursors kept | spectra | Sage @1% (vs apex 12,537) | MSFragger @1% (vs dt 13,932) | ratio | wall |
+|---|---|---|---|---|---|---|
+| apex (k=2, today's default) | 1,105,532 | 927,813 | 12,537 | 11,927 | 85.6% | 15:21 |
+| **k=3** (>= 2 isotope partners) | 655,297 | **566,537 (−39%)** | 11,739 (−6.4%; only-apex 1,010 / only-k3 212) | **11,820 (−0.9%)** | 84.8% | 11:53 |
+| k=4 | 399,837 | 353,689 (−62%) | 10,201 (−18.6%) | 10,538 (−11.6%) | 75.6% | 9:51 |
+Pre-registered reading: cutting emission by 39% -- to BELOW diaTracer's 700k -- moves the MSFragger ratio from 85.6%
+to 84.8%. It does not rise. So the extra spectra are not what costs us on MSFragger (the emission-competition
+hypothesis is refuted for the second time, now with a precursor-quality gate rather than merging), and the gate removes
+real faint peptides on Sage (−6.4%). The deficit is per-precursor CONTENT of the faint tail, consistent with the
+rescoring A/B (ratio unchanged after Percolator) and H3 (identical scores on shared peptides). Sub-arm 2 (matched
+precursor population) is the direct test of that and is running. Side result: `SPEXTRACT_MIN_ISOTOPES=3` is a
+legitimate speed/emission knob (−39% spectra, −23% wall, −0.9% MSFragger, −6.4% Sage) -- not a default.
