@@ -92,7 +92,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 7. ~~E7 tarball~~ **DONE** (718 MB on ceph, sha c6b2e6b8…).
 
 **Week 2 — resolve the MSFragger attribution instead of naming it**
-8. ~~C1(a)~~ done (identical scores on shared peptides); ~~C1(b)~~ **done: rescoring does not move the ratio (82.8%)** → the deficit is content-side. Next: C1(c) emission-controlled arm (step 02) and C1(d) oracle-fragment arm; C5 stays conditional on (d).
+8. ~~C1(a)~~ done (identical scores on shared peptides); ~~C1(b)~~ **done: rescoring does not move the ratio (82.8%)** → the deficit is content-side. Next: C1(c) emission-controlled arm (step 02) — **sub-arm 1 (isotope-depth gate k=3/4) and sub-arm 2 (diaTracer-precursor-matched emission) pre-registered and running 22:00**; C1(d) oracle-fragment arm after; C5 stays conditional on (d).
 9. ~~D1 isolation A/B~~ **DONE**: exact calibration recovers 91% of the loss (12,082 vs 10,785; `.d` 12,217); exact path is the mzPeak default.
 10. ~~C9 isotope exclusion~~ **FALSIFIED** (−2.3%): the precursor isotopes in the list help the engine.
 

@@ -510,3 +510,12 @@ Prediction if the MSFragger deficit is EMISSION COMPETITION: the spx/dt MSFragge
 toward diaTracer's 700k (peptides@1% hold or rise while spectra drop). Prediction if it is FAINT-TAIL CONTENT: the
 ratio is flat or falls (the gate removes exactly the faint precursors). Gates: Sage set overlap vs the apex arm,
 MSFragger raw walk vs msf_dt, emission count; both engines before any default change.
+
+### STEP 02, sub-arm 2 -- PRE-REGISTERED (2026-09-02, 22:03): diaTracer-precursor-MATCHED emission
+`SPEXTRACT_PRECURSOR_LIST=<rt_sec mz z>` keeps only our precursors that match a listed diaTracer S30 precursor
+(|dRT| <= 10 s, |dm/z| <= 10 ppm, same charge). The list is diaTracer's own 700,434 pseudo-spectra (extracted from
+its mzML; RT converted from minutes). This holds the PRECURSOR POPULATION fixed and varies only the spectra.
+Prediction if the MSFragger deficit is EMISSION COMPETITION: with the same precursor set the spx/dt MSFragger ratio
+moves toward parity (>= 95%). Prediction if it is PER-PRECURSOR CONTENT (fragment coverage of the faint tail): the
+ratio stays near 85% even with matched precursors. Gates: emission count, Sage set vs the apex arm, MSFragger raw
+walk vs msf_dt. Runs after sub-arm 1 (`bench_match.sh`, d15_matched).
