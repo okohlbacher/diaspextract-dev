@@ -552,3 +552,22 @@ launched); (2) fragment coverage of the faint tail (our ~55 fragments vs diaTrac
 MSFragger); (3) the oracle-fragment arm (true fragments at true charge/mono) to bound what content can give.
 Note also: only 62% of diaTracer's emissions have a matching precursor of ours -- the other 38% are either duplicates
 on diaTracer's side or precursors we never hypothesise (the MS1 funnel), a separate coverage question.
+
+### CONTENT CANDIDATE 2 MEASURED (2026-09-03, 01:28): the faint tail is missing ~2-3 matched fragment ions per spectrum
+MSFragger raw-walk TSVs (S30, best PSM per peptide+charge, target only; thresholds 15.2 ours / 14.0 dt):
+| | apex arm (all precursors) | diaTracer-precursor-matched arm |
+|---|---|---|
+| diaTracer-identified / shared / **dt-only** | 14,974 / 11,037 / **3,937** | 14,974 / 11,367 / **3,607** |
+| dt-only for which we HAVE a PSM (searched, below threshold) | **2,501 (64%)** | 1,567 (43%) |
+| dt-only with NO PSM at all (never emitted or < min_frags) | 1,436 (36%) | 2,040 (57%) |
+| dt-only, ours vs dt: hyperscore median | 12.5 vs 16.2 | 13.1 vs 16.2 |
+| dt-only, ours vs dt: matched ions median (of 26 theoretical) | **7 vs 9** (deficit +2; p25 +1, p75 +4; same at every charge) | 6 vs 9 (deficit +3) |
+| shared, ours vs dt: hyperscore / matched ions | 23.6 vs 22.9 / 12 vs 12 | 24.4 vs 22.4 / 12 vs 12 |
+Reading: on the peptides we both find, our spectra are as good as diaTracer's. On the ~3,900 we miss, two thirds
+are searched and fall short by ~2 of ~9 fragment ions -- the faint tail is under-covered: the weaker fragments of
+faint precursors are gated out (`gate:min_correlation` 0.3, `min_correlation_points`) or never traced
+(`trace:ms2_noise_threshold_int` 10, `ms2_chrom_peak_snr` 1.0). The remaining third we never emit at all (the MS1
+funnel: no hypothesis or < min_frags). This is the first mechanistic, per-peptide account of the MSFragger deficit.
+**Pre-registered arms (running next, both engines):** (a) `gate:min_correlation 0.2`, (b) `trace:ms2_noise_threshold_int 5`,
+(c) both. Prediction: the dt-only matched-ion deficit shrinks toward 0 and the MSFragger ratio rises above 90%;
+falsifier: the deficit stays at +2 (then the missing ions are not in our traces at all -> MS2 aggregation / detector).
