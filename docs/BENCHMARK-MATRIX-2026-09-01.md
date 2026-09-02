@@ -94,3 +94,26 @@ Precursor-channel and both-channel arms running.
 **Governance consequence (review's "thing everybody missed"): peptides@1%FDR is partly a
 mass-calibration measurement, so 11,976 is only comparable to future numbers taken at the same
 residual ppm. Any future lever must report its ppm median beside its count.**
+
+## MSFragger gap: hypothesis tests (2026-09-02)
+Post-hoc on the archived TSVs, same global raw-hyperscore 1% walk that produced the matrix:
+| | speXtract | diaTracer |
+|---|---|---|
+| PSM charges searched | 1+ 44,490 · 2+ 326,462 · 3+ 167,203 · 4+ 29,894 · 5+ 4,268 | 1+ 12,969 · 2+ 277,753 · 3+ 161,487 · 4+ 45,030 |
+| accepted @1%, all charges | 11,463 (threshold hyperscore **15.205**, 358,493 distinct keys) | 13,932 (threshold **14.033**, 407,432 keys) |
+| accepted @1%, z in {2,3} only | 11,327 (**-136**) | 13,722 (-210) |
+- **H7 "MSFragger discards our z=1/4/5 spectra": DEAD.** It searched all charges (`precursor_charge` is
+  a fallback for charge-less spectra only; confirmed by the charge column).
+- **H1 "our extra low-yield spectra broaden the null and raise the threshold": DEAD.** Deleting every
+  z!=2,3 PSM LOWERS our count (-136); a null-broadening tax would have raised it.
+- **H-B/H-C/H-D/H-F (isolation window mode switch, TIC/title/base-peak metadata, 500-peak padding,
+  encoding): DEAD** -- identical MSFragger parameters in both logs; the MSFTBX reader does not even
+  parse the spectrum title; use_topN_peaks=150 caps both.
+- **What survives:** our accepted-hyperscore threshold IS higher (15.2 vs 14.0) with FEWER distinct
+  candidates (358k vs 407k) -> diaTracer's target scores sit higher relative to decoys in the TAIL;
+  for the 9,405 shared peptides the scores are identical. I.e. coverage/quality of the faint tail
+  (codex: 53-75% of the gap) plus kimi's reading of H-A as attribute CORRUPTION (a wrong charge label
+  -> wrong precursor mass, invisible to a 25 ppm closed search in either engine; 16-35%). Decisive
+  test for the latter running: MSFragger with override_charge=1, z=1..5, both tools.
+- **"Is there additional information MSFragger can use?" -- No.** Nothing diaTracer writes that we
+  do not is consumed by scoring. The deficit is in what we emit, not what we annotate.
