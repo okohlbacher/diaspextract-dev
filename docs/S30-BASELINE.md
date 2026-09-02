@@ -502,3 +502,11 @@ diaTracer's 2.0 is the over-emission signature: Percolator's peptide-level FDR g
 step 02: quality-gate 924k -> ~700k + diaTracer-precursor-matched sub-arm, both engines, full FDR curves) and (d) the
 oracle-fragment arm. The learned charge/mono predictor stays conditional on (d). A MSBooster-tolerant rerun (var mods
 capped identically for both tools) is owed for the +17% predictions bring diaTracer.
+
+### STEP 02, sub-arm 1 -- PRE-REGISTERED (2026-09-02, 22:00): precursor-quality gate by isotope-envelope depth
+`SPEXTRACT_MIN_ISOTOPES=k` keeps precursors with >= k isotope peaks (k=2 is today's default via
+require_isotope_support; k=3 and k=4 are the arms). Emission falls with k; fragment sharing is untouched.
+Prediction if the MSFragger deficit is EMISSION COMPETITION: the spx/dt MSFragger ratio rises as emission falls
+toward diaTracer's 700k (peptides@1% hold or rise while spectra drop). Prediction if it is FAINT-TAIL CONTENT: the
+ratio is flat or falls (the gate removes exactly the faint precursors). Gates: Sage set overlap vs the apex arm,
+MSFragger raw walk vs msf_dt, emission count; both engines before any default change.
