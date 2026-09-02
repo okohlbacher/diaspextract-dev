@@ -33,6 +33,8 @@
 #include <vector>
 #ifdef _OPENMP
 #include <omp.h>
+#include <cstdlib>     // getenv
+#include <exception>   // exception_ptr
 #endif
 
 using namespace OpenMS;
@@ -476,8 +478,9 @@ namespace
     /// order. OpenMS hands frames over a strictly serial `for (fid..) consumeSpectrum(spec)` loop,
     /// so before this the peak picking of 1.26e9 peaks ran on ONE thread and was 53% of total wall
     /// (measured: 1046 s wall, parallel factor 1.0). Buffering here parallelises it without
-    /// touching the reader. Appending strictly by buffer index keeps the output order -- and hence
-    /// the emitted spectra -- identical to the serial path.
+    /// touching the reader. Appending strictly by buffer index keeps the output order identical to
+    /// the serial path; the emitted spectra matched it in m/z and differed in ~2% of intensities at
+    /// the 1e-5..1e-4 relative level (Sage count unchanged) -- see docs/RUNTIME-PLAN [pick-det].
     void flush_()
     {
       const int n = (int)buf_.size();
@@ -485,16 +488,30 @@ namespace
       std::vector<CompactFrame> compacted((size_t)n);
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
-      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 8)
+      // SPEXTRACT_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
+      // scheduling-sensitivity from downstream chaos (kimi, plan review). [pick-det]
+      static const bool par_pick = std::getenv("SPEXTRACT_PICK_SERIAL") == nullptr;
+      std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
+      // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers (codex, plan review)
+      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1) if(par_pick)
       for (int i = 0; i < n; ++i)
       {
-        auto& s = buf_[(size_t)i];
-        ensureIMArrayName(s);
-        if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
-        ensureIMArrayName(s);
-        compacted[(size_t)i] = compactify(s, st[(size_t)i]);
-        s.clear(true);                                  // raw frame dies here, inside the loop
+        try
+        {
+          auto& s = buf_[(size_t)i];
+          ensureIMArrayName(s);
+          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+          ensureIMArrayName(s);
+          compacted[(size_t)i] = compactify(s, st[(size_t)i]);
+          s.clear(true);                                // raw frame dies here, inside the loop
+        }
+        catch (...)
+        {
+          #pragma omp critical(pick_err)
+          if (!pick_err) pick_err = std::current_exception();
+        }
       }
+      if (pick_err) std::rethrow_exception(pick_err);
       for (int i = 0; i < n; ++i)
       {
         stats_ += st[(size_t)i];
@@ -533,9 +550,10 @@ namespace
     void ensureMapsAreFilled_() override { flush_(); }   // pick up the tail
 
   private:
-    /// ponytail: 64 frames is ~250 MB of raw buffer at ~37k peaks/frame -- enough to fill 100
-    /// threads, small next to the 12 GB compact store. Raise only if profiling says so.
-    static constexpr size_t kBatch = 64;
+    /// ponytail: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
+    /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
+    /// store. SPEXTRACT_PICK_BATCH overrides for the sweep.
+    static const size_t kBatch;
     std::vector<MapType::SpectrumType> buf_;
     std::vector<pair<int, int>> key_;
     PeakPickerIM& picker_;
@@ -544,6 +562,8 @@ namespace
     CompactStats& stats_;
     std::function<pair<int, int>(double, double)> keyfn_;
   };
+  const size_t PickCompactConsumer::kBatch =
+    std::getenv("SPEXTRACT_PICK_BATCH") ? (size_t)std::atoi(std::getenv("SPEXTRACT_PICK_BATCH")) : 256;
 
   /// [wavelet] Stationary ("a trous") B3-spline wavelet smoothing of an elution profile.
   ///
