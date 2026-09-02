@@ -9,6 +9,7 @@
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <sys/resource.h>
 #include <OpenMS/FORMAT/BrukerTimsFile.h>
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
@@ -80,6 +81,60 @@ namespace
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   }
   static std::string clk_() { char b[32]; snprintf(b, sizeof b, " [t=%.0fs]", phase_clock_()); return b; }
+
+  /// [perf-instr] Per-phase wall/CPU/RSS accounting. Sparse [t=..] markers left ~53% of wall time
+  /// unattributed, which is how you optimise the wrong thing. Every phase is timed; the table is
+  /// printed unconditionally at the end so a benchmark log always says where the time went.
+  struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; };
+  inline std::map<std::string, PhaseStat>& phase_stats_()
+  { static std::map<std::string, PhaseStat> m; return m; }
+  inline std::vector<std::string>& phase_order_()
+  { static std::vector<std::string> v; return v; }
+  static double cpu_seconds_()
+  {
+    struct rusage ru;                       // RUSAGE_SELF sums ALL threads -> parallel efficiency
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
+    return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6
+         + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+  }
+  static long rss_mb_()
+  {
+    std::ifstream f("/proc/self/status"); std::string k;   // ponytail: Linux-only, returns 0 elsewhere
+    while (f >> k) { if (k == "VmRSS:") { long v; f >> v; return v / 1024; } f.ignore(1 << 20, '\n'); }
+    return 0;
+  }
+  struct Phase
+  {
+    std::string name; double w0, c0;
+    explicit Phase(std::string n) : name(std::move(n)), w0(phase_clock_()), c0(cpu_seconds_()) {}
+    ~Phase()
+    {
+      auto& st = phase_stats_()[name];
+      if (st.n == 0) phase_order_().push_back(name);
+      st.wall += phase_clock_() - w0; st.cpu += cpu_seconds_() - c0;
+      st.rss_end_mb = rss_mb_(); ++st.n;
+    }
+  };
+  static void report_phases_(double total_wall)
+  {
+    if (phase_order_().empty()) return;
+    OPENMS_LOG_INFO << "\n[perf] phase breakdown (wall s | % of total | CPU s | par x | RSS MB at end)\n";
+    double acc = 0;
+    for (const auto& n : phase_order_())
+    {
+      const auto& p = phase_stats_()[n];
+      acc += p.wall;
+      char b[220];
+      snprintf(b, sizeof b, "[perf] %-22s %8.1f  %5.1f%%  %9.1f  %5.1fx  %8ld%s\n", n.c_str(), p.wall,
+               total_wall > 0 ? 100.0 * p.wall / total_wall : 0.0, p.cpu,
+               p.wall > 0 ? p.cpu / p.wall : 0.0, p.rss_end_mb, p.n > 1 ? "  (summed)" : "");
+      OPENMS_LOG_INFO << b;
+    }
+    char b[160];
+    snprintf(b, sizeof b, "[perf] %-22s %8.1f  %5.1f%%  (unattributed %.1f s)\n", "TOTAL(measured)", acc,
+             total_wall > 0 ? 100.0 * acc / total_wall : 0.0, total_wall - acc);
+    OPENMS_LOG_INFO << b;
+  }
 
   bool log_overlap_ = false;   ///< [B0] gate:coelution == "logoverlap"
   /// [wavelet] Precursor-XIC smoothing scale in SECONDS, derived from the MEASURED MS1 FWHM
@@ -1516,6 +1571,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       {
         BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
         streamed = true;
+        phase_stats_()["LOAD(stream)"].wall = phase_clock_();      // [perf-instr] start-to-here
+        phase_stats_()["LOAD(stream)"].cpu  = cpu_seconds_();
+        phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
+        if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -1529,7 +1588,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
 
     if (!streamed)
+    {
+      Phase _ph("LOAD(full)");
       FileHandler().loadExperiment(in, exp, {FileTypes::MZML, FileTypes::MZPEAK, FileTypes::BRUKER_TDF}, log_type_);
+    }
 
     //-------------------------------------------------------------
     // Input normalization / validation [C-4]
@@ -1649,8 +1711,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // as the root cause of low-abundance loss in this tool class.
     int ms1_bands = getIntOption_("perf:ms1_trace_bands");
     if (ms1_bands < 1) ms1_bands = 1;
+    double _t_ms1 = phase_clock_(), _c_ms1 = cpu_seconds_();   // [perf-instr]
     vector<Trace> ms1_traces = detectTraces_(ms1_map, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+    { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
+      st.wall += phase_clock_() - _t_ms1; st.cpu += cpu_seconds_() - _c_ms1; st.rss_end_mb = rss_mb_(); }
     writeLogInfo_("MS1 " + ms1_span);   // [merged-trace] measure, do not assume
 
     // [fwhm] Measure the actual chromatographic peak width from the MS1 traces just built, and
@@ -1752,6 +1817,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       if (a.im != b.im) return a.im < b.im;
       return a.intensity < b.intensity;
     });
+    double _t_win = 0, _c_win = 0;                             // [perf-instr] window loop (function scope)
+    double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring, ambig_margin);
     if (getFlag_("assembly:dedup_precursors"))
@@ -1896,6 +1963,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // total-order sort over all emitted spectra runs after the loop, so reordering here is safe.
     {
       auto wbytes = [](const vector<CompactFrame>& fr) { size_t b = 0; for (const auto& f : fr) b += f.bytes(); return b; };
+      { auto& st = phase_stats_()["PRECURSOR_INFER"]; if (st.n++ == 0) phase_order_().push_back("PRECURSOR_INFER");
+        st.wall += phase_clock_() - _t_inf; st.cpu += cpu_seconds_() - _c_inf; st.rss_end_mb = rss_mb_(); }
+      _t_win = phase_clock_(); _c_win = cpu_seconds_();          // [perf-instr] window loop
       std::stable_sort(window_list.begin(), window_list.end(),
                        [&](const auto& a, const auto& b) { return wbytes(*a.second) > wbytes(*b.second); });
     }
@@ -2255,6 +2325,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       }
     }
 
+    { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
+      st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
     writeLogInfo_("All windows done." + clk_() + rss_()); // parallel-phase peak? [mem]
     {
       // These are CPU-seconds summed across threads, not wall time -- a stage that runs on 20
@@ -2282,6 +2354,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
     // Canonical total-order sort (RT, precursor m/z, charge): thread-count-independent and free of
     // RT-tie ambiguity (RT-only sortSpectra is NOT canonical). [par-Crit-2]
+    { Phase _ph("SORT(canonical)");
     sort(all_out.begin(), all_out.end(), [](const MSSpectrum& a, const MSSpectrum& b) {
       if (a.getRT() != b.getRT()) return a.getRT() < b.getRT();
       const double amz = a.getPrecursors().empty() ? 0.0 : a.getPrecursors()[0].getMZ();
@@ -2298,7 +2371,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (a[i].getIntensity() != b[i].getIntensity()) return a[i].getIntensity() < b[i].getIntensity();
       }
       return false;
-    });
+    }); }
 
     //-------------------------------------------------------------
     // [route-1] FEATURE-LEVEL CONSOLIDATION
@@ -2505,7 +2578,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
 
     PeakMap out_exp;
-    for (auto& s : all_out) out_exp.addSpectrum(std::move(s));
+    { Phase _ph("ASSEMBLE(PeakMap)");
+      for (auto& s : all_out) out_exp.addSpectrum(std::move(s)); }
     const Size n_out = out_exp.size();
     addDataProcessing_(out_exp, getProcessingInfo_(DataProcessing::DATA_PROCESSING));
     // [provenance] Record the emitted-intensity reweighting so an identical historical command line is
@@ -2520,8 +2594,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     out_exp.setMetaValue("spx:require_isotope_support", (int)getFlag_("assembly:require_isotope_support"));
-    FileHandler().storeExperiment(out, out_exp, {FileTypes::MZML}, log_type_);
+    { Phase _ph("WRITE(mzML)");
+      FileHandler().storeExperiment(out, out_exp, {FileTypes::MZML}, log_type_); }
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out);
+    report_phases_(phase_clock_());
     return EXECUTION_OK;
   }
 };
