@@ -628,7 +628,8 @@ the first lever that moves it since the calibration fix. It costs Sage 2.6% (the
 spectra that were already rich: Sage's scoring is hurt by them, MSFragger's top-150 cap is not); N=150 is too much
 for both. Not a default as measured -- the engines disagree. **Pre-registered next arm:** backfill only the faint
 tail: `SPEXTRACT_BACKFILL_RAW=50` + `SPEXTRACT_BACKFILL_MAXFRAGS=K` (apply only to spectra with <= K assembled
-fragments; K = 30 and 60). Prediction: MSFragger keeps most of +5% while Sage returns to ~12,500; falsifier: Sage still
+fragments; K = 50 and 150 -- the first launch of this arm collided with a second chain on the same output paths at
+06:18 and was stopped and relaunched cleanly at 06:19). Prediction: MSFragger keeps most of +5% while Sage returns to ~12,500; falsifier: Sage still
 drops -> the noise cost is in the faint spectra themselves, and the selection must be per-peak (IM/RT co-elution of the
 raw peak, i.e. MS2 aggregation across neighbouring frames, C6).
 
