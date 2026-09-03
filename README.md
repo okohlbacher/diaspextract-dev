@@ -52,22 +52,27 @@ repository (measured: -18.4% peak RSS combined, of which compaction alone is -6.
 
 ## Where it stands
 
-Measured 2026-09-01 on three diaPASEF acquisitions (one cohort, one instrument), both engines,
-identical search settings for both tools. Full matrix: `docs/BENCHMARK-MATRIX-2026-09-01.md`.
+Measured on three diaPASEF acquisitions (one cohort, one instrument), both engines, identical search
+settings for both tools. Current arm: apex m/z estimator + `charge:min_charge` 2 (2026-09-03).
+Full matrix: `docs/BENCHMARK-MATRIX-2026-09-01.md`; decisions: `docs/S30-BASELINE.md`.
 
 | | S30 | S08 | S23 | vs diaTracer |
 |---|---|---|---|---|
-| **Sage** peptides @1% FDR (apex estimator, 2026-09-02) | 12,537 | 10,789 | 10,156 | 108.9 / 105.3 / 113.5% -- mean 109.2%, 95% CI [99.0, 119.4] |
-| Sage, previous estimator (2026-09-01) | 11,976 | 10,333 | 9,891 | 104.0 / 100.9 / 110.5% -- mean 105.1%, 95% CI [93.0, 117.3] |
-| **MSFragger** peptidoforms @1% | 11,927 (apex; 11,463 before) | 11,465 | 9,404 | 85.6 / 83.9 / 88.7% (S08/S23 not yet re-run with apex) |
-| entrapment FDR at nominal 1% (shipping arm) | 1.28% [1.03-1.53] | 0.95% [0.72-1.18] | 1.32% [1.04-1.59] | diaTracer 1.24 / 1.22% on S08/S23 |
+| **Sage** peptides @1% FDR | **12,642** | **11,084** | **10,294** | 109.8 / 108.2 / 115.0% |
+| Sage, before the charge gate (2026-09-02) | 12,537 | 10,789 | 10,156 | 108.9 / 105.3 / 113.5% |
+| **MSFragger** peptidoforms @1% | **12,073** | **12,061** | **9,822** | 86.7 / 88.3 / 92.6% |
+| MSFragger, before the charge gate | 11,927 | 11,444 | 9,738 | 85.6 / 83.7 / 91.8% |
+| diaTracer reference (Sage / MSFragger) | 11,517 / 13,932 | 10,242 / 13,666 | 8,948 / 10,606 | -- |
+| entrapment FDR at nominal 1% | 1.38% [1.15-1.64] | 0.99% [0.77-1.23] | 1.28% [1.01-1.54] | diaTracer 1.24 / 1.22% on S08/S23 |
 | precursor mass error, paired vs diaTracer on shared peptides | +0.78 ppm | +1.47 | +1.17 | fragment: -2.4 / -2.0 / -2.1 (diaTracer-side reporting) |
-| pseudo-spectra emitted | ~0.93 M | 1.23 M | 0.84 M | ~1.32x diaTracer |
+| pseudo-spectra emitted | 0.66 M | 0.86 M | 0.59 M | **0.94 / 0.99 / 0.82x diaTracer** |
+| wall time, 128-core node (S30) | 12:49 | -- | -- | -- |
 
-Read honestly: **on Sage the result is now at or above parity (lower CI bound 99%); on MSFragger the
-deficit stands and is statistically supported.** speXtract also emits ~1.32x more spectra, so per-spectrum
-efficiency still favours diaTracer. The MSFragger gap survives perfect masses, so it is
-search/detection-side, not calibration.
+Read honestly: **on Sage the result is above parity on all three files; on MSFragger the deficit
+stands (7-13%) and is statistically supported.** The emission excess is gone -- since 2026-09-03 we
+emit FEWER spectra than diaTracer on all three files, so per-spectrum efficiency no longer favours
+diaTracer and the MSFragger gap cannot be attributed to over-emission. It also survives perfect
+masses, so it is search/detection-side, not calibration.
 
 The 2026-09-01 calibration fix is worth +6-11% closed-search peptides on Sage. It is an
 identification-*yield* effect, not better spectra (emission moved -0.2%): mass error is a feature of
