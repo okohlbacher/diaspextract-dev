@@ -151,6 +151,9 @@ namespace
   double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
   double mono_guard_ = 0.0;          ///< [mono-guard] averagine slack on leftward isotope steps (0=off)
   bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
+  std::atomic<long long> stat_slice_{0};    ///< fragments VISITED by the IM slice
+  std::atomic<long long> stat_rtpass_{0};   ///< of those, how many pass the RT gate
+  std::atomic<long long> stat_prec_{0};     ///< precursors scored
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
   bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
@@ -844,27 +847,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
     registerIntOption_("max_charge", "<n>", 5, "Maximum precursor charge considered during isotope inference.", false);
 
-    // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
-    // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
-    // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
-    // [adv-review codex/kimi 2026-09-03]
-    setMinInt_("assembly:min_fragments", 1);
-    setMinInt_("assembly:max_fragments", 1);
-    setMinInt_("assembly:default_charge", 0);
-    setMinInt_("max_charge", 1);
-    setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
-    setMinFloat_("gate:delta_im", 0.0);
-    setMinFloat_("gate:delta_rt", 0.0);
-    setMinFloat_("gate:min_correlation", -1.0);
-    setMaxFloat_("gate:min_correlation", 1.0);
-    setMinFloat_("charge:iso_im_tolerance", 0.0);
-    setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
-    setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
-    setMinFloat_("trace:ms2_noise_threshold_int", 0.0);
-    setMinFloat_("trace:noise_threshold_int", 0.0);
-    setMinInt_("perf:ms1_trace_bands", 0);      // 0 = auto (documented)
-    setMinFloat_("perf:mem_fraction", 0.05);
-    setMaxFloat_("perf:mem_fraction", 0.95);
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message. [bugfix]
     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
@@ -887,6 +869,28 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "[mono-guard] Reject a leftward isotope step (the walk that defines the MONOISOTOPE in charge:scoring=count) when the candidate peak is too weak to be a real lighter isotope under averagine. The partner search matches m/z, RT and IM but NEVER intensity, so it can latch onto a noise peak or a co-eluting species one isotope spacing below the true monoisotope -- making the reported precursor mass ~1.00335 Da TOO LIGHT. Closed search hides this (the engine enumerates isotope_errors and corrects it for free); OPEN/blind search turns it into a phantom -1.003 Da modification, and it is our single largest open-search delta-mass artefact on S30 (8.20%% isotope-shifted PSMs vs diaTracer's 3.46%%). The bound is averagine's LOOSEST: stepping from isotope m+1 to m the lighter peak is >= (m+1)/lambda times the heavier one, minimised at m=0 -> 1/lambda (lambda = 0.000594*neutral mass), so a value of 1.0 enforces exactly that minimum and never rejects a legitimate envelope; smaller values add slack for noise. 0 = off (old behaviour). [bench]", false);
     registerFlag_("charge:mono_averagine_select", "[mono-select] Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves. [bench]");
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. Default 0.05 (= 5x the fragment gate). A reviewer argued 0.01 (isotopes of one species share mobility, so 0.05 can admit cross-species partners), but 0.01 has NOT been measured on S30; change only behind the S30 set gate.", false);
+
+    // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
+    // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
+    // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
+    // [adv-review codex/kimi 2026-09-03]
+    setMinInt_("assembly:min_fragments", 1);
+    setMinInt_("assembly:max_fragments", 1);
+    setMinInt_("assembly:default_charge", 0);
+    setMinInt_("max_charge", 1);
+    setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
+    setMinFloat_("gate:delta_im", 0.0);
+    setMinFloat_("gate:delta_rt", 0.0);
+    setMinFloat_("gate:min_correlation", -1.0);
+    setMaxFloat_("gate:min_correlation", 1.0);
+    setMinFloat_("charge:iso_im_tolerance", 0.0);
+    setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
+    setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
+    setMinFloat_("trace:ms2_noise_threshold_int", 0.0);
+    setMinFloat_("trace:noise_threshold_int", 0.0);
+    setMinInt_("perf:ms1_trace_bands", 0);      // 0 = auto (documented)
+    setMinFloat_("perf:mem_fraction", 0.05);
+    setMaxFloat_("perf:mem_fraction", 0.95);
     // deliberate: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
   }
 
@@ -1002,6 +1006,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         MassTraceDetection m2; m2.setLogType(ProgressLogger::NONE); m2.setParameters(p);
         vector<MassTrace> t;
         sub[b].sortSpectra();
+        if (sub[b].size() < 3) { sub[b].clear(true); continue; }   // MTD aborts below 3 spectra
         m2.run(sub[b], t);
         sub[b].clear(true);
         // keep only traces whose centroid lies in this band's CORE -> no duplicates from the halo
@@ -1017,7 +1022,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
     else
     {
-      mtd.run(map, mts);
+      if (map.size() >= 3) mtd.run(map, mts);   // MTD aborts below 3 spectra; a tiny input is not an error
       map.clear(true); // [compact] dead from here; ~1.1 GB/window freed before the EPD peak
     }
 
@@ -1497,10 +1502,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     {
       size_t lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - delta_im) - frag_im.begin();
       size_t hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + delta_im) - frag_im.begin();
+      long long n_rtpass = 0;
+      stat_slice_ += (long long)(hi - lo); ++stat_prec_;
       for (size_t fi = lo; fi < hi; ++fi)
       {
         const Trace& f = frag_traces[fi];
         if (fabs(f.rt - pc.rt) > delta_rt) continue;                   // RT gate
+        ++n_rtpass;
         if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
         // [C9 A/B, 2026-09-02] 28% of emitted spectra carry the precursor's M+1 and 25% its M+2 as
@@ -1571,6 +1579,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (c < min_corr) continue;                                    // correlation gate
         emit(fi, c);
       }
+      stat_rtpass_ += n_rtpass;
     }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
   }
@@ -2632,6 +2641,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       writeLogInfo_("  fraggrid    " + String(S * t_grid)  + " s (" + String(pct(t_grid))  + "%)");
       writeLogInfo_("  score       " + String(S * t_score) + " s (" + String(pct(t_score)) + "%)");
       writeLogInfo_("  emit        " + String(S * t_emit)  + " s (" + String(pct(t_emit))  + "%)");
+      // Is the score stage doing arithmetic, or walking fragments the RT gate then discards?
+      // One atomic add per precursor, so this costs nothing against a 10^11-iteration loop.
+      const long long np = stat_prec_.load(), sl = stat_slice_.load(), rp = stat_rtpass_.load();
+      if (np > 0)
+        writeLogInfo_("  score gate: " + String(np) + " precursors visited " + String(sl)
+                      + " fragments (" + String(sl / np) + "/precursor), "
+                      + String(rp) + " passed the RT gate ("
+                      + String(rp > 0 ? (double)sl / (double)rp : 0.0) + "x scanned per survivor)");
     }
 
     vector<MSSpectrum> all_out;
