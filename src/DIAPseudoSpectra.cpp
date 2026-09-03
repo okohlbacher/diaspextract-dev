@@ -17,6 +17,14 @@
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <unordered_map>
+#include <cstring>
+#if __has_include(<SQLiteCpp/SQLiteCpp.h>)
+#include <SQLiteCpp/SQLiteCpp.h>
+#endif
+// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+// OpenMS patch and already included via the mzPeak loader; including the in-tree copy as well
+// redefines the struct.
+#include <OpenMS/FORMAT/TdfMzCalibration.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
@@ -469,6 +477,50 @@ namespace
   };
 
   inline TofAxis& tofAxis() { static TofAxis a; return a; }
+
+  /// Populate the flight-time axis from a Bruker analysis.tdf (the .d directory, or a sidecar).
+  /// Returns false and leaves the axis unusable if anything is missing -- the detector that needs it
+  /// refuses to run rather than substituting a reference temperature for every frame.
+  inline bool loadTofAxis(const std::string& tdf_path, String& why)
+  {
+#if __has_include(<SQLiteCpp/SQLiteCpp.h>)
+    TofAxis& ax = tofAxis();
+    ax.ok = false;
+    try
+    {
+      SQLite::Database db(tdf_path, SQLite::OPEN_READONLY);
+      SQLite::Statement q(db, "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 FROM MzCalibration");
+      if (!q.executeStep()) { why = "no MzCalibration row"; return false; }
+      ax.cal.digitizer_timebase = q.getColumn(1).getDouble();
+      ax.cal.digitizer_delay = q.getColumn(2).getDouble();
+      ax.cal.C0 = q.getColumn(3).getDouble(); ax.cal.C1 = q.getColumn(4).getDouble();
+      ax.cal.C2 = q.getColumn(5).getDouble(); ax.cal.T1_ref = q.getColumn(6).getDouble();
+      ax.cal.dC1 = q.getColumn(7).getDouble(); ax.cal.dC2 = q.getColumn(8).getDouble();
+      ax.cal.C3 = q.getColumn(9).getDouble(); ax.cal.C4 = q.getColumn(10).getDouble();
+      if (q.executeStep()) { why = "more than one MzCalibration row"; return false; }
+      if (!ax.cal.isSupported()) { why = ax.cal.unsupportedReason(); return false; }
+      SQLite::Statement fr(db, "SELECT Id, T1 FROM Frames");
+      while (fr.executeStep())
+      {
+        const long long id = fr.getColumn(0).getInt64();
+        if (id < 0) continue;
+        if ((size_t)id >= ax.b_by_frame.size()) ax.b_by_frame.resize((size_t)id + 1, 0.0);
+        ax.b_by_frame[(size_t)id] = ax.cal.frameFactor(fr.getColumn(1).getDouble());
+      }
+      // frames the tdf did not list keep the reference factor rather than a zero
+      const double bref = ax.cal.frameFactor(ax.cal.T1_ref);
+      for (double& b : ax.b_by_frame) if (!(b > 0.0)) b = bref;
+      if (ax.b_by_frame.size() < 2) { why = "no Frames rows"; return false; }
+      ax.ok = true;
+      return true;
+    }
+    catch (const std::exception& e) { why = e.what(); return false; }
+#else
+    why = "built without SQLiteCpp";
+    (void)tdf_path;
+    return false;
+#endif
+  }
   constexpr double IM_LO = 0.4, IM_HI = 1.8;
   constexpr double IM_Q = 65535.0 / (IM_HI - IM_LO);
 
@@ -500,10 +552,28 @@ namespace
   };
 
   /// Convert one picked MSSpectrum into the compact form (drops everything tracing does not read).
+  /// Vendor frame Id from a native identifier. Bruker writes "frame=<N> scan=<M>"; the mzPeak
+  /// reader writes "mzpeak=<frame index> window=<w>". Anything else yields 0, which makes the
+  /// calibration fall back to the reference temperature -- so the caller must treat 0 as unknown.
+  inline uint32_t frameIdOf(const String& nid)
+  {
+    for (const char* key : {"frame=", "mzpeak="})
+    {
+      const size_t i = nid.find(key);
+      if (i == std::string::npos) continue;
+      const size_t j = i + strlen(key);
+      uint32_t v = 0; size_t k = j;
+      for (; k < nid.size() && isdigit((unsigned char)nid[k]); ++k) v = v * 10 + (uint32_t)(nid[k] - '0');
+      if (k > j) return v;
+    }
+    return 0;
+  }
+
   CompactFrame compactify(const MSSpectrum& s, CompactStats& st)
   {
     CompactFrame f;
     f.rt = s.getRT();
+    f.frame_id = frameIdOf(s.getNativeID());
     if (!s.containsIMData()) { st.no_im_array += s.size(); return f; }
     const auto& im = s.getFloatDataArrays()[s.getIMData().first];
     const Size n = s.size();
@@ -2665,6 +2735,19 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // /proc/meminfo at each admission so the run yields to other jobs instead of fighting them.
     // Always admit when nothing is in flight, so the loop cannot deadlock on a single huge window.
     const bool integer_detector = (getStringOption_("trace:detector") == "integer");
+    if (integer_detector && !tofAxis().ok)
+    {
+      // The flight-time axis comes from the input's own analysis.tdf: a .d directory has one, and an
+      // mzPeak archive can be accompanied by one (SPEXTRACT_MZPEAK_TDF, as the exact-calibration
+      // path already uses).
+      String why = "no candidate tdf";
+      std::vector<std::string> cand;
+      cand.push_back(in + "/analysis.tdf");
+      if (const char* sc = std::getenv("SPEXTRACT_MZPEAK_TDF")) cand.push_back(sc);
+      for (const std::string& c : cand)
+        if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
+              + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
+    }
     if (integer_detector && !tofAxis().ok)
     {
       // Fail closed. Without the vendor calibration there is no flight-time axis, and inventing one
