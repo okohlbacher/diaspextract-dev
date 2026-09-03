@@ -232,3 +232,30 @@ collapse, and z>=3, on S30 with both engines and entrapment. Prediction: z>=2 lo
 peptides, and may GAIN, since removing 29% of never-identified spectra also removes their share of
 the multiple-testing burden. Falsifier: peptides fall more than the 1.73% the offline join predicts,
 which would mean the z=1 spectra contribute identifications indirectly through FDR calibration.
+
+## 11. Result: the charge gate wins, the collapse loses, and they do not combine
+
+| S30 arm | spectra | Sage @1% | MSFragger @1% | wall | entrapment |
+|---|---|---|---|---|---|
+| apex baseline | 927,813 | 12,537 | 11,927 | 15:21 | 1.28% [1.03-1.53] |
+| **z >= 2** | **656,254 (−29.3%)** | **12,642 (+0.8%)** | **12,073 (+1.2%)** | **12:48 (−17%)** | 1.38% [1.15-1.64] |
+| z >= 2 + collapse K=1 | 541,356 (−41.7%) | 12,067 (−3.8%) | 11,623 (−2.5%) | 11:39 | 1.24% [1.01-1.51] |
+| z >= 3 | 255,664 (−72.4%) | 5,088 (−59%) | 5,060 (−58%) | 08:48 | 0.96% [0.66-1.35] |
+
+**`z >= 2` gains peptides on both engines while cutting emission by 29.3% and runtime by 17%,** and
+lands below diaTracer's spectrum count. The set is near-superset: 310 peptides gained, 205 lost. The
+multiple-testing prediction was right -- 271,559 spectra identified 0.42% of the time were not merely
+useless, they were costing identifications by inflating the search space. z >= 3 confirms the gate is
+not a monotone knob: charge 2 carries 56.9% of peptides, and removing it is catastrophic.
+
+**The isotope collapse does not survive the charge gate.** Applying K=1 on top turns +0.8% into −3.8%
+on Sage and +1.2% into −2.5% on MSFragger. Once the singly-charged junk is gone, every further
+lattice removal is taken out of real signal. This closes the collapse line: **the collapse stays OFF
+in every form** (K=1, K=3, intensity rule, lightest rule, with or without the charge gate).
+
+**Caution before adoption.** Entrapment moves 1.28% -> 1.38%, at the pre-registered 1.4% bound. The
+intervals overlap heavily so this is not yet a difference, but S08 and S23 must confirm it.
+**Confirmation arm running:** z >= 2 on S08 and S23, both engines, entrapment against the same apex
+baselines. Adopt as default only if peptides do not fall on either engine on either file and
+entrapment stays within the apex interval; a rise past 1.4% on a second file means the gate is buying
+peptides with false positives and must be reconsidered as an option rather than a default.
