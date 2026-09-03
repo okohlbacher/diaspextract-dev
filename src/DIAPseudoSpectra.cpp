@@ -235,6 +235,12 @@ namespace
     double rt = 0.0;   ///< apex/centroid RT
     double im = 0.0;   ///< centroid ion mobility (1/K0)
     double intensity = 0.0;
+    /// The flight-time bin this trace was measured on, and the calibration factor of its apex
+    /// frame. The pair is the AUTHORITATIVE m/z: `mz` below is a cached convenience for the gates
+    /// that still compare in m/z space, and the value actually written out is recomputed from these
+    /// two at export. 0 means the trace came from the OpenMS detector, which has no bin.
+    uint32_t tof = 0;
+    double   b = 0.0;
     /// Elution profile, ascending in RT: parallel arrays of frame index and intensity. 8 B/point.
     vector<uint32_t> xi;
     vector<float>    xv;
@@ -248,6 +254,8 @@ namespace
   struct Precursor_
   {
     double mono_mz = 0.0;
+    uint32_t mono_tof = 0;   ///< the monoisotope's flight-time bin, and its frame's factor: the
+    double   mono_b = 0.0;   ///  reported m/z is recomputed from these when the spectrum is written
     int charge = 0;          ///< 0 == unknown
     double rt = 0.0;
     double im = 0.0;
@@ -811,8 +819,12 @@ namespace
       Trace t;
       // The extraction never needed a calibrated m/z; it is applied HERE, once per trace, with
       // the apex frame's own temperature factor -- which is also the most accurate place for it.
-      t.mz = (mz_est == "apex") ? ax.mzOf(L.apex_tof, L.apex_b)
-                                : ax.mzOf((TofIdx)llround(L.mz_sum / L.int_sum), L.apex_b);
+      // Carry the BIN, not just a number derived from it: the calibration is re-applied at
+      // export so the written m/z can never be a value that drifted through the intermediate
+      // gates. `mz` here is the cached form those gates still use.
+      t.tof = (mz_est == "apex") ? L.apex_tof : (TofIdx)llround(L.mz_sum / L.int_sum);
+      t.b = L.apex_b;
+      t.mz = ax.mzOf(t.tof, t.b);
       t.rt = rtAxis()[L.apex_frame];
       t.im = IM_LO + (L.im_sum / L.int_sum) / IM_Q;
       t.intensity = L.apex_int;
@@ -1678,6 +1690,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         pc0.trace_idx = seed;
         pc0.rt = s.rt; pc0.im = s.im;
         pc0.mono_mz = best_mono;
+        // Carry the bin of whichever trace the monoisotope call landed on, so the exported mass is
+        // calibrated from a measurement rather than from a number that passed through the gates.
+        pc0.mono_tof = ms1[seed].tof; pc0.mono_b = ms1[seed].b;
+        for (size_t j : best_partners)
+          if (ms1[j].mz == best_mono) { pc0.mono_tof = ms1[j].tof; pc0.mono_b = ms1[j].b; break; }
         pc0.charge = best_z;                    // 0 => unknown, default_charge applied later
         pc0.n_isotopes = best_n;                // [Q4] envelope confidence for the mono call
         out.push_back(pc0);
@@ -1749,6 +1766,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       if (hyps.empty())
       {
         pc.mono_mz = s.mz; pc.charge = 0;   // no envelope evidence at all -> unknown charge
+      pc.mono_tof = s.tof; pc.mono_b = s.b;
         out.push_back(pc);
         used[seed] = true;
         continue;
@@ -1775,6 +1793,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       });
       const Hyp& best = hyps[0];
       pc.mono_mz = best.mono; pc.charge = best.z;
+      pc.mono_tof = s.tof; pc.mono_b = s.b;
+      for (size_t j : best.partners)
+        if (ms1[j].mz == best.mono) { pc.mono_tof = ms1[j].tof; pc.mono_b = ms1[j].b; break; }
       // partners + the seed = envelope size. `members` excludes the seed, so this is the whole
       // envelope only because the seed is always one of its peaks. [adv-review kimi 2026-09-03]
       pc.n_isotopes = 1 + (int)best.partners.size();   // [Q4] envelope confidence for the mono call
@@ -2052,6 +2073,19 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
   /// Build a pseudo-MS2 from a fragment list (m/z,intensity) + ranking scores: keeps top
   /// max_frags by score, drops if < min_frags, annotates the synthetic precursor. Deterministic.
+  /// EXPORT-TIME CALIBRATION. On a flight-time axis the measured quantity is a bin; m/z is a
+  /// calibrated function of it and of the frame's digitizer temperature. Applying that function
+  /// ONCE, here, when the value is written, is what keeps the reported mass free of anything the
+  /// intermediate gates did in cached m/z space -- and the apex frame's own factor is the most
+  /// accurate one to use. A zero bin means the trace came from the OpenMS detector, which has no
+  /// bin, and the value it computed stands.
+  static double exportMz_(uint32_t tof, double b, double cached)
+  {
+    if (tof == 0 || !(b > 0.0) || !tofAxis().ok) return cached;
+    const double v = tofAxis().mzOf(tof, b);
+    return std::isfinite(v) && v > 0.0 ? v : cached;
+  }
+
   void assembleFromList_(const Precursor_& pc, double win_lo, double win_hi,
                          vector<pair<double, double>>& frags, vector<double>& frag_scores,
                          Size min_frags, Size max_frags, MSSpectrum& out) const
@@ -2083,7 +2117,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     for (const auto& fr : frags) out.emplace_back(fr.first, fr.second);
     out.sortByPosition();
     OpenMS::Precursor prec;
-    prec.setMZ(pc.mono_mz);
+    prec.setMZ(exportMz_(pc.mono_tof, pc.mono_b, pc.mono_mz));   // calibrate on write
     if (pc.charge > 0) prec.setCharge(pc.charge);
     prec.setIsolationWindowLowerOffset(max(0.0, pc.mono_mz - win_lo));   // [C-5]
     prec.setIsolationWindowUpperOffset(max(0.0, win_hi - pc.mono_mz));
@@ -2130,7 +2164,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
                      min_corr_pts, pdense, [&](size_t fi, double c) {
       const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);
-      frags.emplace_back(frag_traces[fi].mz, emit_inten);
+      frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
       frag_scores.push_back(c * inten);
     });
     assembleFromList_(pc, win_lo, win_hi, frags, frag_scores, min_frags, max_frags, out);
@@ -2995,7 +3029,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                              min_corr_pts, pdense, [&](size_t fi, double c) {
               const double w = wsum[fi] > 0.0f ? std::pow(std::max(c, 0.0), apportion) / wsum[fi] : 1.0;
               const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity * w, c, frag_im[fi] - pc.im);   // [E5]
-              frags.emplace_back(frag_traces[fi].mz, emit_inten);
+              frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
               frag_scores.push_back(c * inten);
             });
             MSSpectrum ms2;
@@ -3103,7 +3137,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               double c = -1.0;
               for (auto& cp : topk[fi]) if (cp.second == kv2.first) { c = cp.first; break; }
               const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);   // [E5]
-              frags.emplace_back(frag_traces[fi].mz, emit_inten);
+              frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
               frag_scores.push_back(c * inten);
             }
             MSSpectrum ms2;
