@@ -638,12 +638,6 @@ namespace
     vector<double>   b;            ///< size F: the frame's calibration factor (bin -> m/z)
     vector<float>    inten;
     vector<uint16_t> imq;          ///< the store's quantised 1/K0, kept for export
-    vector<uint16_t> scan;         ///< TIMS scan index: the RANK of this peak's mobility in its
-                                   ///  frame. Within a frame the distinct 1/K0 values ARE the
-                                   ///  scans, so ranking recovers the index without the vendor
-                                   ///  TIMS table -- and comparing scans is what the gate wants,
-                                   ///  since the calibrated value drifts frame to frame.
-    vector<uint16_t> scan_tol;     ///< per frame: gate:delta_im expressed in scans for THAT frame
     size_t frames() const { return rt_index.size(); }
     size_t peaks()  const { return tof.size(); }
   };
@@ -683,35 +677,6 @@ namespace
     return sl;
   }
 
-  /// Rank each frame's mobility values into TIMS scan indices, and express the mobility tolerance
-  /// in scans for that frame. Not a constant across frames: the ramp is not uniform, and assuming
-  /// it were would repeat the fixed-halo mistake in the other dimension.
-  void indexScans(PeakSlab& sl, double im_tol)
-  {
-    const size_t F = sl.frames();
-    sl.scan.assign(sl.tof.size(), 0);
-    sl.scan_tol.assign(F, 1);
-    vector<uint16_t> vals;
-    for (size_t f = 0; f < F; ++f)
-    {
-      const uint32_t a = sl.frame_off[f], b = sl.frame_off[f + 1];
-      if (b <= a) continue;
-      vals.assign(sl.imq.begin() + a, sl.imq.begin() + b);
-      sort(vals.begin(), vals.end());
-      vals.erase(unique(vals.begin(), vals.end()), vals.end());
-      for (uint32_t k = a; k < b; ++k)
-        sl.scan[k] = (uint16_t)(lower_bound(vals.begin(), vals.end(), sl.imq[k]) - vals.begin());
-      // how many ranks does the tolerance span here? measure it on this frame's own spacing
-      const double q = im_tol * IM_Q;                 // tolerance in quantised 1/K0 units
-      size_t worst = 1;
-      for (size_t i = 0; i < vals.size(); ++i)
-      {
-        const size_t hi = upper_bound(vals.begin(), vals.end(), (uint16_t)std::min<double>(65535.0, vals[i] + q)) - vals.begin();
-        worst = std::max(worst, hi - i);
-      }
-      sl.scan_tol[f] = (uint16_t)std::min<size_t>(65535, worst);
-    }
-  }
 
   /// Mass-trace detection on the integer m/z axis.
   ///
@@ -731,22 +696,29 @@ namespace
   /// Mobility is part of the identity, as in the IM-aware OpenMS path: a candidate must also be
   /// within `im_tol` of the trace's mobility. Valley splitting is NOT done here -- the existing
   /// ElutionPeakDetection step runs afterwards on the traces this produces.
-  /// Mass-trace detection on integer arrays: a FAITHFUL reimplementation of the algorithm OpenMS
-  /// `MassTraceDetection` runs -- intensity-ordered seeding, bidirectional extension against a
-  /// running centroid, `min_sample_rate` termination -- with every axis an integer and no
-  /// `PeakMap`, `MSSpectrum` or `Peak1D` anywhere. The science is meant to be the same; only the
-  /// data structures change. Valley splitting is NOT reimplemented: ElutionPeakDetection still runs
-  /// afterwards on what this returns.
-  ///
-  /// `band_lo`/`band_hi` restrict it to a slice of the FLIGHT-TIME range. A trace's centroid cannot
-  /// leave `seed +- span`, so a halo of `2*span` cannot cut one and the partition is exact by
-  /// construction -- which the OpenMS path's m/z halo can only approximate, since its traces drift
-  /// without bound. A trace belongs to the band whose core holds its seed, so there are no
-  /// duplicates. See docs/INTEGER-TRACING-DESIGN.md.
+  /// Mass-trace detection on integer arrays, following OpenMS `MassTraceDetection::run_` step for
+  /// step -- written from that source, not from a description of it. The first version was written
+  /// from a description and lost 92% of the peptides; the review that found why is in
+  /// docs/reviews/integer-tracing-2026-09-03/ and the corrected semantics are:
+  ///   * seeds in intensity order, ties later-index-first (stable ascending sort, reverse walk);
+  ///   * the two directions extend INTERLEAVED, one frame down then one up, sharing one centroid;
+  ///   * acceptance is the CLOSEST peak within +-3 sd of the running m/z centroid and within the
+  ///     mobility tolerance of the running mobility centroid; if that closest peak is already
+  ///     taken, the frame is a MISS -- the next-closest is not tried;
+  ///   * sd starts at centroid*ppm and is RE-ESTIMATED from the accepted peaks (reestimate_mt_sd);
+  ///   * a direction stops after more than 5 consecutive misses; an empty frame is not a miss;
+  ///   * the trace is valid if its RT span is within [min,max] length and
+  ///     size / (frames visited - trailing misses) >= min_sample_rate (0.5 by default);
+  ///   * peaks are marked taken only when the trace is valid;
+  ///   * the seed is counted twice in the centroid, as run_ does (init, then update again).
+  /// Peaks stay integers (flight-time bin, quantised mobility); the running centroid and sd are
+  /// doubles in m/z, exactly as in OpenMS, so the tolerance semantics are the same. The bin<->m/z
+  /// conversion is one calibration call per frame step plus one per ACCEPTED peak -- never per
+  /// visited peak. Valley splitting runs afterwards on the result, as it does for the OpenMS path.
   vector<Trace> detectTracesInteger_(PeakSlab& sl, double mass_ppm, double im_tol,
                                      double noise, double snr, double min_len_sec,
                                      double min_sample_rate, double max_len_sec,
-                                     const std::string& mz_est,
+                                     const std::string& /*mz_est: applied in toTrace() after EPD*/,
                                      TofIdx band_lo = 0, TofIdx band_hi = 0)
   {
     vector<Trace> out;
@@ -754,114 +726,201 @@ namespace
     if (F == 0 || P == 0) return out;
     const bool banded = band_hi > band_lo;
     const TofAxis& ax = tofAxis();
+    const double msr = min_sample_rate >= 0.0 ? min_sample_rate : 0.5;   // -1 = OpenMS default
+    const double imq_tol = im_tol * IM_Q;
+    const Size max_missed = 5;                                            // trace_termination_outliers
 
-    // frame of each peak, so a seed knows where it starts
     vector<uint32_t> frame_of(P, 0);
     for (size_t f = 0; f < F; ++f)
       for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k) frame_of[k] = (uint32_t)f;
 
-    // Seeding order: intensity descending, as OpenMS does. Ties broken on (tof, index) so the run
-    // is reproducible -- an unstable order here would make the output depend on the sort.
+    // Membership: OpenMS deletes every peak <= noise before tracing, so they cannot join a trace.
+    // Seeds additionally need intensity > snr*noise (strict). Banding: seed only in the core.
+    vector<char> member(P, 0);
+    for (uint32_t k = 0; k < P; ++k) member[k] = sl.inten[k] > (float)noise;
     vector<uint32_t> order;
-    order.reserve(P);
+    order.reserve(P / 4);
+    const float min_apex = (float)(snr * noise);
     for (uint32_t k = 0; k < P; ++k)
-      if (sl.inten[k] > (float)noise &&
-          (!banded || (sl.tof[k] >= band_lo && sl.tof[k] < band_hi)))
+      if (member[k] && sl.inten[k] > min_apex && (!banded || (sl.tof[k] >= band_lo && sl.tof[k] < band_hi)))
         order.push_back(k);
+    // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
+    // intensities the LATER peak seeds first.
     sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
       if (sl.inten[a] != sl.inten[b]) return sl.inten[a] > sl.inten[b];
-      if (sl.tof[a] != sl.tof[b]) return sl.tof[a] < sl.tof[b];
-      return a < b;
+      return a > b;
     });
 
-    vector<char> used(P, 0);
-    const double min_apex = snr * noise;
-    vector<uint32_t> xi; vector<float> xv;
-
-    /// Closest unused peak of frame `f` within `span` bins of `centroid` and `stol` scans of
-    /// `scan0`. One binary search plus a short walk over the tolerance window.
-    auto pick = [&](size_t f, TofIdx centroid, TofIdx span, uint16_t scan0, uint16_t stol) -> long {
+    vector<char> visited(P, 0);
+    auto mzAt = [&](uint32_t k) { return ax.mzOf(sl.tof[k], sl.b[frame_of[k]]); };
+    auto iwm = [](double v, double w, double& c, double& cnt, double& den) {   // updateIterativeWeightedMean_
+      const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
+      c *= (ct / dt); cnt += w * v; den += w;
+    };
+    auto sdRobust = [](double mz, double w, double mean, double& sd, double& wsum) {   // updateWeightedSDEstimateRobust
+      const double d1 = std::log(wsum) + 2.0 * std::log(sd);
+      const double d2 = std::log(w) + 2.0 * std::log(std::abs(mz - mean));
+      const double denom = std::sqrt(std::exp(d1) + std::exp(d2));
+      const double ws = wsum + w;
+      const double t = denom / std::sqrt(ws);
+      if (t > std::numeric_limits<double>::epsilon()) sd = t;
+      wsum = ws;
+    };
+    /// findBestPeak_ + isPeakAcceptable_: closest m/z inside +-3sd with mobility inside the gate;
+    /// returns the index, or -1 for "no candidate"; sets `taken` if the closest one is visited.
+    auto best = [&](size_t f, double cmz, double sd, double cim, bool& taken) -> long {
+      taken = false;
       const uint32_t a = sl.frame_off[f], b = sl.frame_off[f + 1];
       if (b <= a) return -1;
-      const TofIdx lo = centroid > span ? centroid - span : 0;
-      const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + a, sl.tof.begin() + b, lo) - sl.tof.begin());
-      long best = -1; TofIdx best_d = span + 1;
-      for (uint32_t k = s0; k < b && sl.tof[k] <= centroid + span; ++k)
+      const double bf = sl.b[f];
+      const double lo_mz = cmz - 3.0 * sd, hi_mz = cmz + 3.0 * sd;
+      const TofIdx lo_t = ax.tofOf(lo_mz > 0.0 ? lo_mz : 1e-9, bf);
+      const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + a, sl.tof.begin() + b, lo_t) - sl.tof.begin());
+      long bk = -1; double bd = std::numeric_limits<double>::infinity();
+      for (uint32_t k = s0; k < b; ++k)
       {
-        if (used[k]) continue;
-        const int ds = (int)sl.scan[k] - (int)scan0;
-        if (ds > (int)stol || -ds > (int)stol) continue;
-        const TofIdx d = sl.tof[k] > centroid ? sl.tof[k] - centroid : centroid - sl.tof[k];
-        if (d < best_d) { best_d = d; best = (long)k; }
+        const double mz = ax.mzOf(sl.tof[k], bf);
+        if (mz > hi_mz) break;
+        if (mz < lo_mz || !member[k]) continue;
+        if (std::abs((double)sl.imq[k] - cim) > imq_tol) continue;
+        const double d = std::abs(mz - cmz);
+        if (d < bd) { bd = d; bk = (long)k; }          // strict <: first of equals wins
       }
-      return best;
+      if (bk >= 0 && visited[(size_t)bk]) { taken = true; return -1; }
+      return bk;
     };
 
+    struct Dir { Size hits = 0, missed = 0, scans = 0; bool active = true; };
+    vector<uint32_t> got;                 // provisional members, marked only if the trace is valid
     for (uint32_t seed : order)
     {
-      if (used[seed]) continue;
-      if ((double)sl.inten[seed] < min_apex) break;      // intensity-ordered: none left above it
+      if (visited[seed]) continue;
       const size_t f0 = frame_of[seed];
-      const uint16_t scan0 = sl.scan[seed];
-      double wsum = sl.inten[seed], msum = (double)sl.tof[seed] * sl.inten[seed];
-      double imsum = (double)sl.imq[seed] * sl.inten[seed];
-      TofIdx centroid = sl.tof[seed];
-      used[seed] = 1;
-      xi.clear(); xv.clear();
-      xi.push_back(sl.rt_index[f0]); xv.push_back(sl.inten[seed]);
-
-      for (int dir = 1; dir >= -1; dir -= 2)
+      const double w0 = sl.inten[seed], m0 = mzAt(seed);
+      double cmz = m0, cnt = w0 * m0, den = w0;
+      iwm(m0, w0, cmz, cnt, den);                             // seed counted twice, as run_ does
+      double cim = sl.imq[seed], cnt_im = w0 * cim, den_im = w0;
+      iwm((double)sl.imq[seed], w0, cim, cnt_im, den_im);
+      double sd = (cmz / 1e6) * mass_ppm, wsum = w0;
+      got.clear(); got.push_back(seed);
+      Dir dn, up;
+      long fd = (long)f0, fu = (long)f0;
+      while ((fd > 0 && dn.active) || (fu + 1 < (long)F && up.active))
       {
-        size_t hits = 0, visited = 0;
-        for (long f = (long)f0 + dir; f >= 0 && f < (long)F; f += dir)
+        for (int side = 0; side < 2; ++side)
         {
-          const TofIdx span = ax.ok ? ax.span(centroid, sl.b[(size_t)f], mass_ppm)
-                                    : std::max<TofIdx>(1, (TofIdx)(centroid * mass_ppm * 1e-6 + 0.5));
-          const long k = pick((size_t)f, centroid, span, scan0, sl.scan_tol[(size_t)f]);
-          ++visited;
-          if (k < 0)
+          Dir& d = side == 0 ? dn : up;
+          long& fi = side == 0 ? fd : fu;
+          if (!d.active) continue;
+          if (side == 0 ? !(fi > 0) : !(fi + 1 < (long)F)) continue;
+          const size_t f = (size_t)(side == 0 ? fi - 1 : fi + 1);
+          if (sl.frame_off[f + 1] > sl.frame_off[f])            // an empty frame is not a miss
           {
-            // OpenMS stops a direction when the hit rate over the frames it has visited falls
-            // below min_sample_rate; the same rule, on the same denominator.
-            if (min_sample_rate > 0.0 && (double)hits / (double)visited < min_sample_rate) break;
-            continue;
+            bool taken = false;
+            const long k = best(f, cmz, sd, cim, taken);
+            if (k >= 0)
+            {
+              const double mz = mzAt((uint32_t)k), w = sl.inten[k];
+              iwm(mz, w, cmz, cnt, den);
+              iwm((double)sl.imq[k], w, cim, cnt_im, den_im);
+              sdRobust(mz, w, cmz, sd, wsum);
+              got.push_back((uint32_t)k);
+              ++d.hits; d.missed = 0;
+            }
+            else ++d.missed;
           }
-          ++hits;
-          used[(size_t)k] = 1;
-          wsum += sl.inten[k]; msum += (double)sl.tof[k] * sl.inten[k];
-          imsum += (double)sl.imq[k] * sl.inten[k];
-          centroid = (TofIdx)llround(msum / wsum);
-          // drift cap: keeps a trace inside seed +- span, which is what makes banding exact
-          const TofIdx cap = ax.ok ? ax.span(sl.tof[seed], sl.b[f0], mass_ppm) : span;
-          if (centroid > sl.tof[seed] + cap) centroid = sl.tof[seed] + cap;
-          else if (sl.tof[seed] > cap && centroid < sl.tof[seed] - cap) centroid = sl.tof[seed] - cap;
-          xi.push_back(sl.rt_index[(size_t)f]); xv.push_back(sl.inten[k]);
+          fi += (side == 0 ? -1 : 1);
+          ++d.scans;
+          if (d.missed > max_missed) d.active = false;
         }
       }
+      // isTraceValid_
+      uint32_t fmin = frame_of[got[0]], fmax = fmin;
+      for (uint32_t k : got) { fmin = std::min(fmin, frame_of[k]); fmax = std::max(fmax, frame_of[k]); }
+      const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
+      if (span_s < min_len_sec) continue;
+      if (max_len_sec >= 0.0 && span_s > max_len_sec) continue;
+      const Size total = dn.scans + up.scans + 1;
+      const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
+      if ((double)got.size() / (double)adjusted < msr) continue;
+      for (uint32_t k : got) visited[k] = 1;                  // valid: now they are taken
+      if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // core owns it
 
-      if (xi.size() < 2) continue;
-      sort(xi.begin(), xi.end());   // the backward direction appended in reverse
-      // xv must follow xi: rebuild both from pairs rather than sorting one of them
-      {
-        vector<pair<uint32_t, float>> pts(xi.size());
-        for (size_t i2 = 0; i2 < xi.size(); ++i2) pts[i2] = {xi[i2], xv[i2]};
-        sort(pts.begin(), pts.end());
-        for (size_t i2 = 0; i2 < pts.size(); ++i2) { xi[i2] = pts[i2].first; xv[i2] = pts[i2].second; }
-      }
-      const double len = rtAxis()[xi.back()] - rtAxis()[xi.front()];
-      if (min_len_sec > 0.0 && len < min_len_sec) continue;
-      if (max_len_sec > 0.0 && len > max_len_sec) continue;
-
+      // profile in frame order; pair BEFORE sorting (the first version sorted one array alone)
+      vector<pair<uint32_t, uint32_t>> pts;                   // (frame, peak)
+      pts.reserve(got.size());
+      for (uint32_t k : got) pts.emplace_back(frame_of[k], k);
+      sort(pts.begin(), pts.end());
       Trace t;
+      t.xi.reserve(pts.size()); t.xv.reserve(pts.size());
       size_t ap = 0;
-      for (size_t i2 = 1; i2 < xv.size(); ++i2) if (xv[i2] > xv[ap]) ap = i2;
-      t.tof = (mz_est == "apex") ? sl.tof[seed] : (TofIdx)llround(msum / wsum);
-      t.b = sl.b[f0];
-      t.mz = ax.ok ? ax.mzOf(t.tof, t.b) : (double)t.tof / MZ_Q;
-      t.rt = rtAxis()[xi[ap]];
-      t.im = IM_LO + (imsum / wsum) / IM_Q;
-      t.intensity = xv[ap];
-      t.xi = xi; t.xv = xv;
+      for (size_t q = 0; q < pts.size(); ++q)
+      {
+        t.xi.push_back(sl.rt_index[pts[q].first]); t.xv.push_back(sl.inten[pts[q].second]);
+        if (t.xv[q] > t.xv[ap]) ap = q;
+      }
+      const uint32_t kap = pts[ap].second;
+      t.tof = sl.tof[kap]; t.b = sl.b[frame_of[kap]];
+      t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
+      t.rt = rtAxis()[t.xi[ap]];
+      t.im = IM_LO + cim / IM_Q;
+      t.intensity = t.xv[ap];
+      out.push_back(std::move(t));
+    }
+    return out;
+  }
+
+  /// ElutionPeakDetection on a trace list -- the identical step the OpenMS path runs inside
+  /// detectTraces_ (same parameters), lifted out so the integer detector's output goes through it
+  /// too. The review of the first integer version found this step silently skipped.
+  vector<MassTrace> splitValleys(vector<MassTrace>& in, double split_valleys)
+  {
+    if (split_valleys <= 0.0 || in.empty()) return std::move(in);
+    ElutionPeakDetection epd;
+    epd.setLogType(ProgressLogger::NONE);
+    Param ep = epd.getParameters();
+    ep.setValue("chrom_fwhm", split_valleys);
+    ep.setValue("width_filtering", "off");
+    ep.setValue("masstrace_snr_filtering", "false");
+    epd.setParameters(ep);
+    vector<MassTrace> out; out.reserve(in.size());
+    epd.detectPeaks(in, out);
+    return out;
+  }
+
+  /// Integer traces -> MassTrace objects for EPD -> Trace again, with the flight-time bin
+  /// re-attached from the apex frame's calibration (the store is ~400x finer than a bin, so the
+  /// inversion recovers the measured bin exactly). Only the TRACES become OpenMS objects here --
+  /// the peak arrays never do, which is the point of the integer path.
+  vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, const PeakSlab& sl)
+  {
+    if (split_valleys <= 0.0 || in.empty()) return std::move(in);
+    vector<MassTrace> mts; mts.reserve(in.size());
+    for (Trace& t : in)
+    {
+      std::list<Peak2D> pk;
+      for (size_t i = 0; i < t.np(); ++i)
+      { Peak2D q; q.setRT(t.rtAt(i)); q.setMZ(t.mz); q.setIntensity(t.xv[i]); pk.push_back(q); }
+      MassTrace mt(pk);
+      mt.setCentroidIM(t.im);
+      mts.push_back(std::move(mt));
+      t.freeProfile();
+    }
+    vector<Trace>().swap(in);
+    vector<MassTrace> split = splitValleys(mts, split_valleys);
+    // frame factor by RT index, to re-attach the bin at each split trace's apex
+    std::unordered_map<uint32_t, double> b_of_rt;
+    for (size_t f = 0; f < sl.frames(); ++f) b_of_rt[sl.rt_index[f]] = sl.b[f];
+    vector<Trace> out; out.reserve(split.size());
+    const TofAxis& ax = tofAxis();
+    for (const MassTrace& mt : split)
+    {
+      Trace t = toTrace(mt);
+      if (t.np() == 0) continue;
+      size_t ap = 0; for (size_t i = 1; i < t.np(); ++i) if (t.xv[i] > t.xv[ap]) ap = i;
+      auto it = b_of_rt.find(t.xi[ap]);
+      t.b = it != b_of_rt.end() ? it->second : ax.factor(0);
+      t.tof = ax.ok ? ax.tofOf(t.mz, t.b) : 0;
       out.push_back(std::move(t));
     }
     return out;
@@ -2928,7 +2987,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // peaks converted back into Peak1D doubles, which is the largest per-window allocation.
         PeakMap wmap;
         PeakSlab wslab;
-        if (integer_detector) { wslab = toSlab(*window_list[wi].second); indexScans(wslab, delta_im); }
+        if (integer_detector) wslab = toSlab(*window_list[wi].second);
         else wmap = materializeWindow(*window_list[wi].second);
         if (detOn_())   // [det] compact store digest BEFORE tracing: splits "pick" from "trace+assemble"
         {
@@ -2969,9 +3028,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         vector<Trace> frag_traces;
         if (integer_detector)
         {
-          // Banded like the OpenMS path, but on the flight-time axis, where the halo is a bin
-          // count and the drift cap makes the partition exact. Bands are TASKS, so they fill the
-          // pool alongside every other window's work.
+          // Banded like the OpenMS path. A band SEEDS only in its own flight-time core but may
+          // extend anywhere, so no halo is needed and no trace is cut; the one approximation is
+          // that two bands can take the same peak (each has its own `visited`), which is the same
+          // class of error the OpenMS halo carries -- measured at 0.1% of peptides. Bands are
+          // TASKS, so they fill the pool alongside every other window's work.
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
           const int nb = std::max(1, w_bands);
@@ -2994,6 +3055,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             frag_traces.reserve(tot);
             for (auto& v : per) { for (auto& t : v) frag_traces.push_back(std::move(t)); vector<Trace>().swap(v); }
           }
+          // The same valley-splitting step the OpenMS path runs; skipping it was one of the
+          // defects behind the first version's 92% peptide loss.
+          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wslab);
           PeakSlab().frame_off.swap(wslab.frame_off);   // consumed
           vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
           vector<double>().swap(wslab.b);
