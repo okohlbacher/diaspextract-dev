@@ -2075,6 +2075,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // Not single-linkage -- transitive chaining spans genuinely different species (measured: an
       // ORACLE component collapse still lost 1,387 peptides).
       vector<char> dead(precursors.size(), 0), kept(precursors.size(), 0);
+      vector<size_t> killer(precursors.size(), (size_t)-1); vector<int> kstep(precursors.size(), 0);
       for (size_t i : order)
       {
         if (dead[i]) continue;
@@ -2095,9 +2096,45 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               const Precursor_& o = precursors[j];
               if (o.charge != p.charge) continue;
               if (fabs(o.rt - p.rt) > delta_rt || fabs(o.im - p.im) > iso_im_tol) continue;
-              dead[j] = 1;
+              dead[j] = 1; killer[j] = i; kstep[j] = sgn * k;
             }
           }
+      }
+      // SPEXTRACT_ISO_COLLAPSE_LOG=<tsv>: one row per removal, with the survivor that caused it, so
+      // a lost peptide can be traced back to the exact collapse that took it.
+      if (const char* lg = std::getenv("SPEXTRACT_ISO_COLLAPSE_LOG"))
+      {
+        // Same species or coincidence? Two hypotheses of ONE peptide share an elution profile;
+        // a faint independent peptide that merely sits on the lattice does not. Correlating the two
+        // MS1 XICs is the guard that could separate the free removals from the harmful ones.
+        auto xicCorr = [&](const Trace& a, const Trace& b) -> double {
+          size_t i = 0, j = 0; double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0; int m = 0;
+          while (i < a.xic.size() && j < b.xic.size())
+          {
+            if (fabs(a.xic[i].first - b.xic[j].first) < 1e-6)
+            { const double x = a.xic[i].second, y = b.xic[j].second;
+              sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; ++m; ++i; ++j; }
+            else if (a.xic[i].first < b.xic[j].first) ++i; else ++j;
+          }
+          if (m < 3) return -2.0;
+          const double cov = sxy - sx * sy / m, vx = sxx - sx * sx / m, vy = syy - sy * sy / m;
+          return (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : -2.0;
+        };
+        std::ofstream f(lg);
+        f << "rm_mz\trm_rt\trm_im\trm_z\trm_niso\trm_int\tsv_mz\tsv_rt\tsv_im\tsv_niso\tsv_int\tk\tcorr\n";
+        f.precision(12);
+        for (size_t i = 0; i < precursors.size(); ++i)
+        {
+          if (!dead[i] || killer[i] == (size_t)-1) continue;
+          const Precursor_& r = precursors[i]; const Precursor_& v = precursors[killer[i]];
+          const double ri = r.trace_idx < ms1_traces.size() ? ms1_traces[r.trace_idx].intensity : 0.0;
+          const double vi = v.trace_idx < ms1_traces.size() ? ms1_traces[v.trace_idx].intensity : 0.0;
+          f << r.mono_mz << '\t' << r.rt << '\t' << r.im << '\t' << r.charge << '\t' << r.n_isotopes
+            << '\t' << ri << '\t' << v.mono_mz << '\t' << v.rt << '\t' << v.im << '\t' << v.n_isotopes
+            << '\t' << vi << '\t' << kstep[i] << '\t'
+            << (r.trace_idx < ms1_traces.size() && v.trace_idx < ms1_traces.size()
+                ? xicCorr(ms1_traces[r.trace_idx], ms1_traces[v.trace_idx]) : -2.0) << '\n';
+        }
       }
       size_t w = 0;
       for (size_t i = 0; i < precursors.size(); ++i) if (!dead[i]) precursors[w++] = precursors[i];
@@ -2105,6 +2142,20 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       writeLogInfo_("iso-collapse (" + String(rule) + ", k<=" + String(kmax) + "): removed "
                     + String(before - w) + " of " + String(before) + " precursor hypotheses, "
                     + String(w) + " remain");
+    }
+    // [min-charge, 2026-09-03] 29.3% of S30 emission is SINGLY-charged precursor hypotheses (271,559
+    // spectra) and they carry 259 unique peptides, 1.73%. They are identified on 0.42% of their own
+    // spectra against 15.3% for z=2 -- 36x less often. Tryptic peptides are essentially never 1+ in
+    // ESI, and charge inference breaks ties toward the LOW charge, so this is where the mis-assignments
+    // land. Dropping them is a far better emission lever than any isotope collapse tested: -29.3%
+    // emission for -1.73% peptides, against -15.3% for -4.6% at the best collapse setting.
+    if (const char* mc = std::getenv("SPEXTRACT_MIN_CHARGE"))
+    {
+      const int zmin = std::atoi(mc); const size_t before = precursors.size();
+      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
+                       [zmin](const Precursor_& pc){ return pc.charge > 0 && pc.charge < zmin; }), precursors.end());
+      writeLogInfo_("SPEXTRACT_MIN_CHARGE=" + String(zmin) + ": dropped " + String(before - precursors.size())
+                    + " precursors below that charge, " + String(precursors.size()) + " remain");
     }
     // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts

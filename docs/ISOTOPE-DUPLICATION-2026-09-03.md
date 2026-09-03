@@ -185,3 +185,50 @@ collapse time is not "which member is the monoisotope" but **"are these two the 
 and two hypotheses of one peptide share that peptide's elution profile while an independent faint
 neighbour does not. The decision log now records the MS1 XIC Pearson correlation between the removed
 precursor and its survivor so the harm rate can be measured against it and a threshold set from data.
+
+## 9. No collapse-time feature separates the harmful removals -- except charge
+
+The decision log carries everything the extractor knew when it decided. Harm rate against each,
+over 285,410 logged removals (dark 200,131, covered 25,860, LOST 4,989, unemitted 54,430):
+
+**MS1 elution correlation FAILS, and fails backwards.** Harm rises with correlation, 0.99% for an
+undefined profile to 3.06% at corr >= 0.95, and the covered:LOST ratio is flat at ~5.3 across every
+bin. The hypothesis that co-eluting profiles mark true duplicates is wrong: everything within the
+3 s gate co-elutes, so correlation measures gate width, not identity. Intensity ratio is no better
+(harm 0.95-2.25%, no monotone trend).
+
+**Charge separates cleanly, by a factor of 28:**
+| subset | removals | dark | LOST | harm% | peptides at risk | dark per peptide risked |
+|---|---|---|---|---|---|---|
+| all (K<=3) | 285,410 | 200,131 | 4,989 | 1.75% | 2,016 | 99 |
+| **charge 1** | 98,452 | 59,124 | **108** | **0.11%** | 53 | **1,116** |
+| charge 2 | 127,646 | 99,230 | 3,987 | 3.12% | 1,536 | 65 |
+| charge 3 | 51,249 | 35,535 | 856 | 1.67% | 374 | 95 |
+| charge 4 | 7,016 | 5,322 | 36 | 0.51% | 29 | 184 |
+Secondary, weaker: removing the HEAVIER member is 2.8x safer than removing the lighter (0.75% vs
+2.07%), and a removed peak whose own envelope is LONGER than a tail member's would be is safe to
+remove (0.38%). Neither approaches charge.
+
+## 10. The real lever is not collapse at all: singly-charged precursors
+
+Charge 1 removals are nearly free because **the entire z=1 population is nearly free**:
+| z | emitted spectra | share | identified spectra | rate | peptides ONLY at this charge |
+|---|---|---|---|---|---|
+| **1** | **271,559** | **29.3%** | 1,136 | **0.42%** | **259 (1.73%)** |
+| 2 | 400,590 | 43.2% | 61,338 | 15.3% | 8,507 (56.9%) |
+| 3 | 197,985 | 21.3% | 37,718 | 19.1% | 3,963 (26.5%) |
+| 4 | 38,495 | 4.1% | 2,619 | 6.8% | 328 (2.2%) |
+| 5 | 19,184 | 2.1% | 79 | 0.4% | 9 (0.1%) |
+
+A z=1 pseudo-spectrum is identified 36x less often than a z=2 one. Tryptic peptides are essentially
+never singly charged in ESI, and `charge:scoring count` breaks ties toward the LOW charge, so this is
+where the mis-assignments land. **Dropping z=1 outright is -29.3% emission for -1.73% peptides**, and
+lands at 656,254 spectra, below diaTracer's 700,434 -- against -15.3% emission for -4.6% peptides at
+the best collapse setting. Five times the efficiency, and one line of code instead of a graph
+algorithm.
+
+`SPEXTRACT_MIN_CHARGE=z` implemented. **Pre-registered arm (running):** z>=2, z>=2 with the k=1
+collapse, and z>=3, on S30 with both engines and entrapment. Prediction: z>=2 loses under 2% of Sage
+peptides, and may GAIN, since removing 29% of never-identified spectra also removes their share of
+the multiple-testing burden. Falsifier: peptides fall more than the 1.73% the offline join predicts,
+which would mean the z=1 spectra contribute identifications indirectly through FDR calibration.
