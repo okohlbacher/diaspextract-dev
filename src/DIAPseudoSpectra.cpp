@@ -851,7 +851,11 @@ namespace
           if (!d.active) continue;
           if (side == 0 ? !(fi > 0) : !(fi + 1 < (long)F)) continue;
           const size_t f = (size_t)(side == 0 ? fi - 1 : fi + 1);
-          if (tp.frame_live[f])            // "empty" AFTER sub-noise deletion, as OpenMS tests it
+          // "empty" AFTER sub-noise deletion, as OpenMS tests it. SPEXTRACT_INT_EMPTY_RAW=1 tests
+          // raw emptiness instead: the A/B that attributes the 12,650 -> 12,466 move between the
+          // two corrected versions, which is the only semantic change between them.
+          static const bool empty_raw = std::getenv("SPEXTRACT_INT_EMPTY_RAW") != nullptr;
+          if (empty_raw ? (sl.frame_off[f + 1] > sl.frame_off[f]) : (bool)tp.frame_live[f])
           {
             bool taken = false;
             const long k = best(f, cmz, sd, cim, taken);
