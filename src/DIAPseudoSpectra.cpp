@@ -16,6 +16,7 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
+#include <unordered_map>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
@@ -418,6 +419,19 @@ namespace
   ///   intensity: float32, unchanged (Peak1D already stores float)
   /// Cost: 10 B/peak (4+4+2) vs ~20 B/peak for Peak1D+FloatDataArray, plus no per-MSSpectrum overhead.
   constexpr double MZ_Q = 1e5;      ///< m/z quantum = 1e-5 Da
+
+  /// THE M/Z AXIS IS GLOBAL, UNIFORM AND INTEGER. A TOF instrument measures integer flight times,
+  /// so m/z is discrete at the source; the compact store has always held it that way (uint32 at
+  /// 1e-5 Da) and then thrown it away at materialisation, converting back to double so OpenMS
+  /// MassTraceDetection could match by a ppm tolerance with a binary search per comparison. These
+  /// primitives make the index the working representation. Unlike the RT axis, no table is needed:
+  /// the axis is an affine function of the index. See docs/MZ-AXIS-DESIGN.md.
+  using MzIdx = uint32_t;
+  inline double mzOf(MzIdx i) { return (double)i / MZ_Q; }
+  inline MzIdx  idxOf(double mz) { return (MzIdx)llround(mz * MZ_Q); }
+  /// A ppm tolerance in index units. Exact, because the axis is uniform: 20 ppm at m/z 600 is
+  /// 0.012 Da is 1,200 index units, and the comparison becomes an integer difference.
+  inline MzIdx  ppmSpan(MzIdx i, double ppm) { return (MzIdx)((double)i * ppm * 1e-6 + 0.5); }
   constexpr double IM_LO = 0.4, IM_HI = 1.8;
   constexpr double IM_Q = 65535.0 / (IM_HI - IM_LO);
 
@@ -494,6 +508,167 @@ namespace
       v = t.intensity; std::memcpy(&u, &v, 8); b.push_back(u);
     }
     return detDigest_(std::move(b));
+  }
+
+  /// One window's peaks in INDEX SPACE, frame-major. This is what the compact store already holds;
+  /// the point is that it is never converted back to Peak1D doubles. Replaces the materialised
+  /// PeakMap for the integer detector. See docs/MZ-AXIS-DESIGN.md.
+  struct PeakSlab
+  {
+    vector<uint32_t> frame_off;    ///< size F+1: frame f owns [frame_off[f], frame_off[f+1])
+    vector<uint32_t> rt_index;     ///< size F: the frame's index on the GLOBAL RT axis
+    vector<MzIdx>    mz;           ///< ascending within a frame (the loader sorts by m/z)
+    vector<float>    inten;
+    vector<uint16_t> imq;
+    size_t frames() const { return rt_index.size(); }
+    size_t peaks()  const { return mz.size(); }
+  };
+
+  /// Move a window's compact frames into a slab, consuming them as it goes (the compact store has
+  /// to shrink in step, exactly as materializeWindow does, or the two representations coexist).
+  PeakSlab toSlab(vector<CompactFrame>& frames)
+  {
+    PeakSlab sl;
+    const size_t F = frames.size();
+    sl.frame_off.resize(F + 1, 0);
+    sl.rt_index.resize(F);
+    size_t total = 0;
+    for (const auto& f : frames) total += f.mzq.size();
+    sl.mz.reserve(total); sl.inten.reserve(total); sl.imq.reserve(total);
+    for (size_t i = 0; i < F; ++i)
+    {
+      CompactFrame& f = frames[i];
+      sl.rt_index[i] = rtIndex(f.rt);
+      sl.frame_off[i] = (uint32_t)sl.mz.size();
+      sl.mz.insert(sl.mz.end(), f.mzq.begin(), f.mzq.end());
+      sl.inten.insert(sl.inten.end(), f.inten.begin(), f.inten.end());
+      sl.imq.insert(sl.imq.end(), f.imq.begin(), f.imq.end());
+      vector<uint32_t>().swap(f.mzq);
+      vector<float>().swap(f.inten);
+      vector<uint16_t>().swap(f.imq);
+    }
+    sl.frame_off[F] = (uint32_t)sl.mz.size();
+    return sl;
+  }
+
+  /// Mass-trace detection on the integer m/z axis.
+  ///
+  /// The OpenMS detector accepts a peak when it lies within `mass_error_ppm` of a trace's RUNNING
+  /// centroid, which needs a tolerance comparison against every live trace and makes the cost
+  /// superlinear in peaks per band -- measured on S30: 4 bands 18:25 wall / 163 GB against 12 bands
+  /// 12:53 / 103 GB, i.e. the same work costs more when the bands are bigger. On a uniform integer
+  /// axis the candidates for a peak are found by ARITHMETIC: a live trace can only accept indices
+  /// within `ppmSpan` of its centroid, so bucketing by `mz >> shift` with a bucket wider than the
+  /// largest span puts every candidate in the peak's own bucket or its two neighbours.
+  ///
+  /// This is a DIFFERENT ALGORITHM, not a reimplementation: it will not reproduce the OpenMS
+  /// detector peak for peak. It is therefore gated behind `trace:detector=integer` (default
+  /// `openms`) and must be judged on identified peptides with both search engines, never on a
+  /// spectrum digest.
+  ///
+  /// Mobility is part of the identity, as in the IM-aware OpenMS path: a candidate must also be
+  /// within `im_tol` of the trace's mobility. Valley splitting is NOT done here -- the existing
+  /// ElutionPeakDetection step runs afterwards on the traces this produces.
+  vector<Trace> detectTracesInteger_(PeakSlab& sl, double mass_ppm, double im_tol,
+                                     double noise, double snr, double min_len_sec,
+                                     const std::string& mz_est)
+  {
+    vector<Trace> out;
+    if (sl.frames() == 0) return out;
+    const uint16_t imq_tol = (uint16_t)std::max(1.0, im_tol * IM_Q);
+    // Bucket width: one shift for the whole window, wide enough that no live trace can reach past
+    // an adjacent bucket. The widest span is at the top of the window's m/z range.
+    MzIdx mz_max = 0;
+    for (MzIdx v : sl.mz) mz_max = std::max(mz_max, v);
+    const MzIdx worst = std::max<MzIdx>(ppmSpan(mz_max, mass_ppm), 1);
+    int shift = 0; while (((MzIdx)1 << shift) < worst && shift < 31) ++shift;
+    const MzIdx bucket_w = (MzIdx)1 << shift;
+
+    /// A trace under construction. Kept as a running sum so the centroid is the same
+    /// intensity-weighted mean the OpenMS detector uses.
+    struct Live
+    {
+      double mz_sum = 0, int_sum = 0;     ///< for the intensity-weighted centroid
+      double im_sum = 0;
+      MzIdx  centroid = 0;                ///< current centroid, in index units
+      uint32_t last_frame = 0;            ///< frame index of the most recent point
+      MzIdx  apex_mz = 0; float apex_int = 0; uint32_t apex_frame = 0;
+      vector<uint32_t> xi; vector<float> xv;
+    };
+    vector<Live> live;
+    // bucket -> indices into `live`, so a peak's candidates are three bucket lookups
+    std::unordered_map<MzIdx, vector<uint32_t>> by_bucket;
+    by_bucket.reserve(sl.peaks() / 8 + 16);
+
+    const double min_apex = snr * noise;
+    for (size_t fi = 0; fi < sl.frames(); ++fi)
+    {
+      const uint32_t rti = sl.rt_index[fi];
+      for (uint32_t k = sl.frame_off[fi]; k < sl.frame_off[fi + 1]; ++k)
+      {
+        const MzIdx m = sl.mz[k];
+        const float  v = sl.inten[k];
+        if (v <= (float)noise) continue;                   // membership threshold, as in the gate
+        const uint16_t iq = sl.imq[k];
+        const MzIdx span = std::max<MzIdx>(ppmSpan(m, mass_ppm), 1);
+        // find the closest compatible live trace among three buckets
+        long best = -1; MzIdx best_d = span + 1;
+        const MzIdx b0 = m >> shift;
+        for (int db = -1; db <= 1; ++db)
+        {
+          const MzIdx bb = (MzIdx)((long long)b0 + db);
+          auto it = by_bucket.find(bb);
+          if (it == by_bucket.end()) continue;
+          for (uint32_t li : it->second)
+          {
+            Live& L = live[li];
+            if (L.last_frame == rti) continue;             // one point per trace per frame
+            const MzIdx d = L.centroid > m ? L.centroid - m : m - L.centroid;
+            if (d > span) continue;
+            const double lim = L.im_sum / std::max(L.int_sum, 1e-12);
+            if (fabs(lim - (double)iq) > (double)imq_tol) continue;
+            if (d < best_d) { best_d = d; best = (long)li; }
+          }
+        }
+        if (best < 0)                                      // seed a new trace
+        {
+          Live L;
+          L.mz_sum = (double)m * v; L.int_sum = v; L.im_sum = (double)iq * v;
+          L.centroid = m; L.last_frame = rti;
+          L.apex_mz = m; L.apex_int = v; L.apex_frame = rti;
+          L.xi.push_back(rti); L.xv.push_back(v);
+          live.push_back(std::move(L));
+          by_bucket[m >> shift].push_back((uint32_t)(live.size() - 1));
+          continue;
+        }
+        Live& L = live[(size_t)best];
+        const MzIdx old_bucket = L.centroid >> shift;
+        L.mz_sum += (double)m * v; L.int_sum += v; L.im_sum += (double)iq * v;
+        L.centroid = (MzIdx)llround(L.mz_sum / L.int_sum);
+        L.last_frame = rti;
+        if (v > L.apex_int) { L.apex_int = v; L.apex_mz = m; L.apex_frame = rti; }
+        L.xi.push_back(rti); L.xv.push_back(v);
+        const MzIdx nb = L.centroid >> shift;
+        if (nb != old_bucket) by_bucket[nb].push_back((uint32_t)best);   // drifted into a neighbour
+      }
+    }
+
+    out.reserve(live.size());
+    for (Live& L : live)
+    {
+      if (L.xi.size() < 2) continue;
+      if ((double)L.apex_int < min_apex) continue;                       // apex gate
+      const double len = rtAxis()[L.xi.back()] - rtAxis()[L.xi.front()];
+      if (min_len_sec > 0.0 && len < min_len_sec) continue;
+      Trace t;
+      t.mz = (mz_est == "apex") ? mzOf(L.apex_mz) : L.mz_sum / L.int_sum / MZ_Q;
+      t.rt = rtAxis()[L.apex_frame];
+      t.im = IM_LO + (L.im_sum / L.int_sum) / IM_Q;
+      t.intensity = L.apex_int;
+      t.xi = std::move(L.xi); t.xv = std::move(L.xv);
+      out.push_back(std::move(t));
+    }
+    return out;
   }
 
   /// Rebuild a PeakMap for ONE window from its compact frames, for MassTraceDetection.
@@ -862,6 +1037,14 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (diaTracer-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
+    registerStringOption_("trace:detector", "<mode>", "openms", "Mass-trace detector. 'openms' "
+                          "(default) is OpenMS MassTraceDetection on a materialised PeakMap. 'integer' is the "
+                          "detector on the global integer m/z axis: it finds a peak's candidate traces by "
+                          "arithmetic instead of a tolerance search, and never converts the compact store back "
+                          "to double m/z. It is a DIFFERENT algorithm, not a reimplementation -- judge it on "
+                          "identified peptides with both search engines, not on a spectrum digest. See "
+                          "docs/MZ-AXIS-DESIGN.md.", false);
+    setValidStrings_("trace:detector", {"openms", "integer"});
     registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace. "
                           "'apex' (default) uses the most intense peak's m/z; 'mean' the OpenMS intensity-weighted "
                           "centroid; 'median' the median. apex was chosen on measured identifications with both "
@@ -2414,6 +2597,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // window only when its projected footprint fits in currently-free RAM, re-read from
     // /proc/meminfo at each admission so the run yields to other jobs instead of fighting them.
     // Always admit when nothing is in flight, so the loop cannot deadlock on a single huge window.
+    const bool integer_detector = (getStringOption_("trace:detector") == "integer");
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
     std::atomic<size_t> inflight{0};
     // Projected footprint per window, from its own compact size. RE-CALIBRATED 2026-09-03: the
@@ -2478,7 +2662,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         struct Release { std::atomic<size_t>& c; size_t n; ~Release() { c -= n; } } rel{inflight, need};
         // [compact] materialise ONLY this window, and free its compact frames as we go
         auto _t0 = std::chrono::steady_clock::now();
-        PeakMap wmap = materializeWindow(*window_list[wi].second);
+        // The integer detector reads the compact store directly; only the OpenMS path needs the
+        // peaks converted back into Peak1D doubles, which is the largest per-window allocation.
+        PeakMap wmap;
+        PeakSlab wslab;
+        if (integer_detector) wslab = toSlab(*window_list[wi].second);
+        else wmap = materializeWindow(*window_list[wi].second);
         if (detOn_())   // [det] compact store digest BEFORE tracing: splits "pick" from "trace+assemble"
         {
           // materializeWindow consumed the frames; digest the materialised map instead (same content)
@@ -2515,7 +2704,17 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // keeps the advertised and actual band counts identical. Explicit values pass through
         // unchanged (n_bands == the option when the option is > 0).
         const int w_bands = n_bands;
-        vector<Trace> frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
+        vector<Trace> frag_traces;
+        if (integer_detector)
+        {
+          frag_traces = detectTracesInteger_(wslab, mass_ppm, delta_im, ms2_noise, ms2_snr,
+                                             ms2_minlen, mzEstimator());
+          PeakSlab().frame_off.swap(wslab.frame_off);   // consumed
+          vector<MzIdx>().swap(wslab.mz); vector<float>().swap(wslab.inten);
+          vector<uint16_t>().swap(wslab.imq);
+        }
+        else
+          frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
         if (detOn_())
         {
           #pragma omp critical
