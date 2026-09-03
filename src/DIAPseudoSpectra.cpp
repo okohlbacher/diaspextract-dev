@@ -499,6 +499,7 @@ namespace
       SQLite::Database db(tdf_path, SQLite::OPEN_READONLY);
       SQLite::Statement q(db, "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 FROM MzCalibration");
       if (!q.executeStep()) { why = "no MzCalibration row"; return false; }
+      ax.cal.model_type = q.getColumn(0).getInt();   // was never assigned: the check then saw 0
       ax.cal.digitizer_timebase = q.getColumn(1).getDouble();
       ax.cal.digitizer_delay = q.getColumn(2).getDouble();
       ax.cal.C0 = q.getColumn(3).getDouble(); ax.cal.C1 = q.getColumn(4).getDouble();

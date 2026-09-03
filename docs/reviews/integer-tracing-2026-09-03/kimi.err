@@ -387,4 +387,72 @@ kimi.err
 kimi.md
 vibe.err
 vibe.md
-• There's a `kimi.err` file in docs/reviews/integer-tracing-2026-09-03/ that contains... my own reasoning?! It contains the exact text of my thinking from this session ("For Q3 (estimate): trace detection 3,869 s..."). That's bizarre — it appears a previous/parallel instance of this same review task wrote its transcript there, OR this session's tool output is being mirrored. Look: kimi.err line 216 contains my thinking verbatim from earlier in THIS conversation. And line 261+ contains things I thought but haven't written yet... wait no, line 261 contains my exact thoughts from my head? "Also `t_mat` is timed separately (line 2918-2934...)". That's text I generated in my reasoning blocks. So this session's stderr/thinking is being teed into docs/reviews/integer-tracing-2026-09-03/kimi.err. The harness is saving my transcript there (the user set up a reviews directory collecting reviewer transcripts: codex.transcript, kimi.err, vibe.err, vibe.md). So my own output is being captured as the "kimi" review. Fine — that explains the "file changed" discrepancies too? No — the file edits were real (git status shows M src/DIAPseudoSpectra.cpp, and the content genuinely changed between reads... actually did it? The first Read's saved snapshot was capped at 1000 lines and I paged the snapshot; line numbers matched the ORIGINAL read. The grep afterwards showed shifted line numbers. Possibly the file was edited by the user concurrently, or... the PeakSlab in the snapshot (line 632-642) had no `
+• There's a `kimi.err` file in docs/reviews/integer-tracing-2026-09-03/ that contains... my own reasoning?! It contains the exact text of my thinking from this session ("For Q3 (estimate): trace detection 3,869 s..."). That's bizarre — it appears a previous/parallel instance of this same review task wrote its transcript there, OR this session's tool output is being mirrored. Look: kimi.err line 216 contains my thinking verbatim from earlier in THIS conversation. And line 261+ contains things I thought but haven't written yet... wait no, line 261 contains my exact thoughts from my head? "Also `t_mat` is timed separately (line 2918-2934...)". That's text I generated in my reasoning blocks. So this session's stderr/thinking is being teed into docs/reviews/integer-tracing-2026-09-03/kimi.err. The harness is saving my transcript there (the user set up a reviews directory collecting reviewer transcripts: codex.transcript, kimi.err, vibe.err, vibe.md). So my own output is being captured as the "kimi" review. Fine — that explains the "file changed" discrepancies too? No — the file edits were real (git status shows M src/DIAPseudoSpectra.cpp, and the content genuinely changed between reads... actually did it? The first Read's saved snapshot was capped at 1000 lines and I paged the snapshot; line numbers matched the ORIGINAL read. The grep afterwards showed shifted line numbers. Possibly the file was edited by the user concurrently, or... the PeakSlab in the snapshot (line 632-642) had no `scan`/`scan_tol` fields, while live grep showed them. So yes, the file changed on disk during my review — likely the user or another agent is applying edits live (maybe applying a previous review round's feedback: adding scan fields, the faithful-detector docstring). Also "vibe.md" and "codex.transcript" are other reviewers' outputs from THIS same review round.
+
+  Given the file is a moving target, I should freeze: review the design doc + the code as of my last reads, and explicitly note the tree was being edited during review (doesn't compile: call-site signature mismatch, indexScans never called).
+
+  I have enough to write the review. I should NOT read more of the other reviewers' files (that's their work; mine must be independent). I'll write the final answer now, organized in the 5 requested sections, citing file:symbol.
+
+  Let me make sure of a few citations:
+  - OpenMS: /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp — but cite as OpenMS `MassTraceDetection.cpp` with line numbers and symbols. Since the user knows the repo, cite `MassTraceDetection::run_`, `findBestPeak_`, `isPeakAcceptable_`, `isTraceValid_`, `updateIterativeWeightedMean_`, `updateWeightedSDEstimateRobust`, defaults in ctor.
+  - Defaults: trace_termination_criterion "outlier" (line 41), trace_termination_outliers 5 (43), reestimate_mt_sd "true" (34), min_sample_rate 0.5 (45).
+  - detectTraces_ (src/DIAPseudoSpectra.cpp:1353) sets only mass_error_ppm, noise, snr, ion_mobility_tolerance, min_trace_length, conditionally min_sample_rate and max_trace_length — never trace_termination_criterion, never reestimate_mt_sd.
+  - ftl_sd init: MassTraceDetection.cpp:537 `ftl_sd((centroid_mz / 1e6) * mass_error_ppm_)`, acceptance ±3*ftl_sd (findBestPeak_ lines 301-302, isPeakAcceptable_ 359-366), reestimate at processPeak_ 438-441 via updateWeightedSDEstimateRobust (178-192).
+  - visited only if valid: run_ 653-660.
+  - interleaved down/up: run_ 540-648.
+  - empty spectra don't bump counters: 549-572.
+  - sample_rate mode combined accounting: 582-593.
+  - IM candidate selection: closest m/z among IM-in-tol (findBestPeak_ 324-339); IM centroid updated running (processPeak_ 423-426).
+  - closest-then-reject-if-used: findBestPeak_ picks closest, isPeakAcceptable_ returns false if visited → miss (run_ 552-566).
+  - noise membership filter: run() 240-255 (work_exp only > noise).
+  - PickCompactConsumer picks before compactify: DIAPseudoSpectra.cpp:951 `picker.pickIMCluster(s)` then 953 compactify.
+  - PeakPickerIM: centroid value = picked mobilogram peak position `picked_trace[j].getMZ()` (PeakPickerIM.cpp:390), a PeakPickerHiRes centroid — grid-free.
+  - indexScans: DIAPseudoSpectra.cpp:688-713 (worst-case scan_tol: 704-711).
+  - integer detector: 745-867; used marked at take (829), never unmarked on reject (841/851-852); per-direction rate termination (825); IM gate pinned to seed scan (791, 804, 819); pick takes closest UNUSED (788-795); no intensity floor in pick; EPD absent from integer branch (2962-2993); call sites pass old signature (2971-2972, 2982-2983) — mismatch with new signature (745-749) → doesn't compile; indexScans never called; uniform TOF bands (2976-2981); per-band O(P) frame_of/order setup (758-774) per call.
+  - t_mat/t_trace timers: 2875, 2918-2934 (mat), 2940/3026 (trace), reported 3233-3236.
+  - EPD inside detectTraces_ (1378-1390, 1493+); ms2_split default 7.0 (1253); EPD cost comment (1485-1486).
+  - banding CPU comment: 2944-2951 (trace CPU 11,168→5,378→2,972 across 5/12/24 bands).
+  - ms2_min_sample_rate measurement: 1261.
+  - loadTofAxis fails closed without SQLiteCpp (494-530 in snapshot; ~current similar); integer gate error 2854-ish (grep showed 2836/2854 in earlier numbering).
+  - toSlab per-peak tofOf conversion (668).
+
+  Q5 sequencing answer and "which steps skippable".
+
+  Also Q3: where is the 30-50% supposed to come from: the design's own table only has cache as dominant; but the honest decomposition: (1) materialisation is already separately timed (t_mat) and NOT in t_trace — so it can't deliver any of the 30-50% off t_trace; (2) EPD is inside t_trace and must be retained — its share is a hard floor; (3) detector proper: superlinearity evidence (band CPU scaling) suggests a candidate-scan/working-set term; the draft's pick() has the same asymptotics as OpenMS findBestPeak_ (binary search + window walk), so the per-step win is bandwidth only: 20→10 B/peak on the window walk, plus avoiding Peak1D/FDA indirection. Realistic: 15-25% of detector proper. 30-50% of t_trace requires either counting EPD removal (a regression) or materialisation (already excluded). The falsifier: 15% floor is wrong in both directions — too easy to hit by accidentally dropping EPD (as the draft does!), too hard if EPD retained and its share is large. Correct falsifier: t_trace with EPD retained in both paths falls ≥15% AND the materialize line disappears AND peptide counts within noise. Also correct the vibe.md claim (prior reviewer said materialisation is inside the 90.9% — it's not; t_mat is separate). I should state this plainly since vibe.md got it wrong (vibe says "materialisation pass alone should account for at least 10-20% of the 90.9%"). My reading: timers at 2933-2940 show t_mat accumulated _t1-_t0 (materialise) and t_trace _t3-_t2 starting after materialisation — so materialisation is excluded from trace. Unless _t2 is before... line 2940 _t2 after wmap.sortSpectra + aggregateFrames. Yes excluded. So the design's own "no materialisation" row is a t_mat gain, not a t_trace gain. And is materialise even significant? It's one pass — probably a few % — and it's already measured; the user can read it off the log. If the 3,869 s figure is the trace line only (90.9% of 4,256 = 3,869 exactly: 4256×0.909 = 3869 ✓). And materialize would be a separate small %.
+
+  One measurement to settle layout-vs-search: the codebase already produces it: `perf stat -e LLC-load-misses` on the trace phase, OR cheaper within the existing harness: run S30 with `-perf:trace_bands 12` vs `24` and compare the trace CPU line — already done (5,378 vs 2,972) — CPU halves when the working set halves while peaks/algorithm are identical: that IS the signature of a bandwidth/working-set-bound loop, not an ALU/search-bound one. Hmm wait — 24 bands halves band size → candidate lists per apex halve per the comment... the comment claims the superlinearity is candidate-scan. But findBestPeak_ doesn't scan a band-wide candidate list — it binary-searches one spectrum. What scans "candidates per apex within the band's m/z range"? Hmm, nothing in MTD scans per-apex across the band... unless the comment is wrong. The superlinear CPU with band size at FIXED total peaks — candidate mechanisms: (a) memory pressure (RSS 163→103 GB) → stime/page-fault overhead; (b) sort of apices n log n — weak; (c) cache locality: in a 12-band run, a band's spectra fit cache better. Either way it's a working-set effect → supports layout hypothesis. But careful: per-band halo DUPLICATES peaks (20× ppm halo) — total peaks INCREASE with band count, yet CPU DECREASED — strong evidence the cost is not per-peak-work but per-working-set. Good, cite that.
+
+  So the single decisive measurement I'd name: `perf stat` LLC-misses + page-faults on the trace phase of the CURRENT build at bands=12 vs 24 — if misses scale with RSS, layout is the lever and the refactor is worth doing; if not, it's the extension search. But even simpler and already available: t_mat line + trace CPU across band counts. I'll present: worth doing, conditioned on EPD retention; expected honest gain 15-25% of t_trace.
+
+  Also the user's rule: "If you think this refactor is not worth doing -- for instance because the detection cost is in the extension search rather than the layout -- say so plainly and say what single measurement would settle it." My verdict: provisionally worth doing, because the banding CPU scaling at fixed peak count is working-set evidence; but the settling measurement is the MTD-vs-EPD split of t_trace (one timer around do_split, or read the existing 20:46/28:40 A/B) plus perf stat. The single BEST measurement: time EPD inside t_trace (one-line timer). If EPD ≥ ~40% of t_trace, the ceiling makes 30-50% unreachable and the refactor should not be sold on that number.
+
+  Length: this needs to be thorough but tight. Five sections. Use file:line citations. Let me also double-check current line numbers for key items I'll cite, since file shifted: detectTracesInteger_ at 745; used-mark at 829; termination at 825; pick at 782-797; indexScans 688; call sites 2971/2982; t_mat 2934; t_trace 3026; report 3233-3236; detectTraces_ 1353; do_split 1378; EPD parallel 1493; ms2_split_valleys 1253; ms2_min_sample_rate 1261; band CPU comment 2944-2951; consumer pickIMCluster 951 (was 919 in old snapshot; grep at 951 showed flushMS1's picker line... earlier read shows line 919 `picker.pickIMCluster(s)` in flush_ and 965 in flushMS1_ — wait the second read (739-1039) shows flush_ at 930, pickIMCluster at 951, compactify at 953. Yes current: 951/953.)
+
+  Also the fail-closed gate: earlier grep showed 2836 `integer_detector` and 2854 error — probably shifted ~0-5 lines; I'll cite ~2854 as "the fail-closed check near line 2850". Let me not over-specify; use the message text. Actually let me do one final grep to pin a few line numbers in the CURRENT file. Also confirm loadTofAxis current lines.
+
+• The file changed again — line 2930 now calls `indexScans`. The tree is being actively edited while I review (probably the user applying fixes from the parallel review round). I'll note the moving target and review the state as of my reads, flagging where I cite a line that may have just changed.
+
+  Also I saw docs/reviews/integer-tracing-2026-09-03/kimi.err contains my own thinking — the harness is teeing my session there. I won't read the other reviewers' files (codex/vibe) further; my review is independent. I did inadvertently see vibe.md's falsifier claim (materialisation inside the 90.9%) which I believe is WRONG based on the timers — I'll address that explicitly since the user will read both.
+
+  Now write the final review. Five sections, specific, cite file:symbol. Keep it tight but complete. Note: it doesn't compile at the moment of review (signature mismatch — actually with indexScans now called at 2930, maybe the signature was also fixed; my read at 2971 showed old call args... that was before this latest edit. I'll state: at review time the tree was mid-edit; at one snapshot the call sites didn't match the new signature; verify before measuring.)
+
+  Structure:
+
+  **0. State of the tree** (brief caveat).
+
+  **1. Faithfulness** — list of divergences, each marked [existence] or [order/reporting].
+
+  **2. Mobility axis** — verdict: premise false on this pipeline's own data; attacks; cheap checks; fallback.
+
+  **3. Estimate** — decomposition; materialisation already excluded from t_trace; EPD floor; banding evidence; falsifier redesign; one measurement.
+
+  **4. Risks** — rank the four, add missed, symptom for each.
+
+  **5. Sequencing** — order + skippable.
+
+  Also overall verdict on worth + the single settling measurement.
+
+  Citations for OpenMS source: use path `OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp` with symbols. I'll abbreviate as `MassTraceDetection.cpp:NNN`.
+
+To resume this session: kimi -r session_1f96b33c-4ee2-4613-86e9-669a0ad6b656
+exit=0
