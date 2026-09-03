@@ -199,14 +199,40 @@ namespace
     return (avail_kb + rss_kb) * 1024ull;
   }
 
+  /// THE RT AXIS IS GLOBAL AND DISCRETE. Every acquired frame has one retention time, and every
+  /// point of every mass trace sits on one of those frames -- so an RT value never needs to be
+  /// stored per point. It used to be: `vector<pair<double,double>>` cost 16 B per point and
+  /// duplicated the same ~33,000 values across hundreds of millions of points, and aligning two
+  /// profiles meant a binary search per point because the values had to be compared numerically.
+  /// Here the axis is stored ONCE, a point is (frame index, intensity) at 8 B, and alignment is
+  /// integer equality. Built once after loading, read-only thereafter.
+  inline vector<double>& rtAxis() { static vector<double> v; return v; }
+
+  /// Frame index of an RT. Used only while BUILDING traces: the value comes from a frame, so the
+  /// match is exact, and the nearest-neighbour fallback only guards a last-ulp difference.
+  inline uint32_t rtIndex(double rt)
+  {
+    const vector<double>& a = rtAxis();
+    if (a.empty()) return 0;
+    auto it = lower_bound(a.begin(), a.end(), rt);
+    if (it == a.end()) return (uint32_t)(a.size() - 1);
+    if (it != a.begin() && (*it - rt) > (rt - *(it - 1))) --it;
+    return (uint32_t)(it - a.begin());
+  }
+
   struct Trace
   {
     double mz = 0.0;
     double rt = 0.0;   ///< apex/centroid RT
     double im = 0.0;   ///< centroid ion mobility (1/K0)
     double intensity = 0.0;
-    // elution profile as (rt, intensity) points, sorted by rt
-    vector<pair<double, double>> xic;
+    /// Elution profile, ascending in RT: parallel arrays of frame index and intensity. 8 B/point.
+    vector<uint32_t> xi;
+    vector<float>    xv;
+    size_t np() const { return xi.size(); }
+    double rtAt(size_t i) const { return rtAxis()[xi[i]]; }
+    double intAt(size_t i) const { return (double)xv[i]; }
+    void freeProfile() { vector<uint32_t>().swap(xi); vector<float>().swap(xv); }
   };
 
   /// A precursor hypothesis after isotope/charge inference.
@@ -259,12 +285,15 @@ namespace
     t.rt = mt.getCentroidRT();
     t.im = mt.getCentroidIM();
     t.intensity = mt.getMaxIntensity(false);
-    t.xic.reserve(mt.getSize());
-    for (Size i = 0; i < mt.getSize(); ++i)
-    {
-      t.xic.emplace_back(mt[i].getRT(), mt[i].getIntensity());
-    }
-    sort(t.xic.begin(), t.xic.end());
+    // MassTrace peaks are not guaranteed RT-ordered, and the profile must be ascending for the
+    // correlation loops, so index them and sort the small (index, intensity) pairs.
+    const Size np = mt.getSize();
+    vector<pair<uint32_t, float>> pts;
+    pts.reserve(np);
+    for (Size i = 0; i < np; ++i) pts.emplace_back(rtIndex(mt[i].getRT()), (float)mt[i].getIntensity());
+    sort(pts.begin(), pts.end());
+    t.xi.reserve(np); t.xv.reserve(np);
+    for (const auto& q : pts) { t.xi.push_back(q.first); t.xv.push_back(q.second); }
     return t;
   }
 
@@ -279,6 +308,8 @@ namespace
   struct FragGrid
   {
     vector<double> rt;                          ///< sorted unique grid RTs (size G)
+    vector<int> slot_of_frame;                  ///< global frame index -> grid slot, -1 if unused
+    vector<int> nearest_slot;                   ///< global frame index -> NEAREST used slot within delta_rt
     vector<uint64_t> off;                       ///< size F+1; fragment i spans [off[i], off[i+1])
                                                 ///  64-bit on purpose: 8.5 M fragments x ~510 support
                                                 ///  points is within 2x of the 32-bit wrap, and an
@@ -693,14 +724,14 @@ namespace
   /// OWN sampling. Sampling is read per-trace rather than assumed: diaPASEF cycles are regular, but
   /// a valley-split trace can carry gaps, and a fixed level count would then smooth different
   /// physical widths on different traces.
-  int atrousLevels(const vector<pair<double, double>>& xic, double scale_sec)
+  int atrousLevels(const Trace& tr, double scale_sec)
   {
-    if (xic.size() < 5 || scale_sec <= 0.0) return 0;
+    if (tr.np() < 5 || scale_sec <= 0.0) return 0;
     vector<double> d;
-    d.reserve(xic.size() - 1);
-    for (size_t i = 1; i < xic.size(); ++i)
+    d.reserve(tr.np() - 1);
+    for (size_t i = 1; i < tr.np(); ++i)
     {
-      const double g = xic[i].first - xic[i - 1].first;
+      const double g = tr.rtAt(i) - tr.rtAt(i - 1);
       if (g > 0) d.push_back(g);
     }
     if (d.empty()) return 0;
@@ -717,26 +748,50 @@ namespace
   /// Resample every fragment XIC onto one common RT grid, as CSR. Takes `frags` by reference and
   /// CONSUMES each XIC as it is copied: the XIC vectors and the grid would otherwise be live at the
   /// same time, and their coexistence is what sets the per-window memory peak.
-  FragGrid buildFragGrid(vector<Trace>& frags)
+  FragGrid buildFragGrid(vector<Trace>& frags, double delta_rt)
   {
     FragGrid g;
-    // The grid is the set of DISTINCT fragment RTs, and there is one per frame in this window --
-    // roughly 1,400 values. Collecting all ~10^8 individual points and sorting them cost a ~700 MB
-    // temporary and an 10^8-element sort per window, to produce those 1,400 values. Grow a sorted
-    // vector by insertion instead: the same set exactly, no temporary, and no large sort.
-    for (const auto& f : frags)
-      for (const auto& p : f.xic)
-      {
-        auto it = lower_bound(g.rt.begin(), g.rt.end(), p.first);
-        if (it == g.rt.end() || *it != p.first) g.rt.insert(it, p.first);
-      }
+    // On the global axis the grid is just the set of FRAME INDICES this window's fragments touch.
+    // Mark them in a flat array over the axis, then number the used ones: no collecting of ~10^8
+    // RT values, no large sort, and no binary search per point -- axis index to grid slot is a
+    // single array read. G (the Pearson denominator) is the count of used frames, exactly as before.
+    const size_t na = rtAxis().size();
+    vector<char> used(na, 0);
+    for (const auto& f : frags) for (uint32_t k : f.xi) used[k] = 1;
+    g.slot_of_frame.assign(na, -1);
+    g.rt.clear();
+    for (size_t k = 0; k < na; ++k)
+      if (used[k]) { g.slot_of_frame[k] = (int)g.rt.size(); g.rt.push_back(rtAxis()[k]); }
     const double G = (double)g.rt.size();
+    // Precursor profiles live on MS1 frames, fragment profiles on MS2 frames, so a precursor point
+    // must be matched to the NEAREST fragment frame within gate:delta_rt. That was a binary search
+    // per point per precursor -- the same answer recomputed for every precursor in the window. It
+    // depends only on the window, so compute it once for every frame of the axis. Ties go to the
+    // LATER slot, as the search it replaces did.
+    g.nearest_slot.assign(na, -1);
+    {
+      vector<size_t> u;
+      u.reserve(g.rt.size());
+      for (size_t k = 0; k < na; ++k) if (used[k]) u.push_back(k);
+      size_t hi = 0;
+      for (size_t f = 0; f < na; ++f)
+      {
+        while (hi < u.size() && u[hi] < f) ++hi;
+        const double t = rtAxis()[f];
+        double bd = delta_rt; int gi = -1;
+        if (hi > 0)
+        { const double d = fabs(rtAxis()[u[hi - 1]] - t); if (d <= bd) { bd = d; gi = g.slot_of_frame[u[hi - 1]]; } }
+        if (hi < u.size())
+        { const double d = fabs(rtAxis()[u[hi]] - t); if (d <= bd) { bd = d; gi = g.slot_of_frame[u[hi]]; } }
+        g.nearest_slot[f] = gi;
+      }
+    }
     g.mean.resize(frags.size());
     g.invnorm.resize(frags.size());
     g.off.assign(frags.size() + 1, 0);
     // Offsets first, so each fragment owns a disjoint span and the fill is parallel and
     // deterministic (identical arithmetic per fragment, in the same order, whoever runs it).
-    for (size_t i = 0; i < frags.size(); ++i) g.off[i + 1] = g.off[i] + (uint64_t)frags[i].xic.size();
+    for (size_t i = 0; i < frags.size(); ++i) g.off[i + 1] = g.off[i] + (uint64_t)frags[i].np();
     g.flat.resize((size_t)g.off[frags.size()]);
     #pragma omp taskloop default(shared)
     for (long ii = 0; ii < (long)frags.size(); ++ii)
@@ -744,16 +799,17 @@ namespace
       const size_t i = (size_t)ii;
       double sum = 0, sumsq = 0;
       size_t w = (size_t)g.off[i];
-      for (const auto& p : frags[i].xic)
+      const Trace& f = frags[i];
+      for (size_t k = 0; k < f.np(); ++k)
       {
-        const int gi = (int)(lower_bound(g.rt.begin(), g.rt.end(), p.first) - g.rt.begin());
-        g.flat[w++] = {gi, (float)p.second};
-        sum += p.second; sumsq += p.second * p.second;
+        const double v = f.intAt(k);
+        g.flat[w++] = {g.slot_of_frame[f.xi[k]], (float)v};
+        sum += v; sumsq += v * v;
       }
       g.mean[i] = sum / G;
       const double var = sumsq - G * g.mean[i] * g.mean[i];
       g.invnorm[i] = var > 0 ? 1.0 / sqrt(var) : 0.0;  // 0 => constant/degenerate -> never correlates
-      vector<pair<double, double>>().swap(frags[i].xic);   // consumed here, not after scoring
+      frags[i].freeProfile();   // consumed here, not after scoring
     }
     return g;
   }
@@ -982,7 +1038,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // Partition ONCE (peaks are copied into exactly one core band plus any halo it falls in),
       // then release the source map so the halo duplicates are the only overhead.
       vector<PeakMap> sub(bands);
-      for (const auto& s : map)
+      for (auto& s : map)          // non-const: each spectrum is released once distributed
       {
         const auto* ima = s.getFloatDataArrays().empty() ? nullptr : &s.getFloatDataArrays()[0];
         for (int b = 0; b < bands; ++b)
@@ -1009,7 +1065,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               { t.push_back(s[i]); if (ima && i < ima->size()) ia.push_back((*ima)[i]); }
           if (!t.empty()) { t.getFloatDataArrays().push_back(std::move(ia)); sub[b].addSpectrum(std::move(t)); }
         }
-      }
+        s.clear(true);   // distributed: release it now, so the source and the copies do not both
+      }                  // stand at full size (the transient was ~2x the map)
       map.clear(true);
       vector<vector<MassTrace>> per(bands);
       #pragma omp taskloop grainsize(1) default(shared)
@@ -1124,24 +1181,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
   /// [route-1] Pearson of two XICs over their OVERLAPPING RT points, properly mean-centred on the
   /// overlap (NOT zero-padded over a global grid). Isotopes of one peptide must co-elute; a
   /// coincidental peak at the right m/z spacing usually does not.
-  static double xicCorr(const vector<pair<double,double>>& a, const vector<pair<double,double>>& b, double rt_tol)
+  /// Pearson correlation of two elution profiles over their shared frames. On a global axis the
+  /// intersection is an integer merge -- no RT comparison, no tolerance, no binary search.
+  static double xicCorr(const Trace& a, const Trace& b, double /*rt_tol*/)
   {
-    vector<double> x, y;
-    size_t i = 0, j = 0;
-    while (i < a.size() && j < b.size())
+    size_t i = 0, j = 0; double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0; int m = 0;
+    while (i < a.np() && j < b.np())
     {
-      double d = a[i].first - b[j].first;
-      if (fabs(d) <= rt_tol) { x.push_back(a[i].second); y.push_back(b[j].second); ++i; ++j; }
-      else if (d < 0) ++i; else ++j;
+      if (a.xi[i] == b.xi[j])
+      { const double x = a.intAt(i), y = b.intAt(j);
+        sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; ++m; ++i; ++j; }
+      else if (a.xi[i] < b.xi[j]) ++i; else ++j;
     }
-    const size_t n = x.size();
-    if (n < 5) return 0.0;  // [adv-fix] n=3 gives P(r>0.9)~14.4% under the null
-    double mx = 0, my = 0;
-    for (size_t k = 0; k < n; ++k) { mx += x[k]; my += y[k]; }
-    mx /= n; my /= n;
-    double num = 0, sx = 0, sy = 0;
-    for (size_t k = 0; k < n; ++k) { double dx = x[k]-mx, dy = y[k]-my; num += dx*dy; sx += dx*dx; sy += dy*dy; }
-    return (sx > 0 && sy > 0) ? num / sqrt(sx*sy) : 0.0;
+    if (m < 3) return -2.0;
+    const double cov = sxy - sx * sy / m, vx = sxx - sx * sx / m, vy = syy - sy * sy / m;
+    return (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : -2.0;
   }
 
   /// [route-1] Isotope/charge inference on MS1 traces. Scores each (charge, monoisotope) hypothesis
@@ -1336,7 +1390,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
           double csum = 0.0; int cn = 0;
           for (int k = 1; k <= 3; ++k)
-            if (iso_idx[k] >= 0) { csum += xicCorr(ms1[iso_idx[0]].xic, ms1[iso_idx[k]].xic, delta_rt); ++cn; }
+            if (iso_idx[k] >= 0) { csum += xicCorr(ms1[iso_idx[0]], ms1[iso_idx[k]], delta_rt); ++cn; }
           const double mean_corr = cn ? std::max(0.0, csum / cn) : 0.0;
 
           // Composite: shape AND co-elution must BOTH hold, WEIGHTED BY EVIDENCE.
@@ -1464,7 +1518,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                         int min_corr_pts, vector<float>& pdense, Emit&& emit) const
   {
     const double G = (double)fg.rt.size();
-    const vector<pair<double, double>>& p_xic = ms1_traces[pc.trace_idx].xic;
+    const Trace& p_tr = ms1_traces[pc.trace_idx];
     // [wavelet] Correlate against a SMOOTHED precursor profile, as diaTracer does. Only the
     // INTENSITIES change: RT positions, touched grid points and the overlap count are untouched,
     // so this cannot silently redefine the min_correlation_points gate. Fragment XICs stay RAW
@@ -1473,30 +1527,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const vector<double>* p_int = nullptr;
     if (wl_scale_ > 0.0)
     {
-      const int lv = atrousLevels(p_xic, wl_scale_);
+      const int lv = atrousLevels(p_tr, wl_scale_);
       if (lv > 0)
       {
         thread_local vector<double> raw_i, sm_i;   // window loop is parallel; scratch is per-thread
-        raw_i.resize(p_xic.size());
-        for (size_t i = 0; i < p_xic.size(); ++i) raw_i[i] = p_xic[i].second;
+        raw_i.resize(p_tr.np());
+        for (size_t i = 0; i < p_tr.np(); ++i) raw_i[i] = p_tr.intAt(i);
         atrousSmooth(raw_i, lv, sm_i);
         p_int = &sm_i;
       }
     }
     vector<int> touched;
-    touched.reserve(p_xic.size());
-    for (size_t pi = 0; pi < p_xic.size(); ++pi)
+    touched.reserve(p_tr.np());
+    for (size_t pi = 0; pi < p_tr.np(); ++pi)
     {
-      const auto& p = p_xic[pi];
-      const double pval = p_int ? (*p_int)[pi] : p.second;
-      auto it = lower_bound(fg.rt.begin(), fg.rt.end(), p.first);
-      int gi = -1; double bd = delta_rt;
-      for (auto c : {it == fg.rt.begin() ? it : prev(it), it})
-      {
-        if (c == fg.rt.end()) continue;
-        double d = fabs(*c - p.first);
-        if (d <= bd) { bd = d; gi = (int)(c - fg.rt.begin()); }
-      }
+      const double pval = p_int ? (*p_int)[pi] : p_tr.intAt(pi);
+      const int gi = fg.nearest_slot[p_tr.xi[pi]];        // one array read, precomputed per window
       if (gi >= 0) { if (pdense[gi] == 0.0f) touched.push_back(gi); pdense[gi] += (float)pval; }
     }
     double psum = 0, psumsq = 0, plogsum = 0;
@@ -1647,13 +1693,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // 5. Level selection follows the SAMPLING, not a constant. Two traces of the same physical
     //    width but different cycle times must get different level counts.
     {
-      vector<pair<double, double>> fast, slow;
-      for (int i = 0; i < 40; ++i) fast.emplace_back(i * 0.5, 100.0);   // dt = 0.5 s
-      for (int i = 0; i < 40; ++i) slow.emplace_back(i * 2.0, 100.0);   // dt = 2.0 s
+      // Profiles index the global axis, so the test builds an axis with the two spacings on it.
+      vector<double>& ax = rtAxis();
+      const vector<double> saved = ax;
+      ax.clear();
+      for (int i = 0; i < 40; ++i) ax.push_back(i * 0.5);      // dt = 0.5 s -> indices 0..39
+      for (int i = 0; i < 40; ++i) ax.push_back(1000.0 + i * 2.0);   // dt = 2.0 s -> indices 40..79
+      Trace fast, slow, tiny;
+      for (int i = 0; i < 40; ++i) { fast.xi.push_back((uint32_t)i); fast.xv.push_back(100.0f); }
+      for (int i = 0; i < 40; ++i) { slow.xi.push_back((uint32_t)(40 + i)); slow.xv.push_back(100.0f); }
+      for (int i = 0; i < 3; ++i)  { tiny.xi.push_back((uint32_t)i); tiny.xv.push_back(1.0f); }
       const int lf = atrousLevels(fast, 4.0), ls = atrousLevels(slow, 4.0);
       chk(lf > ls, "levels scale with sampling (finer dt -> more levels)");
       chk(atrousLevels(fast, 0.0) == 0, "scale 0 disables smoothing");
-      chk(atrousLevels(vector<pair<double, double>>(3, {1.0, 1.0}), 4.0) == 0, "too-short XIC -> 0 levels");
+      chk(atrousLevels(tiny, 4.0) == 0, "too-short XIC -> 0 levels");
+      ax = saved;
     }
 
     writeLogInfo_(fail ? "[wavelet] SELFTEST FAILED" : "[wavelet] selftest passed");
@@ -1930,6 +1984,28 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       return INCOMPATIBLE_INPUT_DATA;
     }
 
+    // THE GLOBAL RT AXIS. Every frame contributes one retention time; every trace point sits on a
+    // frame. Building it here, once, is what lets a trace point be 8 bytes (frame index +
+    // intensity) instead of 16 (RT + intensity), and lets two profiles be aligned by integer
+    // equality instead of a binary search per point. Frames are counted once even when an MS1 and
+    // an MS2 frame share an RT, which is what makes the index a valid shared key.
+    {
+      vector<double>& ax = rtAxis();
+      ax.clear();
+      ax.reserve(ms1_map.size() + 1024);
+      for (const auto& sp : ms1_map) ax.push_back(sp.getRT());
+      for (const auto& kv : ms2_by_window) for (const auto& f : kv.second) ax.push_back(f.rt);
+      sort(ax.begin(), ax.end());
+      ax.erase(unique(ax.begin(), ax.end()), ax.end());
+      writeLogInfo_("RT axis: " + String(ax.size()) + " distinct frame retention times"
+                    + (ax.empty() ? "" : " spanning " + String(ax.front()) + "-" + String(ax.back()) + " s"));
+      if (ax.empty())
+      {
+        writeLogError_("Error: no frame retention times; cannot build the RT axis.");
+        return INCOMPATIBLE_INPUT_DATA;
+      }
+    }
+
     //-------------------------------------------------------------
     // MS1 traces + precursor/charge inference (shared, once) [H-8,H-10]
     //-------------------------------------------------------------
@@ -1979,22 +2055,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       fw.reserve(ms1_traces.size() / 4 + 1);
       for (const auto& t : ms1_traces)
       {
-        if (t.xic.size() < 5) continue;
+        if (t.np() < 5) continue;
         size_t ap = 0;
-        for (size_t i = 1; i < t.xic.size(); ++i) if (t.xic[i].second > t.xic[ap].second) ap = i;
-        const double half = t.xic[ap].second * 0.5;
+        for (size_t i = 1; i < t.np(); ++i) if (t.intAt(i) > t.intAt(ap)) ap = i;
+        const double half = t.intAt(ap) * 0.5;
         if (half <= 0.0) continue;
         double lo = -1.0, hi = -1.0;
         for (size_t i = ap; i > 0; --i)
-          if (t.xic[i - 1].second <= half)
-          { const double d = t.xic[i].second - t.xic[i - 1].second;
-            const double f = d > 0 ? (t.xic[i].second - half) / d : 0.0;
-            lo = t.xic[i].first - f * (t.xic[i].first - t.xic[i - 1].first); break; }
-        for (size_t i = ap; i + 1 < t.xic.size(); ++i)
-          if (t.xic[i + 1].second <= half)
-          { const double d = t.xic[i].second - t.xic[i + 1].second;
-            const double f = d > 0 ? (t.xic[i].second - half) / d : 0.0;
-            hi = t.xic[i].first + f * (t.xic[i + 1].first - t.xic[i].first); break; }
+          if (t.intAt(i - 1) <= half)
+          { const double d = t.intAt(i) - t.intAt(i - 1);
+            const double f = d > 0 ? (t.intAt(i) - half) / d : 0.0;
+            lo = t.rtAt(i) - f * (t.rtAt(i) - t.rtAt(i - 1)); break; }
+        for (size_t i = ap; i + 1 < t.np(); ++i)
+          if (t.intAt(i + 1) <= half)
+          { const double d = t.intAt(i) - t.intAt(i + 1);
+            const double f = d > 0 ? (t.intAt(i) - half) / d : 0.0;
+            hi = t.rtAt(i) + f * (t.rtAt(i + 1) - t.rtAt(i)); break; }
         if (lo >= 0.0 && hi > lo) fw.push_back(hi - lo);
       }
       if (!fw.empty())
@@ -2173,30 +2249,29 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // Apex, then walk outwards to half maximum with linear interpolation between samples;
       // -1 when the trace never falls to half max on both sides (truncated peak), which must be
       // reported rather than silently imputed -- a truncated peak is not a narrow one.
-      auto fwhm_of = [](const vector<pair<double, double>>& xic) -> double {
-        if (xic.size() < 3) return -1.0;
+      auto fwhm_of = [](const Trace& tr) -> double {
+        if (tr.np() < 3) return -1.0;
         size_t ap = 0;
-        for (size_t i = 1; i < xic.size(); ++i) if (xic[i].second > xic[ap].second) ap = i;
-        const double half = xic[ap].second * 0.5;
-        if (half <= 0.0) return -1.0;
-        double lo = -1.0, hi = -1.0;
+        for (size_t i = 1; i < tr.np(); ++i) if (tr.intAt(i) > tr.intAt(ap)) ap = i;
+        const double half = tr.intAt(ap) * 0.5;
+        double lo = tr.rtAt(0), hi = tr.rtAt(tr.np() - 1);
         for (size_t i = ap; i > 0; --i)
-          if (xic[i - 1].second <= half)
+          if (tr.intAt(i - 1) <= half)
           {
-            const double d = xic[i].second - xic[i - 1].second;
-            const double f = d > 0 ? (xic[i].second - half) / d : 0.0;
-            lo = xic[i].first - f * (xic[i].first - xic[i - 1].first);
+            const double d = tr.intAt(i) - tr.intAt(i - 1);
+            const double f = d > 0 ? (tr.intAt(i) - half) / d : 0.0;
+            lo = tr.rtAt(i) - f * (tr.rtAt(i) - tr.rtAt(i - 1));
             break;
           }
-        for (size_t i = ap; i + 1 < xic.size(); ++i)
-          if (xic[i + 1].second <= half)
+        for (size_t i = ap; i + 1 < tr.np(); ++i)
+          if (tr.intAt(i + 1) <= half)
           {
-            const double d = xic[i].second - xic[i + 1].second;
-            const double f = d > 0 ? (xic[i].second - half) / d : 0.0;
-            hi = xic[i].first + f * (xic[i + 1].first - xic[i].first);
+            const double d = tr.intAt(i) - tr.intAt(i + 1);
+            const double f = d > 0 ? (tr.intAt(i) - half) / d : 0.0;
+            hi = tr.rtAt(i) + f * (tr.rtAt(i + 1) - tr.rtAt(i));
             break;
           }
-        return (lo >= 0.0 && hi >= 0.0) ? hi - lo : -1.0;
+        return hi - lo;
       };
       ofstream ft((ms1_dump + ".traces.tsv").c_str());
       // [model] 12 significant digits, not the ostream default 6: at m/z 765 six digits quantise
@@ -2207,7 +2282,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\n";
       for (const auto& t : ms1_traces)
         ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << t.intensity << '\t'
-           << fwhm_of(t.xic) << '\t' << t.xic.size() << '\n';
+           << fwhm_of(t) << '\t' << t.np() << '\n';
       ft.close();
       ofstream fp((ms1_dump + ".precursors.tsv").c_str());
       fp.precision(12);
@@ -2234,7 +2309,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // MEMORY: ms1_map is dead the moment its traces exist (nothing below reads it). Release it
     // rather than letting it ride to end of scope through the whole parallel phase. [mem]
     ms1_map.clear(true);
-    // MEMORY: scoring reads ms1_traces[pc.trace_idx].xic, so ms1_traces must STAY -- but only the
+    // MEMORY: scoring reads the profile of ms1_traces[pc.trace_idx], so ms1_traces must STAY -- but only the
     // traces an actual precursor points at are ever dereferenced. Free the xic of the rest
     // (2.5M traces vs 1.2M precursors => roughly half are dead weight held through scoring). [mem]
     {
@@ -2243,9 +2318,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (pc.trace_idx < ms1_traces.size()) needed[pc.trace_idx] = true;
       Size freed = 0;
       for (size_t i = 0; i < ms1_traces.size(); ++i)
-        if (!needed[i] && !ms1_traces[i].xic.empty())
+        if (!needed[i] && ms1_traces[i].np() > 0)
         {
-          vector<pair<double, double>>().swap(ms1_traces[i].xic);
+          ms1_traces[i].freeProfile();
           ++freed;
         }
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_());
@@ -2341,12 +2416,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // Always admit when nothing is in flight, so the loop cannot deadlock on a single huge window.
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
     std::atomic<size_t> inflight{0};
-    // Projected footprint per window, from its own compact size. Multiplier measured on S23:
-    // ~5.8 GB peak against ~0.56 GB compact (materialised PeakMap at 20 B/peak, MassTrace at
-    // 168 B header/trace, valley-split batch, FragGrid). Conservative by design.
+    // Projected footprint per window, from its own compact size. RE-CALIBRATED 2026-09-03: the
+    // 10x multiplier booked the average S08 window at 8.9 GB against a measured 12-14 GB, i.e. it
+    // under-booked by 35-55% in the UNSAFE direction -- it admitted more windows than fit. That was
+    // survivable while the thread grid capped concurrency at 8 anyway; with the task pool, memory
+    // is the only bound, so the estimate has to be honest. [adv-review kimi 2026-09-03]
     auto project = [&](const vector<CompactFrame>& fr) {
       size_t b = 0; for (const auto& f : fr) b += f.bytes();
-      return (size_t)(b * 10.0) + (size_t)256 * 1024 * 1024;
+      return (size_t)(b * 16.0) + (size_t)256 * 1024 * 1024;
     };
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
@@ -2469,7 +2546,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // window's precursors (this window runs on one thread). [perf]
         auto _t3 = std::chrono::steady_clock::now();
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
-        FragGrid fg = buildFragGrid(frag_traces);
+        FragGrid fg = buildFragGrid(frag_traces, delta_rt);
         auto _t4 = std::chrono::steady_clock::now();
         t_grid += std::chrono::duration_cast<std::chrono::nanoseconds>(_t4 - _t3).count();
         // MEMORY: buildFragGrid consumed each XIC as it resampled it, so no fragment XIC is live
