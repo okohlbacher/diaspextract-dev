@@ -631,3 +631,12 @@ tail: `SPEXTRACT_BACKFILL_RAW=50` + `SPEXTRACT_BACKFILL_MAXFRAGS=K` (apply only 
 fragments; K = 30 and 60). Prediction: MSFragger keeps most of +5% while Sage returns to ~12,500; falsifier: Sage still
 drops -> the noise cost is in the faint spectra themselves, and the selection must be per-peak (IM/RT co-elution of the
 raw peak, i.e. MS2 aggregation across neighbouring frames, C6).
+
+### ASSEMBLY-LOSS ARM FALSIFIED (2026-09-03, 06:16): `min_fragments 2` changes nothing
+928,378 spectra (+565), Sage and MSFragger identical to apex, dt-only PSM coverage unchanged (64%). The hypothesised-
+but-not-emitted precursors (17% of diaTracer-only) have NO correlated fragment trace at all, not too few -- the same
+untraced-content problem as the searched tail. **Pre-registered follow-up:** `SPEXTRACT_BACKFILL_EMPTY=1` with
+`SPEXTRACT_BACKFILL_RAW=50`: a hypothesised precursor with no correlated trace still gets a spectrum made of its apex
+frame's IM-band peaks (min_fragments honoured). Prediction: the dt-only "no PSM at all" count (1,436) falls and
+MSFragger rises further; falsifier: those spectra are unidentifiable (counts flat, emission up). Runs after the
+faint-tail-only backfill arm.
