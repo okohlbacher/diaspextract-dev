@@ -134,3 +134,54 @@ changes the FDR denominator. Success = emission near 670-700k with Sage and MSFr
 the 0.17% replicate spread and entrapment no worse than the shipping arm's 1.37%. Falsifier = peptides
 fall outside that spread, which would mean the duplicate hypotheses were carrying real content that
 the survivor's own extraction does not recover -- and would close the emission question for good.
+
+## 7. A/B result: the collapse works mechanically and costs peptides at every setting
+
+| S30 arm | precursors removed | spectra | Sage @1% | MSFragger @1% | wall |
+|---|---|---|---|---|---|
+| apex baseline | -- | 927,813 | 12,537 | 11,927 | 15:21 |
+| **intense, K=1** | 166,440 | 786,300 (−15.3%) | **11,965 (−4.6%)** | **11,546 (−3.2%)** | 14:22 |
+| intense, K=3 | 285,410 | 691,144 (−25.5%) | 11,036 (−12.0%) | 10,667 (−10.6%) | 13:07 |
+| light, K=3 | 299,588 | 679,241 (−26.8%) | 10,728 (−14.4%) | 10,446 (−12.4%) | 13:01 |
+
+Entrapment on the K=3 arm is 1.32% against the shipping arm's 1.28%, so nothing here is an FDR
+artefact. Two things are settled. **The intensity rule beats the naive lightest rule** (11,036 vs
+10,728), as the identification evidence predicted. **And the trade is continuous, not a cliff:** each
+1% of emission removed costs 0.30% of peptides at K=1, 0.47% at K=3 and 0.54% under the light rule --
+the marginal cost RISES as more is cut, so there is no plateau to stop on.
+
+## 8. Where the damage is: 2.1% of removals, and they are not duplicates at all
+
+Every removal traced back to what it cost (`bench/iso_loss.py`, spectrum-level FDR, so totals differ
+slightly from the peptide-level table above):
+
+| class | removals | share | cost |
+|---|---|---|---|
+| dark -- the removed spectrum was never identified | 205,386 | 86.8% | none |
+| covered -- its peptide is still identified elsewhere | 26,217 | 11.1% | none |
+| **LOST -- its peptide is gone** | **5,066** | **2.1%** | **2,139 peptides** |
+
+**97.9% of the collapse is free.** The harm is 5,066 removals, and those peptides were fragile before
+anything was collapsed: median ONE identifying spectrum against four for retained peptides, 52.6%
+with exactly one. For 97.4% of lost peptides the collapse took every spectrum that carried them, and
+exactly ONE retained peptide was re-found on a surviving spectrum. The survivor does not inherit the
+removed member's identification -- the cosine result, confirmed at the identification level.
+
+**The isotope step separates safe from unsafe:**
+| step | removals | harm rate | peptides at risk | covered/dark |
+|---|---|---|---|---|
+| 1 | 121,535 | **1.31%** | 1,032 | 18.5% |
+| 2 | 46,906 | 3.99% | 792 | 9.3% |
+| 3 | 31,142 | 3.32% | 469 | 6.9% |
+One step is three times safer per removal, buys the most spectra, and carries by far the highest share
+of genuinely redundant removals -- which is exactly what the K=1 arm confirmed. Steps 2 and 3 are
+where the greedy rule over-reaches: one intense precursor wipes out genuinely different species up to
+3 Da away.
+
+**What the harmful class actually is.** Not duplicates: faint peptides that co-elute and co-migrate
+within one isotope spacing of an abundant neighbour, i.e. lattice coincidences. The survivor is
+identified in 63.1% of `covered` removals but only 5.0% of `LOST` ones. So the operative question at
+collapse time is not "which member is the monoisotope" but **"are these two the same species at all"**,
+and two hypotheses of one peptide share that peptide's elution profile while an independent faint
+neighbour does not. The decision log now records the MS1 XIC Pearson correlation between the removed
+precursor and its survivor so the harm rate can be measured against it and a threshold set from data.
