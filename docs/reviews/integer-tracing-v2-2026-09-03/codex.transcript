@@ -4354,3 +4354,122 @@ exec
    384	} // namespace spx
    385	#endif // SPEXTRACT_WITH_MZPEAK
 
+exec
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2160,2205p'; rg -n \"exportMz_\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+ succeeded in 0ms:
+  2160	      chk(lf > ls, "levels scale with sampling (finer dt -> more levels)");
+  2161	      chk(atrousLevels(fast, 0.0) == 0, "scale 0 disables smoothing");
+  2162	      chk(atrousLevels(tiny, 4.0) == 0, "too-short XIC -> 0 levels");
+  2163	      ax = saved;
+  2164	    }
+  2165	
+  2166	    writeLogInfo_(fail ? "[wavelet] SELFTEST FAILED" : "[wavelet] selftest passed");
+  2167	    return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
+  2168	  }
+  2169	
+  2170	  /// Build a pseudo-MS2 from a fragment list (m/z,intensity) + ranking scores: keeps top
+  2171	  /// max_frags by score, drops if < min_frags, annotates the synthetic precursor. Deterministic.
+  2172	  /// EXPORT-TIME CALIBRATION. On a flight-time axis the measured quantity is a bin; m/z is a
+  2173	  /// calibrated function of it and of the frame's digitizer temperature. Applying that function
+  2174	  /// ONCE, here, when the value is written, is what keeps the reported mass free of anything the
+  2175	  /// intermediate gates did in cached m/z space -- and the apex frame's own factor is the most
+  2176	  /// accurate one to use. A zero bin means the trace came from the OpenMS detector, which has no
+  2177	  /// bin, and the value it computed stands.
+  2178	  static double exportMz_(uint32_t tof, double b, double cached)
+  2179	  {
+  2180	    if (tof == 0 || !(b > 0.0) || !tofAxis().ok) return cached;
+  2181	    const double v = tofAxis().mzOf(tof, b);
+  2182	    return std::isfinite(v) && v > 0.0 ? v : cached;
+  2183	  }
+  2184	
+  2185	  void assembleFromList_(const Precursor_& pc, double win_lo, double win_hi,
+  2186	                         vector<pair<double, double>>& frags, vector<double>& frag_scores,
+  2187	                         Size min_frags, Size max_frags, MSSpectrum& out) const
+  2188	  {
+  2189	    if (frags.size() < min_frags) return;
+  2190	    if (frags.size() > max_frags)
+  2191	    {
+  2192	      vector<size_t> idx(frags.size());
+  2193	      for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+  2194	      // [rank] Rank by correlation (ours) or by intensity (diaTracer's "top N highest intensity").
+  2195	      // The engine re-ranks by INTENSITY downstream (Sage max_peaks=150), so a correlation-ranked
+  2196	      // cap can discard high-intensity peaks the engine would have scored. Ties break on m/z then
+  2197	      // index in BOTH modes so the output stays deterministic.
+  2198	      const bool by_int = rank_by_intensity_;
+  2199	      partial_sort(idx.begin(), idx.begin() + max_frags, idx.end(), [&](size_t a, size_t b) {
+  2200	        const double ka = by_int ? frags[a].second : frag_scores[a];
+  2201	        const double kb = by_int ? frags[b].second : frag_scores[b];
+  2202	        if (ka != kb) return ka > kb;
+  2203	        if (frags[a].first != frags[b].first) return frags[a].first < frags[b].first;
+  2204	        return a < b;
+  2205	      });
+2178:  static double exportMz_(uint32_t tof, double b, double cached)
+2216:    prec.setMZ(exportMz_(pc.mono_tof, pc.mono_b, pc.mono_mz));   // calibrate on write
+2264:      frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
+3150:              frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
+3258:              frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
+
+codex
+The control-flow rewrite is substantially closer, but it is not faithful. The largest remaining semantic problem is now post-trace: OpenMS recomputes trace m/z from the actual peaks, whereas the integer path stores the search centroid, then fabricates every EPD peak at that one m/z. I’m finishing the boundary/banding analysis and turning this into the five requested sections with SET/COORD/ORDER labels.
+exec
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '3078,3095p'; nl -ba test/test_spextract.py | sed -n '108,120p'; nl -ba test/test_spextract.py | sed -n '232,258p'" in /Users/kohlbach/Claude/speXtract
+ succeeded in 0ms:
+  3078	          frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
+  3079	        if (detOn_())
+  3080	        {
+  3081	          #pragma omp critical
+  3082	          writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " frag traces n=" + String(frag_traces.size()) + " digest=" + String(traceDigest_(frag_traces)));
+  3083	        }
+  3084	        // (compact frames already released inside materializeWindow) [par-Crit-3]
+  3085	        #pragma omp critical
+  3086	        {
+  3087	          if (win_done == 0) writeLogInfo_("MS2 " + ms2_span); // [merged-trace]
+  3088	          writeLogInfo_("  window " + String(++win_done) + "/" + String(window_list.size()));
+  3089	        }
+  3090	
+  3091	        frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
+  3092	          return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(t.rt);
+  3093	        }), frag_traces.end());
+  3094	        if (frag_traces.empty()) return;   // nothing traceable in this window
+  3095	
+   108	<instrumentConfigurationList count="1"><instrumentConfiguration id="ic_test"><cvParam cvRef="MS" accession="MS:1000031" name="instrument model"/></instrumentConfiguration></instrumentConfigurationList>
+   109	<dataProcessingList count="1"><dataProcessing id="dp_test"><processingMethod order="0" softwareRef="so_test"><cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML"/></processingMethod></dataProcessing></dataProcessingList>
+   110	<run id="run_test" defaultInstrumentConfigurationRef="ic_test">
+   111	<spectrumList count="{len(specs)}" defaultDataProcessingRef="dp_test">
+   112	{body}
+   113	</spectrumList></run></mzML></indexedmzML>
+   114	""")
+   115	    return z2_mono, z1_mono
+   116	
+   117	
+   118	def run(binary, inp, out, extra=(), threads=1, expect_fail=False):
+   119	    cmd = [binary, "-in", inp, "-out", out, "-threads", str(threads),
+   120	           "-assembly:min_fragments", "2", "-assembly:require_isotope_support",
+   232	    check("a negative gate:delta_rt is rejected", c5)
+   233	
+   234	    # 4: determinism across thread counts for a fixed binary
+   235	    out_t4 = os.path.join(work, "t4.mzML")
+   236	    run(binary, inp, out_t4, threads=4)
+   237	
+   238	    def c6():
+   239	        a, b = digest(out_def), digest(out_t4)
+   240	        assert a == b, f"spectrum data differs between 1 and 4 threads:\n  {a}\n  {b}"
+   241	    check("byte-identical at 1 vs 4 threads", c6)
+   242	
+   243	    # 5: trace extension across gaps -- the check every broken integer detector would have failed
+   244	    # 20 cycles, so that after a seven-cycle gap BOTH halves are long enough to pass the MS1
+   245	    # minimum trace length (a 3-frame remnant is correctly dropped by OpenMS, which is not the
+   246	    # behaviour under test here).
+   247	    for label, gaps, want_traces in (("one missing cycle -> ONE trace", (10,), 1),
+   248	                                     ("seven missing cycles -> TWO traces", tuple(range(7, 14)), 2)):
+   249	        inp_g = os.path.join(work, f"gap{len(gaps)}.mzML")
+   250	        synth(inp_g, n_cycles=20, gap_cycles=gaps)
+   251	        out_g = os.path.join(work, f"gap{len(gaps)}.out.mzML")
+   252	        dump = os.path.join(work, f"gap{len(gaps)}")
+   253	        run(binary, inp_g, out_g, extra=["-diag:dump_ms1_tsv", dump])
+   254	
+   255	        def cg(label=label, want=want_traces, dump=dump, out_g=out_g, gaps=gaps):
+   256	            tr = ms1_traces_near(dump + ".traces.tsv", z2_mono)
+   257	            assert len(tr) == want, f"expected {want} MS1 trace(s) at {z2_mono} with gaps {gaps}, got {len(tr)} (n_xic {tr})"
+   258	            if want == 1:
+

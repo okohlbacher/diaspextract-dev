@@ -244,10 +244,15 @@ namespace
     /// Elution profile, ascending in RT: parallel arrays of frame index and intensity. 8 B/point.
     vector<uint32_t> xi;
     vector<float>    xv;
+    /// Per-point flight-time bin, set ONLY by the integer detector and consumed by valley
+    /// splitting: without it every peak of a split trace would carry the trace centroid, and the
+    /// 'apex' estimator (the default) would report a centroid instead of the measured apex m/z --
+    /// a systematic difference from the OpenMS path. [adv-review vibe 2026-09-03]
+    vector<uint32_t> xt;
     size_t np() const { return xi.size(); }
     double rtAt(size_t i) const { return rtAxis()[xi[i]]; }
     double intAt(size_t i) const { return (double)xv[i]; }
-    void freeProfile() { vector<uint32_t>().swap(xi); vector<float>().swap(xv); }
+    void freeProfile() { vector<uint32_t>().swap(xi); vector<float>().swap(xv); vector<uint32_t>().swap(xt); }
   };
 
   /// A precursor hypothesis after isotope/charge inference.
@@ -823,7 +828,7 @@ namespace
               const double mz = mzAt((uint32_t)k), w = sl.inten[k];
               iwm(mz, w, cmz, cnt, den);
               iwm((double)sl.imq[k], w, cim, cnt_im, den_im);
-              sdRobust(mz, w, cmz, sd, wsum);
+              sdRobust(mz, w, cmz, sd, wsum);   // reestimate_mt_sd: the tool never turns it off
               got.push_back((uint32_t)k);
               ++d.hits; d.missed = 0;
             }
@@ -844,7 +849,6 @@ namespace
       const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
       if ((double)got.size() / (double)adjusted < msr) continue;
       for (uint32_t k : got) visited[k] = 1;                  // valid: now they are taken
-      if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // core owns it
 
       // profile in frame order; pair BEFORE sorting (the first version sorted one array alone)
       vector<pair<uint32_t, uint32_t>> pts;                   // (frame, peak)
@@ -852,11 +856,12 @@ namespace
       for (uint32_t k : got) pts.emplace_back(frame_of[k], k);
       sort(pts.begin(), pts.end());
       Trace t;
-      t.xi.reserve(pts.size()); t.xv.reserve(pts.size());
+      t.xi.reserve(pts.size()); t.xv.reserve(pts.size()); t.xt.reserve(pts.size());
       size_t ap = 0;
       for (size_t q = 0; q < pts.size(); ++q)
       {
         t.xi.push_back(sl.rt_index[pts[q].first]); t.xv.push_back(sl.inten[pts[q].second]);
+        t.xt.push_back(sl.tof[pts[q].second]);
         if (t.xv[q] > t.xv[ap]) ap = q;
       }
       const uint32_t kap = pts[ap].second;
@@ -896,11 +901,21 @@ namespace
   {
     if (split_valleys <= 0.0 || in.empty()) return std::move(in);
     vector<MassTrace> mts; mts.reserve(in.size());
+    // frame factor by RT index, so each point's bin becomes ITS OWN measured m/z
+    std::unordered_map<uint32_t, double> b_of_rt;
+    for (size_t f = 0; f < sl.frames(); ++f) b_of_rt[sl.rt_index[f]] = sl.b[f];
+    const TofAxis& ax = tofAxis();
     for (Trace& t : in)
     {
       std::list<Peak2D> pk;
       for (size_t i = 0; i < t.np(); ++i)
-      { Peak2D q; q.setRT(t.rtAt(i)); q.setMZ(t.mz); q.setIntensity(t.xv[i]); pk.push_back(q); }
+      {
+        Peak2D q; q.setRT(t.rtAt(i)); q.setIntensity(t.xv[i]);
+        const bool have_bin = ax.ok && i < t.xt.size();
+        auto bi = have_bin ? b_of_rt.find(t.xi[i]) : b_of_rt.end();
+        q.setMZ(bi != b_of_rt.end() ? ax.mzOf(t.xt[i], bi->second) : t.mz);
+        pk.push_back(q);
+      }
       MassTrace mt(pk);
       mt.setCentroidIM(t.im);
       mts.push_back(std::move(mt));
@@ -908,11 +923,7 @@ namespace
     }
     vector<Trace>().swap(in);
     vector<MassTrace> split = splitValleys(mts, split_valleys);
-    // frame factor by RT index, to re-attach the bin at each split trace's apex
-    std::unordered_map<uint32_t, double> b_of_rt;
-    for (size_t f = 0; f < sl.frames(); ++f) b_of_rt[sl.rt_index[f]] = sl.b[f];
     vector<Trace> out; out.reserve(split.size());
-    const TofAxis& ax = tofAxis();
     for (const MassTrace& mt : split)
     {
       Trace t = toTrace(mt);
