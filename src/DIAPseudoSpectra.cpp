@@ -2302,9 +2302,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
         for (MSSpectrum& s : wmap) s.setMSLevel(1); // MassTraceDetection traces MS1-level only
         wmap.sortSpectra();
-        // [backfill, 2026-09-03] RT index of the window's picked frames for the raw-peak backfill arm
-        vector<double> wrt(wmap.size());
-        for (Size i = 0; i < wmap.size(); ++i) wrt[i] = wmap[i].getRT();
+        // [backfill, 2026-09-03] retain the window's picked frames for the raw-peak backfill arm: detectTraces_
+        // partitions its map into bands and clears it, so by assembly time wmap is empty (the first backfill
+        // run was a silent no-op, byte-identical to apex).
+        PeakMap wraw; vector<double> wrt;
+        if (backfill_raw_ > 0)
+        {
+          wraw = wmap; wrt.resize(wraw.size());
+          for (Size i = 0; i < wraw.size(); ++i) wrt[i] = wraw[i].getRT();
+        }
         // [cross-frame] sum adjacent cycles for THIS window before detecting fragment traces
         if (agg_n > 1) aggregateFrames_(wmap, agg_n, mass_ppm, delta_im);
         String ms2_span;
@@ -2468,11 +2474,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             // matched ions that never become a trace (coverage arms falsified). Add the N most intense raw
             // picked peaks of the frame nearest the precursor's RT, inside its IM band, that are not already
             // in the spectrum (10 ppm) -- the peak-level content diaTracer's ~500-peak spectra carry.
-            if (backfill_raw_ > 0 && !ms2.empty() && !wmap.empty())
+            if (backfill_raw_ > 0 && !ms2.empty() && !wraw.empty())
             {
               size_t si = (size_t)(lower_bound(wrt.begin(), wrt.end(), pc.rt) - wrt.begin());
               if (si == wrt.size() || (si > 0 && pc.rt - wrt[si - 1] < wrt[si] - pc.rt)) --si;
-              const MSSpectrum& raw = wmap[si];
+              const MSSpectrum& raw = wraw[si];
               const auto imd = raw.getIMData();
               const auto& ima = raw.getFloatDataArrays()[imd.first];
               vector<double> have(ms2.size()); for (Size k = 0; k < ms2.size(); ++k) have[k] = ms2[k].getMZ();

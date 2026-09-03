@@ -598,3 +598,13 @@ content (the population the coverage arms showed we never trace). Arms: N=50, N=
 missing ions are these peaks, the dt-only matched-ion deficit (+2) shrinks and the MSFragger ratio rises (>= 90%);
 Sage may fall if the added peaks are noise (the 150-peak search cap protects MSFragger more than Sage). Falsifier:
 deficit stays +2 with N=150 -> the missing ions are not in the picked frame either (pick-level / MS2 aggregation).
+
+### Backfill arm, first run INVALID (2026-09-03, 04:42) -- and the never-searched third attributed
+N=50 and N=150 came back byte-identical to apex (Sage symdiff 0, MSFragger 11,927): the backfill never fired because
+`detectTraces_` partitions the window's PeakMap into bands and clears it, so the map is empty by assembly time. Fixed
+(a retained copy when the arm is on); rerun in flight. Not a result.
+**MS1 funnel (funnel_dtonly.py on the apex arm's hypothesis dump, 1,105,532 hypotheses):** of the 1,436 diaTracer-only
+peptides for which we have NO PSM, 654 (46%) have a precursor hypothesis of ours within 10 s / 10 ppm / z (918 = 64%
+within 30 s) -> hypothesised but no spectrum reached the search (assembly: < min_frags or no correlated fragments);
+~500 (35%) have no hypothesis at all (MS1 trace / envelope). So the 3,937 dt-only peptides split ~64% searched-but-
+under-covered / ~17% hypothesised-not-emitted / ~19% never hypothesised.
