@@ -1361,6 +1361,8 @@ namespace
       g.mean[i] = sum / G;
       const double var = sumsq - G * g.mean[i] * g.mean[i];
       g.invnorm[i] = var > 0 ? 1.0 / sqrt(var) : 0.0;  // 0 => constant/degenerate -> never correlates
+      memSub(MEM_TRACES, vbytes(frags[i].xi) + vbytes(frags[i].xv) + vbytes(frags[i].xt)
+                         + (long long)sizeof(Trace));
       frags[i].freeProfile();   // consumed here, not after scoring
     }
     return g;
