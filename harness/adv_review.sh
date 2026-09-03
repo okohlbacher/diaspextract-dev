@@ -46,21 +46,23 @@ fi
 echo "[adv] prompt $(wc -c < "$PROMPT_FILE") bytes -> $OUT"
 
 # --- codex ------------------------------------------------------------------------------------
-# -o is mandatory: without it the answer never reaches stdout.
+# -o is mandatory: without it the answer never reaches stdout. `< /dev/null` is mandatory too --
+# these run backgrounded, and codex exec reads stdin IN ADDITION to the prompt arg, so an
+# inherited never-EOF stdin makes it hang on "Reading additional input from stdin..." forever.
 ( $TO codex exec --skip-git-repo-check -s read-only \
       -c model_reasoning_effort=high \
-      -o "$OUT/codex.md" "$PROMPT" > "$OUT/codex.transcript" 2>&1
+      -o "$OUT/codex.md" "$PROMPT" > "$OUT/codex.transcript" 2>&1 < /dev/null
   echo "exit=$?" >> "$OUT/codex.transcript" ) &
 P_CODEX=$!
 
 # --- kimi -------------------------------------------------------------------------------------
-( $TO kimi -p "$PROMPT" --output-format text > "$OUT/kimi.md" 2>"$OUT/kimi.err"
+( $TO kimi -p "$PROMPT" --output-format text > "$OUT/kimi.md" 2>"$OUT/kimi.err" < /dev/null
   echo "exit=$?" >> "$OUT/kimi.err" ) &
 P_KIMI=$!
 
 # --- vibe -------------------------------------------------------------------------------------
 ( $TO vibe -p "$PROMPT" --output text --auto-approve \
-      --workdir "$(pwd)" > "$OUT/vibe.md" 2>"$OUT/vibe.err"
+      --workdir "$(pwd)" > "$OUT/vibe.md" 2>"$OUT/vibe.err" < /dev/null
   echo "exit=$?" >> "$OUT/vibe.err" ) &
 P_VIBE=$!
 

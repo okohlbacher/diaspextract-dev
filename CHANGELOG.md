@@ -9,13 +9,38 @@
   while cutting emission ~30% and runtime 17%. Entrapment FDR stays inside the previous 95% interval
   on every file. Set `charge:min_charge=1` to restore the previous behaviour.
 
+- **Shipped defaults now match the benchmarked configuration.** `trace:ms2_noise_threshold_int`
+  100 -> 10 and `trace:ms2_split_valleys` 0 -> 7.0. Every published figure was produced with 10 and
+  7.0 passed on the command line, so a default run could not reproduce any of them.
+- **`trace:mz_estimator` is a real parameter** (default `apex`), replacing an undocumented
+  environment variable that silently set every reported precursor and fragment m/z.
+
 ### Added
-- `SPEXTRACT_ISO_COLLAPSE` (experimental, default off): collapses precursor hypotheses on the isotope
-  lattice before extraction. Measured on S30 and NOT adopted -- it loses peptides at every setting,
-  and loses more on top of the charge gate. Kept for reproducibility of that finding.
+- Parameter bounds on the numeric options. A negative count used to wrap through `Size`
+  (`min_fragments -1` became ~1.8e19 and nothing was emitted) and a negative tolerance gated
+  everything out; both failed as an empty but valid-looking result.
 - `bench/iso_dup.py`, `bench/iso_collapse.py`, `bench/iso_sim.py`, `bench/iso_loss.py`,
   `bench/iso_guard.py`: the isotope-duplication census, collapse-rule evaluation, content-similarity
-  test and loss trace behind those results.
+  test and loss trace behind the emission findings.
+
+### Fixed
+- MS1 traces are filtered for non-finite coordinates before sorting. A NaN made the comparator
+  non-transitive, which is undefined behaviour in `sort()` and silently corrupts every later binary
+  search. The fragment path already did this; the MS1 path did not.
+- `FragGrid` CSR offsets widened to 64-bit. At 8.5 M fragments and ~510 support points each, the
+  32-bit offsets were within a factor of two of wrapping, and an overflow there silently corrupts
+  every correlation rather than crashing.
+- mzPeak input fails loudly instead of degrading: an unknown frame no longer falls back to the
+  reference temperature while still being stamped as exactly calibrated; a short batch result from
+  the reader no longer leaves empty tail frames; mismatched m/z, intensity and mobility array
+  lengths are rejected instead of truncated to the shortest.
+
+### Removed
+- The raw apex-frame fragment backfill and the pre-extraction isotope collapse, with all their
+  environment gates. Both were measured on all three files and falsified in every configuration;
+  the results are in `docs/S30-BASELINE.md` and `docs/ISOTOPE-DUPLICATION-2026-09-03.md`, and the
+  implementations are in the git history. 160 lines.
+- An unused per-window band-count heuristic that a comment described as kept for reference.
 
 ### Runtime
 - **MS1 path parallelised** (loader `[speXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and

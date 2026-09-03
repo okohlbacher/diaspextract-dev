@@ -22,7 +22,8 @@
 
 // [D1 exact m/z] the archive stores raw TOF behind a two-point transform; the exact ModelType-1 calibration
 // lives only in the embedded vendor/analysis.tdf.gz. Recover tof = round((sqrt(mz) - c0) / c1) and re-apply
-// TdfMzCalibration per frame. Enabled with SPEXTRACT_MZPEAK_EXACT=1.
+// TdfMzCalibration per frame. ON BY DEFAULT and fail-closed; SPEXTRACT_MZPEAK_EXACT=0 disables it and
+// falls back to the archive's two-point transform, which costs ~12% of identified peptides.
 #include <OpenMS/FORMAT/TdfMzCalibration.h>   // installed by the OpenMS patch (same header as src/TdfMzCalibration.h)
 #include <zip.h>
 #include <zlib.h>
@@ -166,12 +167,24 @@ namespace spx
     /// Recover the integer tof from the archive's two-point m/z and re-apply the exact model.
     void exact(std::vector<double>& mz, long frame_id) const
     {
-      const double b = cal.frameFactor(frame_id >= 0 && (size_t)frame_id < t1_by_frame.size() ? t1_by_frame[(size_t)frame_id] : cal.T1_ref);
+      // Fail rather than fall back to the reference T1: substituting it for an unknown frame stamps
+      // masses calibrated at the wrong temperature as "exact", which is silent wrongness the
+      // provenance record would then vouch for. [adv-review codex 2026-09-03]
+      if (frame_id < 0 || (size_t)frame_id >= t1_by_frame.size())
+        throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "mzPeak exact calibration: no tdf T1 for frame", std::to_string(frame_id));
+      const double b = cal.frameFactor(t1_by_frame[(size_t)frame_id]);
       for (double& v : mz)
       {
+        if (!std::isfinite(v) || v <= 0.0)
+          throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                "mzPeak exact calibration: non-positive archive m/z", std::to_string(v));
         const double tof = std::llround((std::sqrt(v) - c0) / c1);
         const double e = cal.tofToMz(tof, b);
-        if (std::isfinite(e)) v = e;
+        if (!std::isfinite(e))
+          throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                "mzPeak exact calibration produced a non-finite m/z at tof", std::to_string(tof));
+        v = e;
       }
     }
   };
@@ -187,8 +200,17 @@ namespace spx
     const std::vector<double>& mz = (exact && exact->enabled) ? mz_exact : sp.mz();
     const std::vector<float>& in = sp.intensity();
     const std::vector<double>& im = sp.ion_mobility_array();
-    const std::size_t n = std::min(mz.size(), in.size());
-    const bool have_im = im.size() >= n;
+    // Array lengths must agree. Truncating to the shorter one turns a malformed archive into a
+    // smaller frame that looks valid, and the peaks that vanish are never reported anywhere.
+    if (mz.size() != in.size())
+      throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "mzPeak frame has mismatched m/z and intensity array lengths",
+            std::to_string(mz.size()) + " vs " + std::to_string(in.size()));
+    const std::size_t n = mz.size();
+    const bool have_im = im.empty() || im.size() >= n;
+    if (!im.empty() && im.size() < n)
+      throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "mzPeak frame has a short ion-mobility array", std::to_string(im.size()));
     out.assign(wins.size(), MSSpectrum());
     for (std::size_t w = 0; w < wins.size(); ++w)
     {
@@ -333,8 +355,15 @@ namespace spx
             MzPeak::Spectra tsp = tidx->spectra();
             std::vector<std::size_t> want(ids.begin() + (std::ptrdiff_t)c0, ids.begin() + (std::ptrdiff_t)c1);
             std::vector<MzPeak::Spectrum> got = tsp.get_spectra_batch(want);
+            // A short batch result used to be clamped away with min(), leaving the tail frames as
+            // empty spectra: fewer peaks, no warning, and a run that still reports success.
+            // [adv-review codex 2026-09-03]
+            if (got.size() != want.size())
+              throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                    "mzPeak reader returned fewer frames than requested",
+                    std::to_string(got.size()) + " of " + std::to_string(want.size()));
             auto& slot = out[(std::size_t)c]; slot.resize(want.size());
-            for (std::size_t k = 0; k < want.size() && k < got.size(); ++k)
+            for (std::size_t k = 0; k < want.size(); ++k)
               frameToSpectra_(got[k], rt[want[k]], want[k], wins[want[k]], slot[k], exact.get(), frame_id[want[k]]);
           }
           catch (...)

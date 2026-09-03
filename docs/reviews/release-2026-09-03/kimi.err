@@ -1,0 +1,454 @@
+kimi version 0.39.1
+• This is a substantial review task. I need to read the specified files first. Let me read them in parallel. The main C++ file is likely large. Let me start.
+
+• The main C++ file is 2864 lines and I only have the first 1000 and previews. I need to read the whole file. The full output was saved to a file path. Let me page through the saved output. Actually the saved output contains the Read view of lines 1-1000 only? No — the output was 73594 chars which was the truncated read (1000 lines). Wait, "Total lines in file: 2864" and "1000 lines read". The saved output contains those 1000 lines. I need lines 1000-2864 too.
+
+  Given the size, I could delegate deep reading to subagents, but the review requires me to be specific about lines. Actually I can read the file myself in pages — 2864 lines = 3 Read calls. That's fine. Let me read lines 1001-2000 and 2001-2864 from the source file directly, plus page the saved first-1000 output.
+
+  Let me read the saved file for the first 1000 lines content (chars 4096-72570 were elided). The saved output file has the full 1000 lines. I'll read it in pages. Also S30-BASELINE.md was truncated at 757 lines but I got previews 0-4096 and 67467-68491; the middle 4096-67467 is elided. That's a lot. The full output saved to a file too.
+
+  This is a big reading task. Plan: read the rest of DIAPseudoSpectra.cpp (lines 1001-2864) directly, and page through the saved outputs for the elided middle parts. Given context limits, maybe delegate parts to subagents. But the review quality depends on me seeing the code. Total remaining: ~1800 lines of C++ (~60KB), ~63KB of S30-BASELINE middle, ~70KB of the first-1000 C++ elided middle.
+
+  That's ~200KB, too much for my context comfortably but probably OK if I'm careful — 200KB ≈ 50-60k tokens. Risky. Better: I read the C++ file fully myself (core of questions 1, 2, 4), and delegate the S30-BASELINE middle to an explore agent to extract parameter/doc claims relevant to question 2 and 4. Actually for question 2 I need specific claims about charge:min_charge, falsified parameters, help strings. The help strings are in the C++ file (registerOptions_). The docs claims I need: S30-BASELINE sections about min_charge gate placement. I got the end (min_charge adoption section). The middle likely contains falsified experiments.
+
+  Let me read the C++ file in full first (3 reads), then decide about docs.I need to read the middle elided parts. The saved outputs contain the full content. Let me page through the saved files. First saved file (lines 1-1000): I have preview 0-4096 and end. Need chars 4096-72570. Second saved file (lines 1001-2000): need chars 4096-59564. Then read lines 2001-2864.
+
+  That's a lot of reading. Let me page through them with Read on the output_path files. Each page ~1000 lines or 100KB. The saved files are ~73KB and ~60KB — I can read each fully in one or two Reads (1000-line cap, but these saved files have ~1000 lines each since they're the Read view with line numbers). Actually the saved output files contain the numbered lines. Reading them via Read gives me the content.
+
+  Let me do it in parallel: read saved file 1 fully, saved file 2 fully, and the source lines 2001-2864.I'm working through the file. Still need lines ~620-1000 of the first chunk (source lines ~680-1000), lines ~620-1000 of second chunk (source ~1620-2000), and lines 2001-2864. Let me continue reading.Now I need lines 2001-2864 of the source. Let me read that.
+
+• Let me read the remaining ~240 lines of chunk 3 (lines 2620-2864) and also the elided part of the third chunk preview (chars 4096-56998 elided — I've now read lines 2060-2619 via this read; the preview showed 2001-2054 and end). I've covered 2001-2054 (preview), 2060-2619 (this read). Need 2620-2864 and also lines ~2054-2060 (min_charge erase). Let me read the rest.I still need the min_charge gate code around lines 2051-2060, which was in the elided preview region (chars 4096 boundary). The preview ended at line 2054 `[zmin](const Precursor_& pc){ return pc`. And my read started at 2060. Let me read source lines 2051-2062 directly to see the exact predicate.Now I have the full source. I also need the middle of docs/S30-BASELINE.md (chars 4096-67467, lines ~55-740). That's a large doc. For question 2, I need to check the claims about charge:min_charge gate placement ("after the isotope-support gate, before extraction, and NOT dropping charge-0/guessed precursors"). The code: order is default_charge assignment → require_isotope_support gate → min_charge gate → MIN_ISOTOPES env → extraction. The predicate `pc.charge > 0 && pc.charge < zmin` — charge 0 survives only when open_search_safe is on (charge set to 0 for guessed); otherwise guessed precursors get default_charge (2), so they're not dropped. With open_search_safe ON and min_charge=2, guessed (charge 0) precursors are kept — docs claim min_charge doesn't drop charge-0. That matches.
+
+  Wait, important interaction: with default settings (open_search_safe off), guessed precursors get charge = default_charge = 2 ≥ zmin → kept. Good.
+
+  But note: the min_charge gate runs AFTER require_isotope_support. Docs say "after the isotope-support gate" — matches.
+
+  Also, what about precursors with charge assigned by inference = 1? Dropped. OK.
+
+  Now let me check the remaining doc sections. The S30-BASELINE middle has lots of content; I need specifically what it says about min_charge placement and the falsified parameters. Rather than reading all 700 lines myself, I could read the middle — it's ~63KB ≈ 700 lines. That's significant but I've already spent a lot of context. Let me delegate to an explore agent to extract the relevant claims? The risk: I need exact wording to compare. But the key sections I need: (1) where docs say min_charge is applied; (2) falsified parameter defaults; (3) any benchmark numbers in help strings. I already have the end of S30-BASELINE (the charge-gate adoption section) and the beginning. Let me grep S30-BASELINE for "min_charge" to find the placement claims, and grep for FALSIFIED to list claims. That's targeted and cheap.
+
+  Also check README/CHANGELOG vs CMakeLists version: CMakeLists says VERSION 0.2.0 but release approaching v0.3.0 and CHANGELOG has [Unreleased]. That's a finding for section 3.
+
+  Also README build instructions: `build/DIAPseudoSpectra` but CMakeLists doesn't show how to build standalone beyond `cmake -DOpenMS_DIR=...`. README says "then rebuild the OpenMS DIAPseudoSpectra target" — contradictory with "standalone application, lives outside the OpenMS source tree"! The README Build section says apply patches to OpenMS and "rebuild the OpenMS DIAPseudoSpectra target" — but the tool is standalone per CMakeLists comment. That's an inconsistency worth flagging: the apply_openms_patches.sh installs src/TdfMzCalibration.h + patches into OpenMS; but where does DIAPseudoSpectra get built? CMakeLists exists for standalone. README never gives the actual cmake commands for building this repo. Gap.
+
+  Also missing: scripts/apply_openms_patches.sh exists. Input/output doc, worked example with expected output — missing.
+
+  Let me also verify a few technical findings I noticed:
+
+  1. `winKey` quantization: `(int)llround(lo*100.0)` then `win_lo = key.first / 100.0`. Isolation window boundaries quantized to 0.01 Da. Two distinct windows whose lo/hi round to the same centi-Da get merged — probably fine. But more subtle: the precursor's mono_mz window membership uses quantized win_lo/win_hi vs the original lo/hi used for routing. A precursor at the true window edge could be routed differently... Actually routing of frames uses keyfn_(lo,hi) on the actual frame's isolation window; windows come from the data, so consistent. Precursor membership: `plo/phi` from prec_mz within [win_lo, win_hi] — quantized boundaries differ from true by ≤0.005 Da; a precursor within 5 mDa of a window edge could be included/excluded incorrectly vs the fragment routing. Minor; also asymmetric: precursor in window but its fragments routed by true window. Minor finding.
+
+  2. In `frameToSpectra_` (MzPeakStreamLoad.h:198): `spec.setMSLevel(wins.size() == 1 && !(win.lo < win.hi) ? 1 : 2)`. For MS1 frames, wins[i] = {MzPeakWin{0,0,-1e9,1e9}} — lo=0, hi=0, so !(0<0) true, size==1 → MSLevel 1. OK. But then in the MSLevel==2 branch precursors set; for MS1 no precursor — consumeMS1Spectrum_ vs consumeSwathSpectrum_ dispatch in FullSwathFileConsumer is presumably by MS level. Fine.
+
+  Wait — a real issue in MzPeakStreamLoad.h: `frameToSpectra_` sets `spec.setMSLevel(...)` but when `spec.empty()` (no peaks) it does `continue` — leaving an empty spectrum in `out`, and the hand-off skips empty spectra (`if (!spec.empty()) consumer.consumeSpectrum(spec)`). Fine.
+
+  But `PickCompactConsumer::consumeSwathSpectrum_` requires `prec.empty() return` — for MS1 spectra from mzpeak, no precursor → but they're dispatched to consumeMS1Spectrum_ by level. OK.
+
+  3. Potential real bug in MzPeakStreamLoad.h `run()`: `static thread_local std::unique_ptr<MzPeak::Index> tidx;` — thread_local inside a lambda in an inline function; reused across calls and across `run(ms1)`/`run(ms2)` — fine, keyed by path. But `static thread_local` in a lambda means the static persists for the whole program; if the tool processes one file that's fine.
+
+  Bigger: in the omp parallel for, exceptions are caught and stored; ok.
+
+  4. `xicCorr` matching: the two-pointer walk advances BOTH i and j on a match within rt_tol — greedy matching can misalign, standard.
+
+  5. inferPrecursors_ count path: `findPartner` uses `tol` computed from the SEED's m/z (`s.mz * mass_ppm * 1e-6`), not the target's — for lead=3 at z=1, target = s.mz - 3.009, tol slightly off — negligible.
+
+  The `used[]` marking: in the count path, only the best hypothesis's partners are marked used. But during the walk for z=1..max_charge, findPartner skips used — but partners found for z=1 trial are NOT marked while evaluating z=2..5, so the same partner can be counted in multiple hypotheses. Fine (scoring). But subtle: a partner consumed by an earlier seed's best hypothesis can't be reused — greedy. Deterministic given order. OK.
+
+  Real issue: in the count path, `best_n` starts at 1 and only updates `if (n > best_n)`. n = 1 + partners.size(). For z=1 walk with 0 partners → n=1, not > best_n=1, so best_z stays 0 → charge unknown even if z=2..5 also find nothing. OK, intended (no isotope support → charge 0).
+
+  Note in count path: ties — "ties favouring the LOWEST z" — but the update is strictly `n > best_n`, iterating z ascending, so first (lowest) z with max count wins. Consistent with docs.
+
+  But wait — help string for charge:scoring says 'count' "eliminates the catastrophic 4->2 confusion (10,199 cases)". README table says baseline (envelope) has 10,199 4->2 errors. So help string claims count eliminates the 10,199 envelope cases — consistent-ish.
+
+  6. `ambig_margin` in envelope path: `if (hyps[h].z == best.z) continue; if (best.score - hyps[h].score > ambig_margin) break;` — hyps sorted descending, so break at first far one OK.
+
+  7. `assembleFromList_`: `partial_sort(idx.begin(), idx.begin() + max_frags, ...)` — if frags.size() > max_frags OK since guarded by `frags.size() > max_frags`. max_frags is Size from getIntOption_ — if user sets negative max_fragments... (Size)(-1) huge → no cap. Whatever.
+
+  `min_frags` Size cast of negative → huge → nothing emitted. Input validation missing but TOPP may not validate. Minor.
+
+  8. The window loop: `win_out[wi]` per-window bucket, no data race. pdense firstprivate in inner precursor loop. `t_mat` etc. atomics. `fanout_hist` under critical. Looks OK. One issue: in the apportion and rp_max branches, the precursor loops are SERIAL within the window (no inner parallel) — fine.
+
+  Determinism concern: in the share-all path, `pslot[pi-plo]` — deterministic. Merge under canonical sort. Claim of byte-identical at any thread count plausible.
+
+  But: `schedule(dynamic, 32) firstprivate(pdense)` — pdense is a copy per thread, and scoreCandidates_ zeroes `touched` entries at the end — clean. OK.
+
+  9. `#pragma omp critical` without name in several places (det digest, win_done, worker_err, pick_err in main_) — unnamed criticals all share one global lock; correctness fine.
+
+  10. Memory admission: `inflight += need` under critical(admit); Release destructor `c -= n` — if an exception is thrown inside the try after Release constructed... Release is a local struct in the try block; exception caught by catch(...) in same loop iteration — destructor runs during unwind. OK. But note: the Release is constructed AFTER the admission loop; if materializeWindow throws, rel destructs — fine.
+
+  Potential deadlock: `availableBytes_()` returns 0 when unreadable (non-Linux) → budget 0 → only admits when inflight==0 → serial. Documented in CMakeLists comment. OK.
+
+  11. `bands_for` lambda is now dead code (kept "for reference") — `const int w_bands = n_bands;`. The lambda is unused — compiler warning, lab residue. Actually it is unused? `bands_for` defined at 2239, and comment at 2341 says kept for reference but no longer default. Unused lambda → -Wunused. Minor.
+
+  12. CMakeLists: `project(speXtract VERSION 0.2.0)` — stale vs v0.3.0. Also no OpenMP REQUIRED. Also install doesn't install headers/scripts. Also `find_library(MZPEAK_LIB ...)` + Arrow static linking; `zip` linked but not `zlib`/SQLiteCpp — MzPeakStreamLoad.h includes zlib.h and uses inflate; links `zip` but where's `z`? `Parquet::parquet_static` probably transitively brings z. Fragile.
+
+  13. MzPeakStreamLoad.h `mkstemp` then `close(fd)` then `fopen(tmpl,"wb")` — race/permission minor; tmp file removed at end but NOT removed on exception paths (inflate failure throws before std::remove; also SQLite errors throw → leaks /tmp file). Minor leak. Also uses fixed /tmp — fine.
+
+  Also `readMember_`: `zip_int64_t len = st.size - from` — for the footer read `from = st.size - 8`, len=8 OK. But if flen > st.size - 8, underflow → huge; `std::vector<char> buf((size_t)len)` → bad_alloc or huge alloc. parquet footer sanity: flen read from file; no check flen < st.size. A corrupt archive → huge allocation. Minor robustness.
+
+  14. `exact()`: `tof = llround((sqrt(v) - c0)/c1)` — for v≤0, sqrt NaN → llround NaN UB (same class of bug they fixed in compactify!). `if (std::isfinite(e)) v = e;` guards the output but not the llround input. Peaks with mz>0 from archive presumably; but the exact() path: mz from sp.mz() are positive. Minor.
+
+  Also frame_id parsed via `id.find("frame=")` then `std::atol` — ok.
+
+  15. Score: `scoreCandidates_` grid index: `lower_bound(fg.rt...)` then checks `prev(it)` and `it` — takes closest grid point within delta_rt; assigns precursor intensity to ONE grid point. Multiple precursor XIC points can map to the same grid point — `pdense[gi] += pval` accumulates; `touched` only pushed when previously 0. Fine.
+
+  Bug candidate: `pmean = psum / G` — G is double of grid size, fine.
+
+  variance `pvar = psumsq - G*pmean*pmean` — catastrophic cancellation possible but standard.
+
+  16. Charge-0 precursors: `plo/phi` comment says charge 0 NOT dropped, emitted with charge UNSET. assembleFromList_: `if (pc.charge > 0) prec.setCharge(pc.charge);` → unset. OK consistent.
+
+  17. Docs consistency: help for `charge:min_charge` says "charge:scoring breaks ties toward the LOW charge, so the mis-assignments land there". True for count.
+
+  README table row "Sage, before the charge gate (2026-09-02) 12,537" matches CHANGELOG apex arm 12,537. OK.
+
+  18. Now S30-BASELINE middle. I need to check claims about min_charge application point. Let me grep the doc for "min_charge" and "FALSIFIED" and "guessed".
+
+  Also for question 2: "parameters documented as FALSIFIED still exist with the defaults the docs claim" — rp_max default 0 ✓ exists; consolidate:delta_rt 0 ✓; merge:rt_window 0 ✓; apportion exists default 0 ✓ (help doesn't say FALSIFIED though! CHANGELOG says "Help texts of falsified flags (rp_max, consolidate, merge) now say so" — apportion falsified again 2026-09-02 (E5, -3.9%) but its help string does NOT say FALSIFIED — it says "Try 1 (linear) or 2 (sharper)". That's a stale help string: apportion was cleanly falsified (-3.9%) yet the help still invites the user to try it. Good finding.
+
+  Also `assembly:rank_by` intensity — is it falsified? Not stated. `charge:ambiguity_margin` falsified per README ("Left at 0") but help string doesn't say FALSIFIED — says "0 = single charge per precursor". README documents falsification with table. Help could say so but doesn't — minor inconsistency. Also `trace:wavelet_smooth` — status? Docs? Probably falsified or under test; help says "Try 0.25-0.5" — need to check S30-BASELINE for wavelet verdict.
+
+  Also `assembly:open_search_safe` help says "(b) records the isotope-offset hypothesis as a meta value" — code stamps spx_n_isotopes unconditionally (not just under the flag) and does NOT record "the isotope-offset hypothesis" per se; also (a): emits charge UNSET for guessed precursors — code: `pc.charge = open_safe ? 0 : default_charge`. ✓. But help (b) promises meta value recording "so delta-mass inference can correct" — the code stamps spx_n_isotopes always; comment at 1651-1655 says "This is the metadata assembly:open_search_safe's doc promised but never wrote". So now written. OK.
+
+  Undocumented options: env vars SPEXTRACT_* — many, documented in CHANGELOG partially. `SPEXTRACT_ISO_COLLAPSE` mentioned in CHANGELOG as added — but where in code? I didn't see it in what I read! Let me grep. I read the whole main_ but might have missed ISO_COLLAPSE block. Lines 2059-2148 covered MIN_ISOTOPES and PRECURSOR_LIST... I didn't see SPEXTRACT_ISO_COLLAPSE or SPEXTRACT_BACKFILL_RAW in the code I read. Let me grep the source for these env vars.
+
+  Also `diag:dump_ms1_tsv` documented ✓. `perf:stream_load` ✓.
+
+  Env vars in code: SPEXTRACT_DROP_PREC_ISO, SPEXTRACT_MZ_ESTIMATOR, SPEXTRACT_DET, SPEXTRACT_PICK_SERIAL, SPEXTRACT_PICK_STATIC, SPEXTRACT_PICK_BATCH, SPEXTRACT_PICK_MZ_MODE, SPEXTRACT_LOAD_ONLY, SPEXTRACT_MIN_ISOTOPES, SPEXTRACT_PRECURSOR_LIST, SPEXTRACT_MZPEAK_EXACT, SPEXTRACT_MZPEAK_TDF, SPEXTRACT_ALLOW_CHORD_FALLBACK (in TdfMzCalibration.h presumably), SPEXTRACT_BACKFILL_RAW?, SPEXTRACT_ISO_COLLAPSE? Need grep.
+
+  Let me grep for getenv in the source to enumerate, and grep S30-BASELINE for min_charge placement and falsified entries.Important findings:
+
+  1. `SPEXTRACT_ISO_COLLAPSE` and `SPEXTRACT_BACKFILL_RAW` / `SPEXTRACT_BACKFILL_MAXFRAGS` are documented in CHANGELOG (Unreleased → "Added") but DO NOT EXIST in the source. Grep of getenv in src/ shows neither. So the CHANGELOG claims features that aren't in the code. That's a doc-vs-code inconsistency — maybe implemented elsewhere? Let me grep the whole src for "ISO_COLLAPSE" and "BACKFILL" to be sure (could be non-getenv via Param?). Also `SPEXTRACT_ALLOW_CHORD_FALLBACK` lives in TdfMzCalibration.h (src/TdfMzCalibration.h) — outside the two files but fine.
+
+  2. The task's question 2 asks: "is charge:min_charge really applied where the docs say (after the isotope-support gate, before extraction, and NOT dropping charge-0/'guessed' precursors)?" Code: gate order in main_: default_charge assignment (2032-2033) → require_isotope_support (2037) → min_charge (2051-2058) → before window loop/extraction. Predicate `pc.charge > 0 && pc.charge < zmin` → charge-0 (open_search_safe) NOT dropped ✓. But subtle: with open_search_safe OFF, guessed precursors were assigned default_charge=2 BEFORE the min_charge gate, so they survive ✓. With default_charge=0 and open_search_safe off: charge stays 0? Code: `pc.charge = open_safe ? 0 : default_charge;` → default_charge=0 → charge 0 → survives min_charge, emitted with charge unset. Docs? "0 = leave charge UNSET". OK consistent.
+
+  But one inconsistency: the gate is applied AFTER dedup_precursors and after require_isotope_support — docs say "after the isotope-support gate" ✓.
+
+  Let me grep for ISO_COLLAPSE/BACKFILL in src to confirm absence.Confirmed: `SPEXTRACT_ISO_COLLAPSE`, `SPEXTRACT_BACKFILL_RAW`, `SPEXTRACT_BACKFILL_MAXFRAGS` do NOT exist in src/. The CHANGELOG "Added" section claims SPEXTRACT_ISO_COLLAPSE exists ("Kept for reproducibility of that finding") — it doesn't. And the "Under test (env switches...)" list mentions SPEXTRACT_BACKFILL_RAW/MAXFRAGS — also absent from the code. Either the code was reverted without updating the CHANGELOG, or the CHANGELOG is aspirational. Big finding for Q2.
+
+  Wait — maybe backfill was implemented and then removed after falsification (S30-BASELINE line 715: "BACKFILL CONFIRMATION ARM: BOTH CANDIDATES FALSIFIED -- backfill stays OFF"). So backfill removed → but CHANGELOG Unreleased still lists it as "under test". And ISO_COLLAPSE "kept for reproducibility" but absent → code/docs mismatch.
+
+  Let me double-check by searching for "collapse" in the cpp. Grep found nothing for iso_collapse. OK.
+
+  Now, a few more checks for Q2:
+  - Help string `assembly:apportion` says "Try 1 (linear) or 2 (sharper)" but S30-BASELINE C7: apportion FALSIFIED CLEANLY 2026-09-02. CHANGELOG says "Help texts of falsified flags (rp_max, consolidate, merge) now say so" — apportion was falsified AFTER that fix? C7 is dated 2026-09-02 16:46, and the E5 note in CHANGELOG is also 09-02. The help text wasn't updated → stale, invites users to try a falsified option. Finding.
+  - `charge:ambiguity_margin` help: doesn't mention falsified (README says falsified, four tests, left at 0). Also code: ambig_margin only applies in envelope path? Look: the ambig block is in the envelope branch (after hyps sort). In count mode (`!envelope_scoring`), the code `continue`s at line 1246 — the ambig_margin block at 1345 is only reached in the envelope path. And S30-BASELINE line 100 says "it was *unreachable* in count mode, so it is untested rather than falsified". But README presents the ambiguity_margin falsification table measured against "split_count 8,411" — which is count mode! If ambig_margin is unreachable in count mode, then the README's "falsified, four tests" table (0.5/1.0/2.0 all ≈ 8,411) measured a no-op — the margins could never fire. README even says "2.0 is the first value that can genuinely fire against an integer partner count" — acknowledging count-mode semantics, but the code path never reaches the ambig block in count mode. So the README falsification claim is measuring nothing: the parameter is dead in the default (count) mode. That's a genuine doc-vs-code finding, and S30-BASELINE line 100 already admits "unreachable in count mode". The README table is therefore misleading — the four tests tested a dead code path. Excellent adversarial finding.
+
+  Also check: `mono_guard_` and `mono_select_` only apply in count path (they're inside the !envelope_scoring branch). Help says mono guard applies to charge:scoring=count ✓ ("the walk that defines the MONOISOTOPE in charge:scoring=count"). OK.
+
+  `charge:iso_im_tolerance` help: "0.01 has NOT been measured on S30; change only behind the S30 set gate" — fine.
+
+  Now defaults check vs S30-BASELINE "Current defaults" (line 20-22): `trace:ms1_split_valleys 7.0` ✓ (default 7.0), `charge:scoring count` ✓, `ms2_chrom_peak_snr 1.0` ✓, `ms2_noise_threshold_int 10` — but code default for `trace:ms2_noise_threshold_int` is **100.0** (line 780)! S30-BASELINE says current defaults include `ms2_noise_threshold_int 10`. Also `ms2_min_length_sec 0` ✓ (default 0.0), `ms2_split_valleys 7.0` — code default for `trace:ms2_split_valleys` is **0.0** (line 788)! So S30-BASELINE's "Current defaults" list claims ms2_noise_threshold_int 10 and ms2_split_valleys 7.0, but the registered defaults are 100.0 and 0.0. Either the doc is stale (describing bench config, not shipped defaults) or the defaults regressed. Line 20 says "**Current defaults:**" — that's a direct doc-vs-code contradiction. Strong finding. Let me verify by re-checking the registered defaults: line 780: registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 100.0, ...) yes. Line 788: trace:ms2_split_valleys default 0.0, help "0 = OFF. Try 6-8". Yes.
+
+  Hmm, but wait — S30-BASELINE line 20-22 might be old (from July). The doc evolves. Still, it says "Current defaults" — stale or wrong. Good finding.
+
+  Also decision rule line 50: "standard bench config = tool defaults + -assembly:require_isotope_support" — with require_isotope_support ON for bench but OFF in shipped defaults. Fine, documented.
+
+  Now Q2 also: "Does any help string state a benchmark number that the code cannot produce?" Help strings cite counts: min_charge help cites "29.3% of emission on S30 and 1.73% of peptides", gains — those are measurements, reproducible in principle. charge:scoring help cites 71.8% vs 49.7% and 69.6% — from DIA-NN reference on S23, not producible by the code itself but they're study citations. The bigger issue: numbers that are stale — e.g. charge:scoring help says count "gives 71.8% charge agreement" — README says current default (ms1split+count) gives 74.6%, and the 71.8% was count alone. Not wrong per se. require_isotope_support help cites "603,858 of 1,528,113 spectra (-39.5%) for 78 of 10,036 peptides (-0.78%)" measured 2026-07-26 — that was pre-apex, pre-min_charge, pre-corr_power era code; the number can't be reproduced by current code/defaults. It's a historical measurement presented in --help. That's the Q4/Q2 borderline: per-sample benchmark counts in help strings.
+
+  Also `assembly:rank_by` help: is intensity falsified? Not marked. Unknown — leave.
+
+  Q1 findings — let me consolidate the concrete correctness items:
+
+  (a) `winKey` quantization to centi-Da (line 1723-1725, 2293-2294): window boundaries rounded to 0.01 Da; precursor membership uses the QUANTIZED win_lo/win_hi while fragments were routed by the TRUE precursor window. A precursor within ±5 mDa of a true edge is assigned to the wrong side — silent misassignment of a handful of precursors per run. Also two windows closer than 0.01 Da in both edges would merge (won't happen in practice). Severity: low-medium. Fix: keep double keys (e.g. round to 1e-6 or use the doubles directly in an ordered map with exact compare since they come from the same source values).
+
+  (b) `scoreCandidates_` line 1440-1448: precursor XIC points are snapped to the NEAREST grid point within delta_rt; multiple precursor points can collapse onto one grid point and sum (`pdense[gi] += pval`), while `overlap` counts FRAGMENT support points touching nonzero pdense. Not a bug per se. Hmm.
+
+  Actually a subtler one: `touched` tracks grid points set by THIS precursor; reset loop zeroes them. If the same gi gets contributions, fine. But `if (pdense[gi] == 0.0f) touched.push_back(gi)` — if a precursor XIC point has pval == 0 exactly... fine.
+
+  (c) `buildFragGrid` line 728: `int gi = (int)(lower_bound(g.rt..., p.first) - g.rt.begin())` — p.first came from the same union, so exact match found; fine. `g.off[i] = (uint32_t)g.flat.size()` — narrowing: if total support points > 4.29e9, overflow. 8.5M fragments × ~20 points = 1.7e8, OK, but no guard. Minor.
+
+  (d) `FragGrid::off` is uint32_t; `supBegin/supEnd` return size_t from uint32 — fine.
+
+  (e) `xicCorr` rt matching greedy; fine.
+
+  (f) inferPrecursors_ count path: `findPartner` tolerance uses seed m/z for tol but the partner window for z>=2 leftward walk: tol = s.mz*ppm — at z=5, k=5 left: target = s.mz - 5*ISO/5 ≈ s.mz - 1.003. tol relative to seed — fine (within ppm of each other).
+
+  Real issue in count path: `used[]` marking — partners of NON-best hypotheses are not marked, but they are also not unmarked; fine. But: within the z-loop, the same partner j can be found for multiple z hypotheses; when best partners marked used, other hypotheses' candidates remain unused and can seed their own precursors — intended.
+
+  Potential subtle bug: `findPartner` returns the FIRST unused partner in m/z order within the window, not the closest in m/z or the most intense — greedy arbitrary choice within tolerance. For the mono walk that could pick the wrong of two candidate peaks. Behavior choice, deterministic. Not a crash.
+
+  (g) The `mono_select_` block line 1232: `mono = (best_c < nL) ? ms1[lefts[nL - 1 - best_c]].mz : s.mz;` — check indexing: runI is [lefts reversed (nL entries), seed, rights]. Candidate c means mono at runI index c. For c < nL, mono is lefts[nL-1-c] ✓ (runI[0] = lefts[nL-1] = furthest left). OK.
+
+  (h) Envelope path: `hyps` includes hypotheses for lead 0..3; `members` excludes seed; `used` marks members of best only. Note the seed may equal a found partner iso_idx[k] (if seed is M+1 of the mono), then `if ((size_t)j != seed) members.push_back(j)` — seed excluded from members but seed is marked used anyway ✓.
+
+  (i) n_isotopes for envelope: `1 + best.partners.size()` where partners=members (excludes seed when seed isn't mono)... if mono is at lead=2 (mono_idx != seed), members includes mono_idx and other partners but NOT seed; seed is an isotope peak of the envelope though. n_isotopes = 1+members — counts mono + members, seed excluded → undercounts by 1 when seed ≠ mono. Minor metadata inaccuracy (used by SPEXTRACT_MIN_ISOTOPES gate → could wrongly pass/fail edge cases). Low severity but it IS an off-by-one in a gate. Actually MIN_ISOTOPES is falsified/off. Still worth noting.
+
+  (j) `atrousLevels` line 698: `nth_element(d.begin(), d.begin() + d.size()/2, d.end())` fine.
+
+  (k) `aggregateFrames_` line 311: `const Size lo = (i > (Size)half) ? i - half : 0;` — when i == half exactly, lo = 0, but should be i-half = 0 anyway. fine. `hi = min(N-1, i+half)` — window is [i-half, i+half] inclusive = n_frames points when n_frames odd. For even n_frames, half = n/2, window is n+1 points — asymmetric but harmless.
+
+  Cluster consumption bug candidate: inner while iterates b over ALL buf entries within mz tol of mz0, marking consumed those within im_tol of buf[a]. But entries NOT matching im remain; then `while (a < buf.size() && buf[a].in < 0.0) ++a;` advances to next unconsumed. But consumed entries between a and b that were skipped... the loop `for (size_t a = 0; ...)` — after processing cluster at a, advance a past consumed. Next unconsumed a' starts a new cluster with mz0' = buf[a'].mz, and the while (b) scan goes from a' again over remaining — but b starts at a (a'), scanning forward only — entries before a' unconsumed? Can't be: all entries < a' were consumed (we advanced past all consumed; unconsumed earlier entries would have stopped the advance). Wait — entries in [a, b) that didn't match IM are unconsumed and sit between consumed ones; the advance `while buf[a].in < 0 ++a` stops at the first unconsumed, which could be within the mz tolerance of the previous cluster — it starts a new cluster there. OK correct, O(n²) worst case within tol band but fine.
+
+  (l) `compactify` guard `mz * MZ_Q > 4.2e9` — uint32 max is 4.2949e9; llround(mz*1e5) for mz=42949 → 4.2949e9 fits; guard at 4.2e9 conservative ✓.
+
+  (m) `loadMzPeakStreaming` line 271: frame_id parse `id.find("frame=")` — ok. Line 299: `best->lo < -1e8 || best->hi > 1e8` rejects ions without IM band ✓ fail-closed.
+
+  (n) MzPeakStreamLoad.h:330-332: `static thread_local std::unique_ptr<MzPeak::Index> tidx;` — declared inside the omp loop body lambda... it's inside the try, inside the parallel for body. `static thread_local` in that scope: one per thread, persists across batches and across run(ms1)/run(ms2) — keyed by path ✓. But it's also shared if the lambda `run` is called with different `path`? path fixed. OK.
+
+  (o) `frameToSpectra_` line 213: `spec.reserve(n / wins.size() + 64)` fine. Line 217: IM band filter `k0 < win.im_lo || k0 > win.im_hi` — MS1 win im band ±1e9 fine.
+
+  (p) MS1 from mzpeak: `wins[i] = {MzPeakWin{0,0,-1e9,1e9}}` then setMSLevel(1) since !(0<0) ✓. But then in the consumer, consumeMS1Spectrum_ gets it. In `run()`, the handoff calls `consumer.consumeSpectrum(spec)` — FullSwathFileConsumer::consumeSpectrum dispatches by MS level presumably ✓.
+
+  (q) Exception safety in `MzPeakExactMz` ctor: `std::remove(tmpl)` not called on throw paths (leaks temp file) — minor. Also mkstemp file created with fd, closed, then fopen "wb" — ok.
+
+  (r) `readMember_` footer: `uint32_t flen; memcpy(&flen, tail.data(), 4)` — parquet footer length; then `readMember_(z, ..., st.size - 8 - flen, flen)` — if flen is corrupt (larger than st.size), `from` negative → zip_int64_t negative → `if (from > 0 && zip_fseek...)` skipped, len huge → `std::vector<char> buf((size_t)len)` → massive allocation/throw. Fail-closed-ish (throws bad_alloc) but ugly. Low.
+
+  (s) `exact()`: `llround((std::sqrt(v) - c0)/c1)` — v>0 always (peaks), fine; but no isfinite guard before llround — inf mz → UB. Very low.
+
+  (t) OpenMP nested levels: `omp_set_max_active_levels(2)` only when n_bands > 1; the inner precursor loop (p_team) is nested inside the window loop — with max_active_levels default 1, nested parallel for runs SERIAL (p_team=1 effectively? No — num_threads(p_team) with nested parallelism disabled → serialized team of 1). If n_bands == 1 (user sets perf:trace_bands 1), max_active_levels stays default → inner precursor parallel-for is inactive → serial scoring. But also detectTraces_ banding off. That's intended-ish. But when n_bands>1, active levels 2 → both inner band loop AND precursor loop can be active; both divide budget. OK.
+
+  But here's a real one: `omp_set_schedule(omp_sched_dynamic, 1)` at line 531 is called via a static initializer inside flush_() — GLOBAL schedule change affecting all `schedule(runtime)` loops; only that one loop uses runtime. Fine.
+
+  Also `omp_set_max_active_levels(2)` is called AFTER possibly EPD's internal parallelism already used... fine.
+
+  (u) THE key determinism/race item asked: MS1 pick path — flushMS1_ parallel pick + ordered append ✓. Window loop: `win_done` incremented inside critical ✓. `fanout_hist` critical ✓. worker_err critical ✓. `bucket` per-window ✓. `pslot` per-precursor ✓. `pdense` firstprivate ✓ but note in apportion/rp_max branches, scoreCandidates_ called SERIALLY with shared pdense ✓ fine.
+
+  One race candidate: `phase_stats_()` and `phase_order_()` accessed at 1755-1758 outside parallel ✓; Phase destructor used in serial regions ✓. `writeLogInfo_` inside `#pragma omp critical` in some places, but at 2356-2360 within critical ✓; but the det digest at 2318 uses unnamed critical while 2356 uses unnamed critical too — same lock, fine.
+
+  Race: `flush_wall_()` static double updated in flush_/flushMS1_ — called from consumeSpectrum which is serial hand-off ✓.
+
+  MzPeak loader: `err` captured under named critical ✓. `out` slots per chunk ✓. BUT — `run(ms1); run(ms2);` reuse `tidx` thread_local; OpenMP thread pool reused; fine.
+
+  Real subtle issue in mzpeak run(): batch loop `for (b0...)` with `#pragma omp parallel for ... num_threads(nthr)` nested inside NOTHING (serial context) ✓.
+
+  (v) Integer narrowing: `const int nchunk = (int)((b1 - b0 + per - 1) / per)` fine. `for (long i = 0; i < (long)exp.size(); ++i)` fine. `Size n_default` fine. `String((int)(1000.0 * out.size() / ...))` fine.
+
+  (w) `partial_sort(idx.begin(), idx.begin() + max_frags, idx.end(), ...)` — max_frags is Size; idx.size() == frags.size() > max_frags ✓.
+
+  (x) In merge: `nth_element(v.begin(), v.begin() + max_frags, v.end())` — guarded by out.size() > max_frags ✓. `v.begin() + max_frags` with max_frags Size; ok.
+
+  (y) consolidate bug noted in comment (2794-2797): claims getDriftTime returned -1 always previously and "BUGFIX" — now reads pi[0].getDriftTime() — same expression as the "bug"? The comment says "BUGFIX: IM is stamped on the PRECURSOR ... getDriftTime() here returned -1 always" — the fixed line reads `pi[0].getDriftTime()` which IS the precursor's drift time. So the fix was moving from MSSpectrum::getDriftTime() to precursor's. Fine now, but the comment is confusing. Also NOTE: this means all consolidate results BEFORE this fix (including the -12.7% falsification!) ran with the IM gate never firing — the falsification of consolidate may be measuring a bug. The help string cites -12.7% — measured with broken IM gate. Adversarial point: falsification evidence obtained with a defective implementation; the recorded negative result may not hold for the fixed code. Same class as E5 (apportion A/B confounded). Worth flagging in Q2/Q4: the falsified-record convention only works if the recorded negative was measured on correct code; here at least two weren't (E5 admitted; consolidate IM-gate bug not re-run).
+
+  (z) `assembleFromList_` isolation offsets: `max(0.0, pc.mono_mz - win_lo)` — mono outside window? precursor membership by window, fine.
+
+  (aa) Precursor window membership: comment line 2392-2393 "(charge 0 is NOT dropped...)" ✓.
+
+  (bb) Charge gate ordering vs SPEXTRACT_MIN_ISOTOPES: MIN_ISOTOPES after min_charge ✓ irrelevant.
+
+  (cc) `n_default` counted before require_isotope_support drop; log line "X assigned default charge" fine.
+
+  (dd) One more: line 2033 `if (pc.charge == 0) { pc.guessed = true; ...}` — envelope path with hyps found always sets charge z≥1; count path best_z=0 → guessed ✓. But count path with isotope support: charge = best_z ✓ not guessed. open_search_safe only affects guessed ✓ consistent with help (a).
+
+  (ee) help string for `assembly:open_search_safe` (b): "records the isotope-offset hypothesis as a meta value" — code stamps spx_n_isotopes ALWAYS (not only under the flag) and stamps spx_guessed always. Under the flag nothing additional is stamped — (b) is satisfied by spx_n_isotopes existing at all. OK but the help implies flag-gated behavior for (b); harmless.
+
+  (ff) Default in help for charge:scoring: "'count' ... is the DEFAULT: measured against a DIA-NN reference on S23 it gives 71.8%" — matches README table ✓.
+
+  (gg) trace:ms1_split_valleys help: "Measured +36.7% peptides on S23 and +37.4% on S08" vs S30? fine.
+
+  (hh) `trace:noise_threshold_int` help: "MS1 (precursor) noise intensity threshold" default 100 ✓.
+
+  Now the ms2_noise_threshold_int=10/ms2_split_valleys=7 in S30-BASELINE "Current defaults" vs code 100/0.0 — wait, maybe S30-BASELINE line 20-22 lists the bench config which includes non-default parameter settings. It says "**Current defaults:** `trace:ms1_split_valleys 7.0`, `charge:scoring count`, plus `ms2_chrom_peak_snr 1.0`, `ms2_noise_threshold_int 10`, `ms2_min_length_sec 0`, `ms2_split_valleys 7.0`." The code defaults: ms1_split_valleys 7.0 ✓, scoring count ✓, ms2_chrom_peak_snr 1.0 ✓, ms2_noise_threshold_int **100.0** ✗, ms2_min_length_sec 0.0 ✓, ms2_split_valleys **0.0** ✗. So either the doc's "current defaults" is stale (from an era when those were defaults) or wrong. Given the doc's own decision rule (line 50) says standard bench config = tool defaults + require_isotope_support, and re-based 2026-09-01... The numbers 10,802 etc. were produced with SOME config. This is exactly the class of inconsistency the reviewer wants: shipped default ms2_noise_threshold_int=100 vs documented 10 — a 10x fragment threshold difference. Huge if real. I'll flag it prominently with the caveat.
+
+  Hmm wait — actually, let me double check line 780 default: `registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 100.0, ...)` — yes 100.0. And help text says "Lower it (e.g. 50, 20) to recover weak fragments toward diaTracer-like density". If the benchmark runs used 10, then shipped defaults do NOT reproduce benchmark numbers — a stranger running defaults gets much sparser spectra than the README table. That's a Q2+Q3 finding. Let me verify against the bench harness to be fair — check harness/bench.py or scripts for the actual parameters used in benchmark runs. Let me grep the harness for ms2_noise.
+
+• Confirmed: every benchmark run uses `-trace:ms2_noise_threshold_int 10 -trace:ms2_split_valleys 7.0`, and `bench/plan_dechim.yaml:15` even comments "ms2_noise_threshold_int code-default is 100 but the baseline runs it at 10". So the shipped defaults (100 / 0.0) do NOT reproduce the README numbers. A stranger running the README command (`build/DIAPseudoSpectra -in sample.d -out pseudo.mzML -threads 64`) gets a materially different (sparser) result than the benchmark table. This is the single biggest Q2/Q3 finding. S30-BASELINE's "Current defaults" line lists 10 and 7.0 as defaults — wrong relative to the code.
+
+  I have enough. Let me also quickly confirm a couple more things:
+
+  1. tests/test_calibration_cpp.cpp exists for the calibration header — but does CI test the main tool? .github/workflows/tests.yml exists per CHANGELOG. Q5 asks about unit tests for the tool itself: none. tests/ covers TdfMzCalibration + entrapment estimator only.
+
+  2. CMakeLists version 0.2.0 vs v0.3.0 — stale.
+
+  3. README "rebuild the OpenMS DIAPseudoSpectra target" — but this is a standalone app; the OpenMS tree doesn't contain a DIAPseudoSpectra target unless patches install it (openms-topp-mzpeak-cmake.py suggests in-tree build is a supported path). README never says how to build THIS repo (cmake -B build -DOpenMS_DIR=... && cmake --build build). Actually CMakeLists header comment says "Point CMake at an OpenMS build or install with: cmake -DOpenMS_DIR=/path/to/OpenMS/build .." — so build docs live in CMakeLists comments, not README. README's "then rebuild the OpenMS DIAPseudoSpectra target" is actively confusing/wrong for the standalone path.
+
+  4. scripts/apply_openms_patches.sh — exists. Does it pin the OpenMS version? README says verified against OpenMS 3.6.0-pre-exported-20260717. OK.
+
+  5. LICENSE exists, NOTICE exists. Third-party attribution: mzPeak library (BSD?), Arrow (Apache-2.0), libzip, Bruker SDK not redistributed. NOTICE covers OpenMS. mzPeak attribution needed when MZPEAK_ROOT used — check NOTICE? Not read; minor.
+
+  Let me also spot-check one more potential correctness item I want to name precisely: the `used[]` + break-on-first-miss in count path. The walk breaks on first miss (contiguous). With a missing M+1 but present M+2 (sub-threshold M+1), count mode stops — documented as original behavior. Envelope path handles gaps. Fine, documented.
+
+  Off-by-one candidate the prompt hinted: "unchecked `--si` style decrements" — I saw `prev(it)` guarded at line 1442 (`it == fg.rt.begin() ? it : prev(it)`) — guarded. FWHM loops `for (size_t i = ap; i > 0; --i)` use `t.xic[i-1]` — safe. dedup loop fine.
+
+  One more: line 729 `g.flat.emplace_back(gi, (float)p.second)` with gi int from lower_bound — found exactly since grid built from same RTs ✓.
+
+  `FragGrid.off` uint32: `g.off[i] = (uint32_t)g.flat.size()` — no overflow guard. 8.5M frags × avg 20 = 1.7e8 < 4.3e9 OK but a denser dataset could overflow silently → wrong CSR offsets → silent corruption. Worth one line: add a check. Low severity but exactly "silent wrongness" class.
+
+  `window_list` key: `(int)llround(lo*100)` — int overflow if lo*100 huge, no.
+
+  `prec_mz` NaN handling: comment says NaN mono_mz sorts to end — std::sort with NaN violates strict weak ordering → UB-ish (unspecified order, possible crash in debug). Do mono_mz NaNs occur? inferPrecursors_ sets mono from trace mz; traces with NaN mz were... MS1 traces are NOT filtered for finite mz (only frag_traces are, line 2362-2364). If an MS1 trace had NaN mz, the comparator `a.mz < b.mz` with NaN is not a strict weak order → std::sort UB. Low probability but a real latent issue; smallest fix: filter ms1_traces for finite mz/rt/im like the frag path does. Good catch to include.
+
+  Also `sort(precursors...)` fine.
+
+  Env var SPEXTRACT_MZ_ESTIMATOR read via static const in toTrace — first call fixes it; called from parallel region (detectTraces_ → toTrace is called serially after; line 1049 in serial) ✓. Actually toTrace called in window loop serial per window thread — static init is thread-safe (magic statics) ✓.
+
+  `drop_prec_iso_` initialized from getenv at namespace scope — fine.
+
+  Now Q4: internal commentary assessment. Examples to cite:
+  - Keep: [adv-fix] rationales (clamp→drop), determinism comment block at 1988-1997, E5 weighted_ note, [auto-band-fix], the BUGFIX note at 2794 (but rewrite), fail-closed rationale comments. These explain invariants a maintainer needs.
+  - Move to docs/: per-sample counts in help strings (min_charge help's "29.3% of emission on S30 and 1.73%", require_isotope_support's "603,858 of 1,528,113"), narrative experiment history in big comment blocks (route-1/2/3/4, way-2/way-4, step-02, content 3, [bench] tags, dates like "2026-09-02 18:58", "measured 13:55", reviewer attribution "[adv-review kimi/codex 2026-07-26]", "[vibe/claude review]", "[codex #13]").
+  - Cut: stale comments. Concrete stale ones:
+    - Line 65 doxygen: "See PLAN.md / REVIEW.md in the project workspace" — those files aren't in the repo (not in tree listing). Stale/broken reference. Confirm: docs/ has reviews/ but no PLAN.md/REVIEW.md at root. Tree shows no PLAN.md. Finding.
+    - `bands_for` lambda (2239-2244) dead code "kept for reference" — unused; cut or move to docs.
+    - Help for `assembly:apportion` "Try 1 (linear) or 2 (sharper)" — falsified cleanly (C7) yet help invites use; CHANGELOG claims falsified flags' help says so but apportion's doesn't.
+    - `charge:ambiguity_margin` help doesn't say it's unreachable in count mode (the default) — the most important fact about the option.
+    - Comment at 1947: "ms2_split is declared at :1324" — line-reference comment, fragile/stale (ms2_split actually declared ~1886 in current file? I saw `double ms2_split = getDoubleOption_("trace:ms2_split_valleys");` at line 1886). The comment says :1324 — stale line number. Minor but it's exactly "comment factually stale relative to code".
+    - toTrace comment says "DEFAULT = apex since 2026-09-02 18:42" — fine but the "[C2 A/B] ... the estimator is under test" framing is stale: test concluded, apex adopted.
+    - MzPeakStreamLoad.h:251 comment "DEFAULT ON (2026-09-02 18:58)" with counts — keep-ish, it's provenance rationale; date can go.
+    - The consolidate "BUGFIX" comment (2794-2797) admits every prior consolidate result ran without the IM gate — but help string still cites the -12.7% falsification number measured with the broken gate. Stale evidence.
+    - line 499-505 comment in flush_: "~2% of intensities differed at 1e-5..1e-4 relative (Sage count unchanged)" vs README claim byte-identical at any thread count. Hmm — the pick-det comment says parallel pick output "matched it in m/z and differed in ~2% of intensities at the 1e-5..1e-4 relative level" — that contradicts "byte-identical spectrum data at any thread count" claim? The byte-identical claim was threads 8 vs 100 of the CURRENT code; the earlier difference was during development of flush_ vs serial path. Not necessarily contradiction, but the comment documents non-bit-identical picking between serial and parallel paths — meaning SPEXTRACT_PICK_SERIAL=1 vs default parallel produce different output; the "any thread count" claim presumably includes 1 thread? If pick is parallel at threads=1... par_pick is env-based, not thread-based. Threads=1 → omp parallel for with 1 thread — same schedule? dynamic,1 with one thread processes in order — deterministic either way. OK.
+
+  Q5: tests. tests/ has calibration C++ golden tests, calibration python, entrapment python. Nothing for DIAPseudoSpectra itself. Smallest high-value test set:
+  1. inferPrecursors_ unit test: synthetic MS1 trace set — a z=2 envelope (mono + M+1 + M+2 at 1.00335/2 spacing, co-eluting, same IM) plus a decoy peak one spacing below with low intensity; assert mono_mz/charge and that isotope peaks don't seed their own precursors; test break-on-first-miss (gap at M+1, present M+2 → count mode stops; envelope mode spans); test tie-break toward low z; test used[] de-isotoping count.
+  2. findPartner/lower_bound edge: empty ms1 vector, single trace, partner exactly at tolerance boundary (off-by-one at tol edge — lower_bound(target-tol)/upper_bound(target+tol) inclusive).
+  3. min_charge gate predicate test: precursors with charge 0/1/2 at zmin=2 → charge-0 survives, z=1 dropped; and ordering: require_isotope_support then min_charge.
+  4. winKey quantization: two windows or precursor at edge — test that precursor at win edge routes consistently (or just assert the quantization behavior is documented).
+  5. compactify round-trip: NaN/inf/out-of-range peaks dropped and counted; mz exactly at 4.2e9/1e5 boundary.
+  6. xicCorr: n<5 → 0; constant series → 0; perfect co-elution → 1.
+  7. FragGrid: build from traces, assert off sentinel, invnorm 0 for constant trace; overflow guard.
+  8. Determinism smoke: run tool on a tiny synthetic mzML (a few frames) at threads 1 vs 8, compare semantic digest — they have bench/semantic_digest.py; add a tiny synthetic input so CI can run it.
+  9. assembleFromList_ cap: max_fragments partial_sort with ties deterministic.
+  10. selftest_wavelet exists but isn't run in CI — wire diag:selftest_wavelet into CI (it's already a self-test that ships; tests.yml doesn't run it presumably since tool isn't built in CI).
+
+  Is current verification sufficient? No: whole-file benchmarks + peptide-set gate catch regressions on ONE instrument/cohort and can't run in CI; nothing tests the code paths not exercised by defaults (envelope scoring, rp_max, merge, consolidate, mzpeak loader) — several of which have already shipped broken (E5 bypass, consolidate IM gate, auto-band-fix serial tracing). Those three defects are precisely the class unit tests would catch.
+
+  Q3 gaps:
+  - README build: "rebuild the OpenMS DIAPseudoSpectra target" — wrong/confusing for standalone; no cmake configure/build commands for this repo; no statement of compiler (GCC 13 mentioned only for mzpeak), OpenMP optional.
+  - CMakeLists project VERSION 0.2.0 stale.
+  - No version pinning beyond one OpenMS snapshot string; patches may not apply elsewhere — acknowledged but no CI verifying.
+  - No worked example with expected output; no small public test dataset. A stranger cannot reproduce any number without the private cohort files (S30/S08/S23). README claims verified on one cohort; no public-data replication (admitted in CHANGELOG known limitations). For a public release: provide one small public diaPASEF file (e.g. from PRIDE) with expected outputs.
+  - Input requirements doc: needs diaPASEF with IM; error message exists for no-IM. Output format: mzML with spx_guessed/spx_n_isotopes userParams — undocumented anywhere user-facing.
+  - Env vars: a dozen SPEXTRACT_* switches documented only in CHANGELOG/code, not in README or --help. Some change results (SPEXTRACT_MZ_ESTIMATOR!). An env var that changes scientific output without appearing in --help or the recorded parameters is a reproducibility hazard — and README's own determinism note says digest excludes "the recorded parameters"... env vars aren't recorded parameters at all. SPEXTRACT_MZ_ESTIMATOR=mean changes masses with no trace in the mzML (is it stamped? spx:corr_power etc are stamped; mz estimator isn't). Finding: stamp env-derived config into output provenance.
+  - Error messages: streaming load failure falls back with a warning ✓ good; mzpeak exact failure has actionable message ✓; but min_charge etc fine. Missing: what to do when "no MS1 ion-mobility frames" — tells why not what to do. Minor.
+  - NOTICE: check content quickly? It exists; covers OpenMS. Third-party: mzPeak (MIT/BSD?), Arrow Apache-2.0 requires NOTICE inclusion when redistributing — they link static arrow; binary distribution would carry Apache obligations. Flag as needs-check rather than assert.
+  - install target only installs the binary; no docs, no LICENSE install. Minor.
+  - CITATION.cff exists ✓.
+
+  Also Q3: `setValidFormats_("in", {"mzML","mzpeak","d"})` — can OpenMS FileHandler detect ".d"? fine.
+
+  One more Q1 check — the MS1 pick path race the prompt asked about: flushMS1_ is called from consumeSwathSpectrum_ (serial handoff) and consumeMS1Spectrum_ (serial) — all consumer callbacks are serial, so no race. Parallel pick inside uses firstprivate picker ✓. The one shared-state smell: `omp_set_schedule` called via static init inside flush_() — global side effect; with schedule(runtime) only used by that loop, OK.
+
+  Non-deterministic accumulation order: in share-all path pslot — deterministic. In rp_max path serial per window. fanout_hist only diagnostic. t_* atomics only diagnostics. So accumulation is deterministic — good; say so. The one genuine remaining nondeterminism risk: `PeakPickerIM` parallel pick was measured to differ at 1e-5..1e-4 relative vs serial (documented at line 518-519) — but deterministic across thread counts per README. Fine, cite.
+
+  Also `window_list` stable_sort by wbytes descending — stable, deterministic ties by original map order ✓.
+
+  Memory admission race: `availableBytes_` read inside critical — fine.
+
+  Potential deadlock: `#pragma omp parallel for schedule(dynamic) num_threads(n_conc)` with each iteration potentially sleeping in admission loop while holding a thread — with dynamic schedule and n_conc threads, if all threads are sleeping waiting for memory and none in flight... "admit when nothing in flight" breaks it ✓. But if inflight>0 held by... all admitted windows eventually finish ✓.
+
+  Wait, one real issue: `inflight` counts `need` projections; `Release` destructor subtracts — but if `continue` at line 2365 (`frag_traces.empty()`) — Release destructor runs at scope exit ✓ RAII.
+
+  But: Release is declared INSIDE the try block at line 2309 — after the admission loop. Exceptions before it (none). ✓.
+
+  Another: win_out[wi] bucket — wi index into window_list ✓ no race.
+
+  Sort comparator on all_out uses getPrecursors() — all emitted have precursors ✓.
+
+  OK also confirm PLAN.md/REVIEW.md absence: tree doesn't show them; docs/ has reviews/. Doxygen comment line 65 references PLAN.md/REVIEW.md "in the project workspace" — not shipped. Also doxygen page references TOPP_DIAPseudoSpectra.cli includes — standard.
+
+  Also stale: CHANGELOG Unreleased "SPEXTRACT_ISO_COLLAPSE (experimental, default off)" — code absent (confirmed by grep). Also "SPEXTRACT_BACKFILL_RAW=N / SPEXTRACT_BACKFILL_MAXFRAGS=K" under "Under test (env switches, defaults unchanged)" — absent from code. And README nowhere documents these. So CHANGELOG lists features not in the source — either reverted code or unreleased. For v0.3.0 this must be reconciled.
+
+  Also CHANGELOG says "tests/test_calibration_cpp.cpp ... tests/test_entrapment.py .github/workflows/tests.yml runs all three" — fine, but nothing tests the tool.
+
+  Also CMakeLists: when MZPEAK_ROOT build: links `zip` but MzPeakStreamLoad.h also uses zlib (inflate) and SQLiteCpp (header-only? SQLiteCpp is a library — `#include <SQLiteCpp/SQLiteCpp.h>` needs libSQLiteCpp + sqlite3 linked!). CMakeLists links only `Parquet::parquet_static Arrow::arrow_static zip`. If SPX_HAVE_SQLITECPP is defined, code calls SQLite::Database — needs -lSQLiteCpp -lsqlite3. Missing from CMakeLists → link failure in that configuration (or it's header-available-but-lib-missing → the #ifndef SPX_HAVE_SQLITECPP throw path avoids it only if headers absent). So: build gap — with SQLiteCpp headers present, link likely fails; without, exact-mz always throws. Either way the standalone mzpeak+exact build is broken or untested. Good Q3/Q1 finding. (Transitive via OpenMS lib maybe? OpenMS links SQLiteCpp internally but doesn't install it; symbols might come from libOpenMS if it's baked in — SQLiteCpp is compiled into OpenMS? OpenMS extern SQLiteCpp is compiled into libOpenMS? Possibly not exported. I'll flag as "unverifiable from repo; likely link gap".)
+
+  Now severity ranking for Q1:
+
+  HIGH (silent wrongness):
+  1. Shipped defaults don't reproduce benchmarks (ms2_noise 100 vs 10, ms2_split 0 vs 7) — this is Q2/Q3 but it IS silent wrongness for a user. Put in Q2.
+  2. winKey centi-Da quantization misroutes edge precursors silently (low probability, silent). Medium.
+  3. MS1 traces not filtered for non-finite mz → std::sort strict-weak-ordering violation with NaN (UB, can produce arbitrary order/crash); frag traces are filtered, MS1 aren't. Medium-low probability, high class.
+  4. FragGrid.off uint32 silent overflow on very dense data. Low-medium.
+  5. n_isotopes undercount in envelope path when seed≠mono (off-by-one feeding MIN_ISOTOPES gate and spx_n_isotopes metadata consumed by open-search correctors). Low-medium.
+  6. consolidate IM gate: fixed, but falsification evidence (-12.7%) predates fix and help still cites it. Q2.
+  7. ambig_margin dead in count mode (default) yet README presents a falsification table measured in count mode — measured a no-op. Q2/Q1.
+  8. charge:min_charge=2 + open_search_safe: charge-0 guessed kept ✓ docs consistent. But note interplay: min_charge gate runs BEFORE... check order: default_charge assignment (2032), require_isotope_support (2037), min_charge (2051), MIN_ISOTOPES (2062), PRECURSOR_LIST (2073). Docs say "after the isotope-support gate, before extraction, NOT dropping charge-0" — ✓ matches. Good, say so.
+
+  Also check: dedup_precursors runs at 2014 BEFORE default_charge assignment — dedup compares pc.charge where guessed are 0 — fine.
+
+  One more potential Q1: `lower_bound(prec_mz..., win_lo)` — precursors sorted by mono_mz ✓ (sorted at 2151 by mono_mz first) ✓.
+
+  `scoreCandidates_` touched-reset: if an exception thrown between fill and reset, pdense dirty for next precursor on that thread — exceptions propagate to worker_err → abort. Fine.
+
+  float comparison: `if (fg.invnorm[fi] == 0.0) continue;` exact zero compare — invnorm set to exactly 0.0 for degenerate ✓ intentional.
+
+  `pinv > 0` guard ✓.
+
+  Now the Q4 position, concrete:
+  - Cut from source: reviewer attribution tags with names/dates ("[adv-review kimi/codex 2026-07-26]", "[vibe/claude review 2026-09-01]", "[codex #13]", "kimi, plan review", timestamps "2026-09-02 18:58", "measured 13:55"), dead `bands_for` lambda, stale line-reference comment (:1324), "ponytail:" tags (whatever they mean — internal milestone names), "[step-02 sub-arm 2]", "[content 3]".
+  - Move to docs/: per-sample benchmark numbers inside help strings (min_charge: "29.3%... 1.73%... 0.42% vs 15.3%... +0.8/+2.7/+1.4%..."; require_isotope_support: "603,858 of 1,528,113..."; rp_max fan-out history; corr_power's full validation narrative). Help strings should state what the knob does, its default, and "FALSIFIED — keep 0" where applicable, with a pointer to docs. The convention of recording falsification is right — but the record belongs in docs/S30-BASELINE.md (which exists and is good), with ONE line in --help.
+  - Keep: mechanism rationale (why halo 20x makes partition exact; why pre-sized slots prevent the lost-write race; why fail-closed on calibration; the mono-guard averagine bound derivation; E5 warning). These are invariants.
+  - Word "FALSIFIED" in help for rp_max/consolidate/merge: keep one word + pointer. Fine.
+  - Env-var experiment switches: acceptable per convention (a), but they must be listed in one place (docs) and stamped into output provenance; currently scattered and some (BACKFILL, ISO_COLLAPSE) documented-but-absent.
+
+  Stale comments list (concrete):
+  - line 65: PLAN.md/REVIEW.md not in repo.
+  - line 1947: "declared at :1324" — actual declaration at 1886.
+  - apportion help "Try 1 or 2" vs C7 falsification.
+  - ambiguity_margin help vs unreachability in count mode.
+  - consolidate help cites -12.7% measured with broken IM gate (comment at 2794 admits).
+  - toTrace "[C2 A/B] under test" — concluded.
+  - charge:scoring help: 71.8% vs current 74.6% default arm — arguably fine.
+  - CMakeLists VERSION 0.2.0 vs v0.3.0.
+  - S30-BASELINE "Current defaults" line (ms2_noise 10, ms2_split 7) vs code 100/0.
+  - CHANGELOG ISO_COLLAPSE/BACKFILL absent from code.
+
+  Wait — one more check on the min_charge claimed numbers: help says "29.3% of emission on S30 and 1.73% of peptides" and comment at 2045-2046 says "29.3% of S30 emission is SINGLY-charged precursor hypotheses (271,559 spectra) and they carry 259 unique peptides, 1.73%". Consistent.
+
+  Also README "Run" section command uses `build/DIAPseudoSpectra` — implying a build dir the README never tells you how to create. Q3.
+
+  Also README recommends tcmalloc preload but gives no command — minor.
+
+  Q2 checklist answers:
+  - charge:min_charge placement: YES — applied at 2051-2058, after require_isotope_support (2037), before the window loop/extraction (2288), predicate keeps charge-0. ✓ Docs match. One nuance: guessed precursors only keep charge 0 if open_search_safe OR default_charge=0; with defaults they get z=2 and pass. The doc claim "NOT dropping charge-0/guessed" holds.
+  - Falsified params exist with claimed defaults: rp_max=0 ✓, consolidate:delta_rt=0 ✓, merge:rt_window=0 ✓, apportion=0 ✓ (but help not marked falsified), ambiguity_margin=0 ✓ (but help silent on dead-in-count-mode), mono_averagine_guard=0 ✓, open_search_safe off ✓, dedup_precursors off ✓, require_isotope_support off ✓ (bench used it ON per decision rule — note). ms2_min_sample_rate=-1 ✓.
+  - Help strings stating numbers code can't produce: require_isotope_support help numbers (603,858/10,036-era, pre-apex/pre-corr_power/pre-mincharge) can't be reproduced by current code; consolidate -12.7% can't (measured with broken IM gate); charge:scoring help numbers need the DIA-NN reference, fine as citations.
+  - Documented options that no longer exist: SPEXTRACT_ISO_COLLAPSE, SPEXTRACT_BACKFILL_RAW/MAXFRAGS (CHANGELOG only). Docs/PLAN.md reference. 
+  - Options with no documentation: all SPEXTRACT_* env vars (12 in code) — none in --help; DROP_PREC_ISO, MZ_ESTIMATOR, PICK_MZ_MODE, MIN_ISOTOPES, PRECURSOR_LIST etc. only in CHANGELOG; DET/PICK_SERIAL/PICK_STATIC/PICK_BATCH/LOAD_ONLY only in code comments. Also `trace:max_trace_length_sec` is hidden advanced ✓ documented as diagnostic.
+
+  Also — check `perf:ms1_trace_bands` default 12 ✓ matches plan_bands arm default 12.
+
+  Also S30-BASELINE line 20 says "trace:ms1_split_valleys 7.0" ✓.
+
+  Now Q5: current verification sufficiency — No. Benchmarks run only the default path on one instrument; three shipped-broken features (E5, consolidate IM, auto-band) show non-default paths are unverified; no CI builds the tool at all (tests.yml runs python + calibration C++ only — actually does it build DIAPseudoSpectra? CHANGELOG says "60 vendor-derived golden cases against the shipped header" — header only). So the 2,864-line tool has zero executable tests.
+
+  Smallest test set (name function + input):
+  1. `inferPrecursors_` — synthetic traces: envelope z=3 at m/z 500 (mono 500, M+1 at 501.0045, M+2 at 502.0078; co-eluting XICs ≥5 points, same IM) → expect charge 3, mono 500, partners marked used (no extra precursors at 501/502). Plus a singleton bright trace → charge 0. Plus tie case: equal partner counts for z=2 and z=3 → expect z=2 (count mode).
+  2. `findPartner` boundary — partner exactly at target±tol → included; at tol+1ulp → excluded. Empty ms1 → no crash.
+  3. min_charge gate block (lines 2051-2058) — can't unit test without refactoring; refactor predicate into a function and test: charges {0,1,2,3} with zmin=2 → {0,2,3} remain.
+  4. `compactify` — spectrum with NaN m/z, negative m/z, IM outside [0.4,1.8], and a 42950-Da peak (mz*1e5 > 4.2e9) → all counted dropped, none clamped.
+  5. `xicCorr` — n<5 → 0; constant XIC → 0; identical → 1.
+  6. `buildFragGrid`/`scoreCandidates_` — one precursor, one perfectly co-eluting fragment above min_corr → emitted; fragment below min_corr_pts support → skipped; constant fragment (invnorm 0) → skipped.
+  7. `assembleFromList_` — frags > max_frags with tied scores → deterministic cap (mz then index tie-break); frags < min_frags → empty.
+  8. winKey quantization — either fix or test the edge: precursor at win_lo-0.004 vs win_lo+0.004.
+  9. End-to-end determinism: tiny synthetic IM mzML (they can generate one), threads 1 vs 8, `bench/semantic_digest.py` equal — in CI.
+  10. `diag:selftest_wavelet` in CI (exists, currently opt-in).
+
+  Also the peptide-set gate: fine as regression gate but can't localize; and it can't run without the private data → not usable by external contributors.
+
+  Alright. Also Q3: error messages — good ones exist (calibration fail-closed with actionable env vars; mzpeak exact error tells user what to set). Gaps: "no MS1 ion-mobility frames found" doesn't say likely cause (non-diaPASEF input / missing IM arrays); fallback warning on stream load then silently continues with loadExperiment — memory floor returns; user on a small machine OOMs later with no hint. Also no `--help` mention that .d requires WITH_OPENTIMS OpenMS — build-time, but runtime error if OpenMS lacks it? FileHandler would throw; acceptable.
+
+  Licence/attribution gaps: NOTICE covers OpenMS. mzPeak fork, Arrow/Parquet (Apache-2.0), libzip, zlib, SQLiteCpp (MIT), SQLite (public domain) — static linking Apache Arrow into a distributed binary carries Apache-2.0 notice obligations; NOTICE should include them when MZPEAK build is distributed. Flag.
+
+  Version pinning: OpenMS pinned to a snapshot string; Arrow 23/GCC13 only in mzpeak script context; no compiler requirement stated in README (C++20 → GCC 10+/Clang 12+; CMakeLists sets CXX_STANDARD 20 ✓). `cmake_minimum_required 3.16` ✓.
+
+  Missing: no `-version`/tool version wiring? TOPPBase provides version from... CMakeLists project version 0.2.0 — and TOPP tool version likely defaults to OpenMS version unless setVersion_ called. Didn't see setVersion_. So `--help` reports something odd. Minor: call setVersion_ in ctor.
+
+  Now severity ranking. Let me write the review. It should be thorough but organized. Five sections. Use file:line references.
+
+  Ranking for Q1 by severity:
+
+  S1 (silent wrong output, reachable):
+  1. `winKey` quantization (DIAPseudoSpectra.cpp:1723-1725, 2293-2294, 2394-2395): centi-Da rounding of window edges; precursor membership computed on quantized edges while fragment routing keyed on the same quantization — a precursor within ±5 mDa of an edge is silently assigned in/out of the wrong window; windows closer than 0.01 Da collapse into one key. Fix: key on llround(x*1e6) or keep double pairs.
+  2. MS1 traces never filtered for non-finite values (contrast frag path at 2362-2364). A NaN mz trace enters the sort at 1998 and the by_mz sort at 1110 — NaN comparator violates strict weak ordering → undefined behavior, arbitrary permutation, potential silent corruption or crash. Fix: same erase-remove_if as frag path after detectTraces_ for MS1.
+  3. `FragGrid::off` uint32 narrowing (276, 725, 736): no guard against >4.29e9 support points; silent wraparound scrambles every fragment's support range. Fix: check total < UINT32_MAX in buildFragGrid and throw.
+  4. Envelope-path n_isotopes off-by-one (1338): `1 + best.partners.size()` omits the seed when the seed isn't the monoisotope (lead>0) — undercounts envelope depth, which feeds SPEXTRACT_MIN_ISOTOPES and the spx_n_isotopes metadata that open-search correctors are told to trust. Fix: count distinct members + seed + mono.
+  5. `charge:ambiguity_margin` unreachable in count mode (the default): the ambig block at 1345-1357 sits after the envelope-only path; count mode `continue`s at 1246. S30-BASELINE:100 admits it; README presents a four-point falsification table measured against the count arm — those runs could never fire the parameter. The recorded "falsification" is void. Fix: either wire it into count mode or say "untested" in README; help string must state "envelope mode only".
+  6. consolidate falsification evidence gathered with dead IM gate (comment 2794-2797 admits the gate never fired pre-fix) — help at 812 still cites -12.7%. The recorded negative may not describe the fixed code; per the project's own convention this entry should be marked "falsified on defective implementation, re-run owed".
+  7. Sort with potential NaN in prec_mz? covered by 2.
+  8. `exact()` llround without isfinite guard (MzPeakStreamLoad.h:172) — inf/NaN mz → UB on llround; guard exists on output only. Low.
+  9. mkstemp temp file leaked on throw paths (130-159). Low.
+  10. parquet footer flen unchecked → huge alloc on corrupt archive (104-109). Low.
+  11. xicCorr greedy two-pointer with `rt_tol` matching can pair the wrong points when sampling differs; acknowledged class, low.
+  12. `bands_for` dead lambda — Q4.
+  13. int/size_t narrowing: `(int)((b1-b0+per-1)/per)` fine; `nchunk` int fine; `(Size)getIntOption_("assembly:min_fragments")` — negative user input wraps to huge → min_frags huge → NO spectra emitted, silently. getIntOption_ may allow negatives (no setMinInt). Same max_fragments negative → huge cap (harmless) but min_fragments -1 → output empty. Silent wrong output from bad input. Add setMinInt_(0)... wait TOPPBase: registerIntOption_ then setMinInt_. Not done. Low-medium.
+
+  Also `#pragma omp critical` unnamed shared across different purposes — perf only.
+
+  Data races: I found none in the window loop/MS1 pick — say so explicitly; accumulation order is deterministic by construction (pslot + canonical sort). The earlier race (bucket append) is documented as fixed. Good.
+
+  Q1 "nothing found" categories: non-deterministic accumulation — none found; shared mutable state — pdense firstprivate OK; --si decrements — all guarded (prev(it) guarded at 1442, FWHM loops bounded).
+
+  Now write it. Keep it dense and specific. This will be a long reply, justified by the task. Use the five sections. Rank severity within Q1. Be candid about what I verified vs not (I read all 2864 lines + header; did not compile).
+
+To resume this session: kimi -r session_0e64d41d-9952-4265-bdba-e9f997b9e470
+exit=0

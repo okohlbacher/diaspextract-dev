@@ -17,9 +17,13 @@ conclusions in this project, and single-sample iteration removes that class of e
 | across-cycle spread | 2.66 | **correct** — MS1 FWHM is 2.61 cycles |
 | MS1 FWHM | 3.61 s | flat with RT (1.04× across gradient) |
 
-**Current defaults:** `trace:ms1_split_valleys 7.0`, `charge:scoring count`, plus
-`ms2_chrom_peak_snr 1.0`, `ms2_noise_threshold_int 10`, `ms2_min_length_sec 0`,
-`ms2_split_valleys 7.0`.
+**Current defaults** (registered defaults, verified against the code 2026-09-03 --
+`ms2_noise_threshold_int` and `ms2_split_valleys` had been benchmarked at 10 and 7.0 while the
+registered defaults were still 100 and 0, so a default run could not reproduce any figure in this
+file; the defaults were moved to the benchmarked values): `trace:ms1_split_valleys 7.0`,
+`trace:ms2_split_valleys 7.0`, `trace:ms2_noise_threshold_int 10`, `trace:ms2_chrom_peak_snr 1.0`,
+`trace:ms2_min_length_sec 0`, `trace:mz_estimator apex`, `charge:scoring count`,
+`charge:min_charge 2`, `assembly:corr_power 2`, `perf:trace_bands 12`.
 
 ## Measurement methodology (2026-07-28) — variance model + estimator fix
 

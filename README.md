@@ -85,11 +85,14 @@ Determinism: the spectrum data is **byte-identical at any thread count and any l
 `bench/semantic_digest.py` hashes `<spectrumList>`..`</spectrumList>`, excluding the wall-clock
 stamp, the recorded parameters and the trailing byte-offset index, none of which can match across
 invocations -- the last of these had produced two false "differs" verdicts before it was excluded).
-Last-ulp *code* changes still cascade to ~2% in peptide counts, so compare builds by the accepted
-peptide SET and the ppm median, not by raw counts.
+This byte-identity holds for a FIXED binary across thread counts and batch sizes. It does not
+survive a code change: a last-ulp difference in one arithmetic path cascades to ~2% in peptide
+counts, so compare two BUILDS by the accepted peptide SET and the ppm median, never by raw counts.
+The two statements are about different things and both have been measured.
 
-Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **15:21 wall, 106 GB peak RSS**
-(2026-09-02; was 33:05 on 09-01 -- the serial floor was the MS1 path, now parallel). The loader is
+Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **12:49 wall, 102 GB peak RSS**
+with the current defaults (2026-09-03). It was 15:21 before `charge:min_charge` removed ~30% of the
+emission, and 33:05 on 09-01 before the MS1 path was parallelised. The loader is
 4% of the run; the window loop is 83%. Reading from `.mzpeak` instead of `.d` is supported
 (build-optional, mzPeak C++ library) but slower (17:04); the archive's two-point TOF transform costs
 12% of identifications, so the loader recovers the exact TDF calibration from the embedded

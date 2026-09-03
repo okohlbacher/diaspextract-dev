@@ -62,7 +62,8 @@ using namespace std;
   front-end (enables open / semi-tryptic / PTM searches); it does not perform the database
   search, FDR, library building or quantification.
 
-  See PLAN.md / REVIEW.md in the project workspace for the full design and adversarial review.
+  See docs/S30-BASELINE.md for the measured decisions behind every default, and docs/reviews/
+  for the adversarial reviews.
 
   <B>The command line parameters of this tool are:</B>
   @verbinclude TOPP_DIAPseudoSpectra.cli
@@ -104,7 +105,7 @@ namespace
   }
   static long rss_mb_()
   {
-    std::ifstream f("/proc/self/status"); std::string k;   // ponytail: Linux-only, returns 0 elsewhere
+    std::ifstream f("/proc/self/status"); std::string k;   // deliberate: Linux-only, returns 0 elsewhere
     while (f >> k) { if (k == "VmRSS:") { long v; f >> v; return v / 1024; } f.ignore(1 << 20, '\n'); }
     return 0;
   }
@@ -153,10 +154,6 @@ namespace
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
   bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
-  int backfill_raw_ = std::getenv("SPEXTRACT_BACKFILL_RAW") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_RAW")) : 0;   ///< [content 3] raw apex-frame peaks added per spectrum
-  int backfill_maxfrags_ = std::getenv("SPEXTRACT_BACKFILL_MAXFRAGS") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_MAXFRAGS")) : 0;   ///< [content 3] only spectra with <= K fragments
-  bool backfill_empty_ = std::getenv("SPEXTRACT_BACKFILL_EMPTY") != nullptr;   ///< [content 3] also make spectra for precursors with no correlated trace
-  double backfill_maxq_ = std::getenv("SPEXTRACT_BACKFILL_MAXQ") ? std::atof(std::getenv("SPEXTRACT_BACKFILL_MAXQ")) : 0.0;   ///< [content 3] only precursors below this MS1-intensity quantile of the window
 
   static std::string rss_()
   {
@@ -242,15 +239,17 @@ namespace
     }
   }
 
+  /// Reported-m/z estimator, set once from `trace:mz_estimator` before any trace is converted.
+  /// A file-scope value because toTrace() is a free helper with no access to the tool's parameters.
+  inline std::string& mzEstimator() { static std::string v = "apex"; return v; }
+
   Trace toTrace(const MassTrace& mt)
   {
     Trace t;
-    // [C2 A/B, 2026-09-02] reported m/z estimator. Default = OpenMS centroid (intensity-weighted mean over
-    // the trace). Paired vs diaTracer on shared peptides our precursor m/z is +1.5..+2.6 ppm high and our
-    // fragment m/z ~2 ppm low, so the estimator is under test: SPEXTRACT_MZ_ESTIMATOR=apex|median|mean.
-    // DEFAULT = apex since 2026-09-02 18:42: +2.6% Sage (12,537 vs 12,217) AND +4.1% MSFragger (11,927 vs 11,463)
-    // on S30 with the precursor bias vs diaTracer +1.12 -> +0.78 ppm; "mean" restores the OpenMS centroid.
-    static const std::string mz_est = std::getenv("SPEXTRACT_MZ_ESTIMATOR") ? std::getenv("SPEXTRACT_MZ_ESTIMATOR") : "apex";
+    // Reported m/z of a mass trace. "apex" (the default) takes the m/z of the most intense peak;
+    // "mean" is the OpenMS intensity-weighted centroid; "median" the median m/z. Set by
+    // `trace:mz_estimator` -- see docs/S30-BASELINE.md for the comparison that chose apex.
+    const std::string& mz_est = mzEstimator();
     if (mz_est == "apex" && mt.getSize() > 0) t.mz = mt[mt.findMaxByIntPeak(false)].getMZ();
     else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); t.mz = m2.getCentroidMZ(); }
     else t.mz = mt.getCentroidMZ();
@@ -277,7 +276,10 @@ namespace
   struct FragGrid
   {
     vector<double> rt;                          ///< sorted unique grid RTs (size G)
-    vector<uint32_t> off;                       ///< size F+1; fragment i spans [off[i], off[i+1])
+    vector<uint64_t> off;                       ///< size F+1; fragment i spans [off[i], off[i+1])
+                                                ///  64-bit on purpose: 8.5 M fragments x ~510 support
+                                                ///  points is within 2x of the 32-bit wrap, and an
+                                                ///  overflow here silently corrupts every correlation.
     vector<pair<int, float>> flat;              ///< (grid index, intensity), concatenated
     vector<double> mean, invnorm;               ///< per fragment: mean and 1/norm over the full grid
     size_t supBegin(size_t i) const { return off[i]; }
@@ -620,7 +622,7 @@ namespace
     void ensureMapsAreFilled_() override { flushMS1_(); flush_(); }   // pick up the tails
 
   private:
-    /// ponytail: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
+    /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
     /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
     /// store. SPEXTRACT_PICK_BATCH overrides for the sweep.
     static const size_t kBatch;
@@ -781,7 +783,7 @@ protected:
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
     registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance for trace detection.", false);
     registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise intensity threshold.", false);
-    registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 100.0, "MS2 (fragment) noise threshold. Lower it (e.g. 50, 20) to recover weak fragments toward diaTracer-like density; the grid-Pearson optimization keeps that affordable.", false);
+    registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise threshold. Lower it (e.g. 50, 20) to recover weak fragments toward diaTracer-like density; the grid-Pearson optimization keeps that affordable.", false);
     registerDoubleOption_("trace:min_length_sec", "<sec>", 3.0, "Minimum MS1 mass-trace length (seconds).", false, true);
     // diaTracer runs MS2 with deliberately RELAXED constraints vs MS1 (Nat Commun 16:95). The OpenMS
     // apex gate is chrom_peak_snr*noise_threshold_int, so the stock snr=3.0 silently TRIPLES the
@@ -789,10 +791,16 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (diaTracer-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
-    registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 0.0, "[way-2] Split MS2 mass traces at chromatographic local minima via ElutionPeakDetection (which MassTraceDetection never does - it only terminates on outliers, so two peptides 25 s apart within the m/z tolerance MERGE). Value is chrom_fwhm in seconds; it sets both the Savitzky-Golay window and the local-extrema half-window. 0 = OFF. Try 6-8 (peaks here are 5-30 s). width_filtering is forced off so this only SPLITS, never deletes.", false);
+    registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace. "
+                          "'apex' (default) uses the most intense peak's m/z; 'mean' the OpenMS intensity-weighted "
+                          "centroid; 'median' the median. apex was chosen on measured identifications with both "
+                          "search engines -- see docs/S30-BASELINE.md. Affects EVERY reported precursor and "
+                          "fragment m/z.", false);
+    setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
+    registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "[way-2] Split MS2 mass traces at chromatographic local minima via ElutionPeakDetection (which MassTraceDetection never does - it only terminates on outliers, so two peptides 25 s apart within the m/z tolerance MERGE). Value is chrom_fwhm in seconds; it sets both the Savitzky-Golay window and the local-extrema half-window. 0 = OFF. Try 6-8 (peaks here are 5-30 s). width_filtering is forced off so this only SPLITS, never deletes.", false);
     registerFlag_("diag:selftest_wavelet", "[wavelet] Run assertions on the a-trous smoother and exit. Tests the SHIPPED functions, not a copy: DC preservation (filter must sum to 1, or every correlation is rescaled), noise reduction, peak-height retention at the FWHM-derived scale, mirror edges (a truncated peak must not be dragged toward zero), and level selection from sampling. Exits non-zero on failure.", true);
     registerDoubleOption_("trace:wavelet_smooth", "<x>", 0.0, "[wavelet] Smooth the PRECURSOR XIC with a stationary (a-trous) B3-spline wavelet before correlating fragments against it, at a scale of x TIMES THE MEASURED MS1 FWHM. diaTracer smooths its precursor profile (2D Gaussian + Savitzky-Golay) and then applies a 0.3 correlation threshold; we copied the 0.3 but not the smoothing. Pearson r between two NOISY profiles is attenuated toward 0 as S/N falls, so an unsmoothed 0.3 is a systematically weaker constraint than a smoothed 0.3 -- and worst at faint precursors, which is where the coverage analysis says peptides are lost. Fragment XICs stay RAW (as in diaTracer) and emitted peak intensities are unaffected. 0 = off. Try 0.25-0.5 (measured MS1 FWHM is 3.61 s on S30, so 0.5 ~ 1.8 s ~ 1.3 cycles).", false);
-    registerDoubleOption_("trace:split_valleys_fwhm", "<x>", 0.0, "[fwhm] Set the valley-splitting window as a MULTIPLE OF THE MEASURED MS1 FWHM instead of absolute seconds. Overrides trace:ms1_split_valleys when > 0. Absolute seconds cannot be right across methods: 14.0 s is +0.0% peptides on a 31 min gradient and -1.06% on a 5.6 min one. Measured MS1 FWHM is 3.61 s on S30, so the old 7.0 s default is ~1.9x FWHM and 14.0 s is ~3.9x. 0 = off (use absolute seconds).", false);
+    registerDoubleOption_("trace:split_valleys_fwhm", "<x>", 0.0, "[fwhm] Set the valley-splitting window as a MULTIPLE OF THE MEASURED MS1 FWHM instead of absolute seconds. Overrides trace:ms2_split_valleys when > 0 (the MS2 window is the one it sets). Absolute seconds cannot be right across methods: 14.0 s is +0.0% peptides on a 31 min gradient and -1.06% on a 5.6 min one. Measured MS1 FWHM is 3.61 s on S30, so the old 7.0 s default is ~1.9x FWHM and 14.0 s is ~3.9x. 0 = off (use absolute seconds).", false);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys via ElutionPeakDetection. DEFAULT 7.0 s: MassTraceDetection never splits at a local minimum, so two peptides eluting ~25 s apart within the m/z tolerance merge into ONE multi-modal trace, producing a merged precursor with the wrong monoisotope and charge. Measured +36.7% peptides on S23 and +37.4% on S08 at peptide-level FDR. Costs ~1.7x wall time and ~25% peak RAM. 0 = off.", false);
     registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
 registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Same as frame_aggregation_n but for the MS1 (PRECURSOR) map. This is the one that can add DEPTH: measurement shows we identify MORE spectra than diaTracer (3.7%% vs 2.0%% of spectra) but cover FEWER distinct peptides (4.6 vs 1.46 PSMs/peptide), i.e. we miss low-abundance PRECURSORS. Aggregating MS2 alone cannot fix that. 1 = off.", false);
@@ -835,16 +843,37 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "[ms1-funnel] Write MS1 traces and inferred precursors to <prefix>.traces.tsv / <prefix>.precursors.tsv so precursor loss can be attributed to a stage (no trace / no hypothesis / no spectrum) rather than inferred from the final count. Empty = off.", false, true);
 
     registerIntOption_("max_charge", "<n>", 5, "Maximum precursor charge considered during isotope inference.", false);
+
+    // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
+    // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
+    // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
+    // [adv-review codex/kimi 2026-09-03]
+    setMinInt_("assembly:min_fragments", 1);
+    setMinInt_("assembly:max_fragments", 1);
+    setMinInt_("assembly:default_charge", 0);
+    setMinInt_("max_charge", 1);
+    setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
+    setMinFloat_("gate:delta_im", 0.0);
+    setMinFloat_("gate:delta_rt", 0.0);
+    setMinFloat_("gate:min_correlation", -1.0);
+    setMaxFloat_("gate:min_correlation", 1.0);
+    setMinFloat_("charge:iso_im_tolerance", 0.0);
+    setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
+    setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
+    setMinFloat_("trace:ms2_noise_threshold_int", 0.0);
+    setMinFloat_("trace:noise_threshold_int", 0.0);
+    setMinInt_("perf:ms1_trace_bands", 0);      // 0 = auto (documented)
+    setMinFloat_("perf:mem_fraction", 0.05);
+    setMaxFloat_("perf:mem_fraction", 0.95);
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message. [bugfix]
     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
-    registerIntOption_("charge:min_charge", "<n>", 2, "Minimum precursor charge to EMIT. DEFAULT 2: singly-charged hypotheses "
-                       "are 29.3%% of emission on S30 and 1.73%% of peptides -- a z=1 pseudo-spectrum is identified on 0.42%% of "
-                       "its own spectra against 15.3%% for z=2. Tryptic peptides are essentially never 1+ in ESI and "
-                       "charge:scoring breaks ties toward the LOW charge, so the mis-assignments land there. Dropping them GAINS "
-                       "peptides on both engines on all three files (Sage +0.8/+2.7/+1.4%%, MSFragger +1.2/+5.4/+0.9%%) because "
-                       "their share of the multiple-testing burden goes too, and cuts runtime 17%%. Set 1 to emit them again; "
-                       "3+ is catastrophic (charge 2 carries 56.9%% of peptides).", false);
+    registerIntOption_("charge:min_charge", "<n>", 2, "Minimum precursor charge to emit; hypotheses below it "
+                       "are dropped before extraction. Default 2, because tryptic peptides are essentially never singly "
+                       "charged in ESI: z=1 hypotheses were ~30%% of emission and ~1.7%% of identified peptides, and removing "
+                       "them raised peptide counts on both search engines on all three benchmark files while cutting runtime "
+                       "17%%. Use 1 to emit them. 3 or more removes charge 2 and most of the result. Measurements: "
+                       "docs/ISOTOPE-DUPLICATION-2026-09-03.md.", false);
     // [route-1] Only 25.7%% of diaTracer's precursors are matched by us with the RIGHT m/z AND charge;
     // 17.2%% have the wrong charge and 22.9%% (decoy-corrected) the wrong monoisotope. A wrong charge or
     // mono gives a wrong NEUTRAL MASS, so the peptide can never be identified no matter how good the
@@ -852,13 +881,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // x isotope co-elution can.
     registerStringOption_("charge:scoring", "<mode>", "count", "Charge/monoisotope inference. 'count' is the partner-count heuristic (ties favour LOW charge, break-on-first-miss) and is the DEFAULT: measured against a DIA-NN reference on S23 it gives 71.8% charge agreement vs 49.7% for 'envelope', and it eliminates the catastrophic 4->2 confusion (10,199 cases) that fabricates a ~-1198 Da phantom modification at m/z 600 in open search. 'envelope' scores each (charge, mono) hypothesis by averagine cosine x isotope co-elution and allows gapped envelopes; it was the default until 2026-07-21 and is kept for comparison. NOTE both are close to trivial: always answering z=2 scores 69.6%.", false);
     setValidStrings_("charge:scoring", {"envelope", "count"});
-    registerDoubleOption_("charge:ambiguity_margin", "<x>", 0.0, "[route-3] If a different-charge hypothesis scores within this margin of the best, emit it too (diaTracer retains multiple charges when ambiguous). 0 = single charge per precursor.", false);
+    registerDoubleOption_("charge:ambiguity_margin", "<x>", 0.0, "If a different-charge hypothesis scores within this margin of the best, emit it too (diaTracer retains multiple charges when ambiguous). 0 = single charge per precursor. ONLY EFFECTIVE with charge:scoring=envelope -- the default 'count' mode returns before this is consulted, so the value is ignored there.", false);
     registerFlag_("assembly:dedup_precursors", "[route-4] Collapse precursor hypotheses that are the same species (same charge, m/z within ppm, co-eluting RT, co-located IM). Measured redundancy: 4.6 identified spectra per unique peptide vs diaTracer's 1.46.");
     registerFlag_("assembly:require_isotope_support", "[emission] Drop precursor hypotheses with NO isotope partner (the 'guessed' singletons, ~40% of emission) instead of assigning them a default charge. Emission is over-GENERATION of distinct low-quality precursors, not redundancy, so merge/dedup cannot cut it (oracle: same-coordinate collapse only 1.1-1.3x); this gate can. Measured on S30 (2026-07-26): drops 603,858 of 1,528,113 spectra (-39.5%) for 78 of 10,036 peptides (-0.78%) -- guessed spectra identify at 1.30%% vs 11.39%% for supported (8.8x). The 0.78%% are low-abundance/no-envelope species (the open-search caveat), so keep this OFF by default and confirm FDR-recalibrated peptides on any run that enables it.");
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "[mono-guard] Reject a leftward isotope step (the walk that defines the MONOISOTOPE in charge:scoring=count) when the candidate peak is too weak to be a real lighter isotope under averagine. The partner search matches m/z, RT and IM but NEVER intensity, so it can latch onto a noise peak or a co-eluting species one isotope spacing below the true monoisotope -- making the reported precursor mass ~1.00335 Da TOO LIGHT. Closed search hides this (the engine enumerates isotope_errors and corrects it for free); OPEN/blind search turns it into a phantom -1.003 Da modification, and it is our single largest open-search delta-mass artefact on S30 (8.20%% isotope-shifted PSMs vs diaTracer's 3.46%%). The bound is averagine's LOOSEST: stepping from isotope m+1 to m the lighter peak is >= (m+1)/lambda times the heavier one, minimised at m=0 -> 1/lambda (lambda = 0.000594*neutral mass), so a value of 1.0 enforces exactly that minimum and never rejects a legitimate envelope; smaller values add slack for noise. 0 = off (old behaviour). [bench]", false);
     registerFlag_("charge:mono_averagine_select", "[mono-select] Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves. [bench]");
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. Default 0.05 (= 5x the fragment gate). A reviewer argued 0.01 (isotopes of one species share mobility, so 0.05 can admit cross-species partners), but 0.01 has NOT been measured on S30; change only behind the S30 set gate.", false);
-    // ponytail: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
+    // deliberate: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
   }
 
   /// Configure an IM-aware MassTraceDetection and run it on @p map.
@@ -1339,6 +1368,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       });
       const Hyp& best = hyps[0];
       pc.mono_mz = best.mono; pc.charge = best.z;
+      // partners + the seed = envelope size. `members` excludes the seed, so this is the whole
+      // envelope only because the seed is always one of its peaks. [adv-review kimi 2026-09-03]
       pc.n_isotopes = 1 + (int)best.partners.size();   // [Q4] envelope confidence for the mono call
       out.push_back(pc);
       used[seed] = true;
@@ -1716,6 +1747,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
     const Size max_frags = (Size)getIntOption_("assembly:max_fragments");
     const int max_charge = getIntOption_("max_charge");
+    mzEstimator() = getStringOption_("trace:mz_estimator");   // before any toTrace() call
     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
 
     PeakMap exp;
@@ -1797,7 +1829,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         return ILLEGAL_PARAMETERS;
       }
     }
-    // ponytail: assumes 1/K0 (VSSC). ms/CCS conversion and FAIMS rejection are Phase 2 [M-2].
+    // deliberate: assumes 1/K0 (VSSC). ms/CCS conversion and FAIMS rejection are Phase 2 [M-2].
 
     // Centroid IM frames that are still profile, keeping per-peak IM at a tolerance no coarser
     // than the trace IM tolerance [C-2]. Split MS1 vs MS2 into separate working maps.
@@ -1999,6 +2031,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // that already exists (fragment traces are canonicalised right after detectTraces_) and makes
     // the whole tool reproducible -- which also makes the emitted-count/peptide correctness gate
     // MEASURABLE. [adv-review kimi/codex 2026-07-26]
+    // A non-finite coordinate makes the comparator below non-transitive, which is UB in sort()
+    // and silently corrupts every lower_bound on the result. The fragment path already filtered;
+    // this one did not. [adv-review codex/kimi 2026-09-03]
+    {
+      const size_t before = ms1_traces.size();
+      ms1_traces.erase(remove_if(ms1_traces.begin(), ms1_traces.end(), [](const Trace& t) {
+        return !std::isfinite(t.mz) || !std::isfinite(t.rt) || !std::isfinite(t.im)
+               || !std::isfinite(t.intensity);
+      }), ms1_traces.end());
+      if (before != ms1_traces.size())
+        writeLogInfo_("dropped " + String(before - ms1_traces.size()) + " MS1 traces with non-finite coordinates");
+    }
     sort(ms1_traces.begin(), ms1_traces.end(), [](const Trace& a, const Trace& b) {
       if (a.mz != b.mz) return a.mz < b.mz;
       if (a.rt != b.rt) return a.rt < b.rt;
@@ -2045,110 +2089,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                        [](const Precursor_& pc){ return pc.guessed; }), precursors.end());
       writeLogInfo_("require_isotope_support: dropped " + String(before - precursors.size())
                     + " guessed precursors, " + String(precursors.size()) + " isotope-supported remain");
-    }
-    // [iso-collapse, 2026-09-03] 31.4% of emitted spectra have a co-eluting same-charge partner 1-3
-    // isotope steps below, against a 3.8% decoy-offset control; removing them lands at diaTracer's
-    // spectrum count. They cannot be merged after the fact -- content cosine is 0.505 against 0.446 for
-    // an arbitrary co-eluting neighbour, so each hypothesis extracted DIFFERENT fragments. Collapse the
-    // PRECURSORS instead, before extraction, which saves the extraction work too.
-    // Which member survives decides whether peptides are lost. "Keep the lightest" is backwards: where
-    // only the heavier member was identified, Sage says the mass we reported was already right 70% of
-    // the time. The default keeps the most INTENSE MS1 trace, which is the monoisotope in both failure
-    // directions -- a spurious peak below the mono is weaker, and the mono outweighs its own M+1 below
-    // ~1800 Da (above that this rule flips, hence the A/B). SPEXTRACT_ISO_COLLAPSE=intense|light|heavy|niso.
-    if (const char* icr = std::getenv("SPEXTRACT_ISO_COLLAPSE"))
-    {
-      const std::string rule(icr);
-      const char* kenv = std::getenv("SPEXTRACT_ISO_COLLAPSE_K");
-      const int kmax = kenv ? std::atoi(kenv) : 3;
-      const double ISO_ = 1.0033548;
-      const size_t before = precursors.size();
-      vector<size_t> by_mz(precursors.size());
-      for (size_t i = 0; i < by_mz.size(); ++i) by_mz[i] = i;
-      sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b){ return precursors[a].mono_mz < precursors[b].mono_mz; });
-      vector<double> mzs(by_mz.size());
-      for (size_t i = 0; i < by_mz.size(); ++i) mzs[i] = precursors[by_mz[i]].mono_mz;
-      auto key = [&](size_t i) -> double {
-        const Precursor_& p = precursors[i];
-        if (rule == "light") return -p.mono_mz;
-        if (rule == "heavy") return  p.mono_mz;
-        if (rule == "niso")  return  (double)p.n_isotopes;
-        return p.trace_idx < ms1_traces.size() ? ms1_traces[p.trace_idx].intensity : 0.0;
-      };
-      vector<size_t> order(precursors.size());
-      for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-      sort(order.begin(), order.end(), [&](size_t a, size_t b){ return key(a) > key(b); });
-      // Greedy dominating set: best-first, each survivor removes its own lattice neighbours only.
-      // Not single-linkage -- transitive chaining spans genuinely different species (measured: an
-      // ORACLE component collapse still lost 1,387 peptides).
-      vector<char> dead(precursors.size(), 0), kept(precursors.size(), 0);
-      vector<size_t> killer(precursors.size(), (size_t)-1); vector<int> kstep(precursors.size(), 0);
-      for (size_t i : order)
-      {
-        if (dead[i]) continue;
-        const Precursor_& p = precursors[i];
-        if (p.charge <= 0) continue;
-        kept[i] = 1;
-        const double tol = p.mono_mz * mass_ppm * 1e-6;
-        for (int k = 1; k <= kmax; ++k)
-          for (int sgn = -1; sgn <= 1; sgn += 2)
-          {
-            const double t = p.mono_mz + sgn * k * ISO_ / p.charge;
-            size_t lo = std::lower_bound(mzs.begin(), mzs.end(), t - tol) - mzs.begin();
-            size_t hi = std::upper_bound(mzs.begin(), mzs.end(), t + tol) - mzs.begin();
-            for (size_t q = lo; q < hi; ++q)
-            {
-              const size_t j = by_mz[q];
-              if (j == i || dead[j] || kept[j]) continue;
-              const Precursor_& o = precursors[j];
-              if (o.charge != p.charge) continue;
-              if (fabs(o.rt - p.rt) > delta_rt || fabs(o.im - p.im) > iso_im_tol) continue;
-              dead[j] = 1; killer[j] = i; kstep[j] = sgn * k;
-            }
-          }
-      }
-      // SPEXTRACT_ISO_COLLAPSE_LOG=<tsv>: one row per removal, with the survivor that caused it, so
-      // a lost peptide can be traced back to the exact collapse that took it.
-      if (const char* lg = std::getenv("SPEXTRACT_ISO_COLLAPSE_LOG"))
-      {
-        // Same species or coincidence? Two hypotheses of ONE peptide share an elution profile;
-        // a faint independent peptide that merely sits on the lattice does not. Correlating the two
-        // MS1 XICs is the guard that could separate the free removals from the harmful ones.
-        auto xicCorr = [&](const Trace& a, const Trace& b) -> double {
-          size_t i = 0, j = 0; double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0; int m = 0;
-          while (i < a.xic.size() && j < b.xic.size())
-          {
-            if (fabs(a.xic[i].first - b.xic[j].first) < 1e-6)
-            { const double x = a.xic[i].second, y = b.xic[j].second;
-              sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; ++m; ++i; ++j; }
-            else if (a.xic[i].first < b.xic[j].first) ++i; else ++j;
-          }
-          if (m < 3) return -2.0;
-          const double cov = sxy - sx * sy / m, vx = sxx - sx * sx / m, vy = syy - sy * sy / m;
-          return (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : -2.0;
-        };
-        std::ofstream f(lg);
-        f << "rm_mz\trm_rt\trm_im\trm_z\trm_niso\trm_int\tsv_mz\tsv_rt\tsv_im\tsv_niso\tsv_int\tk\tcorr\n";
-        f.precision(12);
-        for (size_t i = 0; i < precursors.size(); ++i)
-        {
-          if (!dead[i] || killer[i] == (size_t)-1) continue;
-          const Precursor_& r = precursors[i]; const Precursor_& v = precursors[killer[i]];
-          const double ri = r.trace_idx < ms1_traces.size() ? ms1_traces[r.trace_idx].intensity : 0.0;
-          const double vi = v.trace_idx < ms1_traces.size() ? ms1_traces[v.trace_idx].intensity : 0.0;
-          f << r.mono_mz << '\t' << r.rt << '\t' << r.im << '\t' << r.charge << '\t' << r.n_isotopes
-            << '\t' << ri << '\t' << v.mono_mz << '\t' << v.rt << '\t' << v.im << '\t' << v.n_isotopes
-            << '\t' << vi << '\t' << kstep[i] << '\t'
-            << (r.trace_idx < ms1_traces.size() && v.trace_idx < ms1_traces.size()
-                ? xicCorr(ms1_traces[r.trace_idx], ms1_traces[v.trace_idx]) : -2.0) << '\n';
-        }
-      }
-      size_t w = 0;
-      for (size_t i = 0; i < precursors.size(); ++i) if (!dead[i]) precursors[w++] = precursors[i];
-      precursors.resize(w);
-      writeLogInfo_("iso-collapse (" + String(rule) + ", k<=" + String(kmax) + "): removed "
-                    + String(before - w) + " of " + String(before) + " precursor hypotheses, "
-                    + String(w) + " remain");
     }
     // [min-charge, 2026-09-03] 29.3% of S30 emission is SINGLY-charged precursor hypotheses (271,559
     // spectra) and they carry 259 unique peptides, 1.73%. They are identified on 0.42% of their own
@@ -2344,12 +2284,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     //
     // min_band_da = 8x the halo keeps overhead near 12% at the narrow end. Bands are capped by
     // the thread budget so windows x bands cannot oversubscribe.
-    auto bands_for = [&](double lo, double hi, int cap) {
-      const double halo = 20.0 * getDoubleOption_("trace:mass_error_ppm") * 1e-6 * (0.5 * (lo + hi));
-      const double min_band_da = std::max(8.0 * halo, 1e-9);
-      int b = (int)std::floor((hi - lo) / min_band_da);
-      return std::max(1, std::min(b, cap));
-    };
     int n_bands = getIntOption_("perf:trace_bands");
     if (n_bands <= 0)  // auto: enough bands that windows x bands covers every thread
       n_bands = (int)std::ceil((double)n_threads / std::max<size_t>(window_list.size(), 1));
@@ -2430,15 +2364,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
         for (MSSpectrum& s : wmap) s.setMSLevel(1); // MassTraceDetection traces MS1-level only
         wmap.sortSpectra();
-        // [backfill, 2026-09-03] retain the window's picked frames for the raw-peak backfill arm: detectTraces_
-        // partitions its map into bands and clears it, so by assembly time wmap is empty (the first backfill
-        // run was a silent no-op, byte-identical to apex).
-        PeakMap wraw; vector<double> wrt; double prec_int_q = std::numeric_limits<double>::infinity();
-        if (backfill_raw_ > 0)
-        {
-          wraw = wmap; wrt.resize(wraw.size());
-          for (Size i = 0; i < wraw.size(); ++i) wrt[i] = wraw[i].getRT();
-        }
         // [cross-frame] sum adjacent cycles for THIS window before detecting fragment traces
         if (agg_n > 1) aggregateFrames_(wmap, agg_n, mass_ppm, delta_im);
         String ms2_span;
@@ -2446,7 +2371,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // per-window band count: n_bands is the AUTO cap (threads/windows); a wide tile may exceed
         // it since bands are cheap relative to the trace work they unlock, a narrow one may not
         // reach it. Explicit -perf:trace_bands N pins every window to N.
-        // MEASURED on S30: flat 12 beats the per-window `bands_for` heuristic by 25% and beats
+        // MEASURED on S30: a flat 12 bands beats a per-window width-derived band count by 25% and beats
         // flat 24 as well (1,844 s vs 2,483 s vs 1,987 s). The heuristic under-provisioned
         // because it sized bands against HALO overhead, and the halo term turned out to be
         // dominated by a much larger effect: trace CPU falls 11,168 -> 5,378 -> 2,972 s across
@@ -2455,7 +2380,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // band halves the candidate list for every apex in it -- superlinear, and it swamps the
         // fixed per-band halo cost. 24 bands then loses to 12 on wall time despite half the CPU,
         // because 24 windows x 24 bands = 576 threads on 100 cores and scheduling overtakes the
-        // algorithmic gain. bands_for is kept for reference but is no longer the default path.
+        // algorithmic gain.
         // [auto-band-fix] Use the RESOLVED n_bands, not the raw option. In auto mode
         // (perf:trace_bands=0) n_bands was computed as ceil(threads/windows) at the top and
         // n_conc was sized from it, but the actual call here re-read the raw 0 and max(1,0)=1
@@ -2510,11 +2435,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // (charge 0 is NOT dropped: emitted with charge UNSET so the engine searches its range.)
         size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), win_lo) - prec_mz.begin();
         size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), win_hi) - prec_mz.begin();
-        if (backfill_raw_ > 0 && backfill_maxq_ > 0.0)   // [content 3] window q-quantile of precursor MS1 intensity
-        {
-          vector<double> iv; for (size_t pi = plo; pi < phi; ++pi) if (precursors[pi].trace_idx < ms1_traces.size()) iv.push_back(ms1_traces[precursors[pi].trace_idx].intensity);
-          if (!iv.empty()) { sort(iv.begin(), iv.end()); prec_int_q = iv[std::min(iv.size() - 1, (size_t)(backfill_maxq_ * iv.size()))]; }
-        }
         if (apportion > 0.0 && rp_max <= 0)
         {
           // [route-4] INTENSITY APPORTIONMENT — the only assembly lever that is not a count knob.
@@ -2603,44 +2523,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             MSSpectrum ms2;
             assembleOne_(pc, win_lo, win_hi, frag_traces, frag_im, ms1_traces, fg,
                          delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
-            // [content candidate 3, 2026-09-03] SPEXTRACT_BACKFILL_RAW=N: the faint tail is short by ~2 of ~9
-            // matched ions that never become a trace (coverage arms falsified). Add the N most intense raw
-            // picked peaks of the frame nearest the precursor's RT, inside its IM band, that are not already
-            // in the spectrum (10 ppm) -- the peak-level content diaTracer's ~500-peak spectra carry.
-            // SPEXTRACT_BACKFILL_EMPTY=1: a hypothesised precursor with NO correlated fragment trace (17% of the
-            // diaTracer-only peptides are exactly this) still gets a spectrum made of the apex frame's IM-band peaks.
-            if (backfill_raw_ > 0 && backfill_empty_ && ms2.empty() && !wraw.empty())
-            {
-              vector<pair<double, double>> frags; vector<double> frag_scores;
-              assembleFromList_(pc, win_lo, win_hi, frags, frag_scores, 0, max_frags, ms2);   // metadata only
-            }
-            // SPEXTRACT_BACKFILL_MAXFRAGS=K restricts the backfill to spectra with <= K assembled fragments (the faint tail)
-            // SPEXTRACT_BACKFILL_MAXQ=q: only precursors whose MS1 trace intensity is below the window's q-quantile
-            const bool faint_ok = backfill_maxq_ <= 0.0 || (pc.trace_idx < ms1_traces.size() && ms1_traces[pc.trace_idx].intensity <= prec_int_q);
-            if (backfill_raw_ > 0 && faint_ok && (!ms2.empty() || (backfill_empty_ && ms2.metaValueExists("spx_guessed"))) && !wraw.empty() && (backfill_maxfrags_ <= 0 || (int)ms2.size() <= backfill_maxfrags_))
-            {
-              size_t si = (size_t)(lower_bound(wrt.begin(), wrt.end(), pc.rt) - wrt.begin());
-              if (si == wrt.size() || (si > 0 && pc.rt - wrt[si - 1] < wrt[si] - pc.rt)) --si;
-              const MSSpectrum& raw = wraw[si];
-              const auto imd = raw.getIMData();
-              const auto& ima = raw.getFloatDataArrays()[imd.first];
-              vector<double> have(ms2.size()); for (Size k = 0; k < ms2.size(); ++k) have[k] = ms2[k].getMZ();
-              sort(have.begin(), have.end());
-              vector<pair<float, double>> cand;                       // (intensity, mz)
-              for (Size k = 0; k < raw.size() && k < ima.size(); ++k)
-              {
-                if (fabs((double)ima[k] - pc.im) > delta_im) continue;
-                const double mz = raw[k].getMZ(), tol = mz * 10e-6;
-                auto it = lower_bound(have.begin(), have.end(), mz - tol);
-                if (it != have.end() && *it <= mz + tol) continue;    // already represented
-                cand.emplace_back(raw[k].getIntensity(), mz);
-              }
-              const size_t n = std::min<size_t>((size_t)backfill_raw_, cand.size());
-              partial_sort(cand.begin(), cand.begin() + n, cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-              for (size_t k = 0; k < n; ++k) ms2.emplace_back(cand[k].second, cand[k].first);
-              ms2.sortByPosition();
-              if (ms2.size() < min_frags) ms2.clear(true);            // backfill-only spectra still honour min_fragments
-            }
             if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
           }
           auto _t6 = std::chrono::steady_clock::now();
