@@ -1870,7 +1870,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
   /// Shared by the per-precursor path and the competitive (best-precursor) assignment. [bench]
   template <class Emit>
   void scoreCandidates_(const Precursor_& pc, const vector<Trace>& frag_traces,
-                        const vector<double>& frag_im, const vector<Trace>& ms1_traces,
+                        const vector<double>& frag_im, const vector<double>& frag_rt,
+                        const vector<Trace>& ms1_traces,
                         const FragGrid& fg, double delta_im, double delta_rt, double min_corr,
                         int min_corr_pts, vector<float>& pdense, Emit&& emit) const
   {
@@ -1921,10 +1922,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       stat_slice_ += (long long)(hi - lo); ++stat_prec_;
       for (size_t fi = lo; fi < hi; ++fi)
       {
-        const Trace& f = frag_traces[fi];
-        if (fabs(f.rt - pc.rt) > delta_rt) continue;                   // RT gate
+        // Read the gate field from a parallel array, and do NOT touch the 96-byte trace record
+        // until the fragment has passed: 99.4% of visits end here, and at 8 B instead of 96 B the
+        // scan moves ~12x fewer bytes. [soa]
+        if (fabs(frag_rt[fi] - pc.rt) > delta_rt) continue;            // RT gate
         ++n_rtpass;
         if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
+        const Trace& f = frag_traces[fi];
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
         // [C9 A/B, 2026-09-02] 28% of emitted spectra carry the precursor's M+1 and 25% its M+2 as
         // "fragments" (unfragmented survivors). SPEXTRACT_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
@@ -2155,13 +2159,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
   /// be shared across precursors -> chimeric). Leaves @p out empty on failure.
   void assembleOne_(const Precursor_& pc, double win_lo, double win_hi,
                     const vector<Trace>& frag_traces, const vector<double>& frag_im,
+                    const vector<double>& frag_rt,
                     const vector<Trace>& ms1_traces, const FragGrid& fg,
                     double delta_im, double delta_rt, double min_corr, int min_corr_pts,
                     Size min_frags, Size max_frags, vector<float>& pdense, MSSpectrum& out) const
   {
     vector<pair<double, double>> frags;
     vector<double> frag_scores;
-    scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
+    scoreCandidates_(pc, frag_traces, frag_im, frag_rt, ms1_traces, fg, delta_im, delta_rt, min_corr,
                      min_corr_pts, pdense, [&](size_t fi, double c) {
       const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);
       frags.emplace_back(exportMz_(frag_traces[fi].tof, frag_traces[fi].b, frag_traces[fi].mz), emit_inten);
@@ -2971,8 +2976,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (a.rt != b.rt) return a.rt < b.rt;
           return a.intensity < b.intensity;
         });
-        vector<double> frag_im(frag_traces.size());
-        for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
+        vector<double> frag_im(frag_traces.size()), frag_rt(frag_traces.size());
+        for (size_t i = 0; i < frag_traces.size(); ++i)
+        { frag_im[i] = frag_traces[i].im; frag_rt[i] = frag_traces[i].rt; }
 
         // Precompute the common correlation grid once per window; pdense is reused across the
         // window's precursors (this window runs on one thread). [perf]
@@ -3014,7 +3020,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           {
             const Precursor_& pc = precursors[pi];
             if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
-            scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
+            scoreCandidates_(pc, frag_traces, frag_im, frag_rt, ms1_traces, fg, delta_im, delta_rt, min_corr,
                              min_corr_pts, pdense, [&](size_t fi, double c) {
               wsum[fi] += (float)std::pow(std::max(c, 0.0), apportion);
             });
@@ -3025,7 +3031,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
             vector<pair<double, double>> frags;
             vector<double> frag_scores;
-            scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
+            scoreCandidates_(pc, frag_traces, frag_im, frag_rt, ms1_traces, fg, delta_im, delta_rt, min_corr,
                              min_corr_pts, pdense, [&](size_t fi, double c) {
               const double w = wsum[fi] > 0.0f ? std::pow(std::max(c, 0.0), apportion) / wsum[fi] : 1.0;
               const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity * w, c, frag_im[fi] - pc.im);   // [E5]
@@ -3075,7 +3081,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             const Precursor_& pc = precursors[pi];
             if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
             MSSpectrum ms2;
-            assembleOne_(pc, win_lo, win_hi, frag_traces, frag_im, ms1_traces, fg,
+            assembleOne_(pc, win_lo, win_hi, frag_traces, frag_im, frag_rt, ms1_traces, fg,
                          delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
             if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
           }
@@ -3097,7 +3103,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           {
             const Precursor_& pc = precursors[pi];
             if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
-            scoreCandidates_(pc, frag_traces, frag_im, ms1_traces, fg, delta_im, delta_rt, min_corr,
+            scoreCandidates_(pc, frag_traces, frag_im, frag_rt, ms1_traces, fg, delta_im, delta_rt, min_corr,
                              min_corr_pts, pdense, [&](size_t fi, double c) {
               ++nfan[fi];
               auto& tk = topk[fi];
