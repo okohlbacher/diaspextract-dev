@@ -11,6 +11,7 @@ peptides):
 | corrected, measured per-peak m/z | 656,241 | **12,650** | 9:28 | 174 GB |
 | corrected, prep hoisted + bin search | 656,256 | 12,466 | 9:31 | 185 GB |
 | **corrected, valley splitting chunked + parallel** | 656,256 | 12,466 | **6:53** | **105 GB** |
+| same, raw-emptiness A/B (SPEXTRACT_INT_EMPTY_RAW=1) | 656,256 | pending | 6:56 | 105 GB |
 | OpenMS detector, same binary | 656,254 | 12,642 | 7:17-7:22 | 164-166 GB |
 
 **The serial section was valley splitting.** Chunking it into bands*4 parallel tasks, as the OpenMS
