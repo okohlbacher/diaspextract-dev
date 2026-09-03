@@ -577,3 +577,16 @@ falsifier: the deficit stays at +2 (then the missing ions are not in our traces 
 **MSFragger 11,429 (−4.2% vs 11,927)**. The correlation-power intensity reshaping is a win on both engines (first
 MSFragger measurement of it; the July +8-10% was Sage-only). Intensity structure is not what MSFragger dislikes in our
 faint-tail spectra. Remaining content candidate: fragment coverage (the +2 matched-ion deficit) -- arms running.
+
+### COVERAGE ARMS FALSIFIED (2026-09-03, 03:10): the missing fragment ions are not in our traces at all
+| S30 arm | spectra | Sage vs apex 12,537 | MSFragger vs apex 11,927 | dt-only: ours vs dt matched ions |
+|---|---|---|---|---|
+| `gate:min_correlation 0.2` | 928,572 | 12,509 (145/117) | 11,935 | 7 vs 9, deficit +2 |
+| `trace:ms2_noise_threshold_int 5` | 927,813 | **12,537, symdiff 0 (byte-identical)** | 11,927 | 7 vs 9, deficit +2 |
+| both | 928,572 | 12,509 | 11,935 | 7 vs 9, deficit +2 |
+Loosening the correlation gate adds nothing to the faint tail, and the intensity threshold 5 vs 10 changes NOTHING
+(the SNR / min-length gates already decide). Per the pre-registered falsifier, the ~2 missing ions per faint spectrum are
+not in our fragment TRACES: they are peaks that never become a trace (single-frame or sub-SNR) -- exactly the population
+diaTracer's ~500-peak spectra carry and our ~55-trace spectra do not. Next arm (content candidate 3): backfill each
+pseudo-spectrum with the raw picked MS2 peaks of the precursor's apex frame inside its IM band (top-N not already
+present), the DIA-Umpire/diaTracer-style "peak-level" spectrum, both engines; falsifier: dt-only deficit stays +2.
