@@ -926,46 +926,66 @@ namespace
   }
 
   /// Integer traces -> MassTrace objects for EPD -> Trace again, with the flight-time bin
-  /// re-attached from the apex frame's calibration (the store is ~400x finer than a bin, so the
-  /// inversion recovers the measured bin exactly). Only the TRACES become OpenMS objects here --
-  /// the peak arrays never do, which is the point of the integer path.
-  vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, const PeakSlab& sl)
+  /// re-attached from the apex frame's calibration. Only the TRACES become OpenMS objects -- the
+  /// peak arrays never do, which is the point of the integer path.
+  ///
+  /// CHUNKED AND PARALLEL, like the OpenMS path's own valley-splitting step (do_split over
+  /// bands*4 chunks as tasks). The previous version converted every trace of a window into a
+  /// MassTrace (a list<Peak2D>, ~48 B/point) on ONE thread and then ran ElutionPeakDetection over
+  /// all of them at once, also on one thread: a serial section of a stage that is 95% of the window
+  /// loop, and the whole window's list-based copy alive at the same time. That is consistent with
+  /// what was measured -- occupancy 44x against 81x for the OpenMS path, and MORE peak memory,
+  /// after the per-band sorts and the per-visit calibration calls had already been removed and
+  /// changed nothing.
+  vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, const PeakSlab& sl, int nchunk)
   {
     if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);   // OpenMS branch: EPD needs > 1
-    vector<MassTrace> mts; mts.reserve(in.size());
-    // frame factor by RT index, so each point's bin becomes ITS OWN measured m/z
     std::unordered_map<uint32_t, double> b_of_rt;
     for (size_t f = 0; f < sl.frames(); ++f) b_of_rt[sl.rt_index[f]] = sl.b[f];
     const TofAxis& ax = tofAxis();
-    for (Trace& t : in)
+    nchunk = std::max(1, std::min<int>(nchunk, (int)in.size()));
+    vector<vector<Trace>> parts(nchunk);
+    const size_t n_in = in.size();
+    #pragma omp taskloop grainsize(1) default(shared)
+    for (int ci = 0; ci < nchunk; ++ci)
     {
-      std::list<Peak2D> pk;
-      for (size_t i = 0; i < t.np(); ++i)
+      const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
+      vector<MassTrace> mts; mts.reserve(hi - lo);
+      for (size_t q = lo; q < hi; ++q)
       {
-        Peak2D q; q.setRT(t.rtAt(i)); q.setIntensity(t.xv[i]);
-        const bool have_bin = ax.ok && i < t.xt.size();
-        auto bi = have_bin ? b_of_rt.find(t.xi[i]) : b_of_rt.end();
-        q.setMZ(bi != b_of_rt.end() ? ax.mzOf(t.xt[i], bi->second) : t.mz);
-        pk.push_back(q);
+        Trace& t = in[q];
+        std::list<Peak2D> pk;
+        for (size_t i = 0; i < t.np(); ++i)
+        {
+          Peak2D pt; pt.setRT(t.rtAt(i)); pt.setIntensity(t.xv[i]);
+          const bool have_bin = ax.ok && i < t.xt.size();
+          auto bi = have_bin ? b_of_rt.find(t.xi[i]) : b_of_rt.end();
+          pt.setMZ(bi != b_of_rt.end() ? ax.mzOf(t.xt[i], bi->second) : t.mz);
+          pk.push_back(pt);
+        }
+        MassTrace mt(pk);
+        mt.setCentroidIM(t.im);
+        mts.push_back(std::move(mt));
+        t.freeProfile();                                   // the list copy replaces it, chunk-wise
       }
-      MassTrace mt(pk);
-      mt.setCentroidIM(t.im);
-      mts.push_back(std::move(mt));
-      t.freeProfile();
+      vector<MassTrace> split = splitValleys(mts, split_valleys);
+      vector<Trace>& out = parts[ci];
+      out.reserve(split.size());
+      for (const MassTrace& mt : split)
+      {
+        Trace t = toTrace(mt);
+        if (t.np() == 0) continue;
+        size_t ap = 0; for (size_t i = 1; i < t.np(); ++i) if (t.xv[i] > t.xv[ap]) ap = i;
+        auto it = b_of_rt.find(t.xi[ap]);
+        t.b = it != b_of_rt.end() ? it->second : ax.factor(0);
+        t.tof = ax.ok ? ax.tofOf(t.mz, t.b) : 0;
+        out.push_back(std::move(t));
+      }
     }
     vector<Trace>().swap(in);
-    vector<MassTrace> split = splitValleys(mts, split_valleys);
-    vector<Trace> out; out.reserve(split.size());
-    for (const MassTrace& mt : split)
-    {
-      Trace t = toTrace(mt);
-      if (t.np() == 0) continue;
-      size_t ap = 0; for (size_t i = 1; i < t.np(); ++i) if (t.xv[i] > t.xv[ap]) ap = i;
-      auto it = b_of_rt.find(t.xi[ap]);
-      t.b = it != b_of_rt.end() ? it->second : ax.factor(0);
-      t.tof = ax.ok ? ax.tofOf(t.mz, t.b) : 0;
-      out.push_back(std::move(t));
-    }
+    size_t tot = 0; for (const auto& v : parts) tot += v.size();
+    vector<Trace> out; out.reserve(tot);
+    for (auto& v : parts) { for (auto& t : v) out.push_back(std::move(t)); vector<Trace>().swap(v); }
     return out;
   }
 
@@ -3103,7 +3123,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           }
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
           // defects behind the first version's 92% peptide loss.
-          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wslab);
+          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wslab, std::max(1, w_bands) * 4);
           PeakSlab().frame_off.swap(wslab.frame_off);   // consumed
           vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
           vector<double>().swap(wslab.b);

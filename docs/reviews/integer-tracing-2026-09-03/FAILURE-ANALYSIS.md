@@ -9,7 +9,8 @@ peptides):
 | + sample-rate sentinel fixed only | 625,495 | 8,907 | 4:25 | 92 GB |
 | corrected, centroid m/z into valley splitting | 656,241 | 11,940 | 9:38 | 168 GB |
 | corrected, measured per-peak m/z | 656,241 | **12,650** | 9:28 | 174 GB |
-| OpenMS detector, same binary | 656,254 | 12,642 | 7:22 | 166 GB |
+| corrected, prep hoisted + bin search | 656,256 | 12,466 | 9:31 | 185 GB |
+| OpenMS detector, same binary | 656,254 | 12,642 | 7:17-7:22 | 164-166 GB |
 
 **Science: parity.** 12,650 against 12,642, with a symmetric set difference (1,036 only-reference,
 1,044 only-integer): the residual of a faithful reimplementation that is not bit-identical, and a
@@ -22,8 +23,14 @@ corrected version's own bookkeeping, not in the algorithm:
    seed list) -- twelve full-window sorts per window, twelve P-sized array sets alive at once;
 2. the candidate walk converted every visited peak from bin to m/z (a sqrt per visit) to compare
    in m/z, although the calibration is monotone and closest-in-bins is the same peak.
-The version after this one prepares each window once and searches in bins; only accepted peaks are
-ever converted. Whether that recovers the 30-50% the design promised is what its run measures.
+The version after that prepared each window once and searched in bins -- and changed NOTHING
+(9:31, occupancy 44x, memory up to 185 GB, peptides 12,466). So neither the per-band sorts nor
+the per-visit calibration calls were the cost. What that version still did on one thread per
+window, and the OpenMS path does in bands*4 parallel chunks, is valley splitting: every trace
+converted to a list-based MassTrace and ElutionPeakDetection run over the whole window's traces at
+once -- a serial section inside the stage that is 95% of the loop, with the whole window's list
+copy alive simultaneously. That is consistent with both the occupancy and the memory. The next
+version chunks and parallelises it exactly as the OpenMS path does.
 
 **Second-pass review (docs/reviews/integer-tracing-v2-2026-09-03/):** vibe found the extension
 loop faithful line by line and the per-peak m/z gap above. codex found it "close but not

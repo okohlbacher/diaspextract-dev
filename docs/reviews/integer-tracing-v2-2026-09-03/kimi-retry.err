@@ -1,0 +1,782 @@
+kimi version 0.40.1
+• Let me analyze the code carefully against the OpenMS excerpts. This is a pure reasoning task, no tools. Let me go line by line.
+
+  First, understand the OpenMS ground truth:
+
+  1. `updateIterativeWeightedMean_`: counter_tmp = 1 + (w*v)/cnt; denom_tmp = 1 + w/den; c *= counter_tmp/denom_tmp; then cnt += w*v; den += w. Tool's `iwm` lambda: `ct = 1.0 + (w*v)/cnt, dt = 1.0 + w/den; c *= ct/dt; cnt += w*v; den += w;` — matches. Good. The prompt says "the two lines after were cut off; VERIFY" — my knowledge of OpenMS: in MassTraceDetection::updateIterativeWeightedMean_:
+  ```cpp
+  double counter_tmp(1 + (added_intensity * added_value) / prev_counter);
+  double denominator_tmp(1 + (added_intensity / prev_denominator));
+  centroid *= (counter_tmp / denominator_tmp);
+  prev_counter += added_intensity * added_value;
+  prev_denominator += added_intensity;
+  ```
+  Yes, tool matches.
+
+  2. Seed init: OpenMS run_ does: centroid_mz = apex.mz; prev_counter = I*mz; prev_denom = I; then updateIterativeWeightedMean_(apex.mz, I, ...) — the apex applied AGAIN. So after double application: cmz = m0 * (1 + w0*m0/(w0*m0)) / (1 + w0/w0) = m0 * 2/2 = m0. And cnt = 2*w0*m0, den = 2*w0. Tool does exactly this: cmz = m0, cnt = w0*m0, den = w0; iwm(m0, w0, ...) → matches.
+
+  Same for IM: OpenMS does the same for centroid_im (the excerpt says "same for centroid_im"). Tool: cim = sl.imq[seed], cnt_im = w0*cim, den_im = w0; iwm(...). Matches — but note: OpenMS works on IM in raw units; tool works on quantized imq (integer). That's a COORD difference for centroid_im, and also affects the IM gate comparisons. imq quantization: cim is integer (imq units), compared `std::abs(imq[k] - cim) > imq_tol`. OpenMS compares |im_k - centroid_im| > ion_mobility_tolerance with floating centroid. Quantization error up to half an imq unit. With IM_Q presumably 1/... unknown scale. IM gate: `std::abs((double)sl.imq[k] - cim) > imq_tol` where cim is a running weighted mean of integers (double). Quantization could shift borderline peaks in/out → SET effect (borderline). Mention.
+
+  3. ftl_sd init: sd = (cmz/1e6)*mass_ppm; intensity_so_far = I. Tool: sd = (cmz/1e6)*mass_ppm, wsum = w0. Matches. Note cmz after double-count = m0, so same.
+
+  4. Extension loop guard: OpenMS:
+  ```
+  while ((down_idx > 0 && down.active) || (up_idx < n-1 && up.active))
+  ```
+  Tool:
+  ```
+  while ((fd > 0 && dn.active) || (fu + 1 < (long)F && up.active))
+  ```
+  Matches.
+
+  But — important subtlety in OpenMS loop body: OpenMS's actual run_ loop increments scan counters and decrements indices. Excerpt:
+  ```
+  if (down_idx > 0 && down.active) {
+    spec = work_exp[down_idx-1];
+    if (!spec.empty()) { cand = findBestPeak_; if (isPeakAcceptable_) { processPeak_; ++down.hits; down.missed = 0; } else ++down.missed; }
+    --down_idx; ++down.scan_counter;
+    if (OUTLIER && down.missed > trace_termination_outliers) down.active = false;
+  }
+  ```
+  Tool: matches, except:
+  - "empty" test: OpenMS tests `!spec.empty()` where work_exp is the noise-filtered map — after deletion of sub-noise peaks, a spectrum could become empty. Tool uses `tp.frame_live[f]` — has any member. Equivalent. ✓.
+  - BUT: if `!spec.empty()` is false (empty spectrum), OpenMS still does `--down_idx; ++down.scan_counter;` — tool also does fi += ... and ++d.scans outside the frame_live check. ✓ matches.
+
+  Wait, actually — subtle: OpenMS checks `if (!spec.empty())` — hmm, actually in real OpenMS the code is:
+  ```cpp
+  if (down_idx > 0 && down_toggle) {
+    Size spec_idx = down_idx - 1;
+    if (!work_exp[spec_idx].empty()) {
+      Size peak_down = work_exp.getNearestIndex(...)... 
+  ```
+  Hmm, the actual OpenMS code uses `findBestPeak_(work_exp[spec_idx], ...)` and `isPeakAcceptable_`. The excerpt given is ground truth, fine.
+
+  Key deviation candidate #1: **The `total` in isTraceValid_**. OpenMS: `isTraceValid_(trace, total_scans_visited, missed_down, missed_up)` where `adjusted = total_scans_visited - missed_down - missed_up; return trace.size()/adjusted >= min_sample_rate`. What is total_scans_visited in OpenMS? In run_: there's a counter... Actually in OpenMS, after the loop:
+
+  ```cpp
+  // check if minimum length is covered
+  ...
+  // check if enough peaks were gathered
+  double avg_peak_width = ...
+  Size total_scans_visited = ... 
+  ```
+  From memory of OpenMS MassTraceDetection::run_: it tracks `down_scans_visited` / or there's `scans_visited`... Actually I recall:
+
+  ```cpp
+  Size missed_down(0), missed_up(0);
+  Size scan_counter_down(0), scan_counter_up(0);
+  ```
+  And at the end:
+  ```cpp
+  if (isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up)) 
+  ```
+  Hmm, I believe OpenMS passes something like that. The prompt asks: "(what total_scans_visited is composed of was not in my excerpt -- state what OpenMS uses)". From my knowledge of OpenMS source:
+
+  ```cpp
+  // Check if the trace is valid
+  if (isTraceValid_(gathered_trace, total_scans_visited, missed_down, missed_up))
+  ```
+  where `total_scans_visited` — in the actual code I recall:
+
+  ```cpp
+  Size total_scans_visited(0);
+  ...
+  while (...) {
+    if (down_idx > 0 && down_toggle) {
+      ...
+      --down_idx;
+      ++scan_counter; // ?
+  ```
+  Actually let me recall the real OpenMS 3.x code. In `MassTraceDetection::run_`:
+
+  ```cpp
+  Size missed_down(0);
+  Size missed_up(0);
+  Size scan_counter_down(0);
+  Size scan_counter_up(0);
+  ...
+  while ((down_idx > 0 && down_toggle) || (up_idx < up_idx_limit && up_toggle))
+  {
+    // ... down
+    if (down_idx > 0 && down_toggle)
+    {
+      Size spec_idx = down_idx - 1;
+      if (!work_exp[spec_idx].empty())
+      {
+        Size peak_down = this->findBestPeak_(...);
+        ...
+        if (this->isPeakAcceptable_(...))
+        {
+          this->processPeak_(...);
+          ++peaks_down; missed_down = 0;
+        }
+        else ++missed_down;
+      }
+      --down_idx;
+      ++scan_counter_down;
+      if (trace_termination_criterion_ == "outlier" && missed_down > trace_termination_outliers_) down_toggle = false;
+    }
+    ... symmetric up ...
+  }
+  ```
+  And after:
+  ```cpp
+  // check if minimum length is covered
+  double rt_range(std::fabs(gathered_trace.rbegin()->getRT() - gathered_trace.begin()->getRT()));
+  // ... isTraceValid_
+  if (isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up))
+  ```
+  Hmm, I'm not 100% sure whether the +1 is there. Actually I recall isTraceValid_ signature: `isTraceValid_(const MassTrace& trace, const Size& total_scans_visited, const Size& missed_down, const Size& missed_up)`. And the call: `isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up)`. Hmm — I genuinely think there is something like that. The tool uses `total = dn.scans + up.scans + 1`. That matches my recollection. Good.
+
+  But WAIT — there's a real subtlety here: OpenMS's scan counter counts scans visited while the direction is active AND within bounds... same as tool. But: does OpenMS count a scan even when the spectrum is empty? Yes, --down_idx and ++scan_counter happen regardless. Tool matches.
+
+  Hmm, but there's another subtlety: in OpenMS, `isTraceValid_` also checks rt_range — the tool computes span from got members (frame min/max of gathered peaks) whereas OpenMS uses |last.rt - first.rt| of the gathered trace — same thing since gathered trace is in RT order. ✓.
+
+  Deviation candidate: `adjusted` guard. OpenMS: `adjusted = total - missed_down - missed_up; return trace.size()/adjusted >= min_sample_rate;` — no guard against adjusted <= 0 (division by zero → inf → passes?). Tool: `adjusted = total > dn.missed + up.missed ? total - ... : 1`. Hmm, if adjusted is 0 in OpenMS, size/0 = inf (integer division? trace.size() is Size (unsigned); `trace.size()/adjusted` — in OpenMS isTraceValid_: `return static_cast<double>(trace.size())/static_cast<double>(adjusted) >= min_sample_rate;`? I believe there's a cast. If adjusted == 0 → inf >= msr → true. Tool would use 1 → size/1 ≥ msr also likely true. Marginal; also can missed exceed total? missed counts increments only when frame_live and no acceptable peak; scans counts every step. missed ≤ scans per direction, and total = scans+1, so missed_down+missed_up ≤ scans_total < total. So adjusted ≥ 1 always; the guard is dead code. Fine, no deviation.
+
+  Deviation candidate #2: **min_trace_length**. OpenMS default min_trace_length is 0.0? No wait — in OpenMS MassTraceDetection, min_trace_length default is 0.0? Actually I recall default min_trace_length = 0.0 and max = -1.0 (disabled). The prompt says "min_trace_length / max_trace_length from the caller". Tool: `if (max_len_sec > 0.0 && span_s > max_len_sec) continue;` with comment "the tool passes 0 for off". OpenMS: `if (max_len >= 0 && rt_range > max_len) -> false`. If max_len is exactly 0.0: OpenMS treats 0 >= 0 as enabled → any span > 0 fails. Tool: 0 → off. Deviation only if caller passes exactly 0.0 meaning "enabled 0" — unlikely but a boundary difference. Minor. Actually also `min_sample_rate`: msr = min_sample_rate >= 0 ? : 0.5 — OpenMS default is 0.5, fine.
+
+  Deviation candidate #3: **min_sample_rate comparison operator**. OpenMS isTraceValid_: `return (double)trace.size() / (double)adjusted >= min_sample_rate;`. Tool: `if ((double)got.size() / (double)adjusted < msr) continue;` — equivalent to >=. ✓.
+
+  Deviation candidate #4: **taken semantics / closest-then-reject**. OpenMS: findBestPeak_ finds closest among IM-compatible within window (regardless of visited — visited check is in isPeakAcceptable_). If the closest is visited → reject (missed++), NOT try the second closest. Tool: `best` filters member, IM, then tracks closest d; after loop, `if (bk >= 0 && visited[bk]) { taken = true; return -1; }`. So the tool finds closest among ALL peaks (visited or not) and rejects if that one is visited. ✓ matches OpenMS "closest-then-reject". Good — the first version's "closest-untaken" bug is fixed.
+
+  But wait — there's a subtlety: OpenMS findBestPeak_ searches in the spectrum as stored in work_exp, which contains only peaks above noise (deleted ones gone). Tool filters `if (!member[k]) continue;`. ✓ member is applied inside the search — matches. Good, this is one of the "pay attention" items and it's correct here.
+
+  IM check placement: OpenMS findBestPeak_ filters IM inside search, so closest = closest among IM-compatible. Tool does the same (`if (std::abs(imq...) > imq_tol) continue;` before distance). ✓.
+
+  Deviation candidate #5: **The `d < bd` strict less-than tie-break**. OpenMS findBestPeak_: `if (!found or |mz_i - c| < |cand.mz - c|)` — strict less, so first of equals wins, where "first" is the iteration order from MZBegin(left) — i.e., ascending m/z order. Tool iterates ascending tof (= ascending mz within a frame, monotone calibration) with strict < → first of equals wins. ✓ equivalent. But bins vs mz: ties in bin space may not be ties in mz space — two peaks with same tof bin? Impossible within a frame? Actually two peaks in the same frame could share... no, tof values are unique-ish; but distance |tof - ct| in bins vs |mz - cmz|: since mz is a monotone function of tof (within a frame), the argmin is the same EXCEPT for ties caused by bin quantization — two peaks adjacent to the centroid bin... hmm, |tof_k - ct| where ct is fractional. Distances in bin space are strictly monotone transforms of |mz - cmz|? Not exactly: |mz1 - cmz| < |mz2 - cmz| iff |g(tof1) - g(ct)| < |g(tof2) - g(ct)| where g = tof→mz. Monotone g preserves order of |x - c|? For monotone g, |g(a) - g(c)| vs |g(b) - g(c)|: not strictly monotone in |a - c| unless g is linear... Actually if g is increasing, and a < c < b, comparing |a-c| vs |b-c| in bin space: |mz_a - cmz| = g(c) - g(a), |mz_b - cmz| = g(b) - g(c). These are ordered the same as a-c vs b-c only if g has constant slope. For a sqrt-like calibration (mz = a*sqrt(t)+b... actually tof~sqrt(mz)), slope varies, so near-ties can flip. This is a COORD/SET edge: closest-peak selection among near-ties may differ. Minor but real: "closest in m/z" ≠ "closest in bins" strictly. The comment in the code claims "closest in m/z is closest in bins because the calibration is monotone" — that's FALSE as a mathematical statement (monotone doesn't preserve distance comparisons), though the practical effect is tiny (only flips when two candidates are within ~bin-scale distance-ratio differences). Worth calling out as a hostile reviewer. Actually wait — it does preserve when both peaks are on the same side of the centroid: if a < b ≤ c, then |mz_a - cmz| > |mz_b - cmz| and |tof_a - ct| > |tof_b - ct|. Ties/flips only when candidates straddle the centroid. Real but small; SET in rare cases.
+
+  Deviation candidate #6: **window edge rounding**: lo_t = tofOf(lo_mz), hi_t = tofOf(hi_mz), then `lower_bound(..., lo_t)` and `sl.tof[k] <= hi_t`. tofOf presumably truncates to integer bin (TofIdx). If tofOf truncates: lo_t = floor(tof(lo_mz)) → lower_bound finds first tof >= floor(...) — a peak with tof = floor(lo_t) might have mz slightly < lo_mz → included though outside window (window slightly wider). hi_t = floor(tof(hi_mz)) → peak at tof = hi_t has mz ≤ hi_mz... if tofOf floors, then tof <= hi_t means mz <= mz(hi_t) <= hi_mz. Fine. But if tofOf rounds-to-nearest, edges can cut/exceed by half a bin. OpenMS uses continuous MZBegin/MZEnd on m/z. Edge effects ±1 bin — with ~400x finer store? No wait, the store is 400x finer than a bin for the re-attachment; the search window is in actual bins. A ±1 bin edge difference vs the m/z window: peaks at the very edge of ±3σ could be included/excluded differently → SET (rare). Also note OpenMS's MZBegin uses binary search on m/z; fine.
+
+  Also `lo_mz > 0 ? lo_mz : 1e-9` guard — fine.
+
+  But bigger: **the m/z↔bin round trip for the accepted peak**: tool converts accepted peak's mz via mzAt (mzOf(tof, b_of_frame)) — per-frame calibration factor. OpenMS works on the original centroided m/z values. If the tool's integer store quantized m/z into bins, then mzAt recovers an m/z that differs from the original centroid by up to half a bin (in mz space). The centroid cmz, sd re-estimation, and the reported trace mz all inherit quantization noise ~half bin. Claimed "store is ~400x finer than a bin" — that refers to bin granularity vs ... hmm, "the store is ~400x finer than a bin, so the inversion recovers the measured bin exactly" — that sentence is about splitIntegerTraces re-attaching bins. The integer store resolution vs m/z: if bins are fine enough (400x finer than what a bin needs?), the round trip error is small. As hostile reviewer: the centroid updates and SD re-estimation operate on bin-quantized m/z, which adds jitter to the ±3σ window per step; with sd re-estimated robustly, tiny jitter rarely changes membership. COORD mostly.
+
+  Deviation candidate #7: **`taken` flag is set but never used**. In `best`, `taken` out-param is set, but the caller ignores it: `if (k >= 0) {...} else ++d.missed;`. In OpenMS, a visited-closest-peak → isPeakAcceptable_ false → ++missed. Tool: same (missed++). So the taken flag is dead but behaviorally correct. Note it.
+
+  Hmm wait — actually check OpenMS outlier counting more carefully. In OpenMS run_ (actual source), there's a subtlety: when the candidate is rejected because it was already gathered... I recall `if (peak_visited[...])` etc. Per excerpt, isPeakAcceptable_ returns false → ++missed. Tool matches.
+
+  Deviation candidate #8: **hits counter unused** — OpenMS uses hits? In OpenMS, `if (peaks_down + peaks_up >= min_trace_length...)`? No — actually, hmm. OpenMS's isTraceValid_ doesn't use hits. But termination: `trace_termination_criterion "outlier"` uses missed. There's also "sample_rate" criterion: `if (SAMPLE_RATE && (double)hits/scans < min_sample_rate) active=false`. Since criterion is "outlier" only, hits unused. Tool matches for the given config but doesn't implement sample_rate termination — fine per defaults stated.
+
+  Deviation candidate #9: **Termination check ordering**: OpenMS checks `if (OUTLIER && missed > outliers) active = false` AFTER incrementing idx/counters — tool same. ✓. Note `>` vs `>=`: both use `> max_missed` with max_missed = 5 → deactivates on 6th miss. OpenMS: `missed_down > trace_termination_outliers_` → same. ✓.
+
+  Deviation candidate #10: **The while-loop / interleaving when one direction exhausts**. Tool's inner for loop: `if (!d.active) continue; if (side==0 ? !(fi>0) : !(fi+1 < F)) continue;` — matches OpenMS's per-direction guard. ✓.
+
+  Deviation candidate #11: **seed skip: visited check order**. OpenMS: apex = most intense unvisited; iterate apices in reverse; skip if visited. Tool: iterates tp.order, checks band core, then visited. ✓. But: band check BEFORE visited check — harmless.
+
+  Seed intensity threshold: OpenMS: apex must have intensity > chrom_peak_snr * noise (strict). Tool: `(double)sl.inten[k] > min_apex` strict. ✓. Noise deletion: `intensity <= noise` deleted → member = intensity > noise. ✓.
+
+  BUT — a subtle one: OpenMS deletes sub-noise peaks and the APEX list is built from the filtered map; also **apex seeding itself**: does OpenMS check chrom_peak_snr against the apex? Yes — in run_, there's a check `if (work_exp.getInt... < chrom_peak_snr_ * noise_threshold_int_) continue;`? Actually I recall the apex candidate loop: `if (apex_peak.getIntensity() < chrom_peak_snr_ * noise_threshold_int_) continue;` — the prompt says strict >. Tool: strict >. ✓. Edge: exact equality — both strict. Fine.
+
+  Deviation candidate #12: **stable_sort ascending, reverse iteration** — among equal intensities, later index seeds first. Tool sorts with comparator: intensity desc, and for equal, a > b (later index first). Equivalent to stable ascending + reverse: reverse of a stable ascending sort gives, among equals, reverse of original order → later first. ✓ matches. Intensities are integer (sl.inten) — exact equality, no float compare issue. OpenMS compares double intensities; if intensities were floats stored exactly, equal in int ⟺ equal in double? If original intensities are non-integer floats quantized to int storage, ties in int space may not be ties in original → seed order differences among near-equal intensities. COORD/SET? Seed order affects which trace claims contested peaks → SET potentially. Worth a mention under banding/quantization. Hmm, intensity stored as what? `sl.inten` compared `(double)sl.inten[k] > noise` — inten is integer-quantized. Tie-breaking differences vs OpenMS double sort: possible order flips among peaks whose original intensities differ but quantize equal. Minor SET.
+
+  Deviation candidate #13: **`reestimate_mt_sd` never turned off** — tool hardcodes sdRobust always. Default is true, fine per config. But: OpenMS calls updateWeightedSDEstimateRobust INSIDE processPeak_ AFTER updateIterativeWeightedMean_ — i.e., mean has already been updated with this peak. Tool: iwm(...) then sdRobust(mz, w, cmz, sd, wsum) — cmz already updated. ✓ matches processPeak_ order. Good.
+
+  Wait — check sdRobust args: OpenMS: updateWeightedSDEstimateRobust(p, mean, sd, last_weights_sum) where p.intensity is weight, |p.mz - mean|. Tool: sdRobust(mz, w, cmz, sd, wsum) with d2 = log(w) + 2log|mz - cmz|. ✓. And initial intensity_so_far = I (apex intensity, counted once — NOT doubled despite the double-count in the weighted mean). Tool: wsum = w0. ✓ matches (intensity_so_far = I set at seed init, and the seed double-application only applies to the weighted mean calls, not to sd robust — indeed OpenMS does NOT call updateWeightedSDEstimateRobust at seed time; ftl_sd starts from ppm). ✓.
+
+  Edge: log(w) with w = 0? intensities > noise ≥ 0; noise could be 0 → intensity > 0 strictly. log(0) impossible since member means inten > noise ≥ 0... if noise = 0, member means inten > 0. OK. log(wsum), wsum = w0 > 0. Fine. But |mz - mean| could be 0 → log(0) = -inf → d2 = -inf → exp → 0 → denom = sqrt(exp(d1)) → tmp_sd = sqrt(wsum*sd²)/sqrt(ws)... fine, same as OpenMS.
+
+  Deviation candidate #14: **sd used in window is the current re-estimated one, and window recomputed per frame step from current cmz/sd** — OpenMS findBestPeak_ called per spectrum with current centroid_mz and ftl_sd. ✓ tool recomputes lo/hi per call. ✓.
+
+  Deviation candidate #15: **`isPeakAcceptable_` re-checks the ±3sd window and IM on the candidate after findBestPeak_** — OpenMS: findBestPeak_ searches within ±3sd of CURRENT centroid/sd; isPeakAcceptable_ checks again (redundant, same values — no centroid update between). Tool doesn't re-check but it's redundant in OpenMS too (no state change between findBestPeak_ and isPeakAcceptable_). ✓ no behavioral difference. The prompt asks "whether the ±3 sd window is applied to the CANDIDATE after re-estimation the same way" — re-estimation happens in processPeak_ AFTER acceptance, so next step uses new sd. Same in both. ✓.
+
+  Deviation candidate #16: **frame_live test vs `!spec.empty()`** — OpenMS work_exp has sub-noise peaks deleted globally, so empty() = no super-noise peaks. Tool frame_live = any member. ✓.
+
+  BUT — here's a potentially BIG one: **bands and `visited`**. Each band has its own `visited` and seeds only in its core but extends over the whole window. Two bands can both trace the same peaks (a trace seeded in band A's core can extend into band B's core m/z region and vice versa; band B doesn't know those peaks are taken). Result: duplicate/overlapping traces across bands — a peak appearing in two traces, which OpenMS (single global visited) would never produce. Also within-extension: a band's extension has NO m/z restriction — it walks frames and uses ±3σ around its own centroid, which naturally keeps it near its core, but long traces with drifting centroid could cross into a neighbor's core. Is it bounded? Duplicates are bounded by the number of bands whose... actually a trace extending from band A core can only grab peaks within ±3σ of its own centroid path; to duplicate band B's trace it would need to converge onto the same peaks. The duplicate risk: two seeds in adjacent cores near the boundary belonging to the same chromatographic feature — e.g., isotopic envelope peaks straddling the boundary... no, each seed is a distinct m/z. Two different seeds in different band cores could trace the same feature if the feature spans the boundary? A single chromatographic trace has nearly constant m/z; its peaks fall within ±3σ ~ few ppm. If the boundary cuts through a feature's m/z distribution: peaks below boundary seed in band A, peaks above in band B — each band traces the SAME feature partially, producing two traces covering the same RT span with overlapping (disjoint) peak sets? No wait — extension: band A's trace centroid sits just below boundary; its ±3σ window extends ABOVE the boundary and grabs peaks in B's core — B's visited doesn't know → B seeds one of those peaks (if it survives... B checks only its own visited) → duplicate trace of the same feature, one seeded from each side, each claiming (in its own copy) all peaks. Both traces valid → two MassTraces for one feature. EPD then may split them identically. Downstream: duplicate features → FFid might merge or double-count; peptides: duplicates usually get merged or cause FDR weirdness. Bounded? Each boundary can produce at most duplicates for features straddling it; bounded by number of straddling features ~ proportional to window width in σ vs band width. Also missed-rejection divergence: a band-B trace whose closest peak was "taken" in OpenMS (reject → missed++) would in band-B's own world take it → trace grows where OpenMS's died → extra traces (SET). And conversely nothing is LOST — banding can only add traces, not lose them... unless the benchmark deficit is explained elsewhere. Since the question mentions a peptide DEFICIT, banding causing duplicates doesn't explain deficit; but note.
+
+  Also: seed gate `sl.tof[seed] < band_lo || >= band_hi` uses the seed's bin with the GLOBAL axis? tof bins comparable across frames? Bins are raw tof indices; calibration factor b differs per frame. A peak's bin in frame f means mz via b[f]. Band core defined in tof bins — if per-frame calibration shifts b, the same m/z maps to different bins in different frames → band cores are fuzzy in m/z across drift. Whatever — flag it.
+
+  Deviation candidate #17 (seed list is window-global but bands): tp.order built once over the whole window; each band iterates it and skips non-core seeds — fine.
+
+  Deviation candidate #18: **isTraceValid_ rt span from got min/max frame** — OpenMS uses first/last of gathered trace which is RT-ordered by construction. ✓ same. rtAxis()[sl.rt_index[f]] mapping — assume fine.
+
+  Deviation candidate #19: **max_len_sec > 0.0 vs OpenMS max_len >= 0** — noted above (#... ). If caller passes -1 for off → tool: -1 > 0 false → off ✓ same as OpenMS (-1 >= 0 false → off). Only 0.0 differs. Fine-ish; flag boundary.
+
+  Deviation candidate #20: **traces pushed even when got.size()==1?** OpenMS: min_trace_length default 0.0, min_sample_rate 0.5. A single-peak trace: span = 0 >= min_len (if min_len 0), total=1, adjusted=1, size/adjusted = 1 ≥ 0.5 → valid! OpenMS would emit single-peak traces too (if min_len=0). Then EPD requires ≥... split_valleys with length 1: `in.size() < 2` check is about number of TRACES not peaks. Hmm, EPD on single-peak traces — MassTrace with 1 point; EPD filter might drop. Same both sides presumably. Tool matches. But wait — the tool's early return `if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);` — "OpenMS branch: EPD needs > 1" — hmm, this means if fewer than 2 traces, no splitting. Fine, trivial.
+
+  Deviation candidate #21: **splitIntegerTraces per-peak m/z**: It builds Peak2D with per-peak m/z recovered from bin + per-frame factor — wait, the prompt's question 3 says "builds MassTrace objects with every peak at the SAME m/z (t.mz)" — but the code sets `q.setMZ(bi != end ? ax.mzOf(t.xt[i], bi->second) : t.mz)`. So actually per-peak m/z IS recovered (with per-frame calibration via b_of_rt). The prompt's claim in Q3 seems slightly off — unless `have_bin` fails. `have_bin = ax.ok && i < t.xt.size()`. t.xt was filled in detectTracesInteger_. So mostly per-peak m/z. Hmm wait — but toTrace after splitting: t.mz = whatever toTrace reports under trace:mz_estimator. Then `t.tof = ax.tofOf(t.mz, t.b)` — the re-attached bin is computed from the REPORTED mz (e.g. mean/median of per-peak m/z) inverted with the APEX frame's factor. If the estimator reports a weighted mean m/z that differs from any actual peak bin, tofOf gives the nearest bin — "the store is ~400x finer than a bin, so the inversion recovers the measured bin exactly" — hmm, that claim: bins are integers of a fine store; mzOf then tofOf round trip recovers the same bin if quantization is fine. But t.mz from toTrace under, say, "median" estimator equals one of the per-peak m/z values → inversion with the apex frame's factor gives the bin that that m/z would have IN THE APEX FRAME, which may differ from the bin in its own frame if per-frame calibration drifted (b differs per frame!). That's the bug seed in Q2: re-attached bin uses apex frame's b, but the m/z came from a peak in a DIFFERENT frame; with per-frame calibration differences, tofOf(mz, b_apex) ≠ the original measured bin. Impact: downstream extraction in bin space could be off by drift amount. COORD mostly.
+
+  Also `b_of_rt` keyed by rt_index — if two frames share an rt_index (duplicate RTs in merged data?), map collides. Edge case.
+
+  Also EPD and per-peak m/z: ElutionPeakDetection operates on chromatographic profile (RT/intensity); m/z used only for reporting centroids (filterByMassTraceSNR? disabled). So per-peak m/z fidelity doesn't affect splitting decisions — only reported coordinates. COORD. Losing per-peak m/z would change "mean"/"median" estimators: toTrace under "mean" uses per-peak m/z → with recovered per-peak m/z it's near-correct; if all same (fallback), mean = t.mz anyway.
+
+  Deviation candidate #22: **THE BIG ONE — check `processPeak_` push order and `got` for span**: fine.
+
+  Now, what about **the double-count of the seed and `wsum`**: covered.
+
+  **Q: does OpenMS also double-apply IM seed?** Excerpt says "same for centroid_im" — yes.
+
+  **Another potentially significant one: `d.scans` counting when direction inactive**: tool increments scans only inside the guarded section. ✓.
+
+  **Potential BIG deviation: `best()` uses `member[k]` — but OpenMS's findBestPeak_ searches work_exp where sub-noise peaks were deleted — same. ✓.**
+
+  **Another: apex SNR threshold — OpenMS: `chrom_peak_snr` times noise_threshold_int, compared... the prompt says strict >.** Tool strict. ✓.
+
+  **Intensity `w0 = sl.inten[seed]` — integer intensities.** OpenMS uses original float intensities in ALL weighted means and sd robust. Integer-quantized intensities: if inten is stored as e.g. uint32 scaled by 1 (truncation of float), every weight is off by up to 1 unit — negligible for large intensities, but for tiny intensities near noise the relative error is large → centroid/sd jitter, and log(w) weights differ. Also threshold comparisons `(double)sl.inten[k] > noise` vs OpenMS `intensity > noise` on floats: peaks with float intensity 100.4 vs noise 100.0 — int 100 > 100 false → deleted though OpenMS keeps. Membership differences at threshold boundaries → SET (rare, but the noise boundary is exactly where MANY peaks live — this could actually matter for the noise deletion!). If inten is round-to-nearest, ±0.5. If truncated, systematically down: peaks with float intensity in (noise, noise+1) get int ≤ noise → deleted where OpenMS keeps → systematically FEWER peaks above noise → fewer members → fewer traces near the noise floor. That's a plausible peptide-deficit contributor! Flag prominently. Similarly apex SNR gate: float inten in (snr*noise, snr*noise+1) lost as seeds.
+
+  We don't know how inten was quantized (scale factor?). The store is "~400x finer than a bin" refers to tof. If intensities stored raw as uint32 (typical profile intensities are large-ish, e.g. 1000s), effect small. Flag with caveat.
+
+  **Q1 also: "what total/adjusted are built from"** — state OpenMS uses scan_counter_down + scan_counter_up + 1 (counters incremented every loop step per active in-bounds direction, including empty spectra and rejected candidates). Tool matches... wait, actually let me double check the +1. In OpenMS 3.x run_:
+
+  ```cpp
+  // *** gather peaks ***
+  ...
+  Size scan_counter(0);
+  ```
+  Hmm. Let me recall actual code. From OpenMS MassTraceDetection.cpp (I've read it before):
+
+  ```cpp
+      //***************************************************************
+      // Extend the seed in both chromatographic directions
+      ...
+      Size missed_down(0), missed_up(0);
+      bool down_toggle(true), up_toggle(true);
+      ...
+      while ((down_idx > 0 && down_toggle) || (up_idx < work_exp.size() - 1 && up_toggle))
+      {
+        // Move down
+        if (down_idx > 0 && down_toggle)
+        {
+          Size spec_idx = down_idx - 1;
+          if (!work_exp[spec_idx].empty())
+          {
+            Size peak_down = findBestPeak_(...);
+            if (isPeakAcceptable_(...)) { processPeak_; ++peaks_down; missed_down = 0; }
+            else { ++missed_down; }
+          }
+          --down_idx;
+          ++scan_counter_down;
+          ...
+        }
+  ```
+  and later:
+
+  ```cpp
+        double rt_range = ...
+        bool is_valid = isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up);
+  ```
+  I genuinely believe there's a `+1` for the apex scan. Actually I recall the exact line:
+
+  ```cpp
+  if (isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up))
+  ```
+  Hmm, or does isTraceValid_ do the +1 internally? The prompt's excerpt: `adjusted = total_scans_visited - missed_down - missed_up; return trace.size()/adjusted >= min_sample_rate;` — and the tool's `total = dn.scans + up.scans + 1`. My best recollection supports scan counters + 1 (the seed scan). I'll state it as: OpenMS passes scan_counter_down + scan_counter_up + 1 (the +1 accounts for the apex spectrum). Tool matches.
+
+  One more check on the sample-rate semantics: adjusted = scans visited where the spectrum was NON-EMPTY minus... wait: total - missed. total counts every visited scan including empty ones; missed counts non-empty-but-rejected. So adjusted = empty-scan count + hit count. trace.size()/adjusted — hits/(hits+empties). Sample rate = fraction of non-... it's hits / (hits + empty scans). Interesting: empty scans count against sample rate (they're in adjusted denominator but not numerator... wait: adjusted = total - missed = (hits + misses + empties) + 1 - misses = hits + empties + 1. trace.size() = hits + 1 (apex). So ratio = (hits+1)/(hits+empties+1). Both sides same. ✓.
+
+  Hmm wait, one subtlety: in OpenMS, is missed incremented when spectrum is empty? No — the `if (!spec.empty())` guards it. Tool: same. ✓.
+
+  **Another one: `if (OUTLIER && ...)` — tool always applies outlier termination (hardcodes "outlier" criterion). Config default is "outlier" — fine, but if the config ever selects "sample_rate", tool diverges. Note as hardcoding, matches stated config.**
+
+  **Q2 specifics**: bin/mz round trip:
+  - Window edges: tofOf truncation/rounding → ±1 bin slop vs continuous m/z window (MZBegin/MZEnd). SET in edge cases.
+  - Closest-in-bins ≠ closest-in-m/z when candidates straddle the centroid (monotone ≠ distance-preserving). The code comment's justification is mathematically wrong, practically tiny.
+  - Accepted peak m/z = mzOf(bin) — quantized to bin center/nearest; centroid cmz and sd inherit quantization error; error bounded by half bin in m/z (with fine store, small). COORD, occasionally SET via ±3σ window borderline.
+  - Re-attached bin after splitting: `t.tof = ax.tofOf(t.mz, t.b)` where t.mz is toTrace's estimator output (could be mean of per-peak m/z's — not a measured value) and t.b is apex frame's factor. Inverting an estimator-derived m/z with the apex frame's calibration gives a bin that need not equal any measured bin; if calibration drifted between the apex frame and the frames whose peaks dominate the estimator, the bin is off by the drift. Also under a median estimator, t.mz is a measured m/z but from a different frame → same drift issue. And EPD redefines the apex (split pieces) — ap recomputed from split trace intensities, fine. The claim "recovers the measured bin exactly" holds only if t.mz is exactly a per-peak recovered m/z AND the same frame's factor is used — neither is guaranteed (estimator + apex-frame factor). COORD. Also `t.b = ... ax.factor(0)` fallback.
+
+  **Q3**: Does EPD care about per-peak m/z? ElutionPeakDetection splits on the RT/intensity chromatogram; m/z per peak is used only for centroid recomputation (and masstrace S/N filter, disabled). So splitting decisions unaffected. The code actually recovers per-peak m/z (mzOf per frame) — contradicting the question's premise; the fallback (t.mz for all) only when bin missing. toTrace afterwards: under estimator "mean"/"median", per-peak m/z matters → recovered values make it nearly right; if the flat fallback path were taken, mean/median would collapse to the weighted centroid m/z — COORD only.
+
+  **Q4 banding**: covered above. Precisely:
+  - Seeds restricted to core by bin range on the seed's bin.
+  - Extension unrestricted in m/z; ±3σ window naturally localizes but can cross the boundary.
+  - Separate visited per band → the "closest-then-reject" kill mechanism doesn't fire across bands: a peak already claimed by band A's trace is freely claimable by band B → duplicate traces of the same feature seeded from both sides of the boundary; also a trace that OpenMS would kill (closest peak visited) survives in the other band.
+  - Also seed ORDER: within a band, order is global intensity order filtered — same relative order as OpenMS, fine. But cross-band contention is resolved arbitrarily (parallel tasks → race? Are bands run in parallel and merged? Each band has own visited and outputs merged presumably — deterministic per band but the SET differs from single-pass OpenMS).
+  - Bounded: duplication bounded by number of features whose ±3σ span straddles a boundary; each straddling feature can produce at most 2 (or up to #bands it spans) copies. Never loses traces vs OpenMS — purely additive. Therefore banding cannot explain a peptide DEFICIT; if anything it inflates. Unless... duplicates downstream collapse in feature linking or the same trace twice causes ID transfer weirdness. State clearly: not a deficit cause.
+  - Boundary defined in raw bins but calibration varies per frame → the core boundary in m/z wobbles frame to frame; a feature near the boundary may have its apex-bin classified differently than its other peaks — but seeding only cares about the seed peak's bin. Fine.
+
+  **Q5 speed**:
+  - `best()` per call does two `tofOf` calibration calls + mzToTof(cmz) — comment says two, actually three (ct). OpenMS does MZBegin/MZEnd binary searches on doubles — cheap. Here tofOf may involve sqrt — three sqrt-ish calls per frame step vs OpenMS's ~2 binary searches. Fine-ish.
+  - `mzAt` called once per accepted peak — good.
+  - The walk `for k in [s0..b)` — the window in bins near the centroid; fine.
+  - Potential slowness: `std::unordered_map<uint32_t,double> b_of_rt` built once — fine.
+  - The big one: `mzAt(seed)` for every seed — one calibration per trace, fine.
+  - Actually: `best` computes `ct = ax.cal.mzToTof(cmz, bf)` every call — a sqrt per visited frame per direction; unavoidable-ish.
+  - The `iwm`/`sdRobust` per accepted peak: log/exp — OpenMS does the same.
+  - Real potential slowdown vs OpenMS: **the tool processes ALL bands over the same frames** — each band scans the same frame's spectrum window separately; total work = sum over bands of trace steps — comparable. But: `tp.order` iterated fully by every band (12 bands × P/4 seeds scanned with a cheap bin-range check — fine).
+  - Duplicate work from cross-band duplicate tracing: every straddling feature is traced twice (or more) — extra traces through EPD and downstream — additive time.
+  - `lower_bound` over the whole frame range each call — fine.
+  - One more: `got` spans and validity loops — fine.
+  - Honest answer: nothing algorithmically slower than OpenMS remains at equal output; residual overhead: 3 calibration evals per frame-step (sqrt) vs OpenMS's double compares, plus duplicate tracing across band boundaries, plus EPD MassTrace construction/destruction (OpenMS does that too). The 9:28→ causes (rebuild per band, sqrt per visited peak) are fixed. Remaining possible: `sort(pts)` per trace trivial.
+
+  Hmm wait, one more potential correctness issue: **`best()` returns -1 both for "no candidate" and "taken", and increments missed in both cases** — matches OpenMS (isPeakAcceptable_ false → missed++). ✓.
+
+  **Another: `if (t > epsilon) sd = t;`** — matches OpenMS (tmp_sd > eps guard). ✓.
+
+  **Another: after validity, OpenMS marks visited only gathered indices — tool same.** ✓. Invalid traces leave peaks unvisited → they can seed/be taken later. ✓ matches.
+
+  **Order of output traces**: OpenMS pushes in seed order (intensity desc); tool same per band, but bands concatenated → global order differs. ORDER only. Downstream EPD per-trace → unaffected; FeatureFinder might sort anyway.
+
+  **One more real one**: `span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]]` — OpenMS uses |last.rt - first.rt| — same. But if the window's frames are not contiguous in RT (slab subset?), rt_index maps — assume fine.
+
+  **Missing: `min_len_sec` comparison `<` vs OpenMS `rt_range < min_len -> false`** — same.
+
+  **Missing `d.hits` unused — fine.**
+
+  **check: `Size max_missed = 5` and condition `d.missed > max_missed`** — OpenMS trace_termination_outliers 5, `missed > 5` → 6 misses kill. ✓.
+
+  **THE while-guard subtlety**: OpenMS while condition: `(down_idx > 0 && down.active) || (up_idx < n-1 && up.active)`. Tool: `(fd > 0 && dn.active) || (fu + 1 < (long)F && up.active)`. up_idx < n-1 ⟺ fu+1 < F. ✓.
+
+  **Empty-spectrum `frame_live` but the apex frame itself**: irrelevant.
+
+  Now the sdRobust uses `std::abs(mz - mean)` where mean is the UPDATED centroid — matches OpenMS processPeak_ order (mean updated first, then SD reestimate uses new mean). Wait, actually let me double-check OpenMS processPeak_:
+
+  ```cpp
+  void processPeak_(...) {
+    ...
+    updateIterativeWeightedMean_(peak_mz, peak_int, centroid_mz, prev_counter, prev_denom);
+    ...
+    if (reestimate_mt_sd_) updateWeightedSDEstimateRobust(..., centroid_mz, ...);
+  }
+  ```
+  Yes, centroid first, then SD with the new centroid. Tool: iwm then sdRobust(mz, w, cmz, ...) — cmz updated. ✓.
+
+  BUT WAIT — a subtle bug possibility in sdRobust: OpenMS passes the PEAK's mz and |p.mz - mean|. Tool passes mz, w, cmz. Same. ✓.
+
+  Also intensity weight in sdRobust: `d2 = log(w) + 2*log(|mz-mean|)` — OpenMS: `log(p.intensity) + 2*log(|p.mz - mean|)`. ✓.
+
+  Now let me also reconsider **the IM gate quantization** — imq = quantized IM; cim runs as weighted mean of imq integers; gate `|imq[k] - cim| > imq_tol` with imq_tol = im_tol * IM_Q. Quantization: true |im_k - cim_true| vs measured |imq_k - cim_q|/IM_Q differ by up to ~1/IM_Q total → borderline peaks included/excluded differently. Since the FIRST version's bug list included "mobility gate pinned to the seed" — the rewrite now updates cim per accepted peak ✓ (iwm on cim) — good, matches.
+
+  Also **`t.im = IM_LO + cim / IM_Q`** — reports centroid IM from quantized domain — COORD fine.
+
+  One more on **findBestPeak_ semantics in OpenMS**: it searches `for i in [MZBegin(left), MZEnd(right))` — MZEnd(right) is upper_bound(right) — exclusive of peaks > right, INCLUSIVE of peak == right? MZEnd returns first iterator with mz > right? OpenMS SpectrumConstIterator MZEnd(double mz) → upper bound → peaks with mz ≤ right included? upper_bound(mz) returns first element > mz, so range includes elements ≤ mz. Tool: `sl.tof[k] <= hi_t` — inclusive. ✓ consistent-ish. MZBegin(left) = lower_bound(left) → first ≥ left. Tool: lower_bound(lo_t) → first bin ≥ lo_t. If tofOf floors, first bin ≥ floor(tof(left)) might be a bin whose mz < left. Edge slop as noted.
+
+  Also note: **`ct` is fractional bins; `d` compares integer bin to fractional ct** — fine.
+
+  What about **peaks in the window BEFORE s0 due to floor**? covered.
+
+  Let me also think about whether OpenMS's `findBestPeak_` tie-break picks first in iteration order = lowest m/z among equals — tool picks lowest bin — consistent modulo the straddling issue.
+
+  **One more potentially significant deviation: `if (banded && ...) continue;` BEFORE `if (visited[seed]) continue;`** — no behavioral issue.
+
+  **And: seeds with `member` but the apex SNR gate uses `sl.inten[seed] > min_apex` — but in OpenMS, is the SNR gate `>=`?** Prompt says strict. ✓.
+
+  **What about OpenMS checking apex visited via peak_visited which was set only for VALID traces — and ALSO, does OpenMS mark the apex visited even if trace invalid?** No — only on valid. Tool same. ✓.
+
+  **Does OpenMS skip apex seeds whose spectrum... no.**
+
+  Now Q1 wants line numbers. The code as given has no line numbers; I'll reference by construct/comment and approximate positions (e.g., "in `best`", "the `iwm` lambda", "the `total` line"). I'll give pseudo-line references by naming the statement since no line numbers exist in the paste. The user asked "Cite the tool's line numbers" — I can number the blocks roughly. I'll cite by anchor text and rough ordinal position ("~line 60, the `best` lambda"). Maybe I should count lines in the pasted code. That's laborious but let me do a rough count.
+
+  Let me count lines from the code block:
+
+  1  /// Per-window, read-only preparation...
+  2  /// noise-membership mask...
+  3  /// only then asks...
+  4  /// The first corrected version...
+  5  /// full-window sorts...
+  6  /// exactly where its extra time...
+  7  struct TracePrep
+  8  {
+  9    vector<uint32_t> frame_of;
+  10   vector<char>     member;
+  11   vector<char>     frame_live;
+  12   vector<uint32_t> order;
+  13 };
+  14 TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr)
+  15 {
+  16   TracePrep tp;
+  17   const size_t F = sl.frames(), P = sl.tof.size();
+  18   tp.frame_of.assign(P, 0); ...
+  19   for (size_t f = 0; f < F; ++f)
+  20     for (uint32_t k = ...)
+  21     {
+  22       tp.frame_of[k] = (uint32_t)f;
+  23       if ((double)sl.inten[k] > noise) {...}
+  24     }
+  25   const double min_apex = snr * noise;
+  26   tp.order.reserve(P / 4);
+  27   for (uint32_t k = 0; k < P; ++k)
+  28     if (tp.member[k] && (double)sl.inten[k] > min_apex) tp.order.push_back(k);
+  29   // OpenMS: stable_sort...
+  30   // intensities the LATER peak seeds first.
+  31   sort(tp.order.begin(), ...){
+  32     if (sl.inten[a] != sl.inten[b]) return sl.inten[a] > sl.inten[b];
+  33     return a > b;
+  34   });
+  35   return tp;
+  36 }
+  37 (blank)
+  38 vector<Trace> detectTracesInteger_(...)
+  39   ... (signature spans)
+  Let me just renumber the function body approximately. I'll number from the start of the paste. Let me carefully count:
+
+  ```
+    1  /// Per-window, read-only preparation shared by every band task: frame of each peak, the
+    2  /// noise-membership mask, per-frame "has any member" (OpenMS deletes sub-noise peaks first and
+    3  /// only then asks whether a frame is empty), and the intensity-ordered seed list. Built ONCE.
+    4  /// The first corrected version rebuilt all of this inside each of the 12 band tasks -- twelve
+    5  /// full-window sorts per window and twelve sets of P-sized arrays alive at once -- which is
+    6  /// exactly where its extra time (9:28 vs 7:22) and extra memory (174 vs 166 GB) came from.
+    7  struct TracePrep
+    8  {
+    9    vector<uint32_t> frame_of;    ///< P
+   10    vector<char>     member;      ///< P: intensity > noise
+   11    vector<char>     frame_live;  ///< F: has at least one member
+   12    vector<uint32_t> order;       ///< seeds, intensity desc, later-index-first among equals
+   13  };
+   14  TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr)
+   15  {
+   16    TracePrep tp;
+   17    const size_t F = sl.frames(), P = sl.tof.size();
+   18    tp.frame_of.assign(P, 0); tp.member.assign(P, 0); tp.frame_live.assign(F, 0);
+   19    for (size_t f = 0; f < F; ++f)
+   20      for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
+   21      {
+   22        tp.frame_of[k] = (uint32_t)f;
+   23        if ((double)sl.inten[k] > noise) { tp.member[k] = 1; tp.frame_live[f] = 1; }
+   24      }
+   25    const double min_apex = snr * noise;
+   26    tp.order.reserve(P / 4);
+   27    for (uint32_t k = 0; k < P; ++k)
+   28      if (tp.member[k] && (double)sl.inten[k] > min_apex) tp.order.push_back(k);
+   29    // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
+   30    // intensities the LATER peak seeds first.
+   31    sort(tp.order.begin(), tp.order.end(), [&](uint32_t a, uint32_t b) {
+   32      if (sl.inten[a] != sl.inten[b]) return sl.inten[a] > sl.inten[b];
+   33      return a > b;
+   34    });
+   35    return tp;
+   36  }
+   37  (blank)
+   38  vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, double mass_ppm,
+   39                                     double im_tol, double min_len_sec, double min_sample_rate,
+   40                                     double max_len_sec, TofIdx band_lo = 0, TofIdx band_hi = 0)
+   41  {
+   42    vector<Trace> out;
+   43    const size_t F = sl.frames(), P = sl.tof.size();
+   44    if (F == 0 || P == 0) return out;
+   45    const bool banded = band_hi > band_lo;
+   46    const TofAxis& ax = tofAxis();
+   47    const double msr = min_sample_rate >= 0.0 ? min_sample_rate : 0.5;
+   48    const Size max_missed = 5;
+   49    const vector<uint32_t>& frame_of = tp.frame_of;
+   50    const vector<char>& member = tp.member;
+   51  (blank)
+   52    vector<char> visited(P, 0);
+   53    auto mzAt = [&](uint32_t k) { return ax.mzOf(sl.tof[k], sl.b[frame_of[k]]); };
+   54    auto iwm = [](double v, double w, double& c, double& cnt, double& den) {
+   55      const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
+   56      c *= (ct / dt); cnt += w * v; den += w;
+   57    };
+   58    auto sdRobust = [](double mz, double w, double mean, double& sd, double& wsum) {
+   59      const double d1 = std::log(wsum) + 2.0 * std::log(sd);
+   60      const double d2 = std::log(w) + 2.0 * std::log(std::abs(mz - mean));
+   61      const double denom = std::sqrt(std::exp(d1) + std::exp(d2));
+   62      const double ws = wsum + w;
+   63      const double t = denom / std::sqrt(ws);
+   64      if (t > std::numeric_limits<double>::epsilon()) sd = t;
+   65      wsum = ws;
+   66    };
+   67-74 comments
+   75    auto best = [&](size_t f, double cmz, double sd, double cim, bool& taken) -> long {
+   76      taken = false;
+   77      const uint32_t a = sl.frame_off[f], b = sl.frame_off[f + 1];
+   78      if (b <= a) return -1;
+   79      const double bf = sl.b[f];
+   80      const double lo_mz = cmz - 3.0 * sd, hi_mz = cmz + 3.0 * sd;
+   81      const TofIdx lo_t = ax.tofOf(lo_mz > 0.0 ? lo_mz : 1e-9, bf);
+   82      const TofIdx hi_t = ax.tofOf(hi_mz, bf);
+   83      const double ct = ax.cal.mzToTof(cmz, bf);
+   84      const uint32_t s0 = (uint32_t)(lower_bound(...lo_t) - ...);
+   85      long bk = -1; double bd = inf;
+   86      for (uint32_t k = s0; k < b && sl.tof[k] <= hi_t; ++k)
+   87      {
+   88        if (!member[k]) continue;
+   89        if (std::abs((double)sl.imq[k] - cim) > imq_tol) continue;
+   90        const double d = std::abs((double)sl.tof[k] - ct);
+   91        if (d < bd) { bd = d; bk = (long)k; }
+   92      }
+   93      if (bk >= 0 && visited[(size_t)bk]) { taken = true; return -1; }
+   94      return bk;
+   95    };
+   96  (blank)
+   97    struct Dir { ... };
+   98    vector<uint32_t> got;
+   99    for (uint32_t seed : tp.order)
+  100    {
+  101      if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
+  102      if (visited[seed]) continue;
+  103      const size_t f0 = frame_of[seed];
+  104      const double w0 = sl.inten[seed], m0 = mzAt(seed);
+  105      double cmz = m0, cnt = w0 * m0, den = w0;
+  106      iwm(m0, w0, cmz, cnt, den);
+  107      double cim = sl.imq[seed], cnt_im = w0 * cim, den_im = w0;
+  108      iwm((double)sl.imq[seed], w0, cim, cnt_im, den_im);
+  109      double sd = (cmz / 1e6) * mass_ppm, wsum = w0;
+  110      got.clear(); got.push_back(seed);
+  111      Dir dn, up;
+  112      long fd = (long)f0, fu = (long)f0;
+  113      while ((fd > 0 && dn.active) || (fu + 1 < (long)F && up.active))
+  114      {
+  115        for (int side = 0; side < 2; ++side)
+  116        {
+  117          Dir& d = side == 0 ? dn : up;
+  118          long& fi = side == 0 ? fd : fu;
+  119          if (!d.active) continue;
+  120          if (side == 0 ? !(fi > 0) : !(fi + 1 < (long)F)) continue;
+  121          const size_t f = (size_t)(side == 0 ? fi - 1 : fi + 1);
+  122          if (tp.frame_live[f])
+  123          {
+  124            bool taken = false;
+  125            const long k = best(f, cmz, sd, cim, taken);
+  126            if (k >= 0)
+  127            {
+  128              const double mz = mzAt((uint32_t)k), w = sl.inten[k];
+  129              iwm(mz, w, cmz, cnt, den);
+  130              iwm((double)sl.imq[k], w, cim, cnt_im, den_im);
+  131              sdRobust(mz, w, cmz, sd, wsum);
+  132              got.push_back((uint32_t)k);
+  133              ++d.hits; d.missed = 0;
+  134            }
+  135            else ++d.missed;
+  136          }
+  137          fi += (side == 0 ? -1 : 1);
+  138          ++d.scans;
+  139          if (d.missed > max_missed) d.active = false;
+  140        }
+  141      }
+  142      // isTraceValid_
+  143      uint32_t fmin = frame_of[got[0]], fmax = fmin;
+  144      for (uint32_t k : got) { ... }
+  145      const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
+  146      if (span_s < min_len_sec) continue;
+  147      if (max_len_sec > 0.0 && span_s > max_len_sec) continue;
+  148      const Size total = dn.scans + up.scans + 1;
+  149      const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
+  150      if ((double)got.size() / (double)adjusted < msr) continue;
+  151      for (uint32_t k : got) visited[k] = 1;
+  152      (comment)
+  153      vector<pair<uint32_t, uint32_t>> pts;
+  154      pts.reserve(got.size());
+  155      for (uint32_t k : got) pts.emplace_back(frame_of[k], k);
+  156      sort(pts.begin(), pts.end());
+  157      Trace t;
+  158      t.xi.reserve... 
+  159      size_t ap = 0;
+  160      for (size_t q = 0; q < pts.size(); ++q)
+  161      {
+  162        t.xi.push_back(...); t.xv.push_back(...);
+  163        t.xt.push_back(sl.tof[pts[q].second]);
+  164        if (t.xv[q] > t.xv[ap]) ap = q;
+  165      }
+  166      const uint32_t kap = pts[ap].second;
+  167      t.tof = sl.tof[kap]; t.b = sl.b[frame_of[kap]];
+  168      t.mz = cmz;
+  169      t.rt = rtAxis()[t.xi[ap]];
+  170      t.im = IM_LO + cim / IM_Q;
+  171      t.intensity = t.xv[ap];
+  172      out.push_back(std::move(t));
+  173    }
+  174    return out;
+  175  }
+  ```
+
+  And splitIntegerTraces roughly lines 177-220:
+  ```
+  177  /// comment...
+  ...
+  182  vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, const PeakSlab& sl)
+  183  {
+  184    if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);
+  185    vector<MassTrace> mts; mts.reserve(in.size());
+  186    (comment)
+  187    std::unordered_map<uint32_t, double> b_of_rt;
+  188    for (size_t f = 0; f < sl.frames(); ++f) b_of_rt[sl.rt_index[f]] = sl.b[f];
+  189    const TofAxis& ax = tofAxis();
+  190    for (Trace& t : in)
+  191    {
+  192      std::list<Peak2D> pk;
+  193      for (size_t i = 0; i < t.np(); ++i)
+  194      {
+  195        Peak2D q; q.setRT(t.rtAt(i)); q.setIntensity(t.xv[i]);
+  196        const bool have_bin = ax.ok && i < t.xt.size();
+  197        auto bi = have_bin ? b_of_rt.find(t.xi[i]) : b_of_rt.end();
+  198        q.setMZ(bi != b_of_rt.end() ? ax.mzOf(t.xt[i], bi->second) : t.mz);
+  199        pk.push_back(q);
+  200      }
+  201      MassTrace mt(pk);
+  202      mt.setCentroidIM(t.im);
+  203      mts.push_back(std::move(mt));
+  204      t.freeProfile();
+  205    }
+  206    vector<Trace>().swap(in);
+  207    vector<MassTrace> split = splitValleys(mts, split_valleys);
+  208    vector<Trace> out; out.reserve(split.size());
+  209    for (const MassTrace& mt : split)
+  210    {
+  211      Trace t = toTrace(mt);
+  212      if (t.np() == 0) continue;
+  213      size_t ap = 0; for (...) if (t.xv[i] > t.xv[ap]) ap = i;
+  214      auto it = b_of_rt.find(t.xi[ap]);
+  215      t.b = it != b_of_rt.end() ? it->second : ax.factor(0);
+  216      t.tof = ax.ok ? ax.tofOf(t.mz, t.b) : 0;
+  217      out.push_back(std::move(t));
+  218    }
+  219    return out;
+  220  }
+  ```
+
+  Good enough — I'll cite these approximate numbers ("~L148" etc.) and note they're relative to the paste.
+
+  Now — WAIT. A critical one I should check: **`sdRobust` is called BEFORE the peak is pushed, but is it called with the peak INCLUDED in wsum?** OpenMS updateWeightedSDEstimateRobust: weights_sum = last + p.intensity; tmp_sd = denom/sqrt(weights_sum); last = weights_sum. Tool: ws = wsum + w; t = denom/sqrt(ws); wsum = ws. ✓ same.
+
+  **Another check — `mzAt(seed)` per seed is one calibration; but seeds that fail `visited` skip before. Fine.**
+
+  **Critical re-examination of the seed double-count for IM**: OpenMS excerpt says "same for centroid_im" — tool does it. ✓.
+
+  **Now, is there anything in the extension loop that's a REAL deviation?** Let me scrutinize the OpenMS excerpt again:
+
+  "while ((down_idx > 0 && down.active) || (up_idx < n-1 && up.active))" — tool L113 ✓.
+
+  "if (down_idx > 0 && down.active)" — tool L119-120 split into two ifs ✓ equivalent.
+
+  "spec = work_exp[down_idx-1]; if (!spec.empty()) { cand = findBestPeak_; if (isPeakAcceptable_) { processPeak_; ++down.hits; down.missed = 0; } else ++down.missed; }" — tool L122-136 ✓.
+
+  "--down_idx; ++down.scan_counter;" — tool L137-138 ✓.
+
+  "if (OUTLIER && down.missed > trace_termination_outliers) down.active = false;" — tool L139 (hardcoded outlier) ✓.
+
+  So the loop is now faithful. The remaining diffs are:
+
+  A. **Quantization domain** (intensity int, m/z bins, imq ints) — systematic boundary effects:
+     - noise/apex thresholds applied to truncated/rounded integers (~L23, L28) — SET at the noise floor. If `sl.inten` is a truncation of the original float, peaks with original intensity in (noise, ceil(noise)) are dropped where OpenMS keeps them → fewer members near noise → shorter/failed traces for LOW-intensity features — exactly the population that drives peptide count. If round-to-nearest, symmetric. This is my top candidate for a real deficit driver besides banding.
+     - tie-break in seed order among int-equal intensities (~L32) — ORDER→SET via claim order.
+     - bin-space argmin vs m/z argmin (L90) — SET only in straddle near-ties; comment's "monotone ⇒ same closest" is wrong in general.
+     - window edge conversion floor/round (L81-82, L84, L86) — ±1 bin edge slop vs continuous ±3σ — SET at edges.
+     - imq gate quantization (L89) — borderline IM in/out — SET at gate edges; also cim itself is a weighted mean of quantized values (bias ≤ 0.5 imq unit).
+     - accepted-peak m/z from bin inversion (L104, L128) — cmz/sd inherit ≤ half-bin error — COORD, occasionally SET via the ±3σ window of the NEXT step.
+
+  B. **`max_len_sec` off-value**: L147 uses `> 0.0` (off at 0), OpenMS uses `>= 0` (0 means "reject everything longer than 0"). Only differs if the caller literally passes 0.0; tool passes 0 for off, so internally consistent — but if the caller forwards OpenMS's -1, fine; if it forwards 0.0 meaning "no limit" both agree effectively. Minor.
+
+  C. **msr negative guard**: L47 treats negative as 0.5 — OpenMS has no such remap (param default is 0.5 anyway). No diff at stated config.
+
+  D. **taken flag dead** (L93, L124) — harmless; behavior matches.
+
+  E. **`total` = scans_down + scans_up + 1** — state that OpenMS passes scan_counter_down + scan_counter_up + 1 (the +1 is the apex spectrum); tool matches (L148). The `adjusted` clamp at L149 is dead code since missed ≤ scans < total.
+
+  F. **Hardcoded config**: L48 max_missed=5 (param), L139 termination criterion hardcoded "outlier" (no sample_rate branch), L131 reestimate always on. All match the STATED defaults but are not wired to parameters — flag as fragility, not a current diff.
+
+  G. **Banding visited** — covered in Q4.
+
+  H. **Output order across bands** — ORDER only.
+
+  I. **`t.mz = cmz` (L168)**: OpenMS MassTrace's centroid m/z — what does OpenMS report? MassTrace computes its own centroid as intensity-weighted mean of gathered peak m/z's? Actually MassTrace::updateWeightedMeanMZ uses the peaks; MTD sets the trace from gathered peaks; the reported centroid MZ is computed by MassTrace (weighted by intensity by default, trace_mz_estimator... hmm, MassTrace has computeCentroid... In MTD run_, after validity: `MassTrace new_trace(gathered_trace); new_trace.updateWeightedMeanRT(); ...` Actually the centroid m/z of a MassTrace is computed from its peaks (`updateWeightedMeanMZ`), NOT the running iterative centroid cmz. The iterative cmz in MTD is only used during detection! The reported MassTrace centroid_mz_ = intensity-weighted mean of the gathered peaks' m/z values. The tool sets t.mz = cmz (the iterative running centroid). ARE THEY EQUAL? The iterative weighted mean (with the double-counted seed and the multiplicative update) — let's check: after seed double application, cnt = 2 I0 m0, den = 2 I0. After peaks 1..n: cnt = 2 I0 m0 + Σ Ii mi, den = 2 I0 + Σ Ii. The running centroid c satisfies c = cnt/den? Check the update: c *= (1 + w v/cnt)/(1 + w/den) → new c = c * (cnt + w v)/cnt * den/(den + w) = (cnt/den) * (cnt + wv)/(den + w)... since c = cnt/den inductively: new c = (cnt + wv)/(den + w) = new cnt/new den. ✓ So cmz = (2 I0 m0 + Σ Ii mi)/(2 I0 + Σ Ii) — the intensity-weighted mean with the seed counted TWICE. MassTrace::updateWeightedMeanMZ gives (I0 m0 + Σ Ii mi)/(I0 + Σ Ii). DIFFERENT — the tool's reported t.mz is the weighted mean with the apex double-weighted! COORD difference (small, since apex is usually the dominant peak, pulling reported m/z slightly toward apex). This is a real, if small, systematic difference from OpenMS's reported centroid. Note: in splitIntegerTraces, per-peak m/z values are set on the MassTrace and toTrace() under trace:mz_estimator recomputes — so after splitting, t.mz comes from toTrace, not cmz. But for the UNSPLIT path (split_valleys ≤ 0 → early return), t.mz = cmz stands. And EPD is always run per the setup... split_valleys>0 given (chrom_fwhm = split_valleys). OK so mostly washed out by toTrace. Still flag L168 as COORD for any consumer using pre-split t.mz.
+
+  Hmm, also: does the double-count bias the DETECTION centroid vs OpenMS? No — OpenMS run_ does exactly the same double application (it's in the excerpt). So detection-identical; only reporting differs, and only pre-split.
+
+  J. **`t.im` reports from quantized domain** — COORD.
+
+  K. **splitIntegerTraces per-peak m/z recovery**: actually good (per-frame factor via b_of_rt). But: keyed by rt_index — collisions if rt_index not unique per frame within the slab. And peaks whose rt_index missing from map fall back to t.mz (flat) — then EPD sees flat m/z for those points.
+
+  L. **Re-attached bin (L214-216)**: uses apex frame's b with estimator-derived t.mz. If estimator = median/mean of per-peak m/z (mixed frames), inversion with apex factor can be off by inter-frame calibration drift. Also under a mean estimator, t.mz isn't any measured value at all — "recovers the measured bin exactly" is then false by up to the estimator spread. COORD. Also whether downstream uses t.tof to slice bins — a wrong bin by drift amount shifts extraction windows.
+
+  M. **EPD behavior**: ElutionPeakDetection on MassTrace uses convex hulls of the chromatogram (RT/intensity); per-peak m/z irrelevant to splitting (used only for reporting + optional filters which are off). Q3's premise (all peaks same m/z) is not what the code does — per-peak m/z IS recovered. If it were flat, splitting still identical; only reported centroids after toTrace would collapse to t.mz for mean/median estimators. COORD only, never SET.
+
+  N. **Speed (Q5)**: 
+  - L81-83: three calibration evaluations per frame-step (two tofOf + one mzToTof) — if calibration is sqrt-based, that's ~3 transcendentals vs OpenMS's two binary searches + double compares per step. Bounded, small.
+  - L53/L104/L128: one mzOf per accepted peak + per seed — same order as OpenMS's none... OpenMS never converts; it reads doubles. So the tool does strictly more math per accepted peak (one sqrt). Small.
+  - The `lower_bound` (L84) is over the frame slice — same as OpenMS's MZBegin.
+  - Banding duplicate tracing (Q4) duplicates whole traces' worth of work at boundaries — additive, bounded by straddlers.
+  - Nothing at the scale of the old 9:28 regression (P-sized arrays per band, sqrt per visited peak, 12× prep) remains. At equal output the integer path should be at parity or faster; if it's still slower, look at per-band `visited(P)` allocation (12 × P bytes — fine) and the fact that every band still scans the FULL tp.order list (12 × |order| cheap checks — fine).
+  - One more: `std::unordered_map` b_of_rt per window — fine.
+
+  O. One more real check — **OpenMS `findBestPeak_` uses `centroid_mz ± 3*ftl_sd` where ftl_sd is the CURRENT re-estimated sd; and isPeakAcceptable_ checks `|mz - centroid| > 3*sd`** — the tool does not re-run the acceptability check on the candidate, but since nothing changed between search and check in OpenMS either, identical. ✓ (answering the prompt's specific question: the window is applied BEFORE re-estimation in both; re-estimation affects the NEXT step's window in both.)
+
+  P. **`frame_live` vs OpenMS `!spec.empty()`**: OpenMS deletes sub-noise peaks from ALL spectra including... ✓ same.
+
+  Q. **`member` applied in `best` (L88)** — matches OpenMS searching the filtered map. ✓ (prompt asked to verify).
+
+  R. Hmm, one more: **OpenMS `run_` seed loop**: "apex = most intense unvisited (apices sorted by intensity via stable_sort ascending, iterated in REVERSE); skip if visited." — the tool pre-sorts ALL seeds once; OpenMS re-sorts per...? In OpenMS, the apex list is computed once per run_ call on the whole map? Actually MTD run_ iterates over spectra and peaks building apices... In OpenMS, run_ builds `apexes` map (multimap<double, pair<Size,Size>>?) — it's built once. The tool matches. But — banded: each band scans the global order; equivalent within band. ✓.
+
+  S. **Intensity tie-break comparator uses `sl.inten[a] != sl.inten[b]` on integers then `a > b`** — matches "stable ascending, reverse" ONLY if the underlying array order is by index ascending, which reverse-stable gives later-index-first among equals. ✓.
+
+  T. **`got` includes the seed; validity span uses min/max frame of gathered** — same as |last-first| RT. ✓.
+
+  U. **`if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);`** — comment "OpenMS branch: EPD needs > 1". Actually OpenMS calls EPD regardless of trace count; EPD on a single trace still filters (e.g. min length?). EPD's filterByPeakWidth is off, masstrace_snr off — with everything off, EPD on 1 trace returns it unchanged modulo... EPD always recomputes centroids? ElutionPeakDetection::detectPeaks: if chrom_fwhm split... it does smoothing/SNR per trace. With width filtering off and snr off, a single trace passes through. So skipping EPD when in.size() < 2 is behaviorally fine. Minor deviation: EPD ALSO would run when split_valleys <= 0 in OpenMS (EPD always runs in the FTFF pipeline after MTD). The tool's early return skips EPD entirely if split_valleys ≤ 0 — but the setup says split_valleys = chrom_fwhm > 0, so fine. Flag as fragility.
+
+  Also — EPD requires MassTrace with ≥ 2 peaks for splitting; single-peak traces pass through unsplit in both.
+
+  V. **What about `min_trace_length` UNITS**: OpenMS min/max_trace_length are in SECONDS (RT range) ✓ tool uses seconds via rtAxis.
+
+  W. Now, is there any REMAINING plausible cause of a peptide DEFICIT? Candidates:
+  1. Intensity quantization at the noise/SNR thresholds (A) — if truncated, systematically drops low-intensity members and seeds → fewer/shorter traces → deficit. Direction matches.
+  2. Bin-window edge slop (A) — tiny.
+  3. Banding — additive, not deficit.
+  4. The sample-rate accounting — matches.
+  5. imq gate — symmetric.
+  6. **Wait — one more: `mzAt(seed)` uses `sl.b[frame_of[seed]]` — per-frame calibration; OpenMS uses the ORIGINAL peak m/z. If the integer store's bin→mz inversion is not exact (bin quantization), the SEED's m0 differs from OpenMS's apex mz by up to half a bin; the initial sd = m0/1e6*ppm differs proportionally — negligible.**
+  7. **What about `min_sample_rate` formula: OpenMS `trace.size()/adjusted >= msr`; adjusted = total - missed. Tool same.** ✓.
+  8. **One I should double check: OpenMS increments scan counters even when the direction's spectrum is beyond...? Both increment within guard. ✓.**
+  9. **Hmm, `if (OUTLIER && ...)` — in OpenMS there's ALSO a check for the OTHER criterion in the same spot; only outlier here. ✓.**
+
+  X. Also — **`std::log(w)` when w is an integer intensity of e.g. 1 → log(1)=0 fine.**
+
+  Y. **One more potential deviation: `best` searches `k < b && sl.tof[k] <= hi_t` — assumes frame peaks sorted by tof — presumably true.**
+
+  Z. **Missing OpenMS detail: `isPeakAcceptable_` in OpenMS ALSO has the IM check with `centroid_im ± ion_mobility_tolerance` — the tool's single IM check in `best` (L89) covers both since values identical. ✓.**
+
+  Also — should double-check the **direction of the `visited` marking and the `taken` reject**: In OpenMS, if findBestPeak_ returns a candidate that is visited → isPeakAcceptable_ false → missed++. But ALSO — subtle — in OpenMS, findBestPeak_ does NOT skip visited peaks during the search (they're in the spectrum); correct, tool doesn't skip either in the walk (it checks visited AFTER choosing closest). ✓ — this was one of the 14 fixes and it's right now.
+
+  Now the "**total_scans_visited composition**" — I stated scan counters + 1. Let me be careful: is the +1 really there in OpenMS? I recall the code:
+
+  ```cpp
+        // *** check if the gathered trace is valid ***
+        double rt_range(std::fabs(...));
+        bool is_valid = isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up);
+  ```
+  Hmm, honestly I'm fairly confident there's a +1. Actually... let me think about isTraceValid_ itself:
+
+  ```cpp
+    bool isTraceValid_(const MassTrace& trace, const Size& total_scans_visited, const Size& missed_down, const Size& missed_up)
+    {
+      // Check rt range
+      double rt_range = std::fabs(trace.rbegin()->getRT() - trace.begin()->getRT());
+      if (rt_range < min_trace_length_) return false;
+      if (max_trace_length_ >= 0.0 && rt_range > max_trace_length_) return false;
+      // Check sample rate
+      Size adjusted_scans = total_scans_visited - missed_down - missed_up;
+      double sample_rate = static_cast<double>(trace.getSize()) / static_cast<double>(adjusted_scans);
+      return sample_rate >= min_sample_rate_;
+    }
+  ```
+  And the call in run_ — I believe: `isTraceValid_(gathered_trace, scan_counter_down + scan_counter_up + 1, missed_down, missed_up)`. The +1 for the apex's own scan. I'll assert this with a hedge ("from my knowledge of OpenMS 3.x: ..."). The prompt explicitly asks me to state it. Given both counters are incremented once per visited spectrum step per direction, +1 for the seed scan is the sensible composition and matches the tool. Good.
+
+  Also the prompt asks to verify updateIterativeWeightedMean_ counter updates ("it matters"). Yes: OpenMS updates prev_counter += added_intensity*added_value; prev_denominator += added_intensity — the tool matches. Confirm from knowledge.
+
+  Now structure the answer in 5 sections as requested. Be thorough but organized. Classify each diff SET/COORD/ORDER.
+
+  Section 1 list:
+  1.1 L23/L28: thresholds on integer intensities (SET, direction depends on quantization; truncation → deficit).
+  1.2 L32: tie-break on quantized intensities (ORDER→SET claim-order flips).
+  1.3 L81-84: window edge via tofOf floor/round + lower_bound on bins — ±1 bin slop vs continuous ±3σ (SET at edges, rare).
+  1.4 L90-91: argmin in bins ≠ argmin in m/z when candidates straddle centroid; comment's monotone claim wrong (SET rare / COORD).
+  1.5 L89, L107-108, L130: IM gate and centroid in quantized imq units; borderline ±(0.5/IM_Q) (SET at gate edges).
+  1.6 L104/L128: accepted m/z from bin inversion; centroid/sd jitter ≤ half bin (COORD; occasionally SET via next-step window).
+  1.7 L148: total = scans+1 — state OpenMS composition; matches. L149 clamp dead code (no diff).
+  1.8 L147: max_len off-value semantics (`>0` vs `>=0`) — differs only at literal 0.0 (SET boundary, inert at current call).
+  1.9 L47: negative msr remap — no diff at config.
+  1.10 L48/L139/L131: hardcoded outliers=5 / outlier-only termination / always-reestimate — match stated config, not parameterized (fragility).
+  1.11 L168: t.mz = running centroid = apex double-weighted mean, whereas MassTrace reports plain intensity-weighted mean of peaks (COORD; washed out when split path recomputes via toTrace).
+  1.12 L93/L124: taken flag dead — behavior correct.
+  1.13 L122 frame_live == !spec.empty() ✓; L88 member filter ✓ correct placement; seed double-count ✓ correct; L113-120 interleave guards ✓ faithful; L139 `>` ✓; counters incremented on empty spectra ✓.
+  1.14 Band order of output traces (ORDER).
+
+  Section 2: bin round trip: edges (floor/round), argmin, accepted-peak inversion error, re-attached bin: estimator-derived t.mz + apex-frame factor — not guaranteed to be the measured bin: (a) mean estimator → value between peaks, "recovers exactly" false by estimator spread; (b) median/other-frame value inverted with wrong frame's factor under calibration drift; (c) fallback ax.factor(0). Bounded by inter-frame drift + estimator spread; COORD.
+
+  Section 3: valley splitting: premise partly wrong — code DOES recover per-peak m/z (L198) with per-frame factors; EPD splitting decisions use RT/intensity only (and convex-hull/SNR features off), so per-peak m/z never changes WHICH sub-traces exist (never SET); only toTrace's reported centroids: mean estimator sensitive, median less; the flat fallback path (bin missing) collapses those to t.mz (COORD). Also EPD recomputes centroid RT etc. And note: t.xt must have survived freeProfile... L204 frees profile AFTER reading xt — order fine. But wait: `t.freeProfile()` at L204 — does it free xt? It's called after the pk loop, fine.
+
+  Hmm, one thing in splitIntegerTraces: `if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);` — OpenMS runs EPD unconditionally; with all filters off, equivalent output, but EPD would still recompute centroids via MassTrace (updateWeightedMeanRT etc.). The early return keeps the tool's own t.mz (double-weighted apex, item 1.11) instead of MassTrace's plain weighted mean → COORD divergence on the no-split path. At current config split_valleys > 0 so only relevant when in.size() < 2 — then ALL traces keep cmz-style m/z. Minor.
+
+  Section 4: banding: 
+  - Each band: seeds gated by bin core (L101), extension unbounded in m/z, own visited (L52).
+  - Failure modes: (i) same feature straddling boundary gets traced independently in both bands → duplicate traces with identical/overlapping members — impossible in OpenMS (global visited); (ii) OpenMS's kill mechanism (closest peak visited → missed → eventual termination) doesn't fire across bands → traces OpenMS would have terminated early run to completion → extra/longer traces; (iii) conversely, cross-band contention resolution is nondeterministic if bands run concurrently (output order), though per-band deterministic; (iv) boundary in raw bins with per-frame calibration drift → core boundary wobbles in m/z; a feature's peaks in different frames classify differently, but only the seed's bin matters.
+  - Bounded: duplication limited to features whose ±3σ span crosses a boundary — O(#boundaries × σ/ band width) fraction; each straddler at most (#bands it touches) copies. Never subtractive → cannot explain a peptide deficit; if anything duplicates/inflates, and could perturb FDR/feature-linking downstream.
+
+  Section 5: speed: remaining costs: 3 calibration evals per frame-step (L81-83) vs OpenMS's double binary searches; one mzOf per accepted peak/seed (L53/104/128); duplicate tracing at band seams; per-band full scan of tp.order (cheap). Nothing asymptotic; the old 9:28 causes are gone. If still slower than OpenMS, profile the calibration call cost (sqrt vs table) and EPD MassTrace churn (std::list<Peak2D> construction L192-200 — OpenMS builds MassTrace once from gathered peaks without the intermediate integer round trip; the tool builds Peak2D lists for every trace — comparable). Also `sort(pts)` trivial. Honest: at equal output expect parity; check that tofOf/mzOf aren't doing something worse than a sqrt (e.g., map lookup or iteration).
+
+  Residual expectation: if faithful, expect peptide counts within a small % (order 0–3%): differences from quantization boundary effects (1.1 could be larger if truncation), edge bins, tie-breaks, and banding duplicates (inflation). If the benchmark shows a real DEFICIT, first check intensity quantization at the noise floor (1.1) and whether imq quantization widens/narrows the gate, not the tracing logic — the tracing logic now matches.
+
+  Also mention: I verified updateIterativeWeightedMean_ counter updates from knowledge: `prev_counter += added_intensity * added_value; prev_denominator += added_intensity;` — tool correct.
+
+  Length: this will be long but the task demands it. Use headers per question. Cite ~L numbers "as numbered in the paste". Keep it tight per item.
+
+To resume this session: kimi -r session_29e16d30-3d3b-4478-85f7-4d3d50db7f57
