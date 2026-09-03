@@ -12,6 +12,13 @@ checks that fail if the things most likely to break do break:
   3. parameter bounds    a negative count must be REJECTED, not wrapped through Size into an
                          empty-but-successful run
   4. determinism         the same input at 1 and 4 threads must give byte-identical spectrum data
+  5. trace extension     one missing cycle must leave ONE trace and its gapped fragment in the
+                         spectrum; seven missing cycles must give TWO traces. Every version of the
+                         integer detector that lost 92% of the peptides passed checks 1-4.
+
+These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
+without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
+real data in the benchmark harness and not here.
 
 Usage: test_spextract.py /path/to/DIAPseudoSpectra [workdir]
 Exit status is 0 only if every check passes.
@@ -54,11 +61,17 @@ def spectrum(idx, ms_level, rt, peaks, im, prec=None):
 </binaryDataArrayList></spectrum>"""
 
 
-def synth(path, n_cycles=14, cycle_s=1.4):
+def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=()):
     """Two precursors that co-elute in one isolation window: a z=2 envelope and a z=1 envelope.
 
     Both are given a 3-peak isotope envelope so `require_isotope_support` keeps them, matching
     fragments that co-elute with the precursor, and a distinct ion mobility.
+
+    `gap_cycles`: cycles in which the z=2 precursor AND its first fragment are ABSENT. This is
+    the input that separates a correct trace-extension rule from a wrong one: OpenMS tolerates up
+    to five consecutive missing frames before it ends a trace, so one gap must still give ONE
+    trace, and seven consecutive gaps must give TWO. Every version of the integer detector that
+    lost 92% of peptides passed the other checks in this file; none would have passed this.
     """
     win = (600.0, 590.0, 620.0)                    # target, lo, hi
     z2_mono, z2_im = 601.3, 0.90                   # a doubly-charged precursor
@@ -71,13 +84,17 @@ def synth(path, n_cycles=14, cycle_s=1.4):
         shape = 1.0 - abs(c - n_cycles / 2.0) / (n_cycles / 2.0 + 1.0)   # a triangular elution
         amp = max(shape, 0.05)
         ms1, ms1_im = [], []
+        gap = c in gap_cycles
         for k, rel in enumerate((1.0, 0.55, 0.20)):                      # averagine-ish envelope
-            ms1.append((z2_mono + k * ISO / 2.0, 6.0e5 * amp * rel)); ms1_im.append(z2_im)
+            if not gap:
+                ms1.append((z2_mono + k * ISO / 2.0, 6.0e5 * amp * rel)); ms1_im.append(z2_im)
             ms1.append((z1_mono + k * ISO / 1.0, 4.0e5 * amp * rel)); ms1_im.append(z1_im)
         order = sorted(range(len(ms1)), key=lambda i: ms1[i][0])
         specs.append(spectrum(idx, 1, rt, [ms1[i] for i in order], [ms1_im[i] for i in order])); idx += 1
         ms2, ms2_im = [], []
-        for mz, rel in z2_frags: ms2.append((mz, 2.0e5 * amp * rel)); ms2_im.append(z2_im)
+        for fi, (mz, rel) in enumerate(z2_frags):
+            if gap and fi == 0: continue                                   # first fragment gapped too
+            ms2.append((mz, 2.0e5 * amp * rel)); ms2_im.append(z2_im)
         for mz, rel in z1_frags: ms2.append((mz, 1.5e5 * amp * rel)); ms2_im.append(z1_im)
         order = sorted(range(len(ms2)), key=lambda i: ms2[i][0])
         specs.append(spectrum(idx, 2, rt, [ms2[i] for i in order], [ms2_im[i] for i in order],
@@ -118,6 +135,35 @@ def precursors(mzml):
         if "selected ion m/z" in line: mz = float(re.search(r'value="([^"]+)"', line).group(1))
         elif "charge state" in line and mz is not None:
             out.append((mz, int(re.search(r'value="([^"]+)"', line).group(1)))); mz = None
+    return out
+
+
+def peaks_of(mzml, prec_mz, tol=0.02):
+    """m/z list of the first spectrum whose selected ion is within tol of prec_mz."""
+    want, arr, prec = False, None, 8
+    for line in open(mzml, errors="replace"):
+        if "<spectrum " in line: want = False
+        elif "selected ion m/z" in line:
+            v = float(re.search(r'value="([^"]+)"', line).group(1)); want = abs(v - prec_mz) < tol
+        elif want and 'name="m/z array"' in line: arr = "mz"
+        elif want and 'name="intensity array"' in line: arr = "it"
+        elif want and 'name="64-bit float"' in line: prec = 8
+        elif want and 'name="32-bit float"' in line: prec = 4
+        elif want and arr == "mz" and "<binary>" in line:
+            b = line[line.find("<binary>") + 8: line.find("</binary>")]
+            raw = base64.b64decode(b)
+            return list(struct.unpack(f"<{len(raw)//prec}{'d' if prec == 8 else 'f'}", raw))
+    return []
+
+
+def ms1_traces_near(tsv, mz, tol=0.02):
+    """(n_xic, ...) of every MS1 trace in a diag:dump_ms1_tsv dump near an m/z."""
+    out = []
+    with open(tsv) as f:
+        hdr = next(f).rstrip("\n").split("\t")
+        for line in f:
+            q = dict(zip(hdr, line.rstrip("\n").split("\t")))
+            if abs(float(q["mz"]) - mz) < tol: out.append(int(q["n_xic"]))
     return out
 
 
@@ -194,7 +240,31 @@ def main():
         assert a == b, f"spectrum data differs between 1 and 4 threads:\n  {a}\n  {b}"
     check("byte-identical at 1 vs 4 threads", c6)
 
-    print(f"\n{6 - len(fails)}/6 checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
+    # 5: trace extension across gaps -- the check every broken integer detector would have failed
+    # 20 cycles, so that after a seven-cycle gap BOTH halves are long enough to pass the MS1
+    # minimum trace length (a 3-frame remnant is correctly dropped by OpenMS, which is not the
+    # behaviour under test here).
+    for label, gaps, want_traces in (("one missing cycle -> ONE trace", (10,), 1),
+                                     ("seven missing cycles -> TWO traces", tuple(range(7, 14)), 2)):
+        inp_g = os.path.join(work, f"gap{len(gaps)}.mzML")
+        synth(inp_g, n_cycles=20, gap_cycles=gaps)
+        out_g = os.path.join(work, f"gap{len(gaps)}.out.mzML")
+        dump = os.path.join(work, f"gap{len(gaps)}")
+        run(binary, inp_g, out_g, extra=["-diag:dump_ms1_tsv", dump])
+
+        def cg(label=label, want=want_traces, dump=dump, out_g=out_g, gaps=gaps):
+            tr = ms1_traces_near(dump + ".traces.tsv", z2_mono)
+            assert len(tr) == want, f"expected {want} MS1 trace(s) at {z2_mono} with gaps {gaps}, got {len(tr)} (n_xic {tr})"
+            if want == 1:
+                assert tr[0] >= 20 - len(gaps) - 1, f"the surviving trace is too short: n_xic {tr[0]}"
+                # the gapped FRAGMENT must still reach the z=2 spectrum: a rule that ends a trace at
+                # its first gap drops it, which is how 92% of the peptides went missing
+                pk = peaks_of(out_g, z2_mono)
+                assert any(abs(m - 233.11) < 0.02 for m in pk), f"gapped fragment 233.11 missing from the z=2 spectrum: {pk}"
+        check(f"trace extension: {label}", cg)
+
+    total = 6 + 2
+    print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 
 

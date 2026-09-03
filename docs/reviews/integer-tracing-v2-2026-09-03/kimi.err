@@ -1,0 +1,532 @@
+kimi version 0.40.1
+• Let me read the files. The main file may be large. Let me read it, the failure analysis, and the test file.The DIAPseudoSpectra.cpp is 3589 lines. I need to find the relevant functions: `detectTracesInteger_`, `splitValleys`, `splitIntegerTraces`, `PeakSlab`, `toSlab`, `TofAxis`. Let me grep for them to find line numbers, then read those sections.I have the core functions. Now I need to see:
+  - `Trace` struct definition and `toTrace`, `toTrace` under `trace:mz_estimator`
+  - How bands are constructed (around line 2990-3060)
+  - The OpenMS path `detectTraces_` for comparison
+  - test/test_spextract.py
+
+  Let me grep for Trace struct and toTrace, and read the banding code around line 2960-3080.
+
+• Now let me look at the OpenMS path `detectTraces_` (lines 1415-1560) for comparison on banding semantics (halo). And the test suite. Let me read those.Now I have all the relevant code. Let me do the hostile review carefully, comparing against the OpenMS excerpts given.
+
+  OpenMS ground truth summary:
+
+  **updateIterativeWeightedMean_**: `counter_tmp = 1 + (w*v)/cnt; denom_tmp = 1 + w/den; c *= counter_tmp/denom_tmp; then cnt += w*v; den += w`. The tool's `iwm` lambda (lines 756-759): `const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den; c *= (ct / dt); cnt += w * v; den += w;` — matches, assuming the cut-off lines are `cnt += w*v; den += w`. Yes, in actual OpenMS, updateIterativeWeightedMean_:
+
+  ```cpp
+  void MassTraceDetection::updateIterativeWeightedMean_(const double added_value, const double added_intensity, double& centroid_value, double& prev_counter, double& prev_denom) const
+  {
+    const double counter_tmp = 1 + (added_intensity * added_value) / prev_counter;
+    const double denom_tmp = 1 + (added_intensity / prev_denom);
+    const double weight = (counter_tmp / denom_tmp);
+    centroid_value *= weight;
+    prev_counter += added_intensity * added_value;
+    prev_denom += added_intensity;
+  }
+  ```
+  Yes, that matches my knowledge of OpenMS. Good — verify: yes, this is correct. So counters updated as stated.
+
+  **updateWeightedSDEstimateRobust**: OpenMS:
+  ```cpp
+  double MassTraceDetection::updateWeightedSDEstimateRobust(const Peak1D& p, const double centroid_mz, double ftl_sd, double& last_weights_sum) const
+  {
+    double denom1 = std::log(last_weights_sum) + 2 * std::log(ftl_sd);
+    double denom2 = std::log(p.getIntensity()) + 2 * std::log(std::abs(p.getMZ() - centroid_mz));
+    double denom = std::sqrt(std::exp(denom1) + std::exp(denom2));
+    double weights_sum = last_weights_sum + p.getIntensity();
+    double tmp_sd = denom / std::sqrt(weights_sum);
+    if (tmp_sd > std::numeric_limits<double>::epsilon())
+    {
+      ftl_sd = tmp_sd;
+    }
+    last_weights_sum = weights_sum;
+    return ftl_sd;
+  }
+  ```
+  The tool's sdRobust (lines 760-768): matches. BUT: in OpenMS, `last_weights_sum` is initialized to `tmp_intensity_so_far` — wait, in run_: `double ftl_sd = ...; ... updateWeightedSDEstimateRobust` is called in processPeak_ with `chromatogram.back().second`? Let me recall. Actually OpenMS run_:
+
+  ```cpp
+  double ftl_sd = (centroid_mz / 1000000) * mass_error_ppm_;
+  ...
+  double tmp_intensity_so_far = work_exp[apex_scan_idx][apex_peak_idx].getIntensity();
+  ```
+  And processPeak_ calls `ftl_sd = updateWeightedSDEstimateRobust(p, centroid_mz, ftl_sd, tmp_intensity_so_far);` if reestimate_mt_sd_. The tool initializes `wsum = w0` (the seed intensity) at line 804 — matches.
+
+  Wait — but does OpenMS call updateWeightedSDEstimateRobust for the SEED too? In run_, the seed is processed... Actually in OpenMS run_:
+
+  ```cpp
+  // *** INITIALIZATION ***
+  MassTrace new_trace;
+  ...
+  centroid_mz = work_exp[apex_scan_idx][apex_peak_idx].getMZ();
+  ...
+  double prev_counter = tmp_intensity * centroid_mz;  // hmm
+  double prev_denom = tmp_intensity;
+  updateIterativeWeightedMean_(centroid_mz, tmp_intensity, centroid_mz, prev_counter, prev_denom);
+  ```
+  Actually let me recall the actual OpenMS code (MassTraceDetection::run_, from OpenMS 3.x):
+
+  ```cpp
+  // details: ... 
+  Size apex_scan_idx(apices[0].first);
+  Size apex_peak_idx(apices[0].second);
+  double apex_intensity(work_exp[apex_scan_idx][apex_peak_idx].getIntensity());
+
+  Size trace_down_idx(apex_scan_idx);
+  Size trace_up_idx(apex_scan_idx);
+
+  new_trace.push_back(work_exp[apex_scan_idx][apex_peak_idx]);
+  // ... gathered_idx.push_back
+  centroid_mz = work_exp[apex_scan_idx][apex_peak_idx].getMZ();
+  if (ion_mobility_tolerance_ > 0.0) centroid_im = ...;
+  double prev_counter = centroid_mz * apex_intensity;
+  double prev_denom = apex_intensity;
+  updateIterativeWeightedMean_(centroid_mz, apex_intensity, centroid_mz, prev_counter, prev_denom);
+  // for IM similarly
+  double ftl_sd = (centroid_mz / 1e6) * mass_error_ppm_;
+  double intensity_so_far = apex_intensity;
+  ```
+  Yes, seed counted twice — the tool does this (lines 800-803). Good.
+
+  Note: OpenMS does NOT call updateWeightedSDEstimateRobust for the seed — the tool also doesn't. Good.
+
+  **Extension loop guard conditions.** OpenMS:
+
+  ```cpp
+  while (((trace_down_idx > 0) && toggle_down) || ((trace_up_idx < work_exp.size() - 1) && toggle_up))
+  {
+    if ((trace_down_idx > 0) && toggle_down)
+    {
+      if (!work_exp[trace_down_idx - 1].empty())
+      {
+        Size next_down_peak_idx = findBestPeak_(...);
+        bool next_down_peak_accepted = isPeakAcceptable_(centroid_mz, ftl_sd, ..., next_down_peak_idx...);
+        if (next_down_peak_accepted) { processPeak_(true, ...); ++current_sample_down; ... missed_down = 0 } else { ++missed_down; }
+        ...
+      }
+      --trace_down_idx;
+      ++scans_down_counter? 
+      if (trace_termination_criterion_ == "outlier") { if (missed_down > trace_termination_outliers_) toggle_down = false; }
+      else ... sample_rate variant: if (current_sample_rate_down < min_sample_rate_) toggle_down = false;
+    }
+    ... symmetric up
+  }
+  ```
+
+  Important details:
+
+  1. The tool increments `d.scans` unconditionally per direction step (line 833: `++d.scans`). In OpenMS, `total_scan_number` is incremented... Actually OpenMS run_:
+
+  ```cpp
+  Size total_scan_number(0);
+  ...
+  if (trace_down_idx > 0 && toggle_down) { ... --trace_down_idx; ++total_scan_number; }
+  if (trace_up_idx < ... && toggle_up) { ... ++trace_up_idx; ++total_scan_number; }
+  ```
+  Hmm, actually I recall `total_scan_number` is incremented inside each direction's block, unconditionally (whether the frame was empty or not, whether hit or miss). And then:
+
+  ```cpp
+  if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up)) {...}
+  ```
+  Wait, the excerpt says `isTraceValid_(trace, total_scans_visited, missed_down, missed_up)` and `adjusted = total_scans_visited - missed_down - missed_up; return trace.size()/adjusted >= min_sample_rate;`.
+
+  Hmm — wait, the excerpt says total_scans_visited minus missed_down minus missed_up. But that's not "trailing misses" — missed_down counts CONSECUTIVE misses at termination time (since missed is reset to 0 on each hit, at loop end missed_down is the number of trailing consecutive misses, i.e., 6 when terminated by outlier, or whatever when terminated by boundary). Actually `missed_down` is reset to 0 on each hit, so at end it's the trailing miss count for that direction. So adjusted = total visited frames minus trailing misses on both sides. Yes, and in OpenMS:
+
+  ```cpp
+  bool MassTraceDetection::isTraceValid_(const MassTrace& trace, const Size total_scan_number, const Size missed_scans_down, const Size missed_scans_up) const
+  {
+    if (trace.getSize() < 2) return false; // hmm? not sure
+    double rt_range = std::fabs(trace.rbegin()->getRT() - trace.begin()->getRT());
+    if (rt_range < min_trace_length_) return false;
+    else if (max_trace_length_ >= 0.0 && rt_range > max_trace_length_) return false;
+    else
+    {
+      Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+      return static_cast<double>(trace.getSize()) / static_cast<double>(total_scans_visited) >= min_sample_rate_;
+    }
+  }
+  ```
+  Something like that. The `+1`? Hmm. total_scan_number: is the seed frame counted? In the tool, line 843: `const Size total = dn.scans + up.scans + 1;` — the +1 is the apex frame. Is that what OpenMS does? In OpenMS run_, I believe total_scan_number is incremented in both direction blocks, and then... Let me recall precisely:
+
+  ```cpp
+  Size missed_scans_down(0), missed_scans_up(0);
+  Size total_scan_number(0);  // hmm?
+  ```
+
+  Actually from OpenMS 2.x/3.x source (I remember it reasonably well):
+
+  ```cpp
+  while (((trace_down_idx > 0) && toggle_down) || ((trace_up_idx < work_exp.size() - 1) && toggle_up))
+  {
+    if (((trace_down_idx > 0) && toggle_down))
+    {
+      if (!work_exp[trace_down_idx - 1].empty())
+      {
+        // search for peak ...
+        if (peak_accepted) { processPeak_(false, ...); ++current_sample_rate_down? ...; missed_scans_down = 0; }
+        else { ++missed_scans_down; }
+      }
+      --trace_down_idx;
+      ++total_scan_number;
+      if (trace_termination_criterion_ == "outlier")
+      { if (missed_scans_down > trace_termination_outliers_) toggle_down = false; }
+      else if (trace_termination_criterion_ == "sample_rate")
+      { ... }
+    }
+    if (((trace_up_idx < work_exp.size() - 1) && toggle_up))
+    { ... ++trace_up_idx; ++total_scan_number; ... }
+  }
+  // check if minimum length is NOT exceeded
+  // ...
+  if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up))
+  ```
+
+  Hmm, was there a `+1` for the apex? I believe in OpenMS the apex frame IS counted: `isTraceValid_` uses `total_scan_number + 1`? Let me think... Actually I recall in OpenMS:
+
+  ```cpp
+  bool isTraceValid_(const MassTrace& trace, const Size total_scan_number, const Size missed_scans_down, const Size missed_scans_up) const
+  {
+    ...
+    const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up + 1;
+    ...
+  }
+  ```
+  Hmm, I'm not certain about the +1. The question prompt itself says "(what total_scans_visited is composed of was not in my excerpt -- state what OpenMS uses)". From my knowledge of OpenMS MassTraceDetection.cpp:
+
+  ```cpp
+      // check if minimum length is NOT exceeded
+      // ...
+      if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up))
+  ```
+
+  and
+
+  ```cpp
+    bool MassTraceDetection::isTraceValid_(const MassTrace& trace, const Size total_scan_number, const Size missed_scans_down, const Size missed_scans_up) const
+    {
+      // min trace length parameter is exceeded?
+      if (rt_range < min_trace_length_)
+      { return false; }
+      // max trace length is exceeded?
+      else if (max_trace_length_ >= 0.0 && rt_range > max_trace_length_)
+      { return false; }
+      else
+      {
+        const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+        return static_cast<double>(trace.getSize()) / static_cast<double>(total_scans_visited) >= min_sample_rate_;
+      }
+    }
+  ```
+
+  And in run_, total_scan_number is incremented per direction step... but does it include the apex scan? I believe in run_ there's:
+
+  ```cpp
+      Size total_scan_number(0);
+  ```
+  Hmm. Actually I recall:
+
+  ```cpp
+        // extend mass trace downstream
+        ...
+  ```
+
+  I genuinely can't recall with 100% certainty whether the +1 is inside or outside. Let me think about OpenMS source more carefully. From OpenMS GitHub MassTraceDetection.cpp (I've read this file):
+
+  ```cpp
+      // ************************************************************** //
+      // start trace extension to the left (down) and to the right (up)...
+      // ************************************************************** //
+      ...
+      Size missed_scans_down(0);
+      Size missed_scans_up(0);
+      ...
+      bool toggle_down = true;
+      bool toggle_up = true;
+      Size total_scan_number(0);
+      ...
+      while (((trace_down_idx > 0) && toggle_down) || ((trace_up_idx < work_exp.size() - 1) && toggle_up))
+      {
+        if (((trace_down_idx > 0) && toggle_down))
+        {
+          if (!work_exp[trace_down_idx - 1].empty())
+          {
+            Size next_down_peak_idx = findBestPeak_(work_exp[trace_down_idx - 1], centroid_mz, ftl_sd, centroid_im);
+            bool next_down_peak_accepted = isPeakAcceptable_(centroid_mz, ftl_sd, centroid_im, work_exp[trace_down_idx - 1], next_down_peak_idx);
+            if (next_down_peak_accepted)
+            {
+              processPeak_(false, work_exp[trace_down_idx - 1], next_down_peak_idx, new_trace, centroid_mz, prev_counter, prev_denom, centroid_im, prev_counter_im, prev_denom_im, ftl_sd, intensity_so_far, gathered_idx);
+              ++current_sample_rate_down? no...
+              missed_scans_down = 0;
+            }
+            else
+            {
+              ++missed_scans_down;
+            }
+          }
+          --trace_down_idx;
+          ++total_scan_number;
+          if (trace_termination_criterion_ == "outlier")
+          {
+            if (missed_scans_down > trace_termination_outliers_) { toggle_down = false; }
+          }
+          else if (trace_termination_criterion_ == "sample_rate")
+          {
+            if (static_cast<double>(...) < min_sample_rate_) { toggle_down = false; }
+          }
+        }
+        ...
+      }
+  ```
+
+  And isTraceValid_:
+
+  ```cpp
+    bool MassTraceDetection::isTraceValid_(const MassTrace& trace, const Size total_scan_number, const Size missed_scans_down, const Size missed_scans_up) const
+    {
+      ...
+      const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up + 1;
+  ```
+
+  I believe the +1 for the apex scan IS there, because otherwise a trace that hit every single frame would get size/(total) = (F)/(F-1) > 1 which is fine, but the semantics "sample rate" suggests size/frames-spanned and the apex frame should count. I recall the actual line:
+
+  ```cpp
+        Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+  ```
+
+  Hmm. Honestly I'm not sure. Let me check: the tool uses `total = dn.scans + up.scans + 1` (line 843). dn.scans counts every step taken downward (hit, miss, or empty frame). up.scans likewise. +1 for apex.
+
+  Actually, I found it — from OpenMS source, MassTraceDetection::run_:
+
+  ```cpp
+        // ************************************************************** //
+        // UPDATE SIZES
+        // ************************************************************** //
+  ```
+  no...
+
+  Let me recall the actual termination block of run_:
+
+  ```cpp
+      // ** check if the trace passes the min length / max length / sample rate criteria **
+      if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up))
+  ```
+
+  And total_scan_number is incremented at the END of each direction block — including when the spectrum is empty. So total_scan_number = number of frames visited in both directions (excluding apex). Then in isTraceValid_, `total_scan_number - missed_scans_down - missed_scans_up + 1`? 
+
+  I found memory: https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+
+  ```cpp
+    bool MassTraceDetection::isTraceValid_(const MassTrace& trace, const Size total_scan_number, const Size missed_scans_down, const Size missed_scans_up) const
+    {
+      // min trace length parameter is exceeded?
+      if (trace.getSize() < 2)
+      {
+        return false;
+      }
+      ...
+  ```
+
+  Hmm no, I don't think there's a getSize() < 2 check. Actually wait — there might be. MassTraceDetection with a single peak... I don't recall that.
+
+  OK. Given uncertainty, in my answer I should state what OpenMS uses as best I know and flag the +1 as matching/mismatching with the caveat. The prompt itself acknowledges total_scans_visited composition wasn't in the excerpt and asks me to state it. From my best knowledge of OpenMS 3.x:
+
+  ```cpp
+        const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up + 1;
+  ```
+
+  Hmm, actually, I now recall more specifically. In run_:
+
+  ```cpp
+        // trace length check
+        if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up))
+  ```
+
+  and isTraceValid_:
+
+  ```cpp
+      else
+      {
+        const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+        return (static_cast<double>(trace.getSize()) / static_cast<double>(total_scans_visited)) >= min_sample_rate_;
+      }
+  ```
+
+  I'm about 60/40 that there is NO +1. Hmm. But wait — the tool's line 843-845 also guards against total - missed <= 0 with `: 1`. In OpenMS, if total_scan_number - missed_down - missed_up could be 0 (e.g., a seed at the boundary with immediate misses: total=2, missed_down=1... missed counts only increment on non-empty frames; for a trace with just the apex and 6 misses each side: total=12, missed=12, adjusted=0 -> division by zero -> inf >= 0.5 -> valid?). In OpenMS Size arithmetic: 12-12=0, division by zero → +inf → passes. Hmm, would OpenMS then accept a single-peak trace? rt_range = 0 < min_trace_length → rejected anyway (unless min_trace_length is 0 — the test suite sets ms2_min_length_sec 0!). With min_len 0 and adjusted 0: OpenMS: size 1 / 0 = inf >= 0.5 → valid! Tool: adjusted = max(...,1) → 1/1 = 1 >= 0.5 → valid too. Same outcome in that corner. But there are cases: total=6, missed=6 (one side only misses 6): e.g., seed at top frame: only down direction runs 6 times, all misses (non-empty frames). total=6, missed_down=6, adjusted=0 → OpenMS: 1/0=inf → valid (if rt_range=0 passes min_len... min_len=0 in test, but default min_trace_length for ms2 in the tool?). The tool: adjusted=1, 1/1=1 ≥ 0.5 valid. Same. Corner: total=6, missed_down=6 but the trace has 1 point: same either way. Actually where it differs: adjusted=0 in OpenMS → any trace passes sample-rate; tool → size/1. If got.size()==1, both pass. Since a trace always has ≥1 point (the seed), adjusted=0 ⇒ size=1 (no hits possible if all steps were misses... wait, missed is TRAILING misses only; adjusted = total - trailing misses. If there was any hit in direction d, missed_d = 0 at end. So adjusted=0 requires both directions all-miss ⇒ size=1 ⇒ both pass). So the sentinel only differs when adjusted>0, which it doesn't affect. Fine — no SET difference, but I should double check: is `total - missed_down - missed_up` in the tool equal to OpenMS's adjusted when OpenMS has +1? If OpenMS has +1 and tool has +1, fine.
+
+  Let me now go through the tool's code for real deviations.
+
+  ### Deviation hunting
+
+  **1. Seed ordering.** OpenMS: apices = all peaks with intensity > chrom_peak_snr * noise_threshold_int (strict >). stable_sort ascending by intensity, iterate in REVERSE. So descending intensity; ties: reverse of stable ascending order → among equal intensities, the one with the LARGER original index comes first. Original index = order in the (scan, peak) flattened vector. Tool: line 749-752: sorts descending by intensity, ties by `a > b` (larger peak index first). Peak index k in the slab is frame-major, and within a frame sorted by tof (mz). OpenMS flattens by (scan idx, peak idx within spectrum) — peak idx within a spectrum is by m/z. So the tie-break order matches: larger (scan,peak) lexicographic = larger k. Match. ✓
+
+  But — OpenMS apices collection: does it include peaks ≤ noise? Those were DELETED from work_exp before tracing, so no. Tool requires member[k] (inten > noise) AND inten > snr*noise. ✓. Also OpenMS checks `if (!peak_visited[apex_scan_idx][apex_peak_idx])` — skip visited. Tool: `if (visited[seed]) continue;` ✓.
+
+  One subtlety: OpenMS chrom_peak_snr filter — apex must have intensity > chrom_peak_snr * noise_threshold_int. Strict. Tool: `sl.inten[k] > min_apex` with `min_apex = (float)(snr*noise)` — note the float rounding of the threshold: `(float)(snr * noise)` computed in double then cast to float, comparison in float. OpenMS compares double intensity vs double threshold. A peak with intensity exactly at the double threshold could round differently. Negligible — mention as COORD/none? Actually it could flip SET membership for a seed at the exact boundary. Essentially negligible; mention.
+
+  **2. `findBestPeak_` in OpenMS**: iterates over `[MZBegin(left), MZEnd(right))` where left/right = centroid_mz ± 3*ftl_sd. Among IM-in-bounds peaks, picks min |mz - centroid|. Then isPeakAcceptable_ checks: found? mz within ±3sd (again)? IM within tolerance (again)? not visited?
+
+  Note OpenMS findBestPeak_ — does it check visited? No. It picks the closest IM-compatible peak regardless of visited status; isPeakAcceptable_ rejects if visited → miss. Tool: line 784 `if (mz < lo_mz || !member[k]) continue;` — the member check inside candidate selection. In OpenMS, member-deleted peaks are gone from work_exp entirely, so they're invisible to findBestPeak_. Same effect. ✓
+
+  But wait — the tool SKIPS non-member peaks in the closest selection. In OpenMS, deleted peaks don't exist. Same. ✓
+
+  However — subtle: OpenMS's findBestPeak_ picks closest among ALL peaks in the m/z window that pass the IM gate, INCLUDING visited ones. Tool: same — visited peaks are considered for "closest" (member[k] is true for visited peaks since membership is by intensity), and then if the closest is visited → taken → miss. ✓ line 789.
+
+  But wait: the tool checks `visited[bk]` — visited is per-BAND (fresh per detectTracesInteger_ call). That's the banding issue, section 4.
+
+  **3. Empty frame handling.** OpenMS: `if (!work_exp[trace_down_idx - 1].empty()) { ... }` — empty frames skip the find/miss logic entirely, but still `--trace_down_idx; ++total_scan_number;` and the outlier check still applies. Tool: lines 817-833: same — if frame non-empty do best(); else nothing; always fi step, ++d.scans, outlier check. ✓
+
+  **4. Termination check timing.** OpenMS checks `missed > outliers` AFTER decrementing trace_down_idx, within the same iteration. Tool line 834 same. ✓
+
+  **5. Guard conditions.** OpenMS while: `((down_idx > 0) && toggle_down) || ((up_idx < n-1) && toggle_up)`. Tool line 808: `while ((fd > 0 && dn.active) || (fu + 1 < (long)F && up.active))`. Same. Inner per-side guards: lines 814-815 check active and bounds. Same. One subtlety: in OpenMS, when down is inactive (toggle_down=false) but up continues, each loop iteration only processes up. Tool same via `if (!d.active) continue;`. ✓
+
+  **6. processPeak_ ordering of IM vs m/z centroid update and sd update.** OpenMS processPeak_: push peak, update m/z centroid, update IM centroid, then if reestimate_mt_sd update sd using the NEW centroid? The excerpt says: "updateIterativeWeightedMean_(mz, I, centroid_mz, ...); gathered_idx.push; updateIterativeWeightedMean_(im, ...); if (reestimate_mt_sd) updateWeightedSDEstimateRobust(peak, centroid_mz, ftl_sd, intensity_so_far)". So sd update uses the UPDATED centroid_mz. Tool lines 823-826: iwm(mz...) then iwm(im...) then sdRobust(mz, w, cmz, sd, wsum) — uses updated cmz. ✓
+
+  **7. IM centroid double-application for seed.** OpenMS run_ initializes centroid_im = apex im; prev_counter_im = im*I; prev_denom_im = I; then updateIterativeWeightedMean_(im, I, centroid_im, ...) — applied again. Tool lines 802-803. ✓ (but note tool works in quantized imq units; centroid in imq space — quantization adds a rounding of ≤2.1e-5 to each peak's im, tolerance 0.01 — negligible, COORD.)
+
+  **8. Seed double count in m/z.** Tool lines 800-801. ✓
+
+  **9. Validity: RT span.** OpenMS: rt_range = |last.rt - first.rt|. Tool: span over min/max frame of gathered peaks (lines 838-840), using rt of frames. Since gathered peaks include first/last... min/max frame of gathered = first/last peak's RT. ✓. But subtle: OpenMS MassTrace peaks — trace[0] is the apex? Actually in OpenMS, processPeak_ pushes front for down direction and back for up, so the trace IS RT-ordered; rt_range = last - first. The tool computes min/max over frames — equivalent. ✓
+
+  But: OpenMS rt_range uses the RTs of the first and last PEAKS in the trace — same as tool. ✓
+
+  **10. Validity: sample rate.** total = dn.scans + up.scans + 1 (apex frame). As discussed, need to state what OpenMS uses. I believe OpenMS's isTraceValid_:
+
+  ```cpp
+  const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+  ```
+
+  Hmm. Let me try to recall the actual code once more. From OpenMS MassTraceDetection.cpp (I've reviewed it multiple times):
+
+  ```cpp
+      // std::cerr << "traces in total: " << total_scan_number << " " << new_trace.getSize() << std::endl;
+      // check if minimum length is NOT exceeded
+      if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up))
+      {
+        ...
+  ```
+
+  and
+
+  ```cpp
+    bool MassTraceDetection::isTraceValid_(const MassTrace& trace, const Size total_scan_number, const Size missed_scans_down, const Size missed_scans_up) const
+    {
+      if (trace.getSize() < 2)
+      {
+        return false;
+      }
+
+      double rt_range(std::fabs(trace.rbegin()->getRT() - trace.begin()->getRT()));
+      // min trace length parameter is exceeded?
+      if (rt_range < min_trace_length_)
+      {
+        return false;
+      }
+      // max trace length is exceeded?
+      else if (max_trace_length_ >= 0.0 && rt_range > max_trace_length_)
+      {
+        return false;
+      }
+      else
+      {
+        const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+        return static_cast<double>(trace.getSize()) / static_cast<double>(total_scans_visited) >= min_sample_rate_;
+      }
+    }
+  ```
+
+  I'm fairly confident about the `trace.getSize() < 2 → false` check! Hmm, is there? Actually... I recall there being something like that in MassTraceDetection — "traces with only one peak are discarded"? Hmm. I genuinely can't be sure. Hmm, let me think about whether a single-peak trace can survive: seed at boundary (up_idx = n-1 or down_idx = 0), e.g., apex in the FIRST frame: down direction never runs (down_idx = 0 → trace_down_idx > 0 false); up direction runs from apex: 6 misses → total_scan_number = 6, missed_up = 6, adjusted = 0 → division by zero → inf → valid. So without a size<2 check, OpenMS would emit single-peak traces with rt_range=0 if min_trace_length ≤ 0. Default min_trace_length in the tool: `trace:min_length_sec`... and ms2_min_length_sec is 0 in the test suite. What's OpenMS's default min_trace_length? 5.0? Hmm, in MassTraceDetection defaults: min_trace_length 5.0. The tool passes min_len from options. So with min_len > 0 single-peak traces are rejected by rt_range anyway. With min_len = 0 (test config, and possibly the S30 config for ms2), OpenMS would accept single-peak traces (division by zero → inf). The tool's sentinel `adjusted=1` also accepts them (1/1 ≥ 0.5). Same result! Unless size ≥ 2... can't be with adjusted=0. OK so equivalent outcomes modulo the possible getSize()<2 check which I'm not sure exists.
+
+  Hmm wait, actually there IS one more subtlety: division by zero in OpenMS is double division by Size 0 → inf, passes. Fine.
+
+  I'll state: OpenMS increments total_scan_number once per direction step (including empty frames), and total_scans_visited = total_scan_number − missed_down − missed_up (the trailing-miss subtraction; the tool's `+1` for the apex frame and its floor at 1). Whether OpenMS has the +1: I need to be careful. Let me actually search my memory harder... 
+
+  From OpenMS source (MassTraceDetection.cpp, run_):
+
+  ```cpp
+        // add the peak to the current trace
+        ...
+        Size missed_scans_down(0);
+        Size missed_scans_up(0);
+
+        Size current_sample_down(1);
+        Size current_sample_up(1);
+        Size total_sample_down(1);
+        Size total_sample_up(1);
+
+        bool toggle_down = true;
+        bool toggle_up = true;
+
+        Size total_scan_number(0);
+
+        // double outlier_shifts_down(0), outlier_shifts_up(0);
+
+        while (((trace_down_idx > 0) && toggle_down) || ((trace_up_idx < work_exp.size() - 1) && toggle_up))
+        {
+          if (((trace_down_idx > 0) && toggle_down))
+          {
+            if (!work_exp[trace_down_idx - 1].empty())
+            {
+              Size next_down_peak_idx = findBestPeak_(work_exp[trace_down_idx - 1], centroid_mz, ftl_sd, centroid_im);
+
+              bool next_down_peak_accepted = isPeakAcceptable_(centroid_mz, ftl_sd, centroid_im, work_exp[trace_down_idx - 1], next_down_peak_idx);
+              if (next_down_peak_accepted)
+              {
+                processPeak_(false, work_exp[trace_down_idx - 1], next_down_peak_idx, new_trace, centroid_mz, prev_counter, prev_denom, centroid_im, prev_counter_im, prev_denom_im, ftl_sd, intensity_so_far, gathered_idx);
+
+                ++current_sample_down;
+                missed_scans_down = 0;
+              }
+              else
+              {
+                ++missed_scans_down;
+              }
+            }
+
+            --trace_down_idx;
+            ++total_scan_number;
+
+            if (trace_termination_criterion_ == "outlier")
+            {
+              if (missed_scans_down > trace_termination_outliers_)
+              {
+                toggle_down = false;
+              }
+            }
+            else if (trace_termination_criterion_ == "sample_rate")
+            {
+              ++total_sample_down;
+              if (static_cast<double>(current_sample_down) / static_cast<double>(total_sample_down) < min_sample_rate_)
+              {
+                toggle_down = false;
+              }
+            }
+          }
+          ...
+  ```
+
+  and then:
+
+  ```cpp
+        if (isTraceValid_(new_trace, total_scan_number, missed_scans_down, missed_scans_up))
+  ```
+
+  with:
+
+  ```cpp
+    bool MassTraceDetection::isTraceValid_(...) const
+    {
+      ...
+      const Size total_scans_visited = total_scan_number - missed_scans_down - missed_scans_up;
+      ...
+    }
+  ```
+
+  I'm now fairly confident there is NO +1 in OpenMS's isTraceValid_, and total_scan_number excludes the apex frame. Hmm, but wait — actually I recall the doc comment: "checks ... sample_rate criterion" and the formula `trace.getSize() / total_scans_visited`. If total excludes apex, a perfect trace spanning F frames has size F and total F-1 → ratio > 1. Fine.
+
+  So the tool's `+1` (line 843) makes `adjusted` ONE LARGER than OpenMS's → slightly STRICTER sample rate → some traces OpenMS keeps get dropped. SET difference (small, boundary cases only — traces exactly at the 0.5 edge). This is a real deviation to flag! The tool's comment at line 711 says "size / (frames visited - trailing misses) >= min_sample_rate" — ambiguous whether frames visited includes apex.
+
+  Hmm, but the FAILURE-ANALYSIS says item 3: "`size / (frames visited - trailing misses) >= 0.5`". Not decisive.
+
+  Given uncertainty, I flag it as a probable deviation with SET impact at the 0.5 boundary, to verify against source. Actually — let me think again... I want to check the OpenMS code on GitHub. I have web access! The prompt says OpenMS source is not on this machine, but I can fetch it from GitHub. That's the right move for a hostile review — verify updateIterativeWeightedMean_ counters, isTraceValid_ composition, and the seed handling. Let me fetch the OpenMS source.
+
+  URL: https://raw.githubusercontent.com/OpenMS/OpenMS/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
