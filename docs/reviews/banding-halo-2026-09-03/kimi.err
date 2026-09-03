@@ -1,0 +1,642 @@
+kimi version 0.40.1
+• The user wants a hostile review of the banding mechanism in src/DIAPseudoSpectra.cpp. I need to read the file first. It's a single C++ file — might be large. Let me read it, focusing on detectTraces_. Let me check size first, or just grep for relevant symbols.    3040 src/DIAPseudoSpectra.cpp
+Now let me look at the auto band derivation and the window loop context around line 2377-2530, plus the help text at 908-909 (already seen). Also check where the canonical sort happens after detectTraces_ and where w_bands is derived.Now I have a good picture. Let me also check the OpenMS MassTraceDetection semantics — the user says acceptance is against the RUNNING centroid. Actually, in OpenMS MassTraceDetection, updateWeightedMean_ uses running mean of m/z with weights, and the acceptance check uses `fabs(mt_mz - peak_mz) > mass_error_ppm * peak_mz * 1e-6`? Let me recall: OpenMS MassTraceDetection::run uses `trace_tolerance_ppm_` and compares `fabs(tmp_mz - mt_centroid) / tmp_mz * 1e6 > mass_tolerance_ppm_` roughly. The user asserts running centroid. I shouldn't need to verify OpenMS source, but I can check if OpenMS source is available locally (patches/ dir references OpenMS). The user says don't propose rewriting OpenMS. I can take the user's description of OpenMS semantics as given, but citing the actual OpenMS code would strengthen. Let me check whether OpenMS source is available somewhere — probably not in this repo. The harness might have it. Quick check: grep for MassTraceDetection in the repo.Is there OpenMS source available locally to verify the "running centroid" claim? Let me check quickly whether OpenMS headers exist on this system. The build might use OpenMS installed. Let me check./System/Volumes/Data/Users/kohlbach/Claude/mzPeak/OpenDIAlyzer/ext/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+/System/Volumes/Data/Users/kohlbach/Claude/OpenMS-metafix/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+/System/Volumes/Data/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+/System/Volumes/Data/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+/System/Volumes/Data/Users/kohlbach/Claude/OpenMS - DirecTag/src/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+/Users/kohlbach/.gemini/history/openms-mzpeak
+/Users/kohlbach/.gemini/tmp/openms-mzpeak
+/Users/kohlbach/Claude/OpenMS-metafix
+/Users/kohlbach/Claude/OpenMS-metafix/doc/openms
+/Users/kohlbach/Claude/OpenMS-metafix/share/OpenMS
+/Users/kohlbach/Claude/OpenMS-metafix/src/openms
+/Users/kohlbach/Claude/OpenMS-metafix/src/openms_gui
+/Users/kohlbach/Claude/OpenMS-mzpeak-build
+/Users/kohlbach/Claude/OpenMS-mzpeak-build/doc/openms
+/Users/kohlbach/Claude/OpenMS-mzpeak-build/share/OpenMS
+290:        double centroid_mz,
+301:      double right_bound = centroid_mz + 3 * ftl_sd;
+302:      double left_bound = centroid_mz - 3 * ftl_sd;
+307:        candidate.idx = spectrum.findNearest(centroid_mz);
+330:            if (!candidate.found || std::abs(spectrum[i].getMZ() - centroid_mz) < std::abs(candidate.mz - centroid_mz))
+347:        double centroid_mz,
+359:      double right_bound = centroid_mz + 3 * ftl_sd;
+360:      double left_bound = centroid_mz - 3 * ftl_sd;
+391:        double& centroid_mz,
+418:      updateIterativeWeightedMean_(candidate.mz, candidate.intensity, centroid_mz, prev_counter, prev_denom);
+440:        updateWeightedSDEstimateRobust(next_peak, centroid_mz, ftl_sd, intensity_so_far);
+508:        double centroid_mz(apex_peak.getMZ());
+512:        updateIterativeWeightedMean_(apex_peak.getMZ(), apex_peak.getIntensity(), centroid_mz, prev_counter, prev_denom);
+537:        double ftl_sd((centroid_mz / 1e6) * mass_error_ppm_);
+552:              PeakCandidate candidate = findBestPeak_(spec_trace_down, centroid_mz, ftl_sd, centroid_im);
+554:              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_down_idx - 1, spec_offsets, peak_visited))
+557:                            fwhms_mz, fwhms_im, centroid_mz, centroid_im,
+605:              PeakCandidate candidate = findBestPeak_(spec_trace_up, centroid_mz, ftl_sd, centroid_im);
+607:              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_up_idx + 1, spec_offsets, peak_visited))
+610:                            fwhms_mz, fwhms_im, centroid_mz, centroid_im,
+664:          new_trace.updateWeightedMeanRT();
+665:          new_trace.updateWeightedMeanMZ();
+      // Step 2: start extending mass traces beginning with the apex peak (go
+      // through all peaks in order of decreasing intensity)
+      // *********************************************************************
+      run_(chrom_apices, total_peak_count, work_exp, spec_offsets, found_masstraces, max_traces);
+
+      return;
+    } // end of MassTraceDetection::run
+
+    MassTraceDetection::PeakCandidate MassTraceDetection::findBestPeak_(
+        const MSSpectrum& spectrum,
+        double centroid_mz,
+        double ftl_sd,
+        double centroid_im) const
+    {
+      PeakCandidate candidate;
+      
+      if (spectrum.empty())
+      {
+        return candidate;
+      }
+
+      double right_bound = centroid_mz + 3 * ftl_sd;
+      double left_bound = centroid_mz - 3 * ftl_sd;
+
+      if (!has_centroid_im_)
+      {
+        // Standard LC-MS data: find peak closest to target m/z
+        candidate.idx = spectrum.findNearest(centroid_mz);
+        candidate.mz = spectrum[candidate.idx].getMZ();
+        candidate.intensity = spectrum[candidate.idx].getIntensity();
+        candidate.found = true;
+      }
+      else
+      {
+        // LC-IMS-MS data: find best peak considering both m/z and ion mobility
+        double right_bound_im = centroid_im + ion_mobility_tolerance_;
+        double left_bound_im = centroid_im - ion_mobility_tolerance_;
+
+        auto left_bound_it = spectrum.MZBegin(left_bound);
+        Size idx_left = left_bound_it - spectrum.begin();
+        auto right_bound_it = spectrum.MZEnd(right_bound);
+        Size idx_right = right_bound_it - spectrum.begin();
+
+        // Search within m/z window for peak with closest ion mobility match
+        for (Size i = idx_left; i < idx_right; ++i)
+        {
+          double im_value = spectrum.getFloatDataArrays()[ion_mobility_idx_][i];
+          
+          if (im_value >= left_bound_im && im_value <= right_bound_im)
+          {
+            if (!candidate.found || std::abs(spectrum[i].getMZ() - centroid_mz) < std::abs(candidate.mz - centroid_mz))
+            {
+              candidate.idx = i;
+              candidate.mz = spectrum[i].getMZ();
+              candidate.intensity = spectrum[i].getIntensity();
+              candidate.im = im_value;
+              candidate.found = true;
+            }
+          }
+        }
+      }
+
+      return candidate;
+    }
+
+    bool MassTraceDetection::isPeakAcceptable_(
+        const PeakCandidate& candidate,
+        double centroid_mz,
+        double ftl_sd,
+        double centroid_im,
+        Size spectrum_idx,
+        const std::vector<Size>& spec_offsets,
+        const boost::dynamic_bitset<>& peak_visited) const
+    {
+      if (!candidate.found)
+      {
+        return false;
+      }
+
+      double right_bound = centroid_mz + 3 * ftl_sd;
+      double left_bound = centroid_mz - 3 * ftl_sd;
+
+      // Peak must fall within m/z tolerance window (±3 standard deviations)
+      if (!((candidate.mz <= right_bound) && (candidate.mz >= left_bound)))
+      {
+        return false;
+      }
+
+      // For ion mobility data, peak must also fall within IM tolerance window
+      if (has_centroid_im_)
+      {
+        double right_bound_im = centroid_im + ion_mobility_tolerance_;
+        double left_bound_im = centroid_im - ion_mobility_tolerance_;
+        
+        if (candidate.im < left_bound_im || candidate.im > right_bound_im)
+        {
+          return false;
+        }
+      }
+
+      // Peak must not have been used in another trace already
+      return !peak_visited[spec_offsets[spectrum_idx] + candidate.idx];
+    }
+
+    void MassTraceDetection::processPeak_(
+        const PeakCandidate& candidate,
+        const MSSpectrum& spectrum,
+        std::list<PeakType>& current_trace,
+        std::vector<std::pair<Size, Size>>& gathered_idx,
+        std::vector<double>& fwhms_mz,
+        std::vector<double>& fwhms_im,
+        double& centroid_mz,
+        double& centroid_im,
+        double& prev_counter,
+        double& prev_denom,
+        double& prev_counter_im,
+        double& prev_denom_im,
+        double& ftl_sd,
+        double& intensity_so_far,
+        Size spectrum_idx,
+        bool is_upward_extension)
+    {
+      Peak2D next_peak;
+      next_peak.setRT(spectrum.getRT());
+      next_peak.setMZ(candidate.mz);
+      next_peak.setIntensity(candidate.intensity);
+
+      // Add peak to the growing mass trace
+      if (is_upward_extension)
+      {
+        current_trace.push_back(next_peak);
+      }
+      else
+      {
+        current_trace.push_front(next_peak);
+      }
+
+      // Update trace centroid m/z with intensity-weighted average
+      updateIterativeWeightedMean_(candidate.mz, candidate.intensity, centroid_mz, prev_counter, prev_denom);
+      gathered_idx.emplace_back(spectrum_idx, candidate.idx);
+
+      // Update ion mobility centroid if available
+      if (has_centroid_im_)
+      {
+        updateIterativeWeightedMean_(candidate.im, candidate.intensity, centroid_im, prev_counter_im, prev_denom_im);
+      }
+
+      // Collect FWHM metadata for trace quality assessment
+      if (has_fwhm_mz_)
+      {
+        fwhms_mz.push_back(spectrum.getFloatDataArrays()[fwhm_meta_idx_][candidate.idx]);
+      }
+      if (has_fwhm_im_)
+      {
+        fwhms_im.push_back(spectrum.getFloatDataArrays()[im_fwhm_idx_][candidate.idx]);
+      }
+
+      // Dynamically adjust m/z tolerance based on observed variance
+      if (reestimate_mt_sd_)
+      {
+        updateWeightedSDEstimateRobust(next_peak, centroid_mz, ftl_sd, intensity_so_far);
+      }
+    }
+
+
+    bool MassTraceDetection::isTraceValid_(
+        const std::list<PeakType>& trace,
+        Size total_scans_visited,
+        Size consecutive_missed_down,
+        Size consecutive_missed_up) const
+    {
+      double rt_range = std::fabs(trace.rbegin()->getRT() - trace.begin()->getRT());
+      
+      // Check length criteria
+      if (rt_range < min_trace_length_)
+      {
+        return false;
+      }
+      
+      if (max_trace_length_ >= 0.0 && rt_range > max_trace_length_)
+      {
+        return false;
+      }
+
+      // Check quality (sample rate)
+      Size adjusted_scans = total_scans_visited - consecutive_missed_down - consecutive_missed_up;
+      double mt_quality = static_cast<double>(trace.size()) / static_cast<double>(adjusted_scans);
+      
+      return mt_quality >= min_sample_rate_;
+    }
+
+This confirms the mechanism. Key facts from OpenMS MassTraceDetection:
+
+  - `centroid_mz` starts at apex peak m/z, updated by `updateIterativeWeightedMean_` with intensity-weighted average after every accepted peak (line 418, and processPeak_).
+  - Acceptance window: `centroid_mz ± 3*ftl_sd`, where `ftl_sd = (centroid_mz/1e6) * mass_error_ppm_` initially (line 537) — so the per-peak acceptance window is ±3 ppm (3 sigma), and the centroid moves with each accepted peak. So per-step tolerance is 3x mass_error_ppm, and it's against the running centroid. Note: `reestimate_mt_sd_` — when true, ftl_sd is dynamically re-estimated via updateWeightedSDEstimateRobust. What's the default? Let me check defaults_ in MassTraceDetection.
+
+  Also findBestPeak_ picks the peak closest to the centroid within the ±3sd window (for IM data: closest in m/z among IM-matching peaks). So if two peaks in the same spectrum both within window, the nearest to centroid is picked — dependent on centroid, dependent on peak set.
+
+  Important: since acceptance window is ±3*ftl_sd where ftl_sd = centroid*ppm/1e6, the per-step tolerance is 3x mass_error_ppm. So a halo of 20x ppm covers ~6.6 step widths. But drift is unbounded in principle: centroid is intensity-weighted mean of all peaks; each new peak can be up to 3sd from the current mean, and the weighted mean moves toward it by w*intensity/sum. Actually with intensity weighting the mean can move by at most (3sd * I_new / (I_sum + I_new)). If new peaks have high intensity relative to accumulated, mean moves fast. So over a long trace the centroid can walk — each step bounded by 3sd*I_new/Itot, cumulative over N peaks could be up to ~3sd * sum of weights — data-dependent, unbounded a priori. Confirm user's hypothesis 2.
+
+  Also note reestimate_mt_sd_ default: In OpenMS MassTraceDetection, "reestimate_mt_sd" default is "false"? Let me check. Actually the parameter is "reestimate_mt_sd" with default "false"? I recall default false for LC-MS but true for some. Let me check the defaults.29:      defaults_.setValue("mass_error_ppm", 20.0, "Allowed mass deviation (in ppm).");
+30:      defaults_.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are removed as noise.");
+31:      defaults_.setValue("chrom_peak_snr", 3.0, "Minimum intensity above noise_threshold_int (signal-to-noise) a peak should have to be considered an apex.");
+32:      defaults_.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/K0 units, e.g., 0.01-0.05). For CCS data, use larger values (e.g., 2-10 square angstroms).");
+34:      defaults_.setValue("reestimate_mt_sd", "true", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
+35:      defaults_.setValidStrings("reestimate_mt_sd", {"true","false"});
+37:      defaults_.setValue("quant_method", String(MassTrace::names_of_quantmethod[0]), "Method of quantification for mass traces. For LC data 'area' is recommended, 'median' for direct injection data. 'max_height' simply uses the most intense peak in the trace.");
+41:      defaults_.setValue("trace_termination_criterion", "outlier", "Termination criterion for the extension of mass traces. In 'outlier' mode, trace extension cancels if a predefined number of consecutive outliers are found (see trace_termination_outliers parameter). In 'sample_rate' mode, trace extension in both directions stops if ratio of found peaks versus visited spectra falls below the 'min_sample_rate' threshold.", {"advanced"});
+43:      defaults_.setValue("trace_termination_outliers", 5, "Mass trace extension in one direction cancels if this number of consecutive spectra with no detectable peaks is reached.", {"advanced"});
+45:      defaults_.setValue("min_sample_rate", 0.5, "Minimum fraction of scans along the mass trace that must contain a peak.", {"advanced"});
+46:      defaults_.setValue("min_trace_length", 5.0, "Minimum expected length of a mass trace (in seconds).", {"advanced"});
+47:      defaults_.setValue("max_trace_length", -1.0, "Maximum expected length of a mass trace (in seconds). Set to a negative value to disable maximal length check during mass trace detection.", {"advanced"});
+243:          if (tmp_peak_int > noise_threshold_int_)
+245:            // Assume that noise_threshold_int_ contains the noise level of the
+246:            // data and we want to be chrom_peak_snr times above the noise level
+248:            if (tmp_peak_int > chrom_peak_snr_ * noise_threshold_int_)
+438:      if (reestimate_mt_sd_)
+454:      if (rt_range < min_trace_length_)
+459:      if (max_trace_length_ >= 0.0 && rt_range > max_trace_length_)
+468:      return mt_quality >= min_sample_rate_;
+589:              if (down_state.scan_counter > min_scans_to_consider && current_sample_rate < min_sample_rate_)
+642:              if (up_state.scan_counter > min_scans_to_consider && current_sample_rate < min_sample_rate_)
+691:      noise_threshold_int_ = (double)param_.getValue("noise_threshold_int");
+692:      chrom_peak_snr_ = (double)param_.getValue("chrom_peak_snr");
+711:      min_sample_rate_ = (double)param_.getValue("min_sample_rate");
+712:      min_trace_length_ = (double)param_.getValue("min_trace_length");
+713:      max_trace_length_ = (double)param_.getValue("max_trace_length");
+714:      reestimate_mt_sd_ = param_.getValue("reestimate_mt_sd").toBool();
+Key confirmations:
+  - `reestimate_mt_sd` default "true" (line 34) — ftl_sd dynamically re-estimated via `updateWeightedSDEstimateRobust`, so the acceptance window is ±3σ of the observed within-trace m/z variance, which itself depends on the peak set. And the speXtract wrapper doesn't set reestimate_mt_sd, so it inherits "true". This is important: the acceptance window isn't even fixed at ±3*ppm — it can shrink/grow with the observed variance. So per-peak tolerance isn't even bounded by 3×mass_error_ppm after re-estimation. Actually is there a cap? updateWeightedSDEstimateRobust computes a robust SD estimate. Let me check whether it's capped. In ElutionPeakDetection/MassTrace code... `updateWeightedSDEstimateRobust` is in OpenMS FILTERING/DATAREDUCTION? Actually in OpenMS source, updateWeightedSDEstimateRobust is defined in MassTraceDetection.h or elsewhere. Let me check quickly.
+
+  Also important: findBestPeak_ picks the peak with the CLOSEST m/z to centroid among IM-eligible peaks in window — so if a halo excludes a peak that would have been the closest match, a different peak is picked (mechanism 3). Also peak_visited bitset: peaks consumed by earlier (higher-intensity-apex) traces are unavailable — greedy competition across the whole map; banding changes which traces compete with which.
+
+  Also `run_` processes apices in decreasing intensity — the apex LIST is global. With banding, the apex priority ordering within a band is the same relative order (subset), so competition between traces in different bands is removed. Two adjacent traces straddling an edge: in unbanded run, the more intense apex claims peaks first; in banded run, both bands see both traces' peaks (halo), each claims them independently, and both may emit a trace, but the core filter keeps each by centroid — but their membership differs from the unbanded case because peak_visited contention resolution differs. Actually in the halo overlap region, the band with the more-intense apex might lose the contest in unbanded but win it banded — changing centroid/membership.
+
+  Let me check updateWeightedSDEstimateRobust for a cap./Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:178:    void updateWeightedSDEstimateRobust(const PeakType& p, const double& mean_t1, double& sd_t, double& last_weights_sum)
+/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:440:        updateWeightedSDEstimateRobust(next_peak, centroid_mz, ftl_sd, intensity_so_far);
+
+    void MassTraceDetection::run_(const std::vector<Apex>& chrom_apices,
+                                  const Size total_peak_count,
+                                  const PeakMap& work_exp,
+                                  const std::vector<Size>& spec_offsets,
+                                  std::vector<MassTrace>& found_masstraces,
+                                  const Size max_traces)
+    {
+      boost::dynamic_bitset<> peak_visited(total_peak_count);
+      Size trace_number(1);
+
+      // Detect ion mobility and FWHM metadata arrays in the dataset
+      getIMIndices_(work_exp,
+                    fwhm_meta_idx_, has_fwhm_mz_,
+                    ion_mobility_idx_, has_centroid_im_,
+                    im_fwhm_idx_, has_fwhm_im_);
+
+      this->startProgress(0, total_peak_count, "mass trace detection");
+      Size peaks_detected(0);
+
+      for (auto m_it = chrom_apices.crbegin(); m_it != chrom_apices.crend(); ++m_it)
+      {
+        Size apex_scan_idx(m_it->scan_idx);
+        Size apex_peak_idx(m_it->peak_idx);
+
+        if (peak_visited[spec_offsets[apex_scan_idx] + apex_peak_idx]) { continue; }
+
+        Peak2D apex_peak;
+        apex_peak.setRT(work_exp[apex_scan_idx].getRT());
+        apex_peak.setMZ(work_exp[apex_scan_idx][apex_peak_idx].getMZ());
+        apex_peak.setIntensity(work_exp[apex_scan_idx][apex_peak_idx].getIntensity());
+
+        std::list<PeakType> current_trace;
+        current_trace.push_back(apex_peak);
+        std::vector<double> fwhms_mz; // peak-FWHM meta values of collected peaks
+        std::vector<double> fwhms_im; // peak-FWHM ion mobility peak FWHM of collected peaks
+
+        // Initialization for the iterative version of weighted m/z mean calculation
+        double centroid_mz(apex_peak.getMZ());
+        double prev_counter(apex_peak.getIntensity() * apex_peak.getMZ());
+        double prev_denom(apex_peak.getIntensity());
+
+        updateIterativeWeightedMean_(apex_peak.getMZ(), apex_peak.getIntensity(), centroid_mz, prev_counter, prev_denom);
+
+        // Initialization for the iterative version of weighted ion mobility mean calculation
+        double centroid_im(-1);
+        double prev_counter_im(-1);
+        double prev_denom_im(-1);
+        if (has_centroid_im_)
+        {
+          centroid_im = work_exp[apex_scan_idx].getFloatDataArrays()[ion_mobility_idx_][apex_peak_idx];
+          prev_counter_im = apex_peak.getIntensity() * centroid_im;
+          prev_denom_im = apex_peak.getIntensity();
+          updateIterativeWeightedMean_(work_exp[apex_scan_idx].getFloatDataArrays()[ion_mobility_idx_][apex_peak_idx],
+                                        apex_peak.getIntensity(), centroid_im, prev_counter_im, prev_denom_im);
+        }
+
+        std::vector<std::pair<Size, Size>> gathered_idx;
+        gathered_idx.emplace_back(apex_scan_idx, apex_peak_idx);
+        
+        if (has_fwhm_mz_) { fwhms_mz.push_back(work_exp[apex_scan_idx].getFloatDataArrays()[fwhm_meta_idx_][apex_peak_idx]); }
+        if (has_fwhm_im_) { fwhms_im.push_back(work_exp[apex_scan_idx].getFloatDataArrays()[im_fwhm_idx_][apex_peak_idx]); }
+
+        TraceExtensionState down_state, up_state;
+        Size trace_down_idx(apex_scan_idx);
+        Size trace_up_idx(apex_scan_idx);
+
+        double ftl_sd((centroid_mz / 1e6) * mass_error_ppm_);
+        double intensity_so_far(apex_peak.getIntensity());
+
+        while ((trace_down_idx > 0 && down_state.active) || (trace_up_idx < work_exp.size() - 1 && up_state.active))
+        {
+          // *********************************************************** //
+          // Step 2.1 MOVE DOWN in RT dim
+          // *********************************************************** //
+          if (trace_down_idx > 0 && down_state.active)
+          {
+            const MSSpectrum& spec_trace_down = work_exp[trace_down_idx - 1];
+            
+            // Only process spectra that contain peaks
+            if (!spec_trace_down.empty())
+            {
+              PeakCandidate candidate = findBestPeak_(spec_trace_down, centroid_mz, ftl_sd, centroid_im);
+              
+              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_down_idx - 1, spec_offsets, peak_visited))
+              {
+                processPeak_(candidate, spec_trace_down, current_trace, gathered_idx,
+                            fwhms_mz, fwhms_im, centroid_mz, centroid_im,
+                            prev_counter, prev_denom, prev_counter_im, prev_denom_im,
+                            ftl_sd, intensity_so_far, trace_down_idx - 1, false);
+                ++down_state.hitting_peak_count;
+Confirmed all OpenMS mechanics. Let me look at updateWeightedSDEstimateRobust at line 178 to see if the SD estimate is bounded.    void updateWeightedSDEstimateRobust(const PeakType& p, const double& mean_t1, double& sd_t, double& last_weights_sum)
+    {
+      double denom1 = std::log(last_weights_sum) + 2 * std::log(sd_t);
+      double denom2 = std::log(p.getIntensity()) + 2 * std::log(std::abs(p.getMZ() - mean_t1));
+      double denom = std::sqrt(std::exp(denom1) + std::exp(denom2));
+      double weights_sum = last_weights_sum + p.getIntensity();
+      double tmp_sd = denom / std::sqrt(weights_sum);
+
+      if (tmp_sd > std::numeric_limits<double>::epsilon())
+      {
+        sd_t = tmp_sd;
+      }
+
+      last_weights_sum = weights_sum;
+    }
+
+    void MassTraceDetection::run(const PeakMap& input_exp, std::vector<MassTrace>& found_masstraces, const Size max_traces)
+    {
+      // make sure the output vector is empty
+      found_masstraces.clear();
+
+      // Check IM unit and warn if CCS data with small tolerance (single-threaded check at algorithm start)
+      for (const auto& spec : input_exp)
+      {
+        if (spec.containsIMData())
+        {
+          const auto [im_data_index, im_unit] = spec.getIMData();
+          if (im_unit == DriftTimeUnit::CCS && ion_mobility_tolerance_ < 1.0)
+          {
+            OPENMS_LOG_WARN << "Warning: Ion mobility data is in CCS units (square angstroms), but "
+                            << "ion_mobility_tolerance = " << ion_mobility_tolerance_
+                            << " appears to be set for 1/K0 data. "
+                            << "For CCS data, consider using larger values (e.g., 2-10)." << '\n';
+          }
+          break; // Found IM data, no need to check further spectra
+        }
+      }
+
+The robust SD update: sd_t grows when |p.mz - mean| is large relative to current sd, and decays ~1/sqrt(weights_sum). There's no cap tying it back to mass_error_ppm. So with reestimate_mt_sd=true (default, not overridden in DIAPseudoSpectra.cpp — I should verify it isn't set anywhere), ftl_sd can exceed ppm-based value, and the acceptance window is centroid ± 3*ftl_sd with a moving centroid. Actually note sd can also decay: denom1 = log(weights)+2log(sd) contributes sd²*weights_sum_old; tmp_sd = sqrt( (w_old·sd²) + I·d² ) / sqrt(w_old + I) roughly — it's a running weighted RMS. So if peaks track tightly, sd shrinks and the window tightens; if they scatter, window widens. So the per-step tolerance is itself data-dependent. This kills any fixed halo bound.
+
+  Verify DIAPseudoSpectra doesn't set reestimate_mt_sd:So speXtract inherits OpenMS defaults: `reestimate_mt_sd = true`, `trace_termination_criterion = "outlier"`, `trace_termination_outliers = 5`.
+
+  Wait — one subtlety: the docs in speXtract say min_sample_rate "terminates trace extension when occupancy drops" — that's only true in "sample_rate" termination mode. In default "outlier" mode, extension stops after 5 consecutive misses, and min_sample_rate is only a post-hoc validity filter (isTraceValid_). Let me check lines 589/642 — those are the sample_rate checks, guarded by termination mode. Let me verify:            if (trace_termination_criterion_ == OUTLIER)
+            {
+              if (down_state.consecutive_missed > trace_termination_outliers_)
+              {
+                down_state.active = false;
+              }
+            }
+            else if (trace_termination_criterion_ == SAMPLE_RATE)
+            {
+              Size min_scans_to_consider = 5;
+              Size total_hits = down_state.hitting_peak_count + up_state.hitting_peak_count + 1; // +1 for apex
+              Size total_scans = down_state.scan_counter + up_state.scan_counter + 1;
+              double current_sample_rate = static_cast<double>(total_hits) / static_cast<double>(total_scans);
+              
+              if (down_state.scan_counter > min_scans_to_consider && current_sample_rate < min_sample_rate_)
+              {
+                down_state.active = false;
+              }
+            }
+          }
+          // *********************************************************** //
+          // Step 2.2 MOVE UP in RT dim
+          // *********************************************************** //
+          if (trace_up_idx < work_exp.size() - 1 && up_state.active)
+          {
+            const MSSpectrum& spec_trace_up = work_exp[trace_up_idx + 1];
+            
+            // Only process spectra that contain peaks
+            if (!spec_trace_up.empty())
+            {
+              PeakCandidate candidate = findBestPeak_(spec_trace_up, centroid_mz, ftl_sd, centroid_im);
+              
+              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_up_idx + 1, spec_offsets, peak_visited))
+              {
+                processPeak_(candidate, spec_trace_up, current_trace, gathered_idx,
+                            fwhms_mz, fwhms_im, centroid_mz, centroid_im,
+                            prev_counter, prev_denom, prev_counter_im, prev_denom_im,
+                            ftl_sd, intensity_so_far, trace_up_idx + 1, true);
+                ++up_state.hitting_peak_count;
+                up_state.consecutive_missed = 0;
+              }
+              else
+              {
+                ++up_state.consecutive_missed;
+              }
+            }
+            // Empty spectra don't affect termination counters
+            
+            // Move to next spectrum regardless of whether peak was found
+            ++trace_up_idx;
+            ++up_state.scan_counter;
+            
+            // Apply termination criteria based on user configuration
+            if (trace_termination_criterion_ == OUTLIER)
+            {
+              if (up_state.consecutive_missed > trace_termination_outliers_)
+              {
+                up_state.active = false;
+              }
+            }
+            else if (trace_termination_criterion_ == SAMPLE_RATE)
+            {
+              Size min_scans_to_consider = 5;
+              Size total_hits = down_state.hitting_peak_count + up_state.hitting_peak_count + 1; // +1 for apex
+              Size total_scans = down_state.scan_counter + up_state.scan_counter + 1;
+              double current_sample_rate = static_cast<double>(total_hits) / static_cast<double>(total_scans);
+              
+              if (up_state.scan_counter > min_scans_to_consider && current_sample_rate < min_sample_rate_)
+              {
+                up_state.active = false;
+              }
+            }
+          }
+        }
+
+        // *********************************************************** //
+All mechanics confirmed. Now I have everything needed to write the review. Let me also quickly check the ms1 band path (line 2030-2040) and the "auto" default — getIntOption default 12, and auto derives ceil(threads/windows). Also confirm the default of `perf:trace_bands` is 12 (line 909) and `perf:ms1_trace_bands` default 12 (line 908).
+
+  One more thing to verify for the concrete example: findBestPeak_ for IM data picks the peak with closest |mz - centroid| among IM-eligible peaks within [centroid-3sd, centroid+3sd]. So the "nearest to centroid" selection is what makes peak-set membership matter.
+
+  Also note: peaks below noise_threshold_int are filtered out before apices (line 243-248). The same peaks would be filtered in each band — fine.
+
+  Also worth noting: quantile edges are computed from a SAMPLE (every 97th peak, line 1027-1034) — the edges themselves are data-derived, so they're the same regardless of N only in the sense of quantile interpolation... not important.
+
+  Another subtle exactness break: `sub[b].sortSpectra()` and MTD requiring >= 3 spectra; a band with < 3 spectra emits nothing — but since every spectrum is copied to every band (with peaks possibly empty), a band only has <3 spectra if fewer than 3 spectra had peaks in its range. Edge case: a trace near an edge in a sparse band could be dropped entirely. Minor but worth noting — actually if sub[b].size() < 3, traces whose core is in that band are LOST entirely, even though the unbanded run would find them. That's a real deletion channel, though rare. Also conversely, the unbanded path requires map.size() >= 3; a banded window with map >= 3 but a band < 3 loses those peaks' traces.
+
+  Also the RT-termination asymmetry: trace extends both up and down from apex; halo in m/z only — fine.
+
+  Another point for mechanism 2 (drift): since centroid is intensity-weighted mean and each accepted peak is within ±3σ of the centroid, the maximum displacement of the mean per accepted peak is 3σ·I_new/(I_tot+I_new). There's no a priori bound on the total walk. But can we bound it by the trace's m/z extremity? The min/max peak m/z of a trace: each peak is within 3σ of the running centroid at acceptance time, and the centroid is always within the convex hull of previously accepted peaks. So every peak m/z lies within... let's think: centroid_k ∈ hull of peaks 1..k. Peak k+1 ∈ centroid_k ± 3σ_k. So peak k+1 ∈ hull(1..k) ± 3σ. So the trace's total m/z span can grow by at most 3σ per RT step, with σ re-estimated. Unbounded in principle, but practically: trace spans are actually small because real mass traces track one chemical species; but noise peak capture can extend. The point stands: no derivable constant multiple.
+
+  Concrete counterexample construction for mechanism 2 (drift): 
+  - apex at m/z 500.0000, ppm = 20 → initial sd = 500*20e-6 = 0.01, window ±0.03.
+  - Scans 1..20, each has one peak, intensities large and constant, m/z increasing by 0.029 per scan (within ±0.03 of current centroid... need to be careful: centroid lags the peak series. With equal intensities, centroid after peak k is mean of first k peaks. If peaks increase linearly at step d, the gap between peak k+1 and centroid_k is d·k/2, which exceeds 3σ=0.03 once k > ~2. Hmm — so equal-intensity linear drift can't actually walk far with step just inside tolerance; the mean lags. Let me think again.
+
+  To make the centroid walk, you need each new peak within 3σ of the current mean. With equal weights, mean is arithmetic mean; if each successive peak is at most ε above the current mean, then the mean increments by ≤ ε/(k+1) at step k — total walk bounded by ε·H_n ≈ ε·ln(n) with equal intensities. Hmm, that's a bound! With harmonic weights, the sum over k of ε/(k+1) diverges as ε ln n. So for a trace of length L scans, total drift ≤ 3σ·ln(L) roughly with equal intensities. With intensity weighting, a new peak with intensity I_new moves mean by (p - c)·I_new/(I_tot + I_new) ≤ 3σ·I_new/I_tot. If each new peak has intensity ≥ geometric ratio of accumulated sum (e.g., I_{k+1} = I_tot), mean moves 3σ/2 each step — then drift ≤ 1.5σ·L, linear in trace length. So with escalating intensities, walk per step can stay O(σ), giving total span O(σ·L). Unbounded a priori but you need intensity escalation. With approximately constant intensity, span ~3σ·ln L. For L=100 scans, ln100≈4.6 → ~14σ ≈ 4.7·(3σ) = 14 ppm·(mz/500·... whatever). So 20x ppm halo ≈ 6.7·(3σ) — a 100-scan constant-intensity drifting trace would span ~14σ > 6.7σ halo. That's a decent concrete example! Let me construct it carefully.
+
+  Setup: mz base 500, mass_error_ppm=20 → ftl_sd initial = 0.01, acceptance window = ±3σ = ±0.03 around centroid. reestimate_mt_sd will adjust σ but assume it stays ~0.01 (robust estimator tracks spread; a monotone walk increases spread, actually increasing σ, making it worse — conservative to ignore).
+
+  Equal intensities I=1. Centroid after k peaks = mean of the k accepted m/z values (weighted mean with equal weights). Strategy: at each new scan, place peak at centroid + 0.029 (just inside +3σ = +0.03). Then centroid increments: c_{k+1} = c_k + 0.029/(k+1). So peak p_{k+1} = c_k + 0.029, and c_{k+1} = c_k + 0.029/(k+1).
+
+  After L scans: c_L ≈ 0.029·(H_L - 1) ≈ 0.029 ln L. For L = 60: H_60 ≈ 4.68, minus 1 → 3.68 → drift ≈ 0.107 m/z ≈ 10.7σ ≈ 3.6× the 20×ppm halo half-width (halo = 20 ppm × 500 = 0.01·20 = ... wait halo = mz·ppm·1e-6·20 = 500·20e-6·20 = 0.2 m/z). Hmm! Halo half-width at 500 with ppm 20 is 0.2 m/z = 20σ. So drift 0.107 < 0.2. Need longer trace: drift ≈ 0.029 ln L; to exceed 0.2 need ln L > 6.9 → L ≈ 1000 scans. That's a 1000-scan trace — unrealistic but exists in principle (apex walk). Hmm, but wait — reestimate_mt_sd would inflate σ as the walk proceeds, since the spread of points around the mean grows, widening the window beyond 0.03 and accelerating the walk. So the equal-intensity bound with fixed σ underestimates.
+
+  But there's a much stronger and cleaner channel for mechanism 3 that doesn't rely on pathological drift: nearest-peak selection and peak_visited contention. Concrete example:
+
+  Mechanism 3 example (cleanest): two peaks in one spectrum inside the halo region. Trace T with centroid near band edge e. In spectrum s, two candidate peaks within IM tolerance: p1 at mz e-δ1 (in band A's core side) and p2 at e+δ2 (band B's core side), both within window, δ1 > δ2? findBestPeak_ picks the closer to centroid. If the unbanded trace's centroid is closer to p1, it picks p1. That happens identically in the band — the candidate set within ±3σ is the same as long as both peaks are within the band's halo. So nearest-peak selection alone doesn't differ unless a candidate lies OUTSIDE the halo but inside ±3σ — that's the halo-undersize issue (mechanism 1), fixed at 20× if span bounded.
+
+  The stronger mechanism-3 channels:
+  (a) peak_visited contention: in the unbanded run, apex ordering is global by intensity. A high-intensity apex in band B whose trace dips into band A's halo claims peaks there before band A's traces get them. In the banded run, band A's MTD run sees those peaks unvisited (its own run) and claims them for its own trace. Both bands emit traces from the same peaks; core filter keeps each in its own band. Result: trace membership differs from unbanded — band A's trace gained peaks that the unbanded run assigned to B's trace (changing A's centroid/intensity profile), and B's trace in the unbanded run had those peaks but banded B still has them too (duplication resolved by core filter but content differs). Concretely: spectrum s contains peak p at mz m, near edge e (within halo of both bands). Unbanded: apex a1 (intensity 1e6, band A side) processed first claims p; trace of apex a2 (intensity 9e5, band B side) misses p, maybe terminates early or has a gap, or picks a different farther peak. Banded: in band B's run, a2 is the highest apex claiming p; a2's trace includes p, different centroid and sample rate. Also a1's trace in band A's run also includes p. Both kept (centroids in their own cores). Net: a2's trace content differs between banded and unbanded → downstream XIC/assignment differs. Provable and realistic — no drift pathology needed.
+
+  (b) min_sample_rate validity: isTraceValid_ computes trace.size()/adjusted_scans over the peaks gathered — membership differences flip valid/invalid.
+
+  (c) EPD valley splitting: operates on gathered intensities; membership differences change split points. Also EPD smooths with SG window — content-dependent.
+
+  (d) σ re-estimation: ftl_sd depends on gathered peaks → acceptance window differs.
+
+  Also mechanism: apex list. Apices are peaks with int > snr*noise. In unbanded run, apexes in halo region of band B might be visited by band A's trace before B's own run → but in banded run each band has its own visited bitset, so an apex peak shared via halo gets used in both bands' runs. Fine, consistent with (a).
+
+  Also the "sub[b].size() < 3" deletion: if a band has <3 spectra with peaks, MTD is skipped and all traces with core in that band are deleted — band-count-dependent loss. With quantile edges and dense data this rarely triggers (every spectrum likely has peaks across the whole range in DIA, so every band has all 656k/24 spectra). Probably a non-issue in practice; mention in passing? DIA fragment data is dense, so each band gets every spectrum. Skip or footnote.
+
+  Now mechanism 2 assessment: is drift really a practical killer of the 20× halo? The walk argument with equal intensities gives ~3σ·ln L which for L=100 is ~14σ ≈ 4.6×(3σ). Halo is 20 ppm = 6.67×3σ at base mz... halo = 20·ppm_abs = 20σ_initial (since σ_initial = ppm_abs). So halo half-width = 20σ vs equal-intensity walk 3σ ln L → exceeds at ln L > 6.67 → L > 800 scans. With σ re-estimation inflating, earlier. With intensity escalation (apex near trace start — common: apex is max intensity), early steps can move the mean fast: first peak after apex with equal intensity moves centroid up to 1.5σ; then decays. Actually let's compute worst case with intensity weighting: step k move ≤ 3σ·I_k/S_k. To maximize total, choose I_k = S_{k-1} (doubling), gives 1.5σ per step: after L steps, 1.5σL. But intensity can't grow forever — data-dependent. Practically, the apex is the most intense peak typically, so I_new/I_tot is small-ish. So drift is real but 20× probably covers most real traces; the honest statement: no bound exists, and σ re-estimation (default true, not overridden — cite line absence + OpenMS line 34 default) makes even the per-step window data-dependent. The measured N-dependence proves the claim false empirically regardless of which mechanism dominates; mechanism 3 alone is sufficient and needs no pathological input.
+
+  Also important: the help text claim "Traces cannot span more than trace:mass_error_ppm in m/z" is false even per-step: the per-step window is ±3·ftl_sd = ±3×mass_error_ppm (line 537: ftl_sd = centroid·ppm/1e6; bounds ±3σ in findBestPeak_/isPeakAcceptable_). So even a single step spans 3× ppm, not 1×. The help text's premise is off by 3× before drift is even considered. That's a nice hostile point: the claimed bound isn't even the per-peak tolerance.
+
+  Now question 2: can banding be made exact?
+
+  (a) Halo from a real bound on trace span: no a priori bound exists (drift + σ re-estimation). You could bound empirically: run once, measure max trace m/z span (max-min peak m/z per trace) at some N, set halo > max span. But span is itself band-dependent — chicken-and-egg. Could do adaptive: detect traces, if any kept trace's extent (min/max member m/z) comes within X of a core edge, widen halo/redo that band. A fixpoint scheme: exact iff no trace crosses a band's halo boundary... but exactness requires that the peak set given to each band produces identical traces to unbanded for all traces whose core is in the band. That requires the band to contain every peak that could influence any trace rooted in the core — the influence radius is unbounded (drift walks). In practice, a "halo > max observed span + margin" is an approximation with a measurable failure mode. Cost: modest; verification: check no trace's member m/z range intersects [edge-halo, edge] region... Actually verification check: after banded run, for every kept trace, verify its full member-m/z extent lies strictly inside its band's (core ∪ halo) AND that no other trace's extent... no — the real verification is comparing to unbanded output.
+
+  (b) Gap partitioning: partition at m/z gaps wider than any possible trace span — again span unbounded. But combined with drift: choose gaps wider than the LARGEST gap-crossing possible... unbounded. However, a variant is sound: partition such that every inter-band gap exceeds the maximum observed trace span, computed adaptively — still empirical. But there's a subtlety: even if no trace SPANS a gap, mechanism 3 (nearest-peak selection, visited contention, σ re-estimation) only involves peaks within a trace's own span plus 3σ, so if gaps > max span + 2×3σ_max... then no trace's influence region crosses a cut, and bands are exact IF apex/visited contention doesn't cross either — contention is mediated by peaks, so if influence regions don't cross cuts, exactness holds. But you can't know max span before running. Chicken-and-egg again: adaptive iterative scheme — run, find max span S, if any gap < S + margin, re-partition with fewer bands and rerun affected... expensive but converges. In dense DIA fragment m/z space (user's data: dense peaks), are there even gaps > spans? The comment at line 2383-2384 shows tiles 19-141 Da wide; fragment m/z in a DIA window is dense, gaps are small (sub-Th), trace spans small too... might actually work: if the peak distribution has natural gaps larger than any trace span. With quantile banding you're guaranteed to cut through dense regions — guaranteed cuts through traces' neighborhoods. Gap-based partitioning would put cuts where they cost nothing. Cost: band load imbalance (gaps don't align with equal work), so you lose the load-balancing property; and in dense windows no suitable gaps may exist → can't band at all → serial. Exactness: conditional on gaps > max influence radius — needs the same unbounded-span assumption, so still not provably exact, only empirically exact.
+
+  Honest answer: no scheme with a fixed partition is provably exact because influence radius is data-dependent and unbounded. The only provably exact parallel scheme is (c): one MTD run per window with the full peak set, parallelised differently — but MTD is serial (user says don't rewrite OpenMS). Alternative within rules: parallelise across WINDOWS only (24-way) and accept 24-core ceiling; or run MTD on the full window and parallelise the OTHER 51% of the loop; or overlap windows so cores stay busy. Actually with the master/worker task pool, windows are tasks: 24 windows × ~equal → load imbalance at the tail. Heaviest-first scheduling + memory admission already exist. The tail problem: when < threads windows remain, cores idle. But bands were introduced exactly for that. Alternative: keep banding but make it output-neutral — impossible if banding changes output.
+
+  (d) Accept the approximation, make it machine/count-independent: pin N to a fixed constant (e.g., 12) as the ONLY supported value for scientific runs; remove auto; document banding as part of the method definition (like random seed). The output is then reproducible across machines, and the approximation error is a fixed, measurable property of the method. This is the pragmatic route: you can't be exact vs unbanded, but you can be deterministic. The unbanded result isn't "truth" either in an absolute sense — but it is the natural reference since it's OpenMS semantics on the full data.
+
+  Question 3: default and auto. Auto should not exist: output depends on thread count (n_bands = ceil(threads/windows), line 2392-2393), and results are gated on accepted-peptide set equality between builds — a different machine = different set = gate failure or silent difference. Default should be a pinned constant (12, current default) documented as part of the scientific method; changing it = changing the method, like changing mass_error_ppm. Auto must go. Also ms1_trace_bands same treatment.
+
+  Question 4: measurement. Reference = N=1 run (unbanded, bands=1 path exists — line 1094-1097). Cost 18 min/160 GB once per dataset (or once per representative dataset). Comparison: run N=1 and N=12 on same input; compare trace sets per window: match traces by (centroid m/z within tolerance, RT overlap) — statistic: fraction of traces with identical member sets; symmetric difference count; centroid m/z Δ distribution; and downstream: accepted-peptide set symmetric difference (the gating statistic), plus precursor-set digest. Report: number/percent of peptides present in one but not the other, and correlation of quant values for shared peptides. Cheap proxy for CI: the existing [det] digests (traceDigest_ at line 2524, precursor digest line 2165) — add digest comparison of N=1 vs N=12 in CI on a small representative file (not S30; a small window/subset) so regression is caught continuously, with the full 18-min reference run only when trace-stage code changes. Also measure the failure modes separately: count traces whose member-m/z span exceeds the halo (mechanism 2 incidence) — cheap to add to span_log; and count halo-region peaks claimed by both bands... that needs instrumentation, maybe skip. But span>20×ppm incidence is directly measurable from a normal run at zero extra cost (span_log already computes RT spans; add m/z spans). Good concrete suggestion: log per-window max trace m/z extent and fraction of traces whose extent crosses a band edge; if zero, mechanisms 1-2 didn't fire (but mechanism 3 could still fire — crossing an edge isn't required for 3... actually for content to differ, some trace's influence region must cross a halo boundary? No — mechanism 3 via visited-contention requires two traces competing for the same peaks, which can happen entirely inside the halo region shared by two bands. That region is inside both bands, so both bands run MTD over overlapping peak sets with independent visited bitsets. Contention difference occurs when the winner differs between banded/unbanded — i.e., when two apices whose influence regions overlap land in different bands. That requires their spans to reach the shared halo region — measurable: for each pair... simpler: any trace whose member extent intersects another band's core (i.e., extent wider than distance to edge) is a contention candidate. Report the count of traces whose m/z extent reaches within 3σ of a band edge — an upper bound on potentially-affected traces.)
+
+  Question 5: keep parallelism without partition. Options:
+  - Window-level only: 24 windows; with the task pool, schedule heaviest-first; tail idle is the cost. If trace stage is 49% and superlinear, the real cost driver of banding was CPU reduction (trace CPU falls with more bands, measured 11,168→5,378→2,972 s across 5/12/24 bands — line 2505-2507). So unbanded isn't just less parallel, it's more total work — superlinear. So giving up bands costs both parallelism and total CPU. Alternatives that preserve exactness:
+    - Exactness-preserving speedup inside MTD is OpenMS rewriting — out of scope.
+    - Split by RT instead of m/z? Traces extend in RT from apex across the whole RT range — RT partition cuts every trace. Worse.
+    - Speculative/exact hybrid: run banded for speed, then RE-RUN only the windows/bands whose traces touched halo boundaries unbanded... verification cost vs full run.
+    - Reduce MTD input size exactly: pre-filter peaks that cannot be in any trace (below noise threshold — already done inside MTD; apex gate). Non-exact if you filter more.
+    - The measured superlinearity means banding is doing algorithmic work reduction, not just parallelism. An exact way to get the same: partition at gaps (option 2b) — if gaps exist. In dense DIA they may not.
+    - Parallelise EPD and downstream (already done), overlap windows (done via task pool). The honest answer: within "don't rewrite OpenMS," you cannot keep both exactness and the band-level speedup, because the speedup comes partly from giving MTD fewer peaks, which is exactly what changes its output. The measured 18:25→12:58 wall and 163→102 GB is the price of exactness; the decision is whether the approximation is worth ~30% wall and ~38% RAM. Given the gating on peptide-set equality, exactness (N=1) or a pinned N are the only defensible choices; if pinned N, keep 12 and never change it.
+
+  Wait — but does N=1 exact run even fit? 160 GB, 18 min at N=4 measured 18:25/163 GB; N=1 would be worse. Hmm, user says unbanded run ~18 min 160 GB — that's their number for the reference. Fine.
+
+  Also note for question 1 completeness: the hypothesis is RIGHT and additionally INCOMPLETE — extra mechanisms the user missed:
+  4. Per-step tolerance is ±3×mass_error_ppm (±3σ), not mass_error_ppm — the help text's premise is wrong by 3× even for one step (OpenMS lines 301-302, 355-356, 537).
+  5. reestimate_mt_sd defaults true and speXtract never overrides it (no match in DIAPseudoSpectra.cpp) — the acceptance window width itself is data-dependent, so no fixed halo can even bound a single STEP after re-estimation... well, σ is bounded by data spread; can shrink too. It makes per-step window depend on gathered peaks → band-dependent → another mechanism-3 channel.
+  6. peak_visited contention / global apex intensity ordering — part of mechanism 3 but worth naming precisely: run_ iterates apices in decreasing intensity (line 494 crbegin) and claims peaks globally; banding forks the bitset per band, so claims that are mutually exclusive unbanded happen independently in two bands.
+  7. The <3 spectra skip (line 1080) — band-count-dependent deletion path (rare in dense DIA, but it is a channel).
+  8. Quantile edges from a sampled subset (every 97th peak, line 1028) — not an exactness issue per se, but edges shift with N, which is fine; also sampling means edge placement is deterministic given the map — OK.
+
+  Also: MS1 traces are banded too (perf:ms1_trace_bands, line 908/2030-2040) with auto=ceil(threads/...)? Line 2030: ms1_bands = getIntOption_(...), check auto handling — line 2030-2040. Let me not over-verify; I saw enough: ms1_bands read at 2030. Auto derivation for ms1? Not fully shown, but mention both params.
+
+  One more check for the concrete example — need to make sure the example for mechanism 2 is valid given the lagging-mean constraint. Let me construct carefully with intensity weighting:
+
+  Example A (mechanism 2, drift): mz0 = 500.0, ppm = 20 → ftl_sd starts at 0.01 (3σ window ±0.03). Apex peak at scan 50: m/z 500.000, intensity 1000.
+  Scan 51: peak at 500.029 (within +0.03 of centroid 500.000), intensity 2000. New centroid = (500.000·1000 + 500.029·2000)/3000 = 500.01933. Move = 0.0193 (~1.9σ? no, 0.0193/0.01 = 1.9σ in one step!). 
+  Scan 52: peak at 500.01933+0.03·0.99 ≈ 500.0490, intensity 4000 → centroid = (3000·500.01933+4000·500.0490)/7000 = 500.03628. Move 0.017.
+  Continue doubling intensity each scan, placing each new peak at centroid + 0.0295: each step moves centroid by 0.0295·I_new/(S+I_new) ≈ 0.0295·(2/3) ≈ 0.0197 with doubling. After 10 scans, centroid ≈ 500.19, i.e., 19σ ≈ 57 ppm of drift — just under the 20×ppm = 0.2 halo. After 11 scans it exceeds the halo half-width. Trace length 11 scans + 5-miss termination is fine, rt_range: scans ~seconds apart, min_trace_length configurable. Intensities doubling 10× → 1000→~1M, plausible over a chromatographic rise? Apex is supposed to be max intensity, but nothing requires it — apex is just the seed; a trace can grow into higher intensities. And with reestimate_mt_sd=true the σ inflates with spread, widening the window beyond 0.03, making it easier, not harder. So: 12 scans, exponentially rising intensity, monotone 0.0295/scan walk → trace spans >0.2 m/z = the full 20× halo → at a band edge placed 0.2 above the apex, the trace's later peaks fall OUTSIDE the band's halo → trace truncated or differently terminated vs unbanded. This demonstrates mechanism 2: span unbounded by any fixed multiple; 20× fails for an 11-step walk.
+
+  But hold on — is exponentially rising intensity realistic? It's a worst-case proof, which is what's asked ("construct a concrete peak configuration where banding provably changes a trace"). Fine. Also note even with CONSTANT intensity: step move = 0.0295/(k+1); cumulative after k steps = 0.0295·(H_{k+1}-1); to reach 0.2 need H_k ≈ 7.78 → k ≈ 2400 scans. Less dramatic but still unbounded. And σ re-estimation accelerates: spread of monotone walk inflates σ.
+
+  Example B (mechanism 3, contention) — cleaner and realistic:
+  - ppm = 20, mz ~ 500, window ±0.03. Band edge e = 500.100. Halo 0.2 → band A covers up to 500.300, band B down to 499.900.
+  - Trace T_A: apex a at 500.090, intensity 1e6, scan 100. Extends up/down in RT; at scan 101 the only in-window IM-eligible peak is p at 500.110 (in halo of A, core of B), intensity 5e5.
+  - Trace T_B: apex b at 500.120, intensity 9e5, scan 101... wait need p to be contested: p must be in both traces' windows and claimed by different winners depending on partitioning.
+  Let me set: p at 500.110 in scan 101. T_A centroid 500.090 → |p - c_A| = 0.020 < 0.03 ✓. T_B apex at 500.120 scan 102, extends DOWN to scan 101: |p - 500.120| = 0.010 < 0.03 ✓.
+  Unbanded: apices sorted by intensity: a (1e6) first — T_A claims p at scan 101. When T_B is processed (apex 9e5), p is visited → at scan 101 findBestPeak_ finds p but isPeakAcceptable_ rejects (visited) → consecutive_missed+1. T_B's trace has a gap at scan 101 → its centroid, sample rate, and possibly validity (min_sample_rate = 0.5) differ.
+  Banded (edge at 500.100): band A's run has apex a, claims p (p ∈ A's halo), emits T_A with centroid ~500.09x → kept in A. Band B's run has apex b, its own visited bitset: claims p for T_B, emits T_B with p included → centroid ~500.11x kept in B.
+  Result: unbanded T_B lacks p; banded T_B contains p. Different member set, different centroid m/z (maybe crossing the edge!), different intensity profile → different downstream pseudo-spectrum. Provable, 3 scans of config. Also if the centroid of T_B with p lands < 500.100... choose numbers so it stays. Fine.
+
+  Also min_sample_rate flip example: T_B visiting 4 scans, 2 hits unbanded (rate 0.5 boundary) vs 3 hits banded → valid/invalid flip. Can fold in.
+
+  Example for mechanism 1 (halo sizing): historical asymmetric under-sizing — already acknowledged/fixed; and 20× magic: Example A shows 20× insufficient. Also note even the CURRENT per-edge sizing uses ppm × 20 where the per-step window is 3σ = 3×ppm — 20× covers only 6.7 step-widths, and drift accumulates.
+
+  Now also confirm user's claim "auto derives N from thread count": line 2392-2393: n_bands = ceil(n_threads / windows). Yes. Machine-dependent output confirmed: 100-core box → ceil(100/24) = 5 bands; 224-core → 10 bands. Different N → different output (measured). So auto makes the science depend on the machine. Confirmed.
+
+  Also the default is 12 (not auto) — registerIntOption default 12, min 0. So default is fine-ish; auto exists only when user passes 0. But the parameter range allows 0 = auto, and help text advertises it. Recommendation: remove auto (reject 0 or map 0→12... better: make 0 an error or deprecate), pin 12, document as method parameter.
+
+  Also ms1_trace_bands default 12 (line 908), auto similarly. And note ms1_bands auto derivation at ~2030 — I didn't read; quickly check lines 2020-2045. Actually from the earlier read: line 2030 `int ms1_bands = getIntOption_("perf:ms1_trace_bands");` then 2039-2040 call. There may be auto handling between. Not critical.
+
+  Question 2 costing:
+  (a) Halo from real bound: no bound exists (drift, σ re-estimation). Could bound span empirically per dataset: run once, measure p100 span, set halo. But span measured banded ≠ span unbanded. Adaptive fixpoint: double halo until no kept trace's extent touches halo boundary — but that only guarantees no truncation; contention effects inside halo region remain (Example B happens entirely within ±halo of edge). So NOT exact even with infinite fixpoint on span alone: exactness requires that for every trace kept in band b, the SET of peaks MTD would have assigned in the full run is present and identically claimed — contention is global (apex intensity order across the whole window). To be exact, each band must replicate the global claim order for all peaks that any of its traces could touch — the influence closure is the whole window in the worst case. Verdict: not exact, any width. Cost: reruns; verification only against N=1.
+  (b) Gap partitioning: exact iff gaps wider than max influence reach (span + contention). Unbounded in theory; in practice DIA fragment m/z is dense — likely no usable gaps, forcing N=1 anyway in dense windows; also breaks load balance (gap positions ≠ equal work). Conditional-exact, verifiable per run: after tracing, check max span < min gap margin; if violated, flag. Cost: possibly no parallelism where dense; imbalance. Verification: per-run certificate (max trace extent vs cut margins) — this is actually the ONLY scheme that ships with a runtime exactness certificate: if every trace's extent is ≥3σ_max away from every cut... hmm, need margin for contention: two traces in different bands can't share a peak if cut gap > both their reaches. Certificate: no peak lies within (max per-trace extent) of a cut... Actually simpler: after the run, for each trace, compute [min_mz - 0, max_mz + 0]... the contention channel requires peaks shared between traces in different cores; if gap G between bands and every trace extent < G/2... define: cut at g (gap from g1 to g2, no peaks). Traces kept left have all members ≤ g1... no wait, halo means bands see across. In gap scheme there are no halos — a trace's peaks all lie within its band because no trace can span the gap (if gap > max span... circular). Post-hoc certificate: every detected trace's m/z extent lies entirely within its band's peak range AND no two traces from different bands have overlapping [minmember-3σ, maxmember+3σ] intervals across a cut — cheap to check. If the certificate holds, output == unbanded (argue: MTD's decisions for a trace depend only on peaks within its reach; if reaches don't cross cuts, runs are independent... but apex ORDERING is global — does cross-band apex ordering matter if influence sets are disjoint? If two traces' reachable peak sets are disjoint, their relative processing order doesn't matter — visited bitset interactions only matter for shared peaks. Noise filtering, apex gating are per-peak. So YES: disjoint influence ⇒ exact. And influence set of a trace = peaks within ±3σ_t of its running centroid path — bounded by [min member - 3σ_max, max member + 3σ_max]. So certificate: cuts placed such that no trace's inflated extent crosses → exact. That's a real exact scheme with a runtime proof, provided gaps exist.) Good — this is the strongest constructive answer. Cost: find gaps > threshold, balance work by merging gap-delimited segments into balanced bins respecting cuts (bin-packing), N becomes data-derived and thus machine-independent! Actually this also solves question 3 partially: gap-derived bands are data-dependent but NOT machine-dependent, and exact (certified), so N can vary. Nice.
+  (c) Whole-window detection, parallelise differently: exact by construction (it IS the reference). Cost: trace stage serial per window, 24-way window parallelism max; measured N=4 18:25 vs N=12 12:58 — N=1 worse still (superlinear: single band holds all peaks). The superlinear cost means exactness has a real price; mitigate by overlapping window tasks (already), heaviest-first (already), and parallelising the other 51% harder. Verification: none needed — it is the reference.
+  (d) Pin N: not exact vs unbanded, but deterministic and machine-independent. Cost: zero code; verification: CI digest at pinned N. The approximation error becomes a fixed property measured once (question 4). This is the pragmatic recommendation combined with reporting.
+
+  Question 4 measurement: 
+  - Reference: N=1 (bands=1 path, line 1094-1097) on representative data. 
+  - Trace level: per window, match traces N=12 vs N=1 by centroid m/z within 3σ and RT overlap ≥50%; statistics: % traces unmatched each way, distribution of centroid Δmz (ppm), Δarea. 
+  - Peptide level (the gate): accepted-peptide SET symmetric difference / |union| (Jaccard distance), direction counts. 
+  - Statistic to report: e.g., "N=12 vs N=1: X of Y peptides differ (Jaccard d=...)". 
+  - Frequency: full run costs 18 min/160 GB — run per dataset release or when trace-stage code changes, not per commit. Per-commit CI: small file + [det] digests (traceDigest_ line 2524, precursor digest line 2165) at pinned N vs stored golden — that guards determinism, not approximation error. For error: the digests make the N=1 vs N=12 comparison cheap to automate on a down-sampled input where N=1 is affordable.
+  - Also zero-cost incidence instrumentation: log max trace m/z extent vs halo (mechanism 2 incidence) and count of traces whose extent crosses within 3σ of an edge (mechanism 3 exposure bound) into span_log (line 1139-1155 already logs RT spans — add m/z extents). This turns "claimed away" into "measured per run."
+
+  Question 5: keep parallelism without partition:
+  - The task pool already fills cores across windows; bands only reduce per-band peak count (superlinear cost) and lift the 24-window ceiling. Without bands: trace CPU rises superlinearly (measured 2,972→11,168 s going 24→5 bands; N=1 higher still) — so the honest price of exactness is roughly 2-4× trace CPU and the 24-core ceiling. 
+  - Options within rules: (i) gap-based partition (question 2b) — keeps most parallelism, exact with certificate, machine-independent; cost: imbalance, possibly few gaps in dense windows (measure gap distribution first! The quantile comment at 1024-1025 says density varies by orders of magnitude — suggesting there ARE sparse regions; but a 141-Da-wide tile with dense peaks may have no gap > span). (ii) Accept N=1 and buy back wall time by running multiple DATASETS/windows — no. (iii) Coarser: since only 24 windows, the tail is the issue; split the LAST windows' work... still partition. 
+  - Also: MTD superlinearity comes from candidate scans per apex; banding reduces candidates. An exact equivalent: precompute per-spectrum m/z-sorted structure — MTD already uses MZBegin/findNearest; the superlinearity is in the apex list × extension cost... can't touch OpenMS.
+  - Verdict: exact parallelism = gap-partition with certificate if the data has gaps, else window-level only and pay. There is no free lunch: any fixed-count equipartition that reduces peak count per MTD call changes MTD's input and therefore its output.
+
+  Also should I mention: even N=1 "reference" differs from a hypothetical single-threaded run? No — N=1 is a single MTD run on the full window; that IS the semantic. Good.
+
+  Also one more check — traceDigest_ and the claim at line 2338 "output is thread-count-independent" — that comment is now known-false; cite it. Line 2338: "canonically sorted, so output is thread-count-independent." That's wrong given banding: sorting fixes ORDER nondeterminism, not SET dependence on band count. Worth citing as the doc bug to fix along with help text at 909 and comment at 1020-1021 ("halo of 20x ... makes the partition exact") and 2380-2381.
+
+  Also the comment at line 1020: "A trace can never span more than mass_error_ppm in m/z" — false.
+
+  Now assemble the review. Structure: five sections as requested. Cite file:line for code claims, OpenMS file:line for MTD claims. Keep it hostile but precise. Length: this is a deep technical review; substantial but organized. Use numbered examples.
+
+  Line citations:
+  - DIAPseudoSpectra.cpp:909 help text claim; 1020-1021 comment; 1023 ppm; 1026-1035 quantile edges; 1048-1049 halo per-edge 20×; 1080 <3 spectra skip; 1083-1088 core filter; 2391-2393 auto = ceil(threads/windows); 2410-2413 log; 2338 thread-count-independent claim; 908 ms1 bands; 2505-2507 measured CPU fall.
+  - OpenMS MassTraceDetection.cpp: 537 ftl_sd init = centroid·ppm/1e6; 301-302/355-356 ±3σ window; 418/438-440 running weighted mean + σ re-estimation per accepted peak; 34 reestimate_mt_sd default true; 178-191 robust SD update uncapped; 494-496 apices in decreasing intensity, visited check; 375-376 acceptance bounds; 382-387 visited; 307-333 nearest-m/z among IM-eligible; 446-468 isTraceValid_ sample rate; 589/642 sample-rate termination (only in SAMPLE_RATE mode; default OUTLIER 41,43 → terminates after 5 consecutive misses). Note user's premise "min_sample_rate terminates extension" is only true in sample_rate mode; speXtract uses default outlier mode; min_sample_rate is a post-hoc validity filter. Small correction to the user's description — hostile reviewer should note. Actually user said "it also applies min_sample_rate (terminating extension when occupancy drops)" — in default outlier mode it doesn't terminate; it filters validity afterward (isTraceValid_, line 462-468). speXtract comment at 987-990 claims it terminates — that's wrong for the configuration actually used (trace_termination_criterion default "outlier", never overridden — Grep found no setValue). Good hostile detail.
+
+  One caution: is the OpenMS source in ~/Claude/OpenMS the version speXtract builds against? Reasonable to assume; there are multiple checkouts. I'll cite it as OpenMS source and note the assumption lightly — actually the patches/ dir (openms-epd-lockfree.patch) suggests they build OpenMS from source. I'll cite paths as OpenMS source file with line numbers and note the checkout.
+
+  Also the digest difference measurement: user says semantic digest differs at N=4,6,25 — consistent.
+
+  Also confirm: does band count affect edges given same map? Yes, quantile edges depend on N; different N → different cuts → different halo overlaps. Even two "valid" Ns differ from each other, not just from N=1 — consistent with measurement (N=4 vs 6 vs 25 all differ).
+
+  Extra mechanism I should include: EPD splitting is run on concatenated per-band traces (line 1115-1136); EPD's smoothing/split decisions are per-trace so content differences propagate, but ALSO the chunking for EPD parallelism (nchunk = bands*4, line 1117-1118) is fine since per-trace independent. OK.
+
+  Also potential subtle issue: apex gate `peak_int > chrom_peak_snr * noise_threshold` — same in bands. Fine.
+
+  Another subtle channel: in band b, `sub[b].sortSpectra()` — fine. And traces whose centroid lands exactly on edge... boundary convention consistent [edge[b], edge[b+1]) — deterministic. But a trace whose centroid is shifted by banding could cross an edge → kept by a different band → but still kept once. However if centroid shift crosses edge, the OTHER band might ALSO have emitted it with a different centroid — could both keep versions? Band A emits trace with centroid 500.0999 (kept by A); band B emits its version with centroid 500.1001 (kept by B) → DUPLICATED trace in output, where unbanded had one. Core filter dedups only if both versions' centroids land in the same core — not guaranteed! That's a duplication channel worth naming: near-edge traces can appear twice (with different content), inflating trace count. Good hostile point — mechanism 3 consequence.
+
+  Write the final answer now. Sections 1-5. Be concrete and cite. Reasonable length — it's a technical review; aim thorough but tight.
+
+To resume this session: kimi -r session_5592c8f5-7763-4928-8f41-261bed4e1bfe
+exit=0

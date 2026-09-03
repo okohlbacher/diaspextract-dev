@@ -1043,8 +1043,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         const auto* ima = s.getFloatDataArrays().empty() ? nullptr : &s.getFloatDataArrays()[0];
         for (int b = 0; b < bands; ++b)
         {
-          const double h = edge[b] * ppm * 1e-6 * 20.0;
-          const double lo = edge[b] - h, hi = edge[b + 1] + h;
+          // Size each halo from ITS OWN edge: one h derived from edge[b] under-sizes the upper
+          // side by the ppm growth across the band. [adv-review 2026-09-03]
+          const double lo = edge[b] - edge[b] * ppm * 1e-6 * 20.0;
+          const double hi = edge[b + 1] + edge[b + 1] * ppm * 1e-6 * 20.0;
           MSSpectrum t; t.setRT(s.getRT()); t.setMSLevel(1);
           OpenMS::DataArrays::FloatDataArray ia;
           ia.setName(Constants::UserParam::ION_MOBILITY);
@@ -2749,8 +2751,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       const double S = 1e-9;
       const double tot = S * (t_mat + t_trace + t_grid + t_score + t_emit);
       auto pct = [&](long long v) { return tot > 0 ? 100.0 * S * v / tot : 0.0; };
-      writeLogInfo_("Window-loop stage breakdown (CPU-seconds across all threads, "
-                    + String(tot) + " s total):");
+      writeLogInfo_("Window-loop stage breakdown (each stage's own ELAPSED time, summed over "
+                    "windows -- NOT CPU-seconds: stages of different windows run concurrently, so "
+                    "this sum exceeds the loop's wall time; " + String(tot) + " s total):");
       writeLogInfo_("  materialize " + String(S * t_mat)   + " s (" + String(pct(t_mat))   + "%)");
       writeLogInfo_("  trace       " + String(S * t_trace) + " s (" + String(pct(t_trace)) + "%)");
       writeLogInfo_("  fraggrid    " + String(S * t_grid)  + " s (" + String(pct(t_grid))  + "%)");
