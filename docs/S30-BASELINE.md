@@ -711,3 +711,28 @@ backwards -- where only the heavy member is identified, Sage says the mass we re
 correct 70% of the time. Mechanism: `findPartner` skips `used[]` peaks, so a leftover one step above a
 consumed run becomes its own monoisotope (heavy members carry fewer isotope partners, 3.53 vs 4.59).
 Upstream ownership gate pre-registered; downstream merging stays falsified.
+
+### BACKFILL CONFIRMATION ARM: BOTH CANDIDATES FALSIFIED (2026-09-03, 11:47) -- backfill stays OFF
+Pre-registered arms `q=0.5` and `K=150` re-run on S08 and S23, both engines, plus entrapment.
+| file | arm | Sage @1% | vs apex | MSFragger @1% | vs apex |
+|---|---|---|---|---|---|
+| S30 | apex | 12,537 | -- | 11,927 | -- |
+| S30 | q=0.5 | 12,442 | −0.8% | 12,492 | +4.7% |
+| S30 | K=150 | 12,724 | **+1.5%** | 12,000 | +0.6% |
+| S08 | apex | 10,789 | -- | 11,444 | -- |
+| S08 | q=0.5 | 10,516 | **−2.5%** | 11,620 | +1.5% |
+| S08 | K=150 | 10,618 | **−1.6%** | 11,483 | +0.3% |
+| S23 | apex | 10,156 | -- | 9,738 | -- |
+| S23 | q=0.5 | 10,134 | −0.2% | 10,178 | +4.5% |
+| S23 | K=150 | 10,166 | +0.1% | 9,751 | +0.1% |
+Entrapment is flat everywhere (S08 apex 0.91% / q05 0.91% / K150 0.97%; S23 1.13% / 1.13% / 1.14%),
+so neither arm is bought with false positives -- but neither survives its own falsifier:
+* **K=150 dies on the sign rule.** S30 said +1.5% on Sage; S08 says −1.6%. The "strictly better on both
+  engines" claim was a one-file artefact.
+* **q=0.5 dies on the magnitude rule.** The pre-registration killed it if any S08/S23 Sage regression
+  exceeded S30's −0.8%; S08 is −2.5%. The MSFragger gain does replicate (+4.7 / +1.5 / +4.5), so the
+  two engines genuinely want different spectra -- but that makes it a per-engine option at best, not a
+  default, and nothing in the evidence says which engine to optimise.
+**Verdict: raw apex-frame backfill stays OFF by default in every form tested** (unconditional,
+fragment-gated, precursor-intensity-gated, empty-precursor). The MSFragger deficit is not closed by
+adding peaks to spectra we already emit.
