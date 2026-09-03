@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+- **`charge:min_charge` now defaults to 2**, dropping singly-charged precursor hypotheses before
+  extraction. They are ~30% of emission and ~1.7% of peptides, and removing them GAINS peptides on
+  both search engines on all three benchmark files (Sage +0.8/+2.7/+1.4%, MSFragger +1.2/+5.4/+0.9%)
+  while cutting emission ~30% and runtime 17%. Entrapment FDR stays inside the previous 95% interval
+  on every file. Set `charge:min_charge=1` to restore the previous behaviour.
+
+### Added
+- `SPEXTRACT_ISO_COLLAPSE` (experimental, default off): collapses precursor hypotheses on the isotope
+  lattice before extraction. Measured on S30 and NOT adopted -- it loses peptides at every setting,
+  and loses more on top of the charge gate. Kept for reproducibility of that finding.
+- `bench/iso_dup.py`, `bench/iso_collapse.py`, `bench/iso_sim.py`, `bench/iso_loss.py`,
+  `bench/iso_guard.py`: the isotope-duplication census, collapse-rule evaluation, content-similarity
+  test and loss trace behind those results.
+
 ### Runtime
 - **MS1 path parallelised** (loader `[speXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and
   `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). S30/100 threads: LOAD 445 s -> 39 s,

@@ -838,6 +838,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message. [bugfix]
     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
+    registerIntOption_("charge:min_charge", "<n>", 2, "Minimum precursor charge to EMIT. DEFAULT 2: singly-charged hypotheses "
+                       "are 29.3%% of emission on S30 and 1.73%% of peptides -- a z=1 pseudo-spectrum is identified on 0.42%% of "
+                       "its own spectra against 15.3%% for z=2. Tryptic peptides are essentially never 1+ in ESI and "
+                       "charge:scoring breaks ties toward the LOW charge, so the mis-assignments land there. Dropping them GAINS "
+                       "peptides on both engines on all three files (Sage +0.8/+2.7/+1.4%%, MSFragger +1.2/+5.4/+0.9%%) because "
+                       "their share of the multiple-testing burden goes too, and cuts runtime 17%%. Set 1 to emit them again; "
+                       "3+ is catastrophic (charge 2 carries 56.9%% of peptides).", false);
     // [route-1] Only 25.7%% of diaTracer's precursors are matched by us with the RIGHT m/z AND charge;
     // 17.2%% have the wrong charge and 22.9%% (decoy-corrected) the wrong monoisotope. A wrong charge or
     // mono gives a wrong NEUTRAL MASS, so the peptide can never be identified no matter how good the
@@ -2149,13 +2156,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // ESI, and charge inference breaks ties toward the LOW charge, so this is where the mis-assignments
     // land. Dropping them is a far better emission lever than any isotope collapse tested: -29.3%
     // emission for -1.73% peptides, against -15.3% for -4.6% at the best collapse setting.
-    if (const char* mc = std::getenv("SPEXTRACT_MIN_CHARGE"))
     {
-      const int zmin = std::atoi(mc); const size_t before = precursors.size();
+      const int zmin = getIntOption_("charge:min_charge"); const size_t before = precursors.size();
       precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
                        [zmin](const Precursor_& pc){ return pc.charge > 0 && pc.charge < zmin; }), precursors.end());
-      writeLogInfo_("SPEXTRACT_MIN_CHARGE=" + String(zmin) + ": dropped " + String(before - precursors.size())
-                    + " precursors below that charge, " + String(precursors.size()) + " remain");
+      if (before != precursors.size())
+        writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
+                      + " precursors below that charge, " + String(precursors.size()) + " remain");
     }
     // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts

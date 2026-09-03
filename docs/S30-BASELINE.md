@@ -736,3 +736,22 @@ so neither arm is bought with false positives -- but neither survives its own fa
 **Verdict: raw apex-frame backfill stays OFF by default in every form tested** (unconditional,
 fragment-gated, precursor-intensity-gated, empty-precursor). The MSFragger deficit is not closed by
 adding peaks to spectra we already emit.
+
+### NEW DEFAULT: `charge:min_charge` = 2 (2026-09-03, 15:05) -- confirmed on all three files, both engines
+Singly-charged precursor hypotheses are ~30% of emission and ~1.7% of peptides. A z=1 pseudo-spectrum
+is identified on 0.42% of its own spectra against 15.3% for z=2; tryptic peptides are essentially
+never 1+ in ESI and `charge:scoring count` breaks ties toward the LOW charge, so the mis-assignments
+land there. Dropping them removes their share of the multiple-testing burden too, so peptides go UP.
+| file | spectra | Sage @1% | MSFragger @1% | entrapment |
+|---|---|---|---|---|
+| S30 | 927,813 -> **656,254** (−29.3%) | 12,537 -> **12,642** (+0.8%) | 11,927 -> **12,073** (+1.2%) | 1.28% -> 1.38% |
+| S08 | 1,228,875 -> **863,319** (−29.7%) | 10,789 -> **11,084** (+2.7%) | 11,444 -> **12,061** (+5.4%) | 0.91% -> 0.99% |
+| S23 | 844,755 -> **586,069** (−30.6%) | 10,156 -> **10,294** (+1.4%) | 9,738 -> **9,822** (+0.9%) | 1.13% -> 1.28% |
+S30 wall time 15:21 -> 12:48 (−17%). Every pre-registered adoption condition is met: peptides rise on
+BOTH engines on ALL THREE files, every entrapment estimate stays inside the corresponding apex 95% CI
+and below the 1.4% bound. Against diaTracer, MSFragger goes 85.6 -> 86.7% (S30), 83.7 -> 88.3% (S08),
+91.8 -> 92.6% (S23); Sage on S30 is 109.8% of diaTracer. This is the first change in the emission line
+that improves both engines while cutting emission AND runtime.
+**Adopted as the default.** `charge:min_charge=1` restores the old behaviour; 3+ is catastrophic
+(charge 2 carries 56.9% of peptides: S30 Sage 5,088). The isotope collapse is NOT adopted in any form
+-- on top of this gate it turns +0.8% into −3.8% (Sage) and +1.2% into −2.5% (MSFragger).
