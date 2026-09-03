@@ -114,6 +114,12 @@ after; its run decides whether anything of the 30-50% survives. The lesson is th
 scoring-gate result taught in the other direction: an estimate of where time goes is worth little
 until a timer has been put on it.
 
+**Outcome (22:32).** With valley splitting chunked and parallel: **6:53 wall against 7:17 for the
+OpenMS path, 105 GB peak against 164 GB, window-loop CPU −24%.** So the design's claim survives in a
+weakened form: the integer layout does pay, but only once the reimplementation stops adding serial
+work the original did not have. The memory saving is the larger and the more certain of the two
+gains, and it is what raises the number of windows the admission gate can keep in flight.
+
 ## 5. Risks, stated before the review
 
 1. **`min_sample_rate` semantics.** OpenMS computes the hit rate over the frames it has visited in

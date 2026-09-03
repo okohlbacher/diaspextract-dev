@@ -10,7 +10,14 @@ peptides):
 | corrected, centroid m/z into valley splitting | 656,241 | 11,940 | 9:38 | 168 GB |
 | corrected, measured per-peak m/z | 656,241 | **12,650** | 9:28 | 174 GB |
 | corrected, prep hoisted + bin search | 656,256 | 12,466 | 9:31 | 185 GB |
+| **corrected, valley splitting chunked + parallel** | 656,256 | 12,466 | **6:53** | **105 GB** |
 | OpenMS detector, same binary | 656,254 | 12,642 | 7:17-7:22 | 164-166 GB |
+
+**The serial section was valley splitting.** Chunking it into bands*4 parallel tasks, as the OpenMS
+path does, took the integer detector from 9:31 to 6:53 wall (now faster than the OpenMS path's
+7:17), window-loop CPU from 17,414 to 15,842 s, occupancy from 44x to 67.6x, and peak memory from
+185 to 105 GB -- 36% below the OpenMS path. Peptides unchanged at 12,466; the 1.4% against the
+12,650 of the earlier version is the frame-emptiness rule and is being measured in isolation.
 
 **Science: parity.** 12,650 against 12,642, with a symmetric set difference (1,036 only-reference,
 1,044 only-integer): the residual of a faithful reimplementation that is not bit-identical, and a
