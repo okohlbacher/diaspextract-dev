@@ -590,3 +590,11 @@ not in our fragment TRACES: they are peaks that never become a trace (single-fra
 diaTracer's ~500-peak spectra carry and our ~55-trace spectra do not. Next arm (content candidate 3): backfill each
 pseudo-spectrum with the raw picked MS2 peaks of the precursor's apex frame inside its IM band (top-N not already
 present), the DIA-Umpire/diaTracer-style "peak-level" spectrum, both engines; falsifier: dt-only deficit stays +2.
+
+### CONTENT CANDIDATE 3 -- PRE-REGISTERED (2026-09-03, 03:35): raw apex-frame peak backfill
+`SPEXTRACT_BACKFILL_RAW=N` adds to each pseudo-spectrum the N most intense raw picked MS2 peaks of the frame nearest
+the precursor's RT, inside its 1/K0 band (delta_im), not already present within 10 ppm -- untraced, single-frame
+content (the population the coverage arms showed we never trace). Arms: N=50, N=150. Predictions: if the faint tail's
+missing ions are these peaks, the dt-only matched-ion deficit (+2) shrinks and the MSFragger ratio rises (>= 90%);
+Sage may fall if the added peaks are noise (the 150-peak search cap protects MSFragger more than Sage). Falsifier:
+deficit stays +2 with N=150 -> the missing ions are not in the picked frame either (pick-level / MS2 aggregation).
