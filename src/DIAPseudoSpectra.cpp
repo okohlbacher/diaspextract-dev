@@ -596,9 +596,15 @@ namespace
       vector<uint32_t> xi; vector<float> xv;
     };
     vector<Live> live;
+    vector<char> closed;                  ///< a retired trace stays in `live` until it is harvested
     // bucket -> indices into `live`, so a peak's candidates are three bucket lookups
     std::unordered_map<MzIdx, vector<uint32_t>> by_bucket;
     by_bucket.reserve(sl.peaks() / 8 + 16);
+    // A trace not extended for this many frames is CLOSED and dropped from its buckets. Without
+    // retirement the buckets accumulate every trace ever seen and the lookup degrades to a scan of
+    // millions -- the bookkeeping, not the idea, would decide the benchmark. Two frames of slack
+    // matches the gappiness the OpenMS path tolerates via min_sample_rate.
+    const uint32_t max_gap = 3;
 
     const double min_apex = snr * noise;
     for (size_t fi = 0; fi < sl.frames(); ++fi)
@@ -619,9 +625,15 @@ namespace
           const MzIdx bb = (MzIdx)((long long)b0 + db);
           auto it = by_bucket.find(bb);
           if (it == by_bucket.end()) continue;
-          for (uint32_t li : it->second)
+          vector<uint32_t>& v = it->second;
+          size_t w = 0;
+          for (size_t vi = 0; vi < v.size(); ++vi)
           {
+            const uint32_t li = v[vi];
             Live& L = live[li];
+            if (closed[li]) continue;                      // already harvested elsewhere
+            if (rti > L.last_frame + max_gap) { closed[li] = 1; continue; }   // retire, drop
+            v[w++] = li;                                   // keep
             if (L.last_frame == rti) continue;             // one point per trace per frame
             const MzIdx d = L.centroid > m ? L.centroid - m : m - L.centroid;
             if (d > span) continue;
@@ -629,6 +641,7 @@ namespace
             if (fabs(lim - (double)iq) > (double)imq_tol) continue;
             if (d < best_d) { best_d = d; best = (long)li; }
           }
+          v.resize(w);
         }
         if (best < 0)                                      // seed a new trace
         {
@@ -638,6 +651,7 @@ namespace
           L.apex_mz = m; L.apex_int = v; L.apex_frame = rti;
           L.xi.push_back(rti); L.xv.push_back(v);
           live.push_back(std::move(L));
+          closed.push_back(0);
           by_bucket[m >> shift].push_back((uint32_t)(live.size() - 1));
           continue;
         }
