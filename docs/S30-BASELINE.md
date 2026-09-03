@@ -608,3 +608,10 @@ peptides for which we have NO PSM, 654 (46%) have a precursor hypothesis of ours
 within 30 s) -> hypothesised but no spectrum reached the search (assembly: < min_frags or no correlated fragments);
 ~500 (35%) have no hypothesis at all (MS1 trace / envelope). So the 3,937 dt-only peptides split ~64% searched-but-
 under-covered / ~17% hypothesised-not-emitted / ~19% never hypothesised.
+
+### ASSEMBLY-LOSS ARM -- PRE-REGISTERED (2026-09-03, 04:45): `assembly:min_fragments` 3
+17% of the diaTracer-only peptides have a precursor hypothesis of ours but no spectrum reached the search. The gate that
+drops a hypothesised precursor at assembly is `assembly:min_fragments` (a spectrum with fewer correlated fragments is
+not emitted). Arm: min_fragments 3 (default in the help), both engines. Prediction: the dt-only "we have SOME PSM"
+fraction rises from 64% and MSFragger gains if those spectra are identifiable; falsifier: the added spectra are
+unidentifiable noise (Sage/MSFragger flat or down, emission up). Runs after the backfill rerun (`bench_minfrag.sh`).
