@@ -838,14 +838,12 @@ namespace
       if (t > std::numeric_limits<double>::epsilon()) sd = t;
       wsum = ws;
     };
-    /// findBestPeak_ + isPeakAcceptable_: closest m/z inside +-3sd with mobility inside the gate;
-    /// returns the index, or -1 for "no candidate"; sets `taken` if the closest one is visited.
-    /// findBestPeak_ + isPeakAcceptable_, in BINS. The +-3 sd window is converted to a bin
-    /// range ONCE per frame step (two calibration calls); inside it, "closest in m/z" is "closest
-    /// in bins" because the calibration is monotone -- so no peak visited by the walk costs a
-    /// calibration call. The first corrected version converted every visited candidate back to
-    /// m/z, a sqrt per visit, and that is the other half of why it was slower than OpenMS.
-    /// Only the ACCEPTED peak is ever converted (in the caller, for the centroid update).
+    /// findBestPeak_ + isPeakAcceptable_: the closest peak in m/z within +-3 sd of the running
+    /// centroid whose mobility is inside the gate; -1 for "no candidate", and `taken` set when the
+    /// closest one is already used, which OpenMS counts as a miss rather than trying the next.
+    /// The +-3 sd window is converted to a BIN range once per frame step, so the walk is bounded
+    /// by two calibration calls and a binary search; only candidates inside that window are
+    /// converted back to m/z for the comparison.
     auto best = [&](size_t f, double cmz, double sd, double cim, bool& taken) -> long {
       taken = false;
       const uint32_t a = sl.frame_off[f], b = sl.frame_off[f + 1];

@@ -93,3 +93,26 @@ one with seven missing frames must come out as two.
 **What the speed numbers mean now.** Nothing yet. The first version was fast partly because it did
 a twelfth of the work. The corrected detector is judged on peptides first; only if those match is its
 wall time a result.
+
+
+## S08: the second file (2026-09-03, 23:09)
+
+| S08, 100 threads | wall | peak RSS | Sage @1% |
+|---|---|---|---|
+| integer detector | **11:51** | **140 GB** | **11,121** |
+| OpenMS detector, same binary | 11:42 | 230 GB | 11,084 |
+| diaTracer, same node | 9:46 | 163 GB | 10,242 |
+
+**The S30 peptide deficit does not reproduce.** On S08 the integer detector finds slightly MORE
+peptides than the OpenMS path (11,121 vs 11,084, +0.3%) where on S30 it found 1.4% fewer -- which is
+what a faithful-but-not-identical reimplementation looks like: a small per-file wobble of either
+sign, not a systematic loss.
+
+**Memory is the bigger and more consistent result: 140 GB against 230 GB, a 39% cut**, matching the
+36% seen on S30 (105 vs 164 GB). It also puts speXtract BELOW diaTracer's 163 GB on this file for
+the first time. Wall time is a wash here (11:51 vs 11:42) although it won on S30 (6:53 vs 7:17);
+window-loop CPU is 31,033 s against 41,530 s, i.e. the integer path does 25% less work but fills
+fewer threads (64x vs 87x), so on the larger file the two effects cancel.
+
+Remaining before it could be a default: MSFragger and entrapment (queued), and an explanation for
+the occupancy gap -- 64x vs 87x is the last unexplained number in this line of work.

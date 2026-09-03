@@ -1,0 +1,227 @@
+kimi version 0.40.1
+• Let me do the arithmetic carefully.
+
+  Scale: 24 windows in flight, each window P ≈ 5e7 peaks, F ≈ 1,400 MS2 frames. n_bands = 12 band tasks per window, 48 EPD chunks per window (bands*4). Fragment traces per window: 5e6–1e7, points per trace ~10.
+
+  Wait — EPD chunks: splitIntegerTraces is called per band? "bands*4 = 48 valley-splitting chunks" per window. So EPD runs per band, 4 chunks each, 12 bands.
+
+  Per-structure inventory:
+
+  **PeakSlab (per window, 24 windows):**
+  - frame_off: (F+1)×4 B ≈ 1,400×4 ≈ 5.6 KB — negligible
+  - rt_index: F×4 ≈ 5.6 KB — negligible
+  - tof: P × sizeof(TofIdx). TofIdx — likely uint32_t (4 B). P=5e7 → 200 MB/window → 4.8 GB for 24.
+  - b: F×8 = 11.2 KB — negligible
+  - inten: P×4 B = 200 MB/window → 4.8 GB
+  - imq: P×2 B = 100 MB/window → 2.4 GB
+
+  Slab total ≈ 500 MB/window → 12 GB at 24 windows.
+
+  **TracePrep (per window? Actually prepareTracing takes the slab — is it per window or per band?)** The prep is on the whole window (order seeds over whole window). Comment says visited is "the only per-band P-sized array", so TracePrep is per window, shared by 12 band tasks.
+
+  - frame_of: P×4 = 200 MB/window → 4.8 GB
+  - member: P×1 = 50 MB/window → 1.2 GB
+  - frame_live: F — negligible
+  - order: reserved P/4, but filled with member && inten > snr*noise peaks. Say ~P/10 to P/4. 4 B each. Upper bound P/4×4 B = 50 MB/window → 1.2 GB. Let's say 0.5–1.2 GB.
+
+  **visited: per band task: P×1 B = 50 MB × 12 bands × 24 windows = 14.4 GB.** That's a big one.
+
+  **Traces (vector<Trace> out per band):** fragment traces per window 5e6–1e7. Per band ~1/12 → ~4e5–8e5 traces per band. Per trace: xi (4 B/pt) + xv (4 B/pt) + xt (4 B/pt) = 12 B/pt × 10 pts = 120 B + sizeof(Trace) (4 doubles=32 + uint32 4 + double 8 → ~48, plus 3 vectors ×24 = 72 → ~120 B) ≈ 240 B/trace. Per window: 5e6–1e7 traces × 240 B ≈ 1.2–2.4 GB per window → 29–58 GB for 24 windows. Hmm, that's huge. But wait — do traces all coexist? Per band, out is built, then splitIntegerTraces consumes them chunk-wise. But across the window, band tasks run concurrently, so 12 bands × their traces coexist within a window. So yes, traces ~1.2–2.4 GB/window → 29–58 GB. Plus vector overhead/fragmentation: 3 vectors per trace, capacity rounding — vector capacity for push_back growth ~1.5x-2x, though they reserve pts.size() exactly. OK.
+
+  **EPD lists (splitIntegerTraces):** per chunk: std::list<Peak2D> nodes: (24 + 16 + 8) = 48 B/pt × 10 pts = 480 B/trace. Chunks per window = 48, each chunk has (traces/window)/48 ≈ 1e5–2e5 traces → 48–96 MB per chunk → ×48 = 2.3–4.6 GB per window → 55–110 GB for 24 windows?? Wait no — the list is built per chunk, but is it freed before the next chunk? Within a taskloop, all 48 chunks run concurrently (across threads). Each chunk: builds mts (lists for its traces), frees Trace profiles chunk-wise as it goes (t.freeProfile()), then splitValleys, then converts back to Trace, then chunk ends — mts and split are destroyed at end of chunk iteration. So at peak, all 48 chunks have their MassTrace vectors + lists simultaneously → per window the entire trace set exists as MassTrace+list (480+ B/trace → 5e6–1e7 × ~500 B = 2.5–5 GB/window → 60–120 GB at 24 windows). Hmm, but parts[ci] Traces also accumulate as chunks finish, while later chunks still hold lists. And MassTrace itself holds a vector<Peak2D> — wait, MassTrace(pk) from a list — MassTrace stores convex hulls + peaks? Actually OpenMS MassTrace holds std::vector<Peak2D> peaks_. MassTrace(pk) constructor from list copies into vector. So during splitValleys, each trace exists as list (48 B/pt) AND MassTrace vector (24 B/pt) → 72 B/pt + overhead. Then split traces → toTrace → 12 B/pt Trace. So peak per trace during EPD ≈ 10 × (48+24) + sizeof(MassTrace)×2 + new Trace = ~1 KB/trace. × 5e6–1e7/window = 5–10 GB/window = 120–240 GB?! That can't be right vs 105 GB measured. Not all chunks at max simultaneously; but roughly EPD is the dominant transient.
+
+  Hmm, but wait — does splitIntegerTraces get called per band with nchunk=4? "bands*4 = 48 valley-splitting chunks". Yes. So 48 chunks per window × 24 windows = 1,152 concurrent chunk workspaces, each ~1/1152 of total trace mass. Total trace mass at once = all traces of 24 windows. If 1e7 traces/window × 24 = 2.4e8 traces × 10 pts = 2.4e9 points. As lists+MassTrace: 2.4e9 × 72 B = 173 GB. Exceeds 105 GB. As split parts Trace arrays accumulate: parts traces (12 B/pt + overhead) while remaining lists exist. Realistically peak EPD is likely the dominant contributor but bounded by overlap patterns; measured 105 GB suggests mix.
+
+  Actually let me reconsider: list node overhead on 64-bit libstdc++: node = 2 pointers (16 B) + payload Peak2D (24 B) = 40 B, allocator rounds to 48 B. The code counts 24+16+8 = 48 B. Fine.
+
+  Let me rank:
+
+  1. Slab tof+inten+imq: 10 B/peak × 5e7 × 24 = 12 GB.
+  2. frame_of: 4 B × 5e7 × 24 = 4.8 GB.
+  3. member: 1 B × 5e7 × 24 = 1.2 GB.
+  4. order: up to 4 B × P/4 × 24 ≈ 1.2 GB (likely less).
+  5. visited: 1 B × 5e7 × 12 × 24 = 14.4 GB.
+  6. Traces (detect output): 5e6–1e7/window × 24 × (10×12 + ~120 + vec overhead) ≈ 30–60 GB.
+  7. EPD lists + MassTrace: overlapping with #6 — during splitting, Trace profile is freed as the list is built, so per-point: list 48 + MassTrace vector 24 = 72 B/pt during splitValleys, plus split output MassTraces, plus parts Traces. If all of a window's traces are in EPD simultaneously: 2.4e9 pts total... per window 5e7–1e8 pts × 72 = 3.6–7.2 GB/window → 86–173 GB. Overestimated since not all chunks peak simultaneously; still, EPD is plausibly the biggest transient.
+
+  Also MassTrace copy in splitValleys — splitValleys(mts,...) presumably copies or moves? It takes vector<MassTrace>& and returns vector<MassTrace> — likely builds new MassTraces for splits, so during splitValleys: original mts + new split MassTraces coexist → double.
+
+  Top three owners of 105 GB: (1) EPD list+MassTrace duplication, (2) detected Trace arrays, (3) slab (tof/inten/imq) + visited + frame_of. Also possibly things outside this code: emitted spectra accumulating, compact store remnants (though consumed), allocator fragmentation from millions of small vectors (3 vectors × 5e6–1e7 traces per window → 1.5e7–3e7 allocations per window — glibc arena fragmentation across 100 threads is real; each thread arena 64 MB × up to 8×ncores arenas... with 100+ threads, glibc creates up to 8 arenas per core count → huge fragmentation. Actually glibc default: up to 8×ncores arenas = 1024 arenas on 128-core, each up to 64 MB → theoretical 64 GB. This is a serious candidate for the 105 GB vs accounted ~60 GB gap.
+
+  **Duplication:**
+  - Compact store vs slab: consumed frame-by-frame (swap), so NOT simultaneous — good.
+  - frame_of duplicates implicit info from frame_off (binary search could recover frame from peak index). 200 MB/window redundant.
+  - tof + b + mz: m/z recomputed on demand — fine.
+  - xt in Trace vs tof in slab: per-point bin copied from slab into trace; slab still alive during EPD (passed as const ref) → xt duplicates slab.tof values for traced points. ~10 pts × 4 B × 1e7 = 400 MB/window duplicated while slab alive.
+  - xi stores rt_index duplicates: xi[i] is global frame index; slab.rt_index alive. Small duplication.
+  - EPD: Trace profile → list<Peak2D> → MassTrace vector → split MassTrace → new Trace. The list copy replaces profile chunk-wise (freeProfile called as list is built) — so list and Trace profile are NOT simultaneous per-trace, but list AND MassTrace vector ARE simultaneous (MassTrace(pk) copies the list into its internal vector; pk destroyed per-iteration? pk is inside the q loop — `std::list<Peak2D> pk;` declared inside the loop, so destroyed after MassTrace mt(pk) — actually list lives until end of iteration; mt copies it. So per trace: list + MassTrace coexist briefly, then list freed. list_bytes MemGuard accounts full chunk's lists though — but actually lists are per-iteration, so peak list memory is one trace's list, not the chunk's! Wait: `for q { std::list<Peak2D> pk; ... MassTrace mt(pk); mts.push_back(move(mt)); }` — pk is loop-scoped, destroyed each iteration. So the list is transient per trace; the accounting `list_bytes` sums but the MemGuard g_list is created after the loop with summed bytes — the accounting overstates actual simultaneous list memory (only ~480 B at a time). The real resident mass is the MassTrace vector mts (24 B/pt + convex hull overhead + sizeof(MassTrace) ~ maybe 200+ B) for the whole chunk, then splitValleys doubles it. So EPD peak per chunk: mts (24 B/pt) + split (~similar or more, since splitting can add points? valley splitting duplicates apex point at boundaries — slight growth) + parts Trace output (12 B/pt). Meanwhile the source Trace profiles were freed chunk-wise, but chunks that haven't started still hold their Trace profiles.
+
+  So genuine simultaneous duplication in EPD: source Traces (unprocessed chunks) + mts + split + parts. And MassTrace stores Peak2D (24 B: double mz + float intensity... Peak2D is 24 B with RT? MassTrace stores peaks with RT) vs Trace's 12 B/pt.
+
+  - imq kept in slab "for export" while cim per trace already derived — 2 B/peak × 24 windows = 2.4 GB held through whole window lifetime for export only.
+
+  **Repeated passes:**
+  Peak reads:
+  1. toSlab: read each compact peak once (mzq → tof), copy inten, imq.
+  2. prepareTracing: pass over all peaks (frame_of fill + member test) — read inten.
+  3. prepareTracing: second pass over all peaks for order fill — read inten again + member.
+  4. sort order — reads inten of seeds repeatedly (O(S log S)).
+  5. detectTraces: seed read; walk reads candidate peaks in ±3sd window per frame step; each accepted point read ~twice (best + mzAt/iwm). Candidates re-read across seed attempts? visited prevents re-trace but failed traces' points can be re-scanned by other seeds.
+  6. Validation pass over got (fmin/fmax).
+  7. Profile build pass over pts (sort + push xi/xv/xt, apex scan).
+  8. splitIntegerTraces: read each trace point to build list (tof→mz conversion, b_of_rt lookup).
+  9. splitValleys internal passes (smoothing, valley detection — multiple reads per point).
+  10. toTrace conversion back — another read per point.
+  11. Apex re-scan in split output loop.
+  12. Export (outside shown code) — recompute m/z from tof/b.
+
+  Fusible: prepareTracing's two passes can be fused (member test and order push in one loop). fmin/fmax pass can be fused into the walk (got built in order? got is built as walk proceeds, frames not monotonic since down/up interleaved — but track min/max during push). pts sort: since got comes from bidirectional walk, could build profile directly in two ordered runs (down part reversed + seed + up part) eliminating the sort and the pts array. The apex scan in detect and the apex rescan in split output — second could reuse.
+
+  **visited:** P per band: 5e7 B = 50 MB × 12 × 24 = 14.4 GB peak. Should be: the band may extend anywhere (traces seeded in band core can extend along RT — wait, extension is along frames/RT, not tof! The walk steps frames, not tof. Hmm — "a band seeds only within its own flight-time core but may extend anywhere" — extension is across frames but the ±3sd window around centroid m/z stays near the seed's tof. The centroid can drift but bounded by... mass_ppm sd? sd grows robustly. Realistically a trace stays within a modest tof corridor. But strictly, visited[k] is indexed by global peak index k. Alternative: per-band visited sized to the band's share? Can't index global k. Options: (a) use the `member`/marking differently — since traces are only seeded in-band but mark peaks anywhere, visited must be window-wide indexed... unless band tasks each handle a disjoint tof RANGE entirely (seed + any peak they touch). If bands partition the tof axis and a band's walk can touch any tof... The walk's candidate search is bounded by lo_t/hi_t from cmz ±3sd which can drift outside the band core. So visited needs window-wide indexability but sparsely used: a band touches peaks only in frames×(tof corridor). Better: visited as bitset → 6.25 MB/band → 1.8 GB total (8× saving). Or: since extension is bounded in practice, allocate visited over the union of bands reachable — hard to prove. Or use a per-band unordered_set<uint32_t> of actually-taken peaks — total taken peaks across all bands ≤ traced points ~1e8/window... that's worse (overhead per entry). Bitset is the clean answer: 50 MB → 6.25 MB per band, 14.4 GB → 1.8 GB. Or epoch/stamp array shared across bands with atomic bytes? Bands partition seeds but marking must be globally consistent — actually wait, do band tasks share visited? Each band has its OWN visited(P). Two bands could claim the same peak (a trace extending into neighbor band's tof region) → duplicate points across bands! But that's a correctness note; for memory: alternative design — one shared atomic visited per window (50 MB) with CAS marking, eliminating 11/12 of the copies: 14.4 GB → 0.6 GB/window → 1.2 GB total. Changes semantics slightly (cross-band claims resolved by race winner) — actually that's arguably more correct (no duplicate points). Flag it.
+
+  **Design changes ranked by bytes saved per unit risk:**
+
+  1. Replace EPD's list<Peak2D>+MassTrace round trip with direct vector<Peak2D> or split Trace in place: list node 48 B/pt → vector 24 B/pt, and avoid double list+MT copy. Saving: ~24–48 B/pt × 2.4e8 pts... per window 5e7–1e8 pts: 1.2–4.8 GB/window → 29–115 GB transient reduction. Output: identical if splitValleys can take vector. Verify: golden peptide counts.
+
+  2. Bitset or shared window visited: 14.4 GB → 1.8 GB (bitset, no semantic change within a band; still per-band duplicates possible) or → 1.2 GB shared atomic (semantic change, arguably fixes double-claim). Verify: peptide counts.
+
+  3. Drop frame_of: recover via frame_off binary search (frame of peak changes once per accepted point + once per best() call — but best() gets f directly; frame_of used for seed f0, fmin/fmax, pts build, mzAt). mzAt needs frame for b — in best() the frame is known; caching per accepted point needed. Saving 4.8 GB; trades CPU (binary searches). Alternatively store frame_of as uint16 deltas? Frames 1,400 < 65k → could pack frame_of as uint16_t → 2.4 GB saving, nearly free. Actually uint16 frame_of: F=1,400 fits → halve to 100 MB/window.
+
+  4. Free slab.imq earlier or don't keep for export — 2.4 GB; or keep imq only for member peaks. Also `b` per frame tiny.
+
+  5. Trace struct: xv could reuse... xi+xv+xt 12 B/pt is already lean; but 3 allocations per trace → combine into one allocation (struct of arrays in a single arena/pool for all traces of a band): saves malloc overhead (~16 B × 3 × 1e7 = 480 MB/window) and fragmentation. Risk moderate.
+
+  6. member array: could be fused into order build... member used in best() to gate candidates — needed. 1 B/peak fine. Could bit-pack → 150 MB saving, small.
+
+  7. Reserve/order: order reserved P/4 = 12.5M×4 B = 50 MB/window even if fewer seeds. Cap reserve.
+
+  8. Arena/pool allocator for Trace vectors + tcmalloc/mimalloc to kill arena fragmentation. Suspect fragmentation is a large chunk of 105 GB — how to confirm: compare RSS vs accounted bytes (the code has memAdd/MemGuard accounting! Compare MEM_* counters sum vs RSS at peak — the gap is fragmentation + outside-code allocations). That's a great confirmation path: the code already instruments. Also MALLOC_ARENA_MAX=2 A/B test.
+
+  9. Streaming windows: cap 24 windows in flight → e.g. 12 halves everything slab-side (12 GB slab, visited 7.2 GB) at wall-time cost. Trades memory for time.
+
+  10. Don't materialize xt: recompute bins at export from mz? No — xt exists to preserve per-point measured bin; could store xt as delta from trace tof in int16? Bins within ±3sd window of centroid — corridor small, int16 enough → 4→2 B/pt: ~200 MB/window.
+
+  Outside-code suspects: emitted spectra accumulating across windows (spectra held until end?), compact store (consumed — but reserve(total) grows slab before all frames consumed: during toSlab, slab grows to full 10 B/peak while compact frames are freed progressively — peak mid-way ≈ slab_partial + compact_remaining ≈ full window mass 500 MB + overhead of mzq at 4 B... compact store is 10 B/peak too, so transient ≈ 500–1000 MB/window × concurrent toSlab). Fine.
+
+  Allocator fragmentation: 3 vectors/trace × up to 1e7 traces/window = 3e7 small allocations/window, freed chunk-wise across 100 threads → glibc per-thread arenas retain freed memory; RSS stays high. Confirm: mallinfo2/MALLOC_ARENA_MAX A/B, compare memAdd totals vs RSS.
+
+  Now section 1 ranking with numbers. Let me settle per-structure table at 24 windows, P=5e7/window, T=5e6–1e7 traces/window, 10 pts/trace:
+
+  Slab (per window ~512 MB; ×24 = 12.3 GB):
+  - tof 200 MB → 4.8 GB
+  - inten 200 MB → 4.8 GB
+  - imq 100 MB → 2.4 GB
+  - frame_off/rt_index/b ~25 KB — negligible
+
+  TracePrep (per window, ~1; shared by bands):
+  - frame_of 200 MB → 4.8 GB
+  - member 50 MB → 1.2 GB
+  - order ≤50 MB → ≤1.2 GB
+  - frame_live ~1.4 KB
+
+  visited per band: 50 MB × 288 band-tasks = 14.4 GB
+
+  Trace store (detect output): per trace ~120 B payload (10 pts × 12 B) + ~120 B struct + malloc overhead 3×16 = ~288 B → at 1e7/window: 2.9 GB/window → 34–69 GB (5e6–1e7). This is likely the single biggest accounted block.
+
+  EPD MassTrace/list: at its peak a window's worth of traces as MassTrace (24 B/pt + sizeof(MassTrace) ~ maybe 200 B + hull vectors) + split copies → roughly comparable to Trace store, overlapping in time with it partially. Peak coexistence: unprocessed chunks' Traces + processed chunks' parts Traces + current chunks' mts+split. Bounded by ~1× full window traces as Trace + 2× chunk... no wait, all 48 chunks run concurrently in the taskloop across 100 threads. Each chunk independently: converts its slice to mts (freeing source profiles), runs splitValleys (mts + split coexist), converts split to parts (split + parts coexist briefly). Worst case per window ≈ all traces as MassTrace (24 B/pt, 10 pts = 240 B + ~200 B MT overhead ≈ 440 B/trace ≈ 4.4 GB/window at 1e7) + split doubles the vector payload portion (+~240 B/trace → +2.4 GB) + parts Trace (~288 B/trace → +2.9 GB). So EPD peak ≈ 5–10 GB/window → 120–240 GB if perfectly synchronized; realistically staggered, but this is the top transient. vs measured 105 GB total — so realistically not all 24 windows × 12 bands are in EPD simultaneously (bands finish detect at different times). Honest answer: EPD is the swing factor; instrumented MEM_EPD_MT counters exist — check them.
+
+  Also note: MassTrace(pk) copies the list into its internal std::vector<Peak2D>. And MassTrace constructor computes convex hulls etc. sizeof(MassTrace) in OpenMS ~ a few hundred bytes (vectors for peaks, hulls, cached stats ~ maybe 300-400 B).
+
+  b_of_rt unordered_map: F entries ~1,400 × ~50 B = 70 KB per split call × 288 = 20 MB. Negligible.
+
+  got, pts: per-task small (≤ trace length).
+
+  FragGrid: shown but not used in this path? It's defined at the end — it's the correlation grid (downstream). off is 8.5 M fragments × 8 B = 68 MB, flat: 8.5 M × 510 × 8 B = 34.7 GB! Wait — 8.5e6 fragments × 510 support points × 8 B/pair = 34.7 GB. Hmm, that's per what? Per window? "8.5 M fragments × ~510 support points" comment. If FragGrid is per window: flat = 8.5e6×510×8 = 34.7 GB/window — can't be ×24. mean/invnorm 8.5e6×8×2 = 136 MB. This is likely built after windows merge or per window but after slab freed. The user asks about "every data structure in the code below" — FragGrid is in the code. At 8 B/entry × 4.3e9 entries = 34.7 GB, this would dominate 105 GB if resident with slabs. But likely lifecycle: traces → FragGrid after window done, per window sequential-ish. I should flag it as a top-3 candidate with the caveat about its lifetime (not enough info in the snippet to know how many coexist; if it's one per window × 24 → impossible at 105 GB, so it must be fewer, or entries fewer). Actually maybe FragGrid is built once globally after all detection? Unclear. I'll quantify and flag: if 1-2 coexist it's 35-70 GB — the single biggest structure mentioned.
+
+  Hmm, but is FragGrid part of "this code path"? The user included it verbatim at the end, so yes, include it. The comment says 8.5 M fragments — global? "8.5 M fragments x ~510 support points is within 2x of the 32-bit wrap" — 8.5e6×510 = 4.3e9 ≈ 2^32.07... yes within 2× of wrap. That's likely per window (5e6–1e7 fragment traces per window!). So FragGrid is per window, flat ≈ 34.7 GB/window. If even 2 windows' grids coexist → 70 GB. That would be THE dominant structure. But then 24 windows would be 800 GB — impossible, so grid must be consumed (correlation scoring) quickly, or support points fewer. ~510 support points per fragment across G grid slots. Hmm, G unique grid RTs per window ~1,400 frames → slots. 510 nonzero of ~1,400. flat 8 B/entry.
+
+  So ranking (simultaneous, assuming grid per window but consumed per window as precursors scored — plausibly 1–few in flight):
+  1. FragGrid.flat ~35 GB/window if present during detection — likely the missing mass. Or if built after slab freed per window, several coexist.
+  2. Trace store (detect output): 34–69 GB across 24 windows.
+  3. EPD MassTrace duplication: transient tens of GB.
+  4. visited 14.4 GB.
+  5. Slab payload 12 GB.
+  6. frame_of 4.8 GB.
+
+  The honest top-3: Trace arrays, FragGrid.flat (if in this path's lifetime), EPD MassTrace copies. And flag unaccounted gap → fragmentation.
+
+  Let me now write the answer. Be quantitative, hostile-reviewer tone, sections 1–5. No tools.
+
+  Numbers to double check:
+  - visited: 5e7 B = 47.7 MiB per band task. ×12×24 = 288 → 13.7 GiB (14.4 GB decimal). Yes.
+  - slab: 5e7 × (4+4+2) = 5e8 B = 477 MiB/window ×24 = 11.4 GiB (12 GB).
+  - frame_of: 5e7×4 = 191 MiB ×24 = 4.6 GiB.
+  - member: 47.7 MiB ×24 = 1.1 GiB.
+  - order: reserve P/4 → 1.25e7×4 = 47.7 MiB ×24 = 1.1 GiB (capacity; actual ≤).
+  - Traces: 12 B/pt × 10 = 120 B + sizeof(Trace): 4×8 + 4 + 8 + 3×24 (vectors) = 32+4+8+72 = 116 → ~120 with padding. + malloc overhead 3 allocations ×~16-32 B. Total ~280-300 B/trace. 1e7/window → 2.8 GB ×24 = 67 GB at high end; 34 GB at 5e6. 
+
+  EPD: MassTrace per trace: 10×24 = 240 B peaks + sizeof(MassTrace). OpenMS MassTrace: contains std::vector<Peak2D> peaks_ (24), std::vector<ConvexHull2D> (24 + hull points), ~10 doubles/cached stats... estimate ~300–500 B per instance. So ~550-750 B/trace as MassTrace; ×1e7 = 5.5–7.5 GB/window if whole window's traces as MTs; split duplicates → +~half; parts as Traces +2.8 GB. Peak EPD/window ~8-12 GB. If ~half the 24 windows mid-EPD: 50–140 GB swing. Definitely the volatility driver.
+
+  FragGrid flat: 8.5e6 × 510 × 8 = 34.7 GB; off: 8.5e6×8 = 68 MB; mean/invnorm: 136 MB; rt/nearest/slot: small.
+
+  Duplication pairs:
+  - mzq compact vs slab: sequential, freed — NOT simultaneous. Good.
+  - slab.tof vs Trace.xt: simultaneous (slab alive during EPD via const ref) — 4 B/pt × ~1e8 pts/window = 400 MB/window → 9.6 GB duplicated (the xt copies of slab bins; slab retains originals). Note: slab must stay alive because EPD needs b_of_rt and tof→mz; but after EPD, slab could be freed before scoring? It is needed for export? imq "kept for export" — so slab lives whole window.
+  - slab.inten vs Trace.xv: xv copies intensities of traced points — traced points are a fraction (~few %) of P. 4 B × 1e8 = 400 MB/window duplicated.
+  - EPD: list→MassTrace: per-trace simultaneous (~1 trace at a time, transient) — small; MassTrace mts vs split MassTraces: simultaneous whole chunk — the real duplication (≈2× MT mass per chunk in splitValleys).
+  - parts Traces vs source Traces: freed chunk-wise — mostly not simultaneous except during taskloop staggering.
+  - b_of_rt map duplicates slab.b/rt_index per split call — trivial (70 KB).
+  - t.mz cached vs (tof,b) authoritative: 8 B/trace, trivial but noted in comment.
+  - FragGrid flat intensities duplicate Trace.xv — if traces still alive when grid built. Lifecycle unknown from snippet; flag.
+
+  Repeated passes — count per peak: 
+  1. toSlab read of compact (1)
+  2. prepareTracing pass 1 (member/frame_of)
+  3. prepareTracing pass 2 (order) — fusible with 2
+  4. sort comparator reads (seeds only, ~log factor)
+  5. detect: walk reads (candidate scans; accepted points read in best, then again in mzAt/iwm)
+  6. fmin/fmax pass over got — fusible into walk
+  7. pts build + sort + profile build pass — sort eliminable (bidirectional merge)
+  8. apex scan during profile build — fused already
+  9. EPD: read to build Peak2D list (tof→mz per point)
+  10. splitValleys internal (multiple)
+  11. toTrace read-back
+  12. apex rescan in split output — duplicates info available in splitValleys
+  13. export recompute mz from tof/b
+
+  Each trace point: read ≥6–8 times (profile build, list build, split internals ×2-3, toTrace, apex scan, export). Peak (all P): read ~3× before tracing + walk touches.
+
+  visited section: 47.7 MiB × 288 = 13.7 GiB. Utilization: band marks only its traced points: 1e8/12 ≈ 8.3e6 marks per 5e7 array → ~17% ever touched, and pages... Actually access pattern sparse → could be unordered_set, but bitset 8× better: 6 MiB/band → 1.7 GiB total. Shared atomic window array: 0.57 GiB total. What it "should be": given seeds restricted to band core but walk extends anywhere in tof? The walk extends along frames at ~constant m/z corridor; candidate gate is cmz±3sd → tof corridor around seed ± drift. Strictly unbounded (sd robust can grow), practically bounded. Safe options: bitset window-wide (no semantic change), or shared per-window atomic visited (semantic change: cross-band double-claim eliminated — changes output, must A/B).
+
+  Design changes ranked bytes/risk:
+
+  1. Free (no output change, no time cost):
+     - bitset visited: −12 GB. Verify: same peptide counts; MEM_VISITED counter.
+     - frame_of → uint16 (F=1,400 < 65,536): −2.3 GB. Verify: peptide counts; guard F<65536.
+     - Fuse prepareTracing passes; fuse fmin/fmax into walk; build profile by merging down/up runs instead of pts sort — time savings, memory small (pts array transient).
+     - order reserve cap: −~0.5–1 GB transient.
+
+  2. Free-ish / low risk:
+     - Single arena allocation per Trace (one block for xi+xv+xt): −3 malloc headers/trace ≈ −48 B × 1e7 = −480 MB/window → −11 GB, plus fragmentation win. Output identical. Verify RSS + counts.
+     - Drop xt or shrink to int16 delta: −4→2 B/pt: −200 MB/window → −4.8 GB (delta) or recompute at EPD from slab (slab alive! EPD has sl) — actually EPD gets `sl` as argument; xt duplicates slab.tof[k] but EPD no longer knows k... could store peak index k instead of bin (also 4 B) — same size, no win. int16 delta from trace apex bin: corridor ±3sd in bins — at 400 bins/Da... wait comment says TOF bin ~400× coarser than 1e-5 Da → bin ≈ 4e-3 Da; 3sd at 10 ppm, m/z 600 → 6e-3 Da → ±~2 bins. sd grows but robust SD caps. int16 plenty. −2 B/pt × 1e8 pts/window = −200 MB/window = −4.8 GB. Output: identical if conversion exact. Medium risk.
+
+  3. Memory-for-time or riskier:
+     - Replace EPD's list→MassTrace→Trace with direct vector<Peak2D> or in-place split on Trace: −24 B/pt copy + sizeof(MassTrace) per trace ≈ −(240+400) B × 1e7 ≈ −6.4 GB/window transient → potentially −50–150 GB peak. Output identical only if splitValleys logic reimplemented exactly — HIGH risk to results (gated on peptides). Alternative cheap: keep MassTrace but pass vector instead of list (MassTrace has vector ctor?) — removes 48 B/pt list transient... but list is per-trace transient anyway (~small). The real win is avoiding double mts+split: make splitValleys in-place/move. Verify with golden tests (tests/calibration_golden.json, peptide counts 12,650).
+     - Free slab.imq after tracing (before EPD/scoring) if export can re-read from... imq kept "for export" — export needs per-point imq? t.im already centroid. If export needs per-point, keep; else −2.4 GB.
+     - Cap windows in flight 24→16: −33% of slab/prep/visited/trace mass (~−25 GB) at wall cost. Trade.
+     - MALLOC_ARENA_MAX or mimalloc: unknown, potentially −10–30 GB fragmentation; verify with A/B RSS.
+
+  4. Outside-code suspects + confirmation:
+     - Emitted spectra accumulating across windows: check MemGuard counters vs RSS gap.
+     - The code HAS accounting (memAdd/MemGuard, MEM_TRACES, MEM_EPD_LIST, MEM_EPD_MT, MEM_VISITED): sum counters at peak and diff against 105 GB RSS → residual = fragmentation + unaccounted (FragGrid? Is FragGrid accounted? No memAdd shown for it — likely unaccounted, and at 35 GB/window it alone could be a third of RSS!). Confirm: log flat.size()*8.
+     - Fragmentation: 3e7 small vector allocs/window across 100 thread arenas; glibc arenas never return memory. Confirm via mallinfo2 or MALLOC_ARENA_MAX=4 A/B.
+
+  Note also list_bytes accounting bug: g_list sums all chunk traces' list bytes but lists are loop-scoped — the MemGuard overstates (minor, but hostile reviewer notes the instrumentation lies).
+
+  Also MassTrace hull computation allocs.
+
+  One more: `vector<pair<uint32_t,uint32_t>> pts` per seed — transient 8 B/pt fine.
+
+  FragGrid: also note mean/invnorm duplicate per-fragment stats derivable from flat — 136 MB, trivial.
+
+  Now, is FragGrid in this code path simultaneous with slabs? The code shows only the struct. I'll treat: "if built per window while 24 windows in flight, impossible (830 GB), so it must be serialized after detection — then 1–3 coexisting grids = 35–105 GB and it IS the peak." State assumption and how to confirm.
+
+  Structure the final answer with 5 sections, quantified table-ish. Keep it terminal-friendly.
+
+To resume this session: kimi -r session_5e34574b-d8ac-4a0d-8eb0-46c3931777f4
+exit=0
