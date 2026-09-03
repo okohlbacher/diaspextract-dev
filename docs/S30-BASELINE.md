@@ -675,3 +675,27 @@ Reading: at equal backfill setting the empty arm reproduces the no-empty arm to 
 up") is met exactly. **Verdict: `SPEXTRACT_BACKFILL_EMPTY` stays off and is not a default candidate.** It also
 confirms the assembly-loss finding from the other side -- the diaTracer-only precursors we never emit are not lost to
 a fragment-count threshold, they have no correlated MS2 signal for us to find at all.
+
+### PRECURSOR-INTENSITY-GATED BACKFILL (2026-09-03, 09:05): prediction held; q=0.5 is the best point on the frontier
+`SPEXTRACT_BACKFILL_RAW=50` applied only to precursors below the window's q-quantile of MS1 intensity. Emission is
+unchanged (927,813 spectra in every arm), so this is purely a content lever.
+| S30 arm | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only | shared w/ dt |
+|---|---|---|---|---|
+| **q=0.5** | 12,442 (−0.8%; only-apex 460 / only-q 365) | **12,492 (+4.7%, 89.7% of dt)** | 2,940 | **12,034** |
+| q=0.25 | 12,504 (−0.3%; 141 / 108) | 12,008 (+0.7%) | 3,913 | 11,061 |
+| N=50 unconditional | 12,208 (−2.6%) | 12,539 (+5.1%) | — | — |
+| K=150 fragment-gated | **12,724 (+1.5%)** | 12,000 (+0.6%) | — | — |
+Reading: the pre-registered falsifier is NOT met. Backfilling only the faint HALF of precursors retains 92% of the
+unconditional MSFragger gain (+4.7 of +5.1 points) while cutting the Sage cost by two thirds (−0.8% vs −2.6%), so the
+gain does track precursor intensity rather than peak count alone. It is concentrated in the second quartile band:
+q=0.25 (the faintest quarter only) collapses to +0.7%, i.e. the very faintest precursors' apex frames carry nothing
+identifiable -- the same wall the backfill-empty arm hit. Sage degrades monotonically with backfill volume in all
+arms. q=0.5 also gives the highest overlap with diaTracer measured to date (12,034 shared, dt-only down to 2,940),
+but the "no PSM at all" residue is 1,406, unmoved from baseline: this is rich-spectrum content, not the deficit
+mechanism.
+**Two candidate defaults now stand, and they are not the same trade:** K=150 is strictly better than baseline on both
+engines but small (+1.5% / +0.6%); q=0.5 is much larger on MSFragger (+4.7%) at a −0.8% Sage cost. Per the both-engines
+rule neither is adopted on one file. **Pre-registered confirmation arm:** both settings on S08 and S23, both engines,
+plus entrapment FDR. Adopt as default only if the S30 sign holds on both files AND entrapment stays <= 1.4%
+(shipping arm: S30 1.37%, S08 0.95%, S23 1.32%); a Sage regression on S08/S23 larger than S30's −0.8% kills q=0.5 and
+leaves K=150 as the only candidate.
