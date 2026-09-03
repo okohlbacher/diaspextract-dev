@@ -153,6 +153,7 @@ namespace
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
   bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
+  int backfill_raw_ = std::getenv("SPEXTRACT_BACKFILL_RAW") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_RAW")) : 0;   ///< [content 3] raw apex-frame peaks added per spectrum
 
   static std::string rss_()
   {
@@ -2301,6 +2302,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
         for (MSSpectrum& s : wmap) s.setMSLevel(1); // MassTraceDetection traces MS1-level only
         wmap.sortSpectra();
+        // [backfill, 2026-09-03] RT index of the window's picked frames for the raw-peak backfill arm
+        vector<double> wrt(wmap.size());
+        for (Size i = 0; i < wmap.size(); ++i) wrt[i] = wmap[i].getRT();
         // [cross-frame] sum adjacent cycles for THIS window before detecting fragment traces
         if (agg_n > 1) aggregateFrames_(wmap, agg_n, mass_ppm, delta_im);
         String ms2_span;
@@ -2460,6 +2464,33 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             MSSpectrum ms2;
             assembleOne_(pc, win_lo, win_hi, frag_traces, frag_im, ms1_traces, fg,
                          delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
+            // [content candidate 3, 2026-09-03] SPEXTRACT_BACKFILL_RAW=N: the faint tail is short by ~2 of ~9
+            // matched ions that never become a trace (coverage arms falsified). Add the N most intense raw
+            // picked peaks of the frame nearest the precursor's RT, inside its IM band, that are not already
+            // in the spectrum (10 ppm) -- the peak-level content diaTracer's ~500-peak spectra carry.
+            if (backfill_raw_ > 0 && !ms2.empty() && !wmap.empty())
+            {
+              size_t si = (size_t)(lower_bound(wrt.begin(), wrt.end(), pc.rt) - wrt.begin());
+              if (si == wrt.size() || (si > 0 && pc.rt - wrt[si - 1] < wrt[si] - pc.rt)) --si;
+              const MSSpectrum& raw = wmap[si];
+              const auto imd = raw.getIMData();
+              const auto& ima = raw.getFloatDataArrays()[imd.first];
+              vector<double> have(ms2.size()); for (Size k = 0; k < ms2.size(); ++k) have[k] = ms2[k].getMZ();
+              sort(have.begin(), have.end());
+              vector<pair<float, double>> cand;                       // (intensity, mz)
+              for (Size k = 0; k < raw.size() && k < ima.size(); ++k)
+              {
+                if (fabs((double)ima[k] - pc.im) > delta_im) continue;
+                const double mz = raw[k].getMZ(), tol = mz * 10e-6;
+                auto it = lower_bound(have.begin(), have.end(), mz - tol);
+                if (it != have.end() && *it <= mz + tol) continue;    // already represented
+                cand.emplace_back(raw[k].getIntensity(), mz);
+              }
+              const size_t n = std::min<size_t>((size_t)backfill_raw_, cand.size());
+              partial_sort(cand.begin(), cand.begin() + n, cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+              for (size_t k = 0; k < n; ++k) ms2.emplace_back(cand[k].second, cand[k].first);
+              ms2.sortByPosition();
+            }
             if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
           }
           auto _t6 = std::chrono::steady_clock::now();
