@@ -812,14 +812,19 @@ namespace
       const double lo_mz = cmz - 3.0 * sd, hi_mz = cmz + 3.0 * sd;
       const TofIdx lo_t = ax.tofOf(lo_mz > 0.0 ? lo_mz : 1e-9, bf);
       const TofIdx hi_t = ax.tofOf(hi_mz, bf);
-      const double ct = ax.cal.mzToTof(cmz, bf);        // centroid in (fractional) bins
       const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + a, sl.tof.begin() + b, lo_t) - sl.tof.begin());
       long bk = -1; double bd = std::numeric_limits<double>::infinity();
       for (uint32_t k = s0; k < b && sl.tof[k] <= hi_t; ++k)
       {
         if (!member[k]) continue;
         if (std::abs((double)sl.imq[k] - cim) > imq_tol) continue;
-        const double d = std::abs((double)sl.tof[k] - ct);
+        // "Closest" is measured in m/z, as OpenMS does, NOT in bins: I had argued the calibration
+        // is monotone so the two agree, and that is true only for candidates on the same side of
+        // the centroid -- across it, the map's curvature can flip which is nearer. Measured: the
+        // bin metric cost 1.4% of peptides (12,650 -> 12,466) and bought no time (the speed came
+        // from parallel valley splitting). The walk is still bounded in bins; only candidates
+        // inside the window pay the conversion.
+        const double d = std::abs(ax.mzOf(sl.tof[k], bf) - cmz);
         if (d < bd) { bd = d; bk = (long)k; }          // strict <: first of equals wins
       }
       if (bk >= 0 && visited[(size_t)bk]) { taken = true; return -1; }

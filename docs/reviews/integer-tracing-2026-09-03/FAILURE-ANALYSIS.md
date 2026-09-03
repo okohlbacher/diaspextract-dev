@@ -11,7 +11,14 @@ peptides):
 | corrected, measured per-peak m/z | 656,241 | **12,650** | 9:28 | 174 GB |
 | corrected, prep hoisted + bin search | 656,256 | 12,466 | 9:31 | 185 GB |
 | **corrected, valley splitting chunked + parallel** | 656,256 | 12,466 | **6:53** | **105 GB** |
-| same, raw-emptiness A/B (SPEXTRACT_INT_EMPTY_RAW=1) | 656,256 | pending | 6:56 | 105 GB |
+| same, raw-emptiness A/B (SPEXTRACT_INT_EMPTY_RAW=1) | 656,256 | 12,466 (set identical to the row above) | 6:56 | 105 GB |
+
+**The emptiness rule was NOT the 1.4%.** Same count, same set. The only other semantic change between
+the 12,650 and 12,466 versions is the candidate metric: "closest to the centroid" measured in bins
+instead of m/z. I had asserted they agree because the calibration is monotone; that holds for
+candidates on one side of the centroid and fails across it, where the map's curvature can flip
+which is nearer. The bin metric also bought no time -- the speed came from parallel valley
+splitting -- so it is reverted (tr9) and the A/B is the 12,650 it should recover.
 | OpenMS detector, same binary | 656,254 | 12,642 | 7:17-7:22 | 164-166 GB |
 
 **The serial section was valley splitting.** Chunking it into bands*4 parallel tasks, as the OpenMS
