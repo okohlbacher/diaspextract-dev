@@ -658,3 +658,20 @@ precursors below the window's q-quantile of MS1 intensity), N=50, q = 0.5 and 0.
 of +5% (the faint precursors are the dt-only ones) while Sage stays >= 12,500; falsifier: the gain tracks the rich
 spectra regardless of precursor intensity (then MSFragger simply likes more peaks, and the two engines want
 different spectra -- a per-engine output option, not a default).
+
+### BACKFILL-EMPTY FALSIFIED (2026-09-03, 08:35): 53,410 extra spectra buy nothing on either engine
+`SPEXTRACT_BACKFILL_EMPTY=1` (a hypothesised precursor with no correlated fragment trace still gets a spectrum built
+from its apex frame's IM-band peaks) + `SPEXTRACT_BACKFILL_RAW=50`. Emission rises 927,813 -> **981,223 (+5.8%)**, so
+the feature does what it says; the identifications do not follow.
+| S30 arm | spectra | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only |
+|---|---|---|---|---|
+| empty + K=0 (backfill all) | 981,223 | 12,218 (−2.5%) | 12,600 (+5.6%, 90.4% of dt) | 3,309; some PSM 58% |
+| empty + K=60 (faint tail) | 981,223 | 12,593 (+0.4%) | 11,982 (+0.5%) | 3,892; some PSM 64% |
+| no-empty N=50 (reference) | 927,813 | 12,208 (−2.6%) | 12,539 (+5.1%) | some PSM 64% |
+| no-empty K=150 (reference) | 927,813 | **12,724 (+1.5%)** | 12,000 (+0.6%) | +2 |
+Reading: at equal backfill setting the empty arm reproduces the no-empty arm to within replicate noise on both engines
+(12,600 vs 12,539 MSFragger; −2.5% vs −2.6% Sage), and the K-gated empty arm is *worse* than K=150 alone (12,593 vs
+12,724 Sage). The 53k trace-free precursors are not identifiable: the pre-registered falsifier ("counts flat, emission
+up") is met exactly. **Verdict: `SPEXTRACT_BACKFILL_EMPTY` stays off and is not a default candidate.** It also
+confirms the assembly-loss finding from the other side -- the diaTracer-only precursors we never emit are not lost to
+a fragment-count threshold, they have no correlated MS2 signal for us to find at all.
