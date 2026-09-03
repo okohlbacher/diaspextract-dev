@@ -35,14 +35,19 @@
   entrapment of the apex arm 1.28% [1.03-1.53] at nominal 1%.
 - Under test (env switches, defaults unchanged): `SPEXTRACT_PICK_MZ_MODE=seed|top3` (pick-level m/z; the -2.4 ppm
   fragment offset vs diaTracer is upstream of the trace estimator), `SPEXTRACT_DROP_PREC_ISO=1` (drop the precursor's
-  M+1..M+3 from fragment lists; 28%/25% of spectra carried them -- FALSIFIED, -2.3%, keep off), `SPEXTRACT_MZPEAK_EXACT=1` (exact calibration for
-  mzPeak input from the embedded or sidecar `analysis.tdf.gz`).
+  M+1..M+3 from fragment lists; 28%/25% of spectra carried them -- FALSIFIED, -2.3%, keep off), `SPEXTRACT_MZPEAK_EXACT` (now the default; `=0` accepts the two-point m/z),
+  `SPEXTRACT_MIN_ISOTOPES=k` (precursor gate by envelope depth; k=3 = -39% emission, -23% wall, MSFragger -0.9%, Sage -6.4%),
+  `SPEXTRACT_PRECURSOR_LIST=<tsv>` (emit only precursors matching a reference list), `SPEXTRACT_BACKFILL_RAW=N` /
+  `SPEXTRACT_BACKFILL_MAXFRAGS=K` (add the N most intense untraced raw peaks of the apex frame inside the IM band:
+  N=50 lifts MSFragger to 90% of diaTracer at -2.6% Sage; faint-tail-only variant under test).
 - Output-identical: band partition by binary search (R3), early skip of fragments below `min_corr_pts` support.
 - Help texts of falsified flags (`rp_max`, `consolidate`, `merge`) now say so; `charge:iso_im_tolerance` help
   no longer contradicts its default.
 
 ### Benchmark findings
-- MSFragger gap is content-side: FragPipe rescoring (Percolator, MSBooster off for both) gives 13,211 vs diaTracer
+- MSFragger gap is per-precursor CONTENT of the faint tail: same precursor population as diaTracer -> 85.0%; emission -39% -> 84.8%;
+  dt-only peptides are searched but short by ~2 of ~9 matched ions that never become a trace; raw apex-frame peak
+  backfill recovers 1,151 of them (MSFragger 85.6% -> 90.0%). FragPipe rescoring (Percolator, MSBooster off for both) gives 13,211 vs diaTracer
   15,947 peptides (82.8%; raw-hyperscore walk 85.6%) -- rescoring lifts both tools and leaves the ratio; ours has
   8.6 PSMs/peptide vs 2.0. Entrapment of the shipping arm: 1.28% / 0.95% / 1.32% at nominal 1% on S30/S08/S23.
 - Falsified today (kept in docs so they are not re-proposed): apportion (clean, -3.9%), precursor-isotope stripping
