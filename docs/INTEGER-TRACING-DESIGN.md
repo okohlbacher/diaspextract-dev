@@ -103,6 +103,17 @@ rather than kept for tidiness.
 **Output.** Faithful, but not bit-identical: the seeding order among equal intensities and the
 closest-peak tie-breaks will differ. Judged on identified peptides with both engines.
 
+## 4b. What was measured (2026-09-03, after the fact)
+
+The falsifier in section 4 fired. The first corrected detector reached parity on peptides (12,650
+vs 12,642 on S30) and was SLOWER (9:28 vs 7:22), with lower occupancy (46.9x vs 78.9x) and MORE
+peak memory (174 vs 166 GB). The estimate above was wrong about where the time was: not in the
+layout of the peak arrays, but in bookkeeping the reimplementation added -- twelve per-band
+full-window sorts and a calibration call per visited candidate. Those are removed in the version
+after; its run decides whether anything of the 30-50% survives. The lesson is the same one the
+scoring-gate result taught in the other direction: an estimate of where time goes is worth little
+until a timer has been put on it.
+
 ## 5. Risks, stated before the review
 
 1. **`min_sample_rate` semantics.** OpenMS computes the hit rate over the frames it has visited in
