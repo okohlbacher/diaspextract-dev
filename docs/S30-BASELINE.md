@@ -641,3 +641,20 @@ untraced-content problem as the searched tail. **Pre-registered follow-up:** `SP
 frame's IM-band peaks (min_fragments honoured). Prediction: the dt-only "no PSM at all" count (1,436) falls and
 MSFragger rises further; falsifier: those spectra are unidentifiable (counts flat, emission up). Runs after the
 faint-tail-only backfill arm.
+
+### FAINT-TAIL-ONLY BACKFILL (2026-09-03, 07:11): removes the Sage cost, but also most of the MSFragger gain
+`SPEXTRACT_BACKFILL_RAW=50` applied only to spectra with <= K assembled fragments:
+| S30 arm | Sage @1% (vs apex 12,537) | MSFragger @1% (vs 11,927) | dt-only deficit |
+|---|---|---|---|
+| unconditional N=50 (05:39) | 12,208 (−2.6%) | **12,539 (+5.1%)** | +3 on the remaining set |
+| **K=150** | **12,724 (+1.5%; only-apex 11 / only-K150 198)** | 12,000 (+0.6%) | +2 |
+| K=50 | 12,591 (+0.4%; 6 / 60) | 11,961 (+0.3%) | +2 |
+Reading: the MSFragger gain of the unconditional arm comes from backfilling the RICH spectra (73% of spectra sit at
+the 500-cap; share-all gives even faint precursors hundreds of fragments), which is exactly where Sage pays. Gating by
+fragment count therefore does not reach the diaTracer-only spectra (deficit still +2). K=150 is a clean small win on
+both engines (+1.5% / +0.6%, superset-like) -- a candidate default pending S08/S23 + entrapment, not a mechanism.
+**Pre-registered next arm:** gate the backfill by PRECURSOR intensity instead (`SPEXTRACT_BACKFILL_MAXQ=q`: only
+precursors below the window's q-quantile of MS1 intensity), N=50, q = 0.5 and 0.25. Prediction: MSFragger keeps most
+of +5% (the faint precursors are the dt-only ones) while Sage stays >= 12,500; falsifier: the gain tracks the rich
+spectra regardless of precursor intensity (then MSFragger simply likes more peaks, and the two engines want
+different spectra -- a per-engine output option, not a default).
