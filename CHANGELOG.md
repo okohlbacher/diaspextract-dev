@@ -23,6 +23,27 @@
   `bench/iso_guard.py`: the isotope-duplication census, collapse-rule evaluation, content-similarity
   test and loss trace behind the emission findings.
 
+### Performance (2026-09-03, window loop)
+- **The scoring gate reads its one field from a parallel array instead of striding the 96-byte
+  trace record.** The gate rejects 99.4% of the fragments it visits; the scan was moving ~83 TB per
+  S30 run for 8 bytes of payload per visit. S30 wall 12:53 -> **7:17**, scoring stage 47% -> 4.8% of
+  window time, **peptide set identical** on Sage. Replicated three times.
+- **The window loop is one OpenMP task pool over all threads** (master/worker) instead of a rigid
+  threads/bands x bands grid; window-loop occupancy 65x -> 81x on 100 threads. The number of windows
+  resident is bounded by the free-RAM admission gate, whose per-window estimate was re-calibrated
+  (10x -> 16x compact bytes; it had been under-booking by 35-55%).
+- **The retention-time axis is a global frame index.** A trace point is (frame index, intensity),
+  8 B instead of 16, and aligning two profiles is integer equality instead of a binary search per
+  point; the per-window correlation grid is built without collecting or sorting ~10^8 RT values.
+- `trace:detector=integer` (EXPERIMENTAL, default `openms`): mass-trace detection on integer arrays
+  with the instrument's flight-time bin as the m/z axis, following OpenMS MassTraceDetection step
+  for step, calibration re-applied only at export. S30: 6:53 wall and 105 GB peak against 7:17 and
+  164 GB for the OpenMS path, at −1.4% Sage peptides pending attribution and the both-engines rule.
+  Not a default. See docs/INTEGER-TRACING-DESIGN.md and docs/reviews/integer-tracing-2026-09-03/.
+- Band-count sensitivity measured: 4/6/12/25 bands move the peptide set by −0.02% to +0.10% and
+  differ in ~2% of spectra's content. Banding is an approximation, not exact as the help had
+  claimed; the halo is now sized per edge.
+
 ### Fixed
 - MS1 traces are filtered for non-finite coordinates before sorting. A NaN made the comparator
   non-transitive, which is undefined behaviour in `sort()` and silently corrupts every later binary

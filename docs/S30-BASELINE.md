@@ -759,3 +759,23 @@ that improves both engines while cutting emission AND runtime.
 **Adopted as the default.** `charge:min_charge=1` restores the old behaviour; 3+ is catastrophic
 (charge 2 carries 56.9% of peptides: S30 Sage 5,088). The isotope collapse is NOT adopted in any form
 -- on top of this gate it turns +0.8% into −3.8% (Sage) and +1.2% into −2.5% (MSFragger).
+
+
+### WINDOW-LOOP PERFORMANCE LINE (2026-09-03, evening) -- one adopted, one held
+| S30, 100 threads | wall | peak RSS | window-loop occupancy | Sage @1% |
+|---|---|---|---|---|
+| morning default (charge gate) | 12:53 | 103 GB | 64.8x | 12,642 |
+| task pool alone | 15:50 | 152 GB | 86.2x | 12,642 (set identical) |
+| **+ scoring gate reads a parallel array** | **7:17** | 164 GB | 80.7x | **12,642 (set identical)** |
+| + integer detector (`trace:detector=integer`) | **6:53** | **105 GB** | 67.6x | 12,466 (−1.4%) |
+**ADOPTED: the parallel-array gate and the task pool.** The gate rejected 99.4% of the fragments it
+visited (867 billion visits for 5.5 billion survivors, measured) and read the field it needed out of
+a 96 B record: ~83 TB of memory traffic per run. Set-identical output, replicated three times. The
+task pool alone was a regression only because it amplified that traffic; with the gate fixed it is
+neutral-to-positive, and the in-flight cap I briefly added on the wrong diagnosis is removed again.
+**NOT ADOPTED (yet): the integer detector.** Faster and 36% lighter, but −1.4% Sage peptides against
+the reference, with a symmetric ~8% set churn that is the residual of a faithful-not-identical
+reimplementation. The only semantic difference between its 12,650 and 12,466 versions is whether a
+frame with only sub-noise peaks counts as empty (the OpenMS rule) or as a miss; that A/B, MSFragger,
+and entrapment are running. Adoption needs: peptides within the replicate spread on BOTH engines,
+entrapment inside the charge-gate arm's interval, and S08 replication of the runtime.

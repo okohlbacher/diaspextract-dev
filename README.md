@@ -90,9 +90,13 @@ survive a code change: a last-ulp difference in one arithmetic path cascades to 
 counts, so compare two BUILDS by the accepted peptide SET and the ppm median, never by raw counts.
 The two statements are about different things and both have been measured.
 
-Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **12:49 wall, 102 GB peak RSS**
-with the current defaults (2026-09-03). It was 15:21 before `charge:min_charge` removed ~30% of the
-emission, and 33:05 on 09-01 before the MS1 path was parallelised. The loader is
+Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **7:17 wall, ~164 GB peak RSS**
+with the current defaults (2026-09-03 evening; peptide set identical to the 12:49 build). The
+scoring gate had been striding 96-byte records to read one field; it now reads a parallel array.
+It was 12:49 that morning after `charge:min_charge` removed ~30% of the emission, 15:21 before
+that, and 33:05 on 09-01 before the MS1 path was parallelised. An experimental integer-array
+detector (`trace:detector=integer`) reaches 6:53 and 105 GB on the same file at −1.4% peptides,
+pending the both-engines rule; it is not the default. The loader is
 4% of the run; the window loop is 83%. Reading from `.mzpeak` instead of `.d` is supported
 (build-optional, mzPeak C++ library) but slower (17:04); the archive's two-point TOF transform costs
 12% of identifications, so the loader recovers the exact TDF calibration from the embedded
