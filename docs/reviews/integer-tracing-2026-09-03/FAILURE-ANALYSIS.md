@@ -116,3 +116,31 @@ fewer threads (64x vs 87x), so on the larger file the two effects cancel.
 
 Remaining before it could be a default: MSFragger and entrapment (queued), and an explanation for
 the occupancy gap -- 64x vs 87x is the last unexplained number in this line of work.
+
+
+## Both engines and entrapment (2026-09-03, 23:41)
+
+| S30 | Sage @1% | MSFragger @1% | entrapment FDR |
+|---|---|---|---|
+| OpenMS detector (shipping default) | 12,642 | 12,073 | 1.38% [1.15-1.64] |
+| integer detector | 12,466-12,475 (−1.3%) | **12,328 (+2.1%)** | 1.24% [1.01-1.50] |
+
+**The two engines disagree in sign.** Sage loses 1.3%, MSFragger gains 2.1%, on the same spectra --
+and on S08 Sage itself gained 0.3%. So there is no evidence of a systematic loss; there is evidence
+of a per-engine, per-file wobble of about a percent either way, which is what a faithful-but-not-
+identical reimplementation produces. Entrapment is slightly LOWER (1.24% vs 1.38%), so nothing here
+is bought with false positives.
+
+**The candidate-metric revert did essentially nothing:** 12,466 -> 12,475 on Sage (+9), 12,328 ->
+12,322 on MSFragger (−6). So the earlier attribution of the 12,650 -> 12,466 move to the bin metric
+was WRONG too -- neither that nor the frame-emptiness rule explains it, and both A/Bs came back
+null. The remaining difference between those two builds is the per-window preparation hoist and the
+chunked valley splitting, i.e. the parallel structure, which means the ~1% is scheduling-order
+sensitivity in a greedy consume-and-mark algorithm, not a semantic difference. That is expected and
+is the reason this project gates on peptide SETS rather than counts.
+
+**Status: the adoption conditions are met on everything except a reason to prefer it.** Both engines
+within ~2% either way, entrapment no worse, S08 replicated on memory (−39%) and peptides (+0.3%).
+The case for it is memory (−36 to −39%, and below diaTracer for the first time) and CPU (−25%); the
+case against is a 64x vs 87x occupancy gap that is still unexplained, and that gap is what makes the
+wall-time win vanish on the larger file.
