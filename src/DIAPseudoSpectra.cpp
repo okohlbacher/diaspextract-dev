@@ -686,12 +686,19 @@ namespace
   /// Mobility is part of the identity, as in the IM-aware OpenMS path: a candidate must also be
   /// within `im_tol` of the trace's mobility. Valley splitting is NOT done here -- the existing
   /// ElutionPeakDetection step runs afterwards on the traces this produces.
+  /// `band_lo`/`band_hi` restrict the detector to a slice of the FLIGHT-TIME range. A trace's
+  /// centroid cannot drift more than `span` bins from its seed, so a halo of `2*span` bins around
+  /// the slice cannot cut a trace in half: banding here is EXACT BY CONSTRUCTION, which the OpenMS
+  /// path's halo can only approximate because its traces may drift without bound. A trace belongs
+  /// to the band whose core contains its SEED, so the halo produces no duplicates.
   vector<Trace> detectTracesInteger_(PeakSlab& sl, double mass_ppm, double im_tol,
                                      double noise, double snr, double min_len_sec,
-                                     const std::string& mz_est)
+                                     const std::string& mz_est,
+                                     TofIdx band_lo = 0, TofIdx band_hi = 0)
   {
     vector<Trace> out;
     if (sl.frames() == 0) return out;
+    const bool banded = band_hi > band_lo;
     const uint16_t imq_tol = (uint16_t)std::max(1.0, im_tol * IM_Q);
     const TofAxis& ax = tofAxis();
     // Bucket width: one shift for the whole window, wide enough that no live trace can reach past
@@ -708,6 +715,7 @@ namespace
     {
       double mz_sum = 0, int_sum = 0;     ///< for the intensity-weighted centroid
       double im_sum = 0;
+      TofIdx seed = 0;                    ///< the bin the trace started on (bounds its drift)
       TofIdx centroid = 0;                ///< current centroid, in BINS
       uint32_t last_frame = 0;            ///< frame index of the most recent point
       TofIdx apex_tof = 0; float apex_int = 0; uint32_t apex_frame = 0;
@@ -757,6 +765,10 @@ namespace
             if (L.last_frame == rti) continue;             // one point per trace per frame
             const TofIdx d = L.centroid > m ? L.centroid - m : m - L.centroid;
             if (d > span) continue;
+            // Drift cap: a trace stays within `span` bins of its SEED. This is what makes banding
+            // exact -- the OpenMS path cannot bound its traces' drift, so its halo is a guess.
+            const TofIdx dd = L.seed > m ? L.seed - m : m - L.seed;
+            if (dd > span) continue;
             const double lim = L.im_sum / std::max(L.int_sum, 1e-12);
             if (fabs(lim - (double)iq) > (double)imq_tol) continue;
             if (d < best_d) { best_d = d; best = (long)li; }
@@ -766,6 +778,7 @@ namespace
         if (best < 0)                                      // seed a new trace
         {
           Live L;
+          L.seed = m;
           L.mz_sum = (double)m * v; L.int_sum = v; L.im_sum = (double)iq * v;
           L.centroid = m; L.last_frame = rti;
           L.apex_tof = m; L.apex_int = v; L.apex_frame = rti; L.apex_b = bf;
@@ -791,6 +804,7 @@ namespace
     for (Live& L : live)
     {
       if (L.xi.size() < 2) continue;
+      if (banded && (L.seed < band_lo || L.seed >= band_hi)) continue;   // another band owns it
       if ((double)L.apex_int < min_apex) continue;                       // apex gate
       const double len = rtAxis()[L.xi.back()] - rtAxis()[L.xi.front()];
       if (min_len_sec > 0.0 && len < min_len_sec) continue;
@@ -2868,8 +2882,31 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         vector<Trace> frag_traces;
         if (integer_detector)
         {
-          frag_traces = detectTracesInteger_(wslab, mass_ppm, delta_im, ms2_noise, ms2_snr,
-                                             ms2_minlen, mzEstimator());
+          // Banded like the OpenMS path, but on the flight-time axis, where the halo is a bin
+          // count and the drift cap makes the partition exact. Bands are TASKS, so they fill the
+          // pool alongside every other window's work.
+          TofIdx tlo = 0xFFFFFFFFu, thi = 0;
+          for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
+          const int nb = std::max(1, w_bands);
+          if (thi <= tlo || nb == 1)
+            frag_traces = detectTracesInteger_(wslab, mass_ppm, delta_im, ms2_noise, ms2_snr,
+                                               ms2_minlen, mzEstimator());
+          else
+          {
+            vector<vector<Trace>> per(nb);
+            const double wdt = (double)(thi - tlo + 1) / nb;
+            #pragma omp taskloop grainsize(1) default(shared)
+            for (int b = 0; b < nb; ++b)
+            {
+              const TofIdx blo = tlo + (TofIdx)(b * wdt);
+              const TofIdx bhi = (b + 1 == nb) ? thi + 1 : tlo + (TofIdx)((b + 1) * wdt);
+              per[b] = detectTracesInteger_(wslab, mass_ppm, delta_im, ms2_noise, ms2_snr,
+                                            ms2_minlen, mzEstimator(), blo, bhi);
+            }
+            size_t tot = 0; for (const auto& v : per) tot += v.size();
+            frag_traces.reserve(tot);
+            for (auto& v : per) { for (auto& t : v) frag_traces.push_back(std::move(t)); vector<Trace>().swap(v); }
+          }
           PeakSlab().frame_off.swap(wslab.frame_off);   // consumed
           vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
           vector<double>().swap(wslab.b);
