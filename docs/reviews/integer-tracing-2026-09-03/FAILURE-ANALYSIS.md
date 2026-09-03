@@ -7,7 +7,31 @@ peptides):
 |---|---|---|---|---|
 | first integer detector | 312,539 | **994** | 5:47 | 86 GB |
 | + sample-rate sentinel fixed only | 625,495 | 8,907 | 4:25 | 92 GB |
-| corrected (this commit) | pending | pending | pending | pending |
+| corrected, centroid m/z into valley splitting | 656,241 | 11,940 | 9:38 | 168 GB |
+| corrected, measured per-peak m/z | 656,241 | **12,650** | 9:28 | 174 GB |
+| OpenMS detector, same binary | 656,254 | 12,642 | 7:22 | 166 GB |
+
+**Science: parity.** 12,650 against 12,642, with a symmetric set difference (1,036 only-reference,
+1,044 only-integer): the residual of a faithful reimplementation that is not bit-identical, and a
+net of +8. The centroid-m/z row shows what the second-pass review caught was worth: −5.6%.
+
+**Performance: the design's falsifier fired.** Slower (9:28 vs 7:22), less occupancy (46.9x vs
+78.9x) and MORE memory (174 vs 166 GB). Layout was not the cost. Two causes, both in the first
+corrected version's own bookkeeping, not in the algorithm:
+1. every band task rebuilt the per-window arrays (frame index, membership, the intensity-sorted
+   seed list) -- twelve full-window sorts per window, twelve P-sized array sets alive at once;
+2. the candidate walk converted every visited peak from bin to m/z (a sqrt per visit) to compare
+   in m/z, although the calibration is monotone and closest-in-bins is the same peak.
+The version after this one prepares each window once and searches in bins; only accepted peaks are
+ever converted. Whether that recovers the 30-50% the design promised is what its run measures.
+
+**Second-pass review (docs/reviews/integer-tracing-v2-2026-09-03/):** vibe found the extension
+loop faithful line by line and the per-peak m/z gap above. codex found it "close but not
+step-for-step" and listed boundary items now addressed: frame emptiness tested before rather than
+after sub-noise deletion, `max_trace_length` 0 meaning "on" instead of "off", valley splitting run
+for a single trace, `frame_aggregation_n` silently ignored, and the mzPeak archive index misread as
+a vendor frame Id. **kimi was SILENT** (385 bytes: it left to consult upstream OpenMS and never
+returned) -- no review, not a clean bill.
 
 The first version was written from a DESCRIPTION of `MassTraceDetection`; the design document
 called it faithful. Three reviewers (codex, kimi, vibe) read the OpenMS source instead and agreed it

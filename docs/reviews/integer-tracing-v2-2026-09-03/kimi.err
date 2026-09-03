@@ -646,4 +646,131 @@ kimi version 0.40.1
   - Worse: ORDER effects. In the unbanded run, the most intense apex seeds first and takes peaks, suppressing later seeds. In the banded run, each band runs its own intensity order; a moderately intense seed in band B that would have been suppressed in the unbanded run (because band A's stronger trace took its peaks) now fires and creates a trace with STOLEN-BUT-UNAWARE membership: its trace may terminate early or accept different peaks? No — it accepts peaks regardless of A's visited marks, so B's trace actually gets the same peaks it would have if A never existed. So banding can only ADD traces (extra traces that would have been suppressed), never remove... wait, can it remove? Within a band, everything is self-consistent: the band's run is exactly the unbanded run restricted to seeds in the core, with extension over all peaks. The unbanded run = single pass with global visited. A trace T seeded in band A in the banded run is identical to the unbanded trace IF at the time T seeds in the unbanded run, the same peaks are unvisited. But in the unbanded run, a stronger trace from band B's core (seeding earlier globally) may have consumed some of T's peaks first, changing T's membership/validity — in the banded run T still gets them. So banding changes SET both ways: can keep traces the unbanded run would have altered/dropped, and creates duplicates near boundaries. Bounded by boundary-adjacent activity; the global intensity ordering is partially lost (only within-band ordering preserved). Also EPD splitting afterwards can split the duplicates differently.
   - Also: band edges are on the TOF axis (uniform in bins), not m/z quantiles like the OpenMS path — load imbalance only, not correctness. And edges computed from min/max bin across ALL peaks including non-member noise — fine.
 
-  **D12. Section 3: valley splitting with flat m/z.** As analyzed: EPD splitting decision uses only RT/intensity → unaffected. But after splitting, each sub-trace's reported m/z via toTrace = flat centroid regardless of estimator. In the OpenMS path, the
+  **D12. Section 3: valley splitting with flat m/z.** As analyzed: EPD splitting decision uses only RT/intensity → unaffected. But after splitting, each sub-trace's reported m/z via toTrace = flat centroid regardless of estimator. In the OpenMS path, the sub-trace's reported m/z under "apex" is the apex peak's actual m/z of that sub-trace. Also, EPD's `computeFwhm` etc. store fwhm; downstream? The tool's toTrace uses mt.getCentroidRT etc. One more: EPD may drop sub-traces? With width_filtering off and snr filtering false, detectPeaks splits but keeps all? There's a parameter `chrom_fwhm` = expected fwhm for smoothing; smoothing could merge/split differently but m/z-independent. ✓. Also MassTrace::updateWeightedMeanMZ — with flat m/z, centroid = flat value. And does EPD use `mt.getCentroidMZ()` in any filter? masstrace_snr_filtering false → no SNR filter. OK.
+
+  Actually WAIT — one real thing in section 3: **MassTrace constructor requires at least... convex hull, and `findMaxByIntPeak`** fine. But another: EPD's detectPeaks needs `mt.getSize() >= 2`? Or traces with < some points pass through unsplit. Same both paths.
+
+  Also **does losing per-peak m/z change the split itself?** EPD works on the chromatogram only. No.
+
+  But here's a subtle one: **two peaks of the same trace in the SAME frame?** Can't happen — one peak per frame per trace by construction (findBestPeak_ picks one). ✓ both paths.
+
+  Another: **the tool passes ALL peaks of a trace the same m/z — then `toTrace` "apex" returns mz of most intense peak = flat value ✓; "mean" = centroid = flat ✓; "median" = flat ✓.** So estimator is a no-op on the integer path. If the S30 baseline chose "apex" because it beat "mean" on the OpenMS path, that choice is silently void on the integer path — fragment m/z reported is the running centroid (apex double-counted), whereas OpenMS+apex reports the apex peak's measured m/z. The reported-fragment m/z feeds the output spectrum m/z for fragments (via tof/b recomputation, line 923). So spectra differ at the ppm level in fragment m/z coordinates → search engines tolerant. COORD mostly; peptide-level effect small but could shift borderline PSMs.
+
+  **D13. t.rt**: integer path sets t.rt = apex RT (line 865); OpenMS path toTrace sets t.rt = mt.getCentroidRT() (intensity-weighted). Downstream gates (delta_rt) use it. COORD difference between paths: apex vs centroid RT. Small. But wait — after splitIntegerTraces, toTrace is used so t.rt = centroid RT. ✓ consistent then. When split_valleys=0 (splitIntegerTraces early-returns!), the integer traces keep t.rt=apex-RT, t.mz=running centroid, and t.tof = apex bin (set at line 863, t.tof = sl.tof[kap] — the ACTUAL measured bin of the apex peak — good). Note inconsistency: with splitting, t.tof = tofOf(centroid); without, t.tof = measured apex bin. Both paths fine individually.
+
+  Hmm wait, line 863: `t.tof = sl.tof[kap]; t.b = sl.b[frame_of[kap]];` — measured bin + its own frame's factor. At export, m/z recomputed from (tof, b) = apex peak's measured m/z. But t.mz = running centroid (line 864) — INCONSISTENT with (tof, b)! The doc says (tof,b) is authoritative; gates use t.mz (cached). So with split off: gates see centroid, export sees apex-bin m/z — they differ by up to ~3sd. With split on: t.mz = flat centroid, t.tof = tofOf(centroid) — consistent. Minor COORD inconsistency when split_valleys=0.
+
+  **D14. `t.im`**: integer path = running IM centroid; OpenMS path toTrace = mt.getCentroidIM() which was set to centroid_im in run_ — same semantics. But after EPD: MassTrace split — does the sub-trace keep centroid IM? EPD's splitting creates sub-MassTraces... setCentroidIM is a metainfo? MassTrace stores centroid_im_ as a double member? In OpenMS, MassTrace has centroid_im as a private member with setCentroidIM/getCentroidIM — when EPD creates sub-traces (it builds new MassTrace from subsets of peaks), does it copy centroid_im? EPD::detectPeaks → filterByPeakWidth / split ... In ElutionPeakDetection, sub-traces are created via `MassTrace subtrace(...)`? It slices peaks: `MassTrace(*iter, from, to)`? If it constructs new MassTraces from peak subsets, centroid_im defaults to -1? Hmm. Actually OpenMS MassTrace has `centroid_im` stored as a regular member? I recall setCentroidIM exists and EPD... this affects BOTH paths equally (the OpenMS path also goes through EPD via do_split). So not a differential. Skip.
+
+  **D15. OpenMS `run()` preprocessing differences**: OpenMS run() also does: `if (work_exp.size() < 3) throw` — the tool's banded path checks size < 3 → skip. Integer path: no minimum frame count check! detectTracesInteger_ runs on F ≥ 1. OpenMS MTD aborts below 3 spectra. So the integer path can produce traces from 1-2 frame windows where OpenMS produces none. SET difference (tiny windows). Worth flagging — actually wait, does the tool's OpenMS path check map.size() >= 3? Line 1518/1534: yes for OpenMS path. The integer path has NO such check. With min_len ≥ 0 and msr... a 2-frame window: trace with 2 hits: total=2 steps? F=2: seed in frame 0: up runs once (frame 1): if hit: total = up.scans(1)+1 = 2, adjusted = 2-0 = 2, size 2/2 = 1 ≥ 0.5 valid if span ≥ min_len. OpenMS: would abort → no traces. SET. But windows with <3 frames are pathological; the window is built from frames routed by isolation window; a diaPASEF window has hundreds of frames. Non-issue practically, but a diff.
+
+  **D16. The IM gate in findBestPeak_ uses `centroid_im ± ion_mobility_tolerance` — INCLUSIVE bounds?** OpenMS: `if (cur_im >= im_lower && cur_im <= im_upper)`. Tool: `if (std::abs(...) > imq_tol) continue;` — inclusive ≤ kept. Same. ✓
+
+  **D17. isPeakAcceptable_ m/z window check**: `if (mz < centroid - 3*sd || mz > centroid + 3*sd) return false`. Same bounds as search → redundant but same. Tool: same numeric window in search. One asymmetry: OpenMS computes left/right as `centroid_mz - 3*ftl_sd` in DOUBLE m/z and MZBegin/MZEnd over the actual double m/z values. Tool converts window to bins via tofOf (rounding) then re-checks each candidate's mzOf in m/z. The re-check makes the m/z comparison exact; only the lower_bound start can skip a candidate as discussed (D-edge). Also the BREAK condition `if (mz > hi_mz) break;` — since bins ascending within frame, mzOf ascending → break valid. ✓ (assuming calibration monotonic — it is).
+
+  **D18. What about peaks with the SAME bin in one frame (quantization collisions)?** The store quantizes m/z at 1e-5 Da then tofOf per frame — two distinct picked peaks in one frame could map to the same bin (if closer than a bin after the 1e-5 grid). Then sl.tof has equal values; lower_bound finds the first; the loop iterates both; closest-by-mz computed from mzOf — identical m/z → first wins ties. Fine, mirrors OpenMS tie behavior approximately.
+
+  But WAIT — a bigger one: **is sl.tof sorted within a frame?** The comment at line 637 says "ascending within a frame". compactify pushes peaks in spectrum order (sorted by m/z → tofOf monotonic → ascending tof). But aggregateFrames_? For the integer path, is aggregation done? Line 3005: `if (agg_n > 1) aggregateFrames_(wmap, agg_n, ...)` — operates on wmap (OpenMS path only)! For integer_detector, wmap is EMPTY (toSlab consumed the compact frames into wslab, wmap never materialized). So with `agg_n > 1` (cross-frame summing), the integer path silently traces UNSUMMED data while the OpenMS path traces summed data?! Let me check: line 2990: `if (integer_detector) wslab = toSlab(...); else wmap = materializeWindow(...)`. Then line 3003-3005 operate on wmap. For integer_detector, wmap is empty → aggregateFrames_ does nothing → but also the compact frames were NOT aggregated before toSlab. So if the benchmark runs with frame aggregation (agg_n > 1), the integer detector's input is fundamentally different (no summing). Is aggregation on by default? Need to check where agg_n comes from. Let me grep. This could be a big SET difference if enabled. Also `wmap.sortSpectra()` — irrelevant.
+
+  Let me check whether aggregateFrames_ is applied to compact frames anywhere for the integer path. Grep "agg_n".
+
+  **D19. `rtIndex` / span**: fine.
+
+  **D20. min_sample_rate sentinel**: line 729 handles -1 → 0.5 ✓ (item 1 of failure analysis fixed).
+
+  **D21. `max_missed = 5`**: OpenMS `trace_termination_outliers` default 5; termination when missed > 5 → after 6 misses. Tool line 834 `d.missed > max_missed` ✓ (6 consecutive misses terminate). Note: `Size missed` — d.missed is Size; fine.
+
+  Wait, actually check OpenMS: `if (missed_scans_down > trace_termination_outliers_) toggle_down = false;` — so termination after missed reaches 6. Tool same. ✓
+
+  **D22. `got` includes peaks from frames visited — but what if best() returns the SEED's own frame peaks? No—extension never revisits f0.** ✓
+
+  **D23. Multiple peaks per trace per frame impossible ✓.**
+
+  **D24. The `order` list built from ALL peaks (banded: core only). In the unbanded OpenMS run, apices = all peaks above snr threshold. Banding restricts seeds — discussed.**
+
+  **D25. Determinism**: bands run as tasks, each writes per[b] — no shared state except read-only slab. But WAIT — `detectTracesInteger_` takes `PeakSlab& sl` NON-const... it only reads (frame_of built locally). OK read-only in practice. ✓ And `tofAxis()` read-only after init ✓. `rtAxis()` read-only ✓ (rtIndex appends? No — rtIndex only searches; rtAxis built once before. ✓)
+
+  **D26. OpenMS noise deletion**: peaks ≤ noise deleted → also absent from apices AND from findBestPeak_ AND they don't block? In OpenMS, deleted peaks are GONE — a frame containing only sub-noise peaks is EMPTY after deletion → not a miss. Tool: member[k]=false for sub-noise peaks; best() skips them — but the frame still counts as NON-EMPTY (line 817 checks raw frame_off span!), so a frame whose peaks are all sub-noise counts as a MISS in the tool but as an EMPTY frame (no miss, no candidate) in OpenMS! SET-relevant termination difference! Wait — in OpenMS, is the spectrum removed from work_exp if all its peaks are deleted, or is it kept as empty spectrum? OpenMS run():
+
+  ```cpp
+      // filter peaks by noise threshold
+      ...
+      for each spectrum: if peak intensity <= noise_threshold_int_ → erase
+      ...
+  ```
+  It erases peaks from spectra but keeps the (possibly empty) spectra? I believe it does `spec.erase(remove_if...)` keeping empty spectra — the run_ loop checks `if (!work_exp[...].empty())`. Yes, OpenMS keeps empty spectra and treats them as non-miss. Hmm, actually does it DELETE empty spectra? Let me recall run():
+
+  ```cpp
+    void MassTraceDetection::run(const PeakMap& input_exp, std::vector<MassTrace>& found_mtraces, const Size max_traces)
+    {
+      // make sure that output vector is empty
+      found_mtraces.clear();
+      // fill a temporary map
+      work_exp = input_exp;
+      // update trace and noise thresholds
+      ...
+      // discard all peaks below noise threshold
+      for (PeakMap::Iterator it = work_exp.begin(); it != work_exp.end(); ++it)
+      {
+        it->erase(std::remove_if(it->begin(), it->end(), ... intensity <= noise ...), it->end());
+      }
+      run_();
+    }
+  ```
+  I believe spectra are kept (empty ones included). So OpenMS: frame with all-sub-noise peaks → empty → not a miss, but still ++total_scan_number (scan visited). Tool: frame non-empty (raw arrays include sub-noise peaks) → best() called → all candidates skipped by !member → returns -1 (bk=-1, taken=false) → ++missed. So a run of 6 frames with only noise peaks TERMINATES the tool's trace but not OpenMS's! And they also count in d.scans in both (OpenMS increments total_scan_number for empty frames too — wait, but then in validity, total includes them; and OpenMS's missed counters don't increment for empty frames). Hmm wait — but actually, are frames with all-sub-noise peaks common? The MS2 noise threshold... every real frame has plenty of peaks above noise in a window. But low-signal stretches (peptide not eluting) still have chemical noise peaks above threshold. So the practical difference: frames where the ONLY peaks are ≤ noise. Rare-ish but real in sparse windows. This is a SET difference in termination timing → trace truncation. FLAG IT. Actually also: `best()` returns -1 both for "no peak in window" and "peak taken" — both are misses, matching OpenMS's isPeakAcceptable_ rejection. The issue is only empty-after-filtering frames.
+
+  Hold on, is it true OpenMS doesn't delete empty spectra? If it removed empty spectra from work_exp, then scan indices would compress and the miss/empty distinction changes. I'm fairly sure OpenMS keeps them (the `!work_exp[idx].empty()` check exists precisely because they can be empty). ✓ So tool line 817 should check "frame has at least one MEMBER peak", not raw non-empty. Real deviation, SET class, though small in practice.
+
+  Let me verify against OpenMS via GitHub fetch — I'm fetching the source anyway.
+
+  **D27. OpenMS run() also computes `chrom_peak_snr` via... the excerpt says apex must have intensity > chrom_peak_snr * noise_threshold_int. ✓ tool.**
+
+  **D28. What about `max_traces`? Not relevant.**
+
+  **D29. `isTraceValid_` rt_range**: `std::fabs(trace.rbegin()->getRT() - trace.begin()->getRT())` — tool: span over gathered frames ✓.
+
+  **D30. OpenMS pushes the apex into the trace and marks it in gathered_idx BEFORE extension ✓ tool same (got.push_back(seed)).**
+
+  **D31. Sample-rate mode**: tool doesn't implement trace_termination_criterion="sample_rate" — OpenMS default is "outlier" ✓ (excerpt confirms). The tool passes only min_sample_rate for validity. ✓
+
+  **D32. Ordering of down-then-up within iteration** — OpenMS does down first, then up, in the same while iteration. Tool: for side 0 (down) then side 1 (up). ✓
+
+  **D33. THE BIG ONE? The seed double-apply in tool line 801**: `iwm(m0, w0, cmz, cnt, den)` where cnt was initialized to w0*m0, den to w0, cmz = m0. As computed, no-op exactly. Same in OpenMS. ✓ It's a faithful no-op.
+
+  **D34. IM centroid initialization**: OpenMS — only if IM-aware (ion_mobility_tolerance_ > 0). Tool always. If im_tol ≤ 0... the tool always passes delta_im > 0 presumably. Edge: if im_tol were 0, OpenMS skips IM gating entirely (findBestPeak_ non-IM branch), tool gates with imq_tol=0 → only identical imq. Divergence only if im_tol==0 configured. Not the case (default 0.01).
+
+  **D35. `best()` — the IM comparison in quantized space with centroid in imq-double. The imq_tol = im_tol * IM_Q. |imq_k - cim| ≤ imq_tol. In real units, imq/IM_Q spacing... consistent. ✓ COORD rounding only.
+
+  **D36. `Trace.tof` for split traces when `ax.ok` false — the integer detector requires the axis? detectTracesInteger_ uses tofAxis() regardless; loadTofAxis must have succeeded for the integer detector to be enabled presumably. Fine.
+
+  **D37. In splitIntegerTraces, `b_of_rt` keyed by rt_index — but multiple frames share... rt_index unique per frame ✓. If apex RT index not found → ax.factor(0) = reference factor (frame_id 0 < size → b_by_frame[0], which was filled with bref for missing frames — line 521). Actually factor(0) returns b_by_frame[0] (bref). OK.
+
+  But NOTE: `t.b` for a split trace uses the apex's frame factor — but the sub-trace's apex after EPD may be a frame whose factor differs from the original. Handled via b_of_rt. ✓. But the m/z being inverted (t.mz) is the FLAT centroid value computed under the ORIGINAL trace's running centroid... and inverted with the sub-trace apex's factor — mixing calibrations? The centroid m/z was computed from per-frame mzOf values (each peak converted with its own frame's b). Inverting the centroid with ONE frame's b gives the bin that would produce that m/z in that frame. But the actual apex peak's bin in that frame converts to a m/z that differs from the centroid. So t.tof ≠ apex peak's bin — as discussed in D12. The export recomputes m/z from (tof, b) → equals centroid (within half bin). Consistent-ish. The real point for section 2: the re-attached bin is NOT necessarily a measured bin; the claim "inversion recovers the measured bin exactly" (line 892-894 comment) is false in the integer path because t.mz is not a measured m/z. Under `trace:mz_estimator=apex` on the OpenMS path it IS measured.
+
+  Also section 2 asks: "is the re-attached bin after valley splitting the right bin — note t.mz there is whatever toTrace() chose under trace:mz_estimator, and the calibration factor is the apex frame's." Answer: with flat per-peak m/z, all estimators return the flat running centroid, so tofOf gives the bin nearest the centroid — which can sit 1+ bins away from any measured peak bin of that sub-trace, and the apex frame's b may differ from the seed frame's b used to compute parts of the centroid. Error bounded by ~half bin + inter-frame b drift + (centroid vs any measured m/z). Since the reported value downstream is recomputed as mzOf(tof,b) ≈ centroid, it's self-consistent; the loss is only quantization (≤ half bin, i.e., up to a few ppm depending on bin density) — but ALSO: t.mz cached vs exported m/z consistency ✓ here.
+
+  **Section 4 boundary issues, precisely:**
+  - Lost mutual suppression: two bands each seed traces that in a single run would have merged into one (the stronger seed consuming the other's peaks). Result: two overlapping partial traces instead of one. These are near-duplicates with overlapping profiles — downstream correlation yields the same fragment twice (duplicate pseudo-spectrum peaks?) or split-intensity fragments. Bounded: only for signal within extension range of a boundary; each such event needs a seed above snr threshold on both sides.
+  - A trace extending across the boundary consumes peaks (marks visited locally) but does NOT prevent the neighbor band from using them; conversely the neighbor's trace may take peaks that the first band's LATER seeds wanted — but since bands run concurrently with private visited, ordering between bands is lost: in the unbanded run global intensity order decides who gets a contested peak; in the banded run both get it. So banding strictly INCREASES trace count vs unbanded (no trace is lost because another band took its peaks — visited is private; seeds are only suppressed within the band). Wait — can banding LOSE a trace? Within a band, seed suppression happens only by that band's own traces, exactly as the unbanded run would do among those seeds... but the unbanded run's traces seeded in OTHER cores could also suppress this band's seeds. In the banded run they don't → banding can only produce a SUPERSET-ish (not exactly, because within-band traces may differ from unbanded ones when the unbanded run would have taken cross-boundary peaks before this band's trace got them). So SET differs both ways but biased toward MORE traces. Also valid traces that coincide → downstream duplicates. The OpenMS halo scheme differs: it physically duplicates peaks into halo regions and keeps traces by centroid-in-core — traces near the boundary are computed twice but only kept once (centroid in core). The integer banding keeps by SEED-in-core: a trace seeded in band A whose centroid lands in band B is kept by A (seed core) — while band B may hold a trace seeded at the same signal? Only if a different seed. Hmm, the OpenMS halo is "exact" up to halo-width sufficiency; the integer scheme is not exact but the error class is boundary duplicates, bounded by seeds within ±3sd-extension of a boundary... actually a trace can extend in RT arbitrarily far; the m/z extent is bounded by ±3sd drift, so cross-core contamination is bounded to peaks within ~3sd (m/z) of the boundary — bounded in m/z, not in count.
+
+  Wait, no — the m/z window is ±3·sd around the running centroid which drifts. Total drift across a trace is bounded? The centroid is a weighted mean of accepted peaks each within 3sd of the previous centroid — sd can grow via robust re-estimation... in principle the centroid can random-walk. Practically bounded. State it as: bounded by the m/z drift a trace can sustain, typically ≲ 3σ, but not strictly bounded in pathological cases.
+
+  **D38. OpenMS `findBestPeak_` — IMPORTANT: does OpenMS's findBestPeak_ consider VISITED peaks? YES (it doesn't know visited). And isPeakAcceptable_ rejects visited → miss. Tool ✓ same via taken. BUT — subtle: the tool considers member[] only; visited peaks are members so they're considered ✓.**
+
+  **D39. Sub-noise peaks as SEEDS: excluded in both ✓ (member required for order, line 745).**
+
+  **D40. What about OpenMS marking visited = gathered peaks of VALID traces only, but OpenMS ALSO skips seeds whose peak is visited ✓.**
+
+  **D41. The tool never sets `t.intensity` = apex intensity (line 867: xv[ap] — the apex of the profile = most intense gathered peak ✓ matches OpenMS getMaxIntensity used in toTrace).**
+
+  **D42. After validity, OpenMS run_ REMOVES the trace's peaks from further seeding (visited). The apices vector is NOT recomputed; visited check suffices ✓ tool same.**
+
+  Now the empty-frame/member issue (D26) — let me verify with the actual OpenMS source whether empty spectra are kept. Also verify updateIterativeWeightedMean_ counter updates, isTraceValid_ composition (+1?), seed init, findBestPeak_ tie-break, and whether run() deletes spectra that become empty.
+
+  Let me fetch OpenMS source from GitHub. The version: OpenMS 3.x. URL: https://raw.githubusercontent.com/OpenMS/OpenMS/develop/src/openms/source/FILTERING/DATAREDUCTION/MassTraceDetection.cpp
+
+  Path in repo: src/openms/source/FILTERING/DATAREDUCTION/MassTraceDetection.cpp. Let me fetch.
+
+error: failed to run prompt: provider.connection_error: Connection error.
+See log: /Users/kohlbach/.kimi-code/logs/kimi-code.log
+exit=1
