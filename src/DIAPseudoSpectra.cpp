@@ -2773,7 +2773,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // only the number of windows allowed IN FLIGHT, i.e. how many materialised windows may hold
     // memory at once, and the free-RAM admission gate below is the real bound. Deriving it from
     // threads/bands (the old 100/12 = 8) was what pinned the tool to a 96-thread grid.
-    int n_conc = (int)window_list.size();
+    // MEASURED 2026-09-03: letting every window be in flight raised window-loop occupancy from
+    // 64.8x to 86.2x -- and made the run SLOWER (15:50 against 12:53) because peak RSS went 103 ->
+    // 152 GB and system time rose 75%: more resident windows means a bigger working set, more page
+    // faults and worse locality, not more useful work. Occupancy and working set are separate
+    // knobs and the task pool only fixes the first. So keep a default cap on windows IN FLIGHT --
+    // the old threads/bands value, which was accidentally a reasonable working-set bound -- while
+    // the pool goes on filling every thread from whatever is admitted.
+    int n_conc = std::max(1, n_threads / std::max(n_bands, 1));
+    n_conc = std::min<int>(n_conc, (int)window_list.size());
     if (max_conc > 0) n_conc = std::min(n_conc, max_conc);
     if (n_conc < 1) n_conc = 1;
 #ifdef _OPENMP
