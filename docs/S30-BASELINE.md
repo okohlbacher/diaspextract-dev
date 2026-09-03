@@ -699,3 +699,15 @@ rule neither is adopted on one file. **Pre-registered confirmation arm:** both s
 plus entrapment FDR. Adopt as default only if the S30 sign holds on both files AND entrapment stays <= 1.4%
 (shipping arm: S30 1.37%, S08 0.95%, S23 1.32%); a Sage regression on S08/S23 larger than S30's −0.8% kills q=0.5 and
 leaves K=150 as the only candidate.
+
+### ISOTOPE DUPLICATION: HYPOTHESIS (a) CONFIRMED, (b) REFUTED (2026-09-03, 09:35)
+Full analysis in [ISOTOPE-DUPLICATION-2026-09-03.md](ISOTOPE-DUPLICATION-2026-09-03.md). 31.4% of
+emitted spectra have a co-eluting same-charge partner 1-3 isotope steps below (decoy offset 3.8%,
+excess 27.7%); removing them leaves 671,270 spectra against diaTracer's 700,434, i.e. isotope-offset
+duplication accounts for the entire emission excess. But they are NOT mergeable: content cosine
+0.505 vs 0.446 for an arbitrary co-eluting neighbour (only 6.5% above 0.9), and every id-agnostic
+collapse rule loses 5,011-5,173 of 14,944 peptides (oracle still loses 1,387). "Keep the lightest" is
+backwards -- where only the heavy member is identified, Sage says the mass we reported was already
+correct 70% of the time. Mechanism: `findPartner` skips `used[]` peaks, so a leftover one step above a
+consumed run becomes its own monoisotope (heavy members carry fewer isotope partners, 3.53 vs 4.59).
+Upstream ownership gate pre-registered; downstream merging stays falsified.
