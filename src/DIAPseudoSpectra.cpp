@@ -156,6 +156,7 @@ namespace
   int backfill_raw_ = std::getenv("SPEXTRACT_BACKFILL_RAW") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_RAW")) : 0;   ///< [content 3] raw apex-frame peaks added per spectrum
   int backfill_maxfrags_ = std::getenv("SPEXTRACT_BACKFILL_MAXFRAGS") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_MAXFRAGS")) : 0;   ///< [content 3] only spectra with <= K fragments
   bool backfill_empty_ = std::getenv("SPEXTRACT_BACKFILL_EMPTY") != nullptr;   ///< [content 3] also make spectra for precursors with no correlated trace
+  double backfill_maxq_ = std::getenv("SPEXTRACT_BACKFILL_MAXQ") ? std::atof(std::getenv("SPEXTRACT_BACKFILL_MAXQ")) : 0.0;   ///< [content 3] only precursors below this MS1-intensity quantile of the window
 
   static std::string rss_()
   {
@@ -2307,7 +2308,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // [backfill, 2026-09-03] retain the window's picked frames for the raw-peak backfill arm: detectTraces_
         // partitions its map into bands and clears it, so by assembly time wmap is empty (the first backfill
         // run was a silent no-op, byte-identical to apex).
-        PeakMap wraw; vector<double> wrt;
+        PeakMap wraw; vector<double> wrt; double prec_int_q = std::numeric_limits<double>::infinity();
         if (backfill_raw_ > 0)
         {
           wraw = wmap; wrt.resize(wraw.size());
@@ -2384,6 +2385,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // (charge 0 is NOT dropped: emitted with charge UNSET so the engine searches its range.)
         size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), win_lo) - prec_mz.begin();
         size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), win_hi) - prec_mz.begin();
+        if (backfill_raw_ > 0 && backfill_maxq_ > 0.0)   // [content 3] window q-quantile of precursor MS1 intensity
+        {
+          vector<double> iv; for (size_t pi = plo; pi < phi; ++pi) if (precursors[pi].trace_idx < ms1_traces.size()) iv.push_back(ms1_traces[precursors[pi].trace_idx].intensity);
+          if (!iv.empty()) { sort(iv.begin(), iv.end()); prec_int_q = iv[std::min(iv.size() - 1, (size_t)(backfill_maxq_ * iv.size()))]; }
+        }
         if (apportion > 0.0 && rp_max <= 0)
         {
           // [route-4] INTENSITY APPORTIONMENT — the only assembly lever that is not a count knob.
@@ -2484,7 +2490,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               assembleFromList_(pc, win_lo, win_hi, frags, frag_scores, 0, max_frags, ms2);   // metadata only
             }
             // SPEXTRACT_BACKFILL_MAXFRAGS=K restricts the backfill to spectra with <= K assembled fragments (the faint tail)
-            if (backfill_raw_ > 0 && (!ms2.empty() || (backfill_empty_ && ms2.metaValueExists("spx_guessed"))) && !wraw.empty() && (backfill_maxfrags_ <= 0 || (int)ms2.size() <= backfill_maxfrags_))
+            // SPEXTRACT_BACKFILL_MAXQ=q: only precursors whose MS1 trace intensity is below the window's q-quantile
+            const bool faint_ok = backfill_maxq_ <= 0.0 || (pc.trace_idx < ms1_traces.size() && ms1_traces[pc.trace_idx].intensity <= prec_int_q);
+            if (backfill_raw_ > 0 && faint_ok && (!ms2.empty() || (backfill_empty_ && ms2.metaValueExists("spx_guessed"))) && !wraw.empty() && (backfill_maxfrags_ <= 0 || (int)ms2.size() <= backfill_maxfrags_))
             {
               size_t si = (size_t)(lower_bound(wrt.begin(), wrt.end(), pc.rt) - wrt.begin());
               if (si == wrt.size() || (si > 0 && pc.rt - wrt[si - 1] < wrt[si] - pc.rt)) --si;
