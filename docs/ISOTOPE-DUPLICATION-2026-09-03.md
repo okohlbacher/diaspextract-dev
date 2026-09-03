@@ -109,3 +109,28 @@ replicate noise. Falsifier: peptides fall by more than the 0.17% replicate sprea
 heavy-only-identified population makes a real risk, since suppression discards exactly the member
 that is right 70% of the time. If it fires, the correct form is REPLACEMENT (transfer ownership to
 the better-fitting member), not suppression.
+
+## 6. Implemented: collapse the precursors before extraction
+
+`SPEXTRACT_ISO_COLLAPSE=intense|light|heavy|niso` (with `SPEXTRACT_ISO_COLLAPSE_K`, default 3) runs
+after the isotope-support gate and before the window loop, so the duplicate hypotheses never reach
+extraction and their extraction cost is saved as well.
+
+**Structure: a greedy dominating set, NOT single linkage.** Precursors are visited best-first by the
+rule; each survivor removes the co-eluting, co-mobile, same-charge hypotheses sitting 1..K isotope
+steps to either side of it, and an already-kept precursor is never removed. Transitive chaining is
+what made the offline component collapse lose 1,387 peptides even with an oracle (chains span
+genuinely different species), so each removal is one hop from a surviving member.
+
+**Default rule is MS1 trace intensity, and the direction matters.** The measured failure is
+symmetric: sometimes we seed on a spurious peak below the true mono, sometimes on a leftover above a
+consumed run. Intensity is right in both cases, because a spurious peak below the mono is weaker and
+the mono outweighs its own M+1 below about 1800 Da. Above that the rule inverts, which is why `light`
+runs as a control rather than as an assumption.
+
+**Pre-registered A/B (S30, queued behind the S08/S23 confirmation chain):** arms `intense` K=3,
+`light` K=3, `intense` K=1. Both engines; entrapment on the default arm, since a large emission cut
+changes the FDR denominator. Success = emission near 670-700k with Sage and MSFragger peptides within
+the 0.17% replicate spread and entrapment no worse than the shipping arm's 1.37%. Falsifier = peptides
+fall outside that spread, which would mean the duplicate hypotheses were carrying real content that
+the survivor's own extraction does not recover -- and would close the emission question for good.

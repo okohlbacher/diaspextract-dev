@@ -2039,6 +2039,73 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       writeLogInfo_("require_isotope_support: dropped " + String(before - precursors.size())
                     + " guessed precursors, " + String(precursors.size()) + " isotope-supported remain");
     }
+    // [iso-collapse, 2026-09-03] 31.4% of emitted spectra have a co-eluting same-charge partner 1-3
+    // isotope steps below, against a 3.8% decoy-offset control; removing them lands at diaTracer's
+    // spectrum count. They cannot be merged after the fact -- content cosine is 0.505 against 0.446 for
+    // an arbitrary co-eluting neighbour, so each hypothesis extracted DIFFERENT fragments. Collapse the
+    // PRECURSORS instead, before extraction, which saves the extraction work too.
+    // Which member survives decides whether peptides are lost. "Keep the lightest" is backwards: where
+    // only the heavier member was identified, Sage says the mass we reported was already right 70% of
+    // the time. The default keeps the most INTENSE MS1 trace, which is the monoisotope in both failure
+    // directions -- a spurious peak below the mono is weaker, and the mono outweighs its own M+1 below
+    // ~1800 Da (above that this rule flips, hence the A/B). SPEXTRACT_ISO_COLLAPSE=intense|light|heavy|niso.
+    if (const char* icr = std::getenv("SPEXTRACT_ISO_COLLAPSE"))
+    {
+      const std::string rule(icr);
+      const char* kenv = std::getenv("SPEXTRACT_ISO_COLLAPSE_K");
+      const int kmax = kenv ? std::atoi(kenv) : 3;
+      const double ISO_ = 1.0033548;
+      const size_t before = precursors.size();
+      vector<size_t> by_mz(precursors.size());
+      for (size_t i = 0; i < by_mz.size(); ++i) by_mz[i] = i;
+      sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b){ return precursors[a].mono_mz < precursors[b].mono_mz; });
+      vector<double> mzs(by_mz.size());
+      for (size_t i = 0; i < by_mz.size(); ++i) mzs[i] = precursors[by_mz[i]].mono_mz;
+      auto key = [&](size_t i) -> double {
+        const Precursor_& p = precursors[i];
+        if (rule == "light") return -p.mono_mz;
+        if (rule == "heavy") return  p.mono_mz;
+        if (rule == "niso")  return  (double)p.n_isotopes;
+        return p.trace_idx < ms1_traces.size() ? ms1_traces[p.trace_idx].intensity : 0.0;
+      };
+      vector<size_t> order(precursors.size());
+      for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+      sort(order.begin(), order.end(), [&](size_t a, size_t b){ return key(a) > key(b); });
+      // Greedy dominating set: best-first, each survivor removes its own lattice neighbours only.
+      // Not single-linkage -- transitive chaining spans genuinely different species (measured: an
+      // ORACLE component collapse still lost 1,387 peptides).
+      vector<char> dead(precursors.size(), 0), kept(precursors.size(), 0);
+      for (size_t i : order)
+      {
+        if (dead[i]) continue;
+        const Precursor_& p = precursors[i];
+        if (p.charge <= 0) continue;
+        kept[i] = 1;
+        const double tol = p.mono_mz * mass_ppm * 1e-6;
+        for (int k = 1; k <= kmax; ++k)
+          for (int sgn = -1; sgn <= 1; sgn += 2)
+          {
+            const double t = p.mono_mz + sgn * k * ISO_ / p.charge;
+            size_t lo = std::lower_bound(mzs.begin(), mzs.end(), t - tol) - mzs.begin();
+            size_t hi = std::upper_bound(mzs.begin(), mzs.end(), t + tol) - mzs.begin();
+            for (size_t q = lo; q < hi; ++q)
+            {
+              const size_t j = by_mz[q];
+              if (j == i || dead[j] || kept[j]) continue;
+              const Precursor_& o = precursors[j];
+              if (o.charge != p.charge) continue;
+              if (fabs(o.rt - p.rt) > delta_rt || fabs(o.im - p.im) > iso_im_tol) continue;
+              dead[j] = 1;
+            }
+          }
+      }
+      size_t w = 0;
+      for (size_t i = 0; i < precursors.size(); ++i) if (!dead[i]) precursors[w++] = precursors[i];
+      precursors.resize(w);
+      writeLogInfo_("iso-collapse (" + String(rule) + ", k<=" + String(kmax) + "): removed "
+                    + String(before - w) + " of " + String(before) + " precursor hypotheses, "
+                    + String(w) + " remain");
+    }
     // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
     // emission without touching fragment sharing. Pre-registered falsifier in S30-BASELINE.
