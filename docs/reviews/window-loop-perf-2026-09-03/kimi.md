@@ -1,0 +1,68 @@
+• I've read all 2,908 lines of `src/DIAPseudoSpectra.cpp`. Before the five sections: your numbers are internally consistent (I checked: stage sums 8,139.5 s ≤ 8×1,139 s; phase-weighted mean busy = 82,338/1,351 = 60.9 ≈ your "60 of 128"; 77,333 CPU-s ≤ 12×8,139.5 s reserved inner slot-time). But two claims *inside the source* contradict your run — flagged below. All line numbers are `src/DIAPseudoSpectra.cpp`.
+
+  ## 1. Where the wall time goes
+
+  The window loop is 84.1% of wall, so everything else is rounding. Decompose its 67.9x against the intended 96-thread grid (:2297 `n_conc = n_threads/n_bands` = 8; :1000 band team = 12; :2519 score team `p_team` = 12; :2302 two active levels). Capacity = 96 × 1,139 = 109,344 thread-s; consumed = 77,333; idle = 32,011 s = **29.3%**. The decomposition is forced by the arithmetic:
+
+  - **Inner imbalance inside trace/score regions: ~15,700 s (14.4%).** Inner threads are only runnable inside the two nested parallel regions (trace :1000 and EPD :1047; score :2519). Inner capacity during those regions = 11 extra threads × (3,965.6 + 3,753.6) = 84,911 s; inner busy = 77,333 − 8,139.5 ≈ 69,194 s → fill = **81.5%**. The band loop is `schedule(dynamic)` over exactly 12 chunks on 12 threads (:1000) — one chunk per thread, so dynamic scheduling cannot rebalance anything; and m/z-*quantile* bands equalise peak counts (:955-963), not trace work, which the code itself admits is superlinear in local density (:2379-2383). Score uses `dynamic,32` (:2519) which helps, but per-precursor work varies with IM-band population.
+  - **Admission waits + loop tail: ~972 outer-thread-s ≈ 11,700 s of capacity (10.7%).** Outer busy = stage wall sums = 8,139.5 s; outer capacity = 8 × 1,139 = 9,112 s. The gap is threads parked in the 200 ms admit poll (:2340-2352) plus the ramp/tail where fewer than 8 of the 24 skewed windows remain. Heavy-first (:2253) already minimises this; the residual is the price of 24 work units on 8 slots with a 136x size spread. Each parked outer thread idles its whole 12-thread team, hence ×12.
+  - **Serial stages inside the loop: ~4,600 s (4.2%).** `materialize` (24.1 s) and `fraggrid` (395.8 s) run on the single outer worker (:2356, :2424 — `buildFragGrid` :714-744 has no OpenMP at all) while 11 team threads sit out: 420.9 window-wall-s × 11.
+
+  **Binding constraint: the raw work volume of trace + score (94.8% of window-time), not the concurrency cap.** Proof: even at 100% fill the loop wall is CPU/96 = 806 s, giving total ≈ 1,018 s — still 1.74x diaTracer's 586 s. Scheduling recovers at most ~29%; it cannot close a 2.3x wall gap.
+
+  **Contradiction you should know about:** the comment at :2274-2276 claims trace = 69.34% / score = 28.81% of window-loop *CPU*. On your run that is impossible — 0.693 × 77,333 = 53.6k CPU-s against a hard ceiling of 12 × 3,965.6 = 47.6k thread-s for the trace stage. The 69/29 split (measured on S30/S23) does not describe S08; score is far heavier here than the source believes. Your stage timers (:2355-2434, :2517-2534) measure *wall* per window, so **trace-vs-score CPU cannot be attributed from your numbers at all** — that is the missing measurement.
+
+  For my explanation to fail, one of these must be wrong: (a) the stage sums really are per-window wall (they are chrono deltas around each stage, :2366/:2423/:2426/:2531 — sound); (b) the 972-s outer gap is *scheduling*, not memory-forced serialization — settle by timing the `for(;;)` admit loop per window (two chrono reads around :2341-2352); (c) inner "idle" is idle, not memory-bandwidth stall — settle with `perf stat` on a score-heavy window, or run 1 window alone and see if fill rises.
+
+  ## 2. Where the memory goes
+
+  ~12 GB per in-flight window is **explicable by the data structures, and ~30-40% of the transient is copies that need not coexist**. Per average window (compact 0.87 GB = 20,849 MB/24, at 10 B/peak):
+
+  | structure | size | lifetime |
+  |---|---|---|
+  | materialised `wmap` | ~20 B/peak ≈ 1.7 GB | :2356 → cleared :998 |
+  | band copies `sub[12]` | ~1.7 GB × ~1.12 halo ≈ 1.9 GB | :969-997 → per-band free :1008 |
+  | MTD output traces | 8.5M × 168 B header (:2316-2317) + peaks | until :1084 |
+  | `Trace` + XIC | xic = 16 B/point (:206) — several GB at 8.5M traces | freed :2432 |
+  | `FragGrid.flat` | 8 B/point (:283) + `off` 8 B/frag + 16 B/frag stats | through score |
+  | `pdense` × 12 | G floats, trivial | :2433, :2519 |
+
+  The transient peaks are the *overlaps*: `wmap` + all 12 `sub` maps coexist (:998 clears wmap only after the full partition copy); `mts` + `out` coexist (:1082-1084); XICs + `flat` coexist (:2424 builds the grid, :2432 frees the XICs after). The peak driver is the **widest window's trace-phase working set** — it holds ~23.7% of precursors (:2244), so scale everything ~5x: ~2 GB compact → ~25-40 GB transient, overlapping 7 average windows × ~9 GB + 55 GB base ≈ your 151.7 GB peak. Note the peak is *worse* than your 97 GB delta suggests: the compact store is consumed as windows materialise (:491-495), so the base is shrinking while windows grow — contemporaneous in-flight footprint is ~110-115 GB, ~14 GB/window. Also `win_out` accumulates all ~863k spectra (~5-7 GB) until the loop ends (:2256, merged :2639).
+
+  **The 10x + 256 MB estimate (:2318-2321) is not defensible as calibrated.** It books the average window at 8.9 GB against a measured ~12-14 GB — under by ~35-55% in the unsafe direction (it admits more than will fit), while over-booking the wide window by luck. It was fitted on S23 (:2315-2317), and the multiplier is threshold-dependent (`trace:ms2_noise_threshold_int` 10 inflates trace count → FragGrid). The fixed `inflight` charge is also held for the window's whole lifetime while real footprint swings ~3x between trace and score phases.
+
+  **A latent correctness bug in the memory layout:** the comment at :279-282 says `off` is "64-bit on purpose" because 8.5M fragments × ~510 support points is within 2x of the 32-bit wrap — but :731 and :742 store `(uint32_t)g.flat.size()` into it. One denser file (lower MS2 noise) and every correlation reads corrupted support spans, silently. Remove the casts. This is the single zero-risk change in this review.
+
+  ## 3. MS1_TRACE at 5.0x and PRECURSOR_INFER at 1.0x
+
+  MS1_TRACE: invert Amdahl on your numbers — 83 = S + (410.9 − S)/12 gives **S ≈ 53 s of strictly serial work, 64% of the phase**. It is all in `detectTraces_`'s serial prologue/epilogue: the quantile sampling and full partition copy of every MS1 peak into 12 sub-PeakMaps (:955-997, single thread, ~2-3×10⁸ peaks), the merge (:1016-1018), the span instrumentation (:1065-1081), and `toTrace` over 6.4M traces (:1082-1085, per-trace sort). More bands cannot help — the parallel fraction is already small. Parallelising the partition (order-preserving chunked append per band) and `toTrace` (independent per trace, index-stable) is output-neutral and worth ~45-50 s wall (~3.5%). Worth fixing *after* the big items; it is low risk, not high value.
+
+  PRECURSOR_INFER: 50.6 s serial over 6.4M traces = 7.9 µs/trace; the binary-search partner lookup (:1167-1178) is already O(log N). The loop is greedy seed-and-mark-used in intensity order (:1151-1161) — any parallel decomposition changes seed order, changes output, and your gate is peptide-set equality. **Leave it alone.** 3.7% of wall is not worth an output-changing rewrite. Combined honest ceiling for both phases: ~6% of wall.
+
+  ## 4. Why diaTracer is 3.1x cheaper in CPU
+
+  Not implementation — algorithm. The gap lives in work volume, in this order:
+
+  1. **It traces summed frames; you trace raw ones.** diaTracer sums adjacent cycles into a composite (m/z × 1/K0) matrix *before* peak picking (documented in your own `aggregateFrames_` header, :290-303). Point volume into its trace-equivalent stage drops ~Nx and S/N rises ~√N, so far fewer noise fragments survive. You centroid every raw frame and trace at noise 10 (:786, `ms2_min_length_sec` 0), producing up to 8.5M fragment traces in one window. Trace (48.7%) and score (46.1%) both scale with trace count — score superlinearly via candidate pairs.
+  2. **Your m/z tracer is superlinear in local density; theirs is a matrix extraction.** Your own sweep proves it: banding cuts *total* trace CPU 11,168 → 5,378 → 2,972 s across 5/12/24 bands (:2379-2383). A linear algorithm shows flat CPU under partitioning; halving the CPU by halving the band means MassTraceDetection's per-apex candidate scan is doing quadratic-ish redundant work. diaTracer never pays it.
+  3. **Correlation candidate volume.** You linearly scan the whole IM band per precursor (:1500-1502) and RT-gate *after* (:1505); with ~932k hypotheses (≈40% guessed singletons, :2082-2083) × an IM band holding 5-15% of 8.5M fragments, the scan itself is ~10¹⁰-10¹¹ element visits per window before a single dot product — the dot only runs for the ~0.3% passing the 3 s RT gate. diaTracer correlates per detected feature against intensity-ranked fragment sets with a pre-smoothed precursor profile: fewer, cheaper pairs.
+  4. **Duplicate edge work**: 12 bands × 20 ppm halo (:975) + the 1.000 Da window overlap → every boundary ion traced and scored twice (~14% combined).
+
+  Output volume is equal (863k vs 872k spectra), so the extra 56k CPU-s bought nothing in quantity. Plainly: **the algorithm does roughly 3x more work by design, and no scheduling recovers that.** What tuning *can* recover is the 29% idle plus the redundant-work items 2 and 3 — maybe down to ~1.4-1.9x CPU. Parity requires item 1 (frame summing, fewer traces), which changes output.
+
+  ## 5. Mitigations, ranked by gain/risk
+
+  **R0 — Fix the `uint32_t` truncation at :731/:742.** Not perf, but the review would be negligent without it: drop both casts. Zero risk, output-neutral except on files that currently silently corrupt. Do regardless.
+
+  **R1 — Parameter-only grid rebalance: `-perf:trace_bands 24` (→ n_conc = 4 × 24 = 96) and `16` (→ 6 × 16).** The S30 wall loss at 24 bands was *oversubscription* (24 concurrent windows × 24 bands, :2383-2385) — the current code divides the budget (:2297), so 4 × 24 = 96 is not oversubscribed, and trace CPU halves per your own measurement. Score's `p_team` becomes 25, halving per-window score wall. Naive model: window-time sum 8,139.5 → ~3,300-4,500 s, wall ~830-1,000 s (**−10 to −25%**). Memory peak drops ~2x (4 windows in flight). Risks: 4 slots × 136x skew could resurrect the tail (heavy-first :2253 mitigates); the trace-CPU-halving may not transfer from S30. Output-neutral (band partition is exact, :946-951). Falsify: two runs, read the `[perf]` table. Costs nothing but machine time — run it today.
+
+  **R2 — 2D (IM, RT) candidate index in `scoreCandidates_` (:1500-1505).** The linear IM-band scan is plausibly 80-90% of score cost (RT gate kills ~99.7% of scanned elements before the dot at :1521). Bucket the IM-sorted fragments into ~256 IM buckets, RT-sort within each, enumerate by binary search, then sort surviving `fi` ascending to preserve emission order (the tie-break at :1664-1665 uses vector index — order must be identical). Expected: score window-time 3,753.6 → ~500-900 s; **−20-27% total wall, −30% CPU**, and a smaller working set (helps if R1's perf-stat shows bandwidth stalls). Output-neutral by construction. Risk: medium — new per-window index (~1-2 s build), and a wrong index silently changes the candidate set. Falsify cheaply *before writing it*: add two atomic counters (IM-band elements scanned vs dot products evaluated) and run once — if scan/dot < 5x, deprioritise; then verify with a byte-diff of the canonically sorted (:2649) mzML on S30.
+
+  **R3 — Parallelise `buildFragGrid` (:714-744) and skip the `wmap` middleman.** fraggrid is 395.8 s of single-thread work holding an 11-thread team hostage; the per-fragment indexing is independent and the grid build can be 12-way merged deterministically. Materialising compact frames *directly into band maps* (edges from the same every-97th-peak sample, :956-957, computable on the compact store) deletes the `wmap` + `sub[]` coexistence — the biggest transient copy (~2x compact per window). Gain: ~4-5% wall, plus several GB/window of peak RSS, which also makes the admission model honest. Output-neutral; falsify by mzML diff + stage table. Medium risk (edge-identical partition logic duplicated).
+
+  **R4 — Parallelise the MS1_TRACE serial 64%** (partition :969-997, `toTrace` :1082-1085). ~3.5% wall, low risk, output-neutral. Falsify by phase table.
+
+  **R5 — Make admission self-calibrating.** Replace the fixed 10x (:2318-2321) with a multiplier re-fit from measured per-window RSS deltas (you already read `/proc` per phase, :106-111), and log per-window admit-wait to settle whether R1's 10.7% is tail or memory. No wall gain on this node; prevents OOM-serialization on shared ones. Low risk, output-neutral.
+
+  **R6 (last, and say it plainly) — the output-changing one.** `trace:native_ms2_neighbors` (:830) is diaTracer's pre-centroid frame summing, the actual 2-3x CPU lever; the tool-level version already lost 26% of peptides (:830 comment), so this needs the full benchmark gate, not a performance review's blessing. Combined ceiling for R0-R5: wall ~750-900 s, CPU ~45-55k s — still ~1.5x diaTracer. **Closing the remaining gap is an algorithm change, not an optimisation, and it will not pass a peptide-set-equality gate for free.** Anyone who tells you otherwise is selling a rewrite.
+

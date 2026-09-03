@@ -714,35 +714,47 @@ namespace
   }
 
   /// Build the per-window FragGrid from IM-sorted fragment traces.
-  FragGrid buildFragGrid(const vector<Trace>& frags)
+  /// Resample every fragment XIC onto one common RT grid, as CSR. Takes `frags` by reference and
+  /// CONSUMES each XIC as it is copied: the XIC vectors and the grid would otherwise be live at the
+  /// same time, and their coexistence is what sets the per-window memory peak.
+  FragGrid buildFragGrid(vector<Trace>& frags)
   {
     FragGrid g;
-    // union of all fragment RTs -> the common grid
-    for (const auto& f : frags) for (const auto& p : f.xic) g.rt.push_back(p.first);
-    sort(g.rt.begin(), g.rt.end());
-    g.rt.erase(unique(g.rt.begin(), g.rt.end()), g.rt.end());
+    // The grid is the set of DISTINCT fragment RTs, and there is one per frame in this window --
+    // roughly 1,400 values. Collecting all ~10^8 individual points and sorting them cost a ~700 MB
+    // temporary and an 10^8-element sort per window, to produce those 1,400 values. Grow a sorted
+    // vector by insertion instead: the same set exactly, no temporary, and no large sort.
+    for (const auto& f : frags)
+      for (const auto& p : f.xic)
+      {
+        auto it = lower_bound(g.rt.begin(), g.rt.end(), p.first);
+        if (it == g.rt.end() || *it != p.first) g.rt.insert(it, p.first);
+      }
     const double G = (double)g.rt.size();
     g.mean.resize(frags.size());
     g.invnorm.resize(frags.size());
-    g.off.resize(frags.size() + 1, 0);
-    size_t total = 0;
-    for (const auto& f : frags) total += f.xic.size();
-    g.flat.reserve(total);
-    for (size_t i = 0; i < frags.size(); ++i)
+    g.off.assign(frags.size() + 1, 0);
+    // Offsets first, so each fragment owns a disjoint span and the fill is parallel and
+    // deterministic (identical arithmetic per fragment, in the same order, whoever runs it).
+    for (size_t i = 0; i < frags.size(); ++i) g.off[i + 1] = g.off[i] + (uint64_t)frags[i].xic.size();
+    g.flat.resize((size_t)g.off[frags.size()]);
+    #pragma omp taskloop default(shared)
+    for (long ii = 0; ii < (long)frags.size(); ++ii)
     {
+      const size_t i = (size_t)ii;
       double sum = 0, sumsq = 0;
-      g.off[i] = (uint32_t)g.flat.size();
+      size_t w = (size_t)g.off[i];
       for (const auto& p : frags[i].xic)
       {
-        int gi = (int)(lower_bound(g.rt.begin(), g.rt.end(), p.first) - g.rt.begin());
-        g.flat.emplace_back(gi, (float)p.second);
+        const int gi = (int)(lower_bound(g.rt.begin(), g.rt.end(), p.first) - g.rt.begin());
+        g.flat[w++] = {gi, (float)p.second};
         sum += p.second; sumsq += p.second * p.second;
       }
       g.mean[i] = sum / G;
-      double var = sumsq - G * g.mean[i] * g.mean[i];
-      g.invnorm[i] = var > 0 ? 1.0 / sqrt(var) : 0.0; // 0 => constant/degenerate -> never correlates
+      const double var = sumsq - G * g.mean[i] * g.mean[i];
+      g.invnorm[i] = var > 0 ? 1.0 / sqrt(var) : 0.0;  // 0 => constant/degenerate -> never correlates
+      vector<pair<double, double>>().swap(frags[i].xic);   // consumed here, not after scoring
     }
-    g.off[frags.size()] = (uint32_t)g.flat.size();   // CSR sentinel
     return g;
   }
 }
@@ -1000,7 +1012,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       }
       map.clear(true);
       vector<vector<MassTrace>> per(bands);
-      #pragma omp parallel for schedule(dynamic) num_threads(bands)
+      #pragma omp taskloop grainsize(1) default(shared)
       for (int b = 0; b < bands; ++b)
       {
         MassTraceDetection m2; m2.setLogType(ProgressLogger::NONE); m2.setParameters(p);
@@ -1047,7 +1059,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       const int nchunk = std::max(1, bands * 4);      // 4x chunks vs threads -> dynamic load balance
       const size_t n_in = mts.size();
       vector<vector<MassTrace>> parts(nchunk);
-      #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+      #pragma omp taskloop grainsize(1) default(shared)
       for (int ci = 0; ci < nchunk; ++ci)
       {
         const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
@@ -1940,7 +1952,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     int ms1_bands = getIntOption_("perf:ms1_trace_bands");
     if (ms1_bands < 1) ms1_bands = 1;
     double _t_ms1 = phase_clock_(), _c_ms1 = cpu_seconds_();   // [perf-instr]
-    vector<Trace> ms1_traces = detectTraces_(ms1_map, delta_im, getDoubleOption_("trace:noise_threshold_int"),
+    // detectTraces_ distributes its bands as TASKS, which requires an enclosing parallel region;
+    // the window loop provides one, this phase must open its own. It also lets MS1 tracing use the
+    // whole machine instead of the band count (it was measured at only 5.0x on 12 bands).
+    vector<Trace> ms1_traces;
+    #pragma omp parallel
+    #pragma omp single
+    ms1_traces = detectTraces_(ms1_map, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_traces)));
     { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
@@ -2301,7 +2319,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // gave 24 windows x 9 bands = 216 threads on a 224-core box that another job was already
     // loading to ~173 -- measured: 11 of 24 windows in 98 min against a 40 min single-band
     // reference. Divide the thread budget between the two levels instead of multiplying it.
-    int n_conc = std::min<int>((int)window_list.size(), std::max(1, n_threads / n_bands));
+    // [master/worker] n_conc no longer partitions the thread pool -- tasks do that. It is now
+    // only the number of windows allowed IN FLIGHT, i.e. how many materialised windows may hold
+    // memory at once, and the free-RAM admission gate below is the real bound. Deriving it from
+    // threads/bands (the old 100/12 = 8) was what pinned the tool to a 96-thread grid.
+    int n_conc = (int)window_list.size();
     if (max_conc > 0) n_conc = std::min(n_conc, max_conc);
     if (n_conc < 1) n_conc = 1;
 #ifdef _OPENMP
@@ -2310,8 +2332,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 #endif
     writeLogInfo_("Parallelism: " + String(window_list.size()) + " windows x " + String(n_bands)
                   + " m/z bands = " + String((int)window_list.size() * n_bands) + " trace units; "
-                  + String(n_conc) + " windows x " + String(n_bands) + " bands = "
-                  + String(n_conc * n_bands) + " live threads of " + String(n_threads));
+                  + String(n_threads) + " worker threads over one task pool; up to "
+                  + String(n_conc) + " windows in flight (memory-bounded)");
     // [dyn-mem] Thread count is the UPPER bound; free RAM is the real one. A static cap either
     // wastes cores on a big machine or OOMs on a shared one, and this node is shared. Admit each
     // window only when its projected footprint fits in currently-free RAM, re-read from
@@ -2336,9 +2358,25 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // are atomic nanosecond accumulators -- one add per stage per window, so the measurement
     // cost is unmeasurable against stages that run for minutes.
     std::atomic<long long> t_mat{0}, t_trace{0}, t_grid{0}, t_score{0}, t_emit{0};
-    #pragma omp parallel for schedule(dynamic) num_threads(n_conc)
+    // [master/worker, 2026-09-03] The loop used to be `parallel for num_threads(n_conc)` with
+    // nested `parallel for num_threads(n_bands)` inside, i.e. a RIGID n_conc x n_bands grid
+    // (8 x 12 = 96 of 100 threads). Two costs followed from the rigidity: the grid never fills the
+    // last 4 threads, and when fewer windows remain than slots the survivors keep only their own
+    // 12-thread team while the rest of the machine idles -- measured 67.9x of 100 on S08, 71% of
+    // the grid's own ceiling. Here ONE thread (the master) walks the windows heaviest-first and
+    // throttles on memory, and every unit of work inside a window is an OpenMP TASK. Idle threads
+    // steal across window boundaries, so the tail of one window is filled by another's bands.
+    // Output is unaffected: every result is written to an index-addressed slot (win_out[wi],
+    // pslot[pi-plo], per[b]), never appended in completion order.
+    #pragma omp parallel num_threads(n_threads)
+    #pragma omp single
     for (long wi = 0; wi < (long)window_list.size(); ++wi)
     {
+      #pragma omp task default(shared) firstprivate(wi)
+      {
+      // A lambda, because `continue` is not a legal exit from a task's structured block and the
+      // window body has one early exit (a window whose fragments all fail the finiteness filter).
+      [&]() {
       try
       {
         const double win_lo = window_list[wi].first.first / 100.0;
@@ -2355,7 +2393,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             if (inflight.load() == 0 || inflight.load() + need <= budget) { inflight += need; go = true; }
           }
           if (go) break;
-          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          // The master is one of the workers: run queued tasks while waiting for memory rather
+          // than sleeping on a thread the pool could be using.
+          #pragma omp taskyield
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         struct Release { std::atomic<size_t>& c; size_t n; ~Release() { c -= n; } } rel{inflight, need};
         // [compact] materialise ONLY this window, and free its compact frames as we go
@@ -2413,7 +2454,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
           return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(t.rt);
         }), frag_traces.end());
-        if (frag_traces.empty()) continue;
+        if (frag_traces.empty()) return;   // nothing traceable in this window
 
         sort(frag_traces.begin(), frag_traces.end(), [](const Trace& a, const Trace& b) {
           if (a.im != b.im) return a.im < b.im;
@@ -2431,12 +2472,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         FragGrid fg = buildFragGrid(frag_traces);
         auto _t4 = std::chrono::steady_clock::now();
         t_grid += std::chrono::duration_cast<std::chrono::nanoseconds>(_t4 - _t3).count();
-        // MEMORY: the XICs are now resampled into fg; scoring below only reads the SCALAR fields
-        // (mz/rt/im/intensity) of each Trace. Releasing the per-trace xic vectors here is the single
-        // biggest per-window win: they would otherwise stay live through the whole scoring loop, and
-        // up to N windows do this concurrently (the threshold-dependent bulk of peak RSS). NOTE the
-        // traces themselves must NOT be freed -- mz/intensity are still needed. [mem]
-        for (auto& t : frag_traces) { vector<pair<double, double>>().swap(t.xic); }
+        // MEMORY: buildFragGrid consumed each XIC as it resampled it, so no fragment XIC is live
+        // from here on; scoring reads only the SCALAR fields (mz/rt/im/intensity) of each Trace.
+        // The traces themselves must NOT be freed -- mz/intensity are still needed. [mem]
         vector<float> pdense(fg.rt.size(), 0.0f);
 
         vector<MSSpectrum>& bucket = win_out[wi];
@@ -2517,13 +2555,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           // ElutionPeakDetection.cpp:328 (a bare parallel-for with no num_threads, reached from
           // inside this same loop, measured at 43.5% kernel time) -- reproduced here by omission.
           // Divide the budget instead of multiplying it.
-          int p_team = 1;
-#ifdef _OPENMP
-          p_team = std::max(1, omp_get_max_threads() / std::max(n_conc, 1));
-#endif
           auto _t5 = std::chrono::steady_clock::now();
           vector<MSSpectrum> pslot(phi > plo ? phi - plo : 0);
-          #pragma omp parallel for schedule(dynamic, 32) firstprivate(pdense) num_threads(p_team)
+          // grainsize, not num_threads: the pool decides how many threads land here, so a window
+          // that outlives its neighbours gets the whole machine instead of a fixed team of 12.
+          #pragma omp taskloop grainsize(32) firstprivate(pdense) default(shared)
           for (long pii = (long)plo; pii < (long)phi; ++pii)
           {
             const size_t pi = (size_t)pii;
@@ -2608,6 +2644,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         #pragma omp critical
         if (!worker_err) worker_err = std::current_exception();
       }
+      }();   // window body
+      }      // omp task
     }
     if (worker_err) std::rethrow_exception(worker_err);
 
