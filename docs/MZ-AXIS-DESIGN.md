@@ -26,37 +26,68 @@ every peak is converted back to a double, re-sorted, and matched by a parts-per-
 with a binary search per comparison -- on data that arrived as integers. That conversion is the
 boundary this design removes.
 
-## 2. Two candidate axes
+## 2. The axis is the flight-time index
 
-| axis | index | size | spacing | every real peak lands exactly on one? |
-|---|---|---|---|---|
-| **uniform** | `round(mz * 1e5)` | ~1.7e8 values over m/z 100-1700 | 1e-5 Da (0.007 ppm at 1400) | yes, by construction of the compact store |
-| **native TOF** | the instrument's flight-time bin | ~5e5 per frame | ~0.006 Da at m/z 600, widening with m/z | yes, for Bruker; recoverable as `round((sqrt(mz) - c0)/c1)` (already done in `MzPeakStreamLoad.h`, 2.5e-5 ppm against the vendor SDK) |
+**Decision (user, 2026-09-03): the native flight-time index, not a uniform m/z grid.** The tool only
+runs on ion-mobility TOF data, so the native axis is always available and there is no reason to
+approximate it. The earlier draft of this document chose a uniform 1e-5 Da grid to keep one code
+path for hypothetical non-TOF input; that was the wrong trade.
 
-The native TOF axis is the more interesting one: it is ~340x smaller, and two peaks of the same ion
-in different frames carry the SAME index, so "same ion" becomes integer equality rather than a
-tolerance. Its drawback is that it exists only for TOF data with a recoverable calibration, and the
-per-frame temperature correction means the index-to-m/z map is frame-dependent (the reason the exact
-calibration recovery mattered: the archive's two-point transform is ~7 ppm off and cost 12% of
-identifications).
+| | uniform m/z grid | **native flight-time bin** |
+|---|---|---|
+| index | `round(mz * 1e5)` | the instrument's TOF bin |
+| size | ~1.7e8 over m/z 100-1700 | **~5e5** |
+| lossless? | no -- a second discretisation on top of the instrument's own | **yes: the bin IS the measurement** |
+| same ion across frames | different m/z as the digitizer temperature drifts | **same bin** |
+| tolerance | a ppm window in a derived quantity | **a handful of integer bins** |
 
-**Decision: the working axis is the UNIFORM one, with the TOF axis as an input-side accelerator.**
-The uniform axis works for every input (including non-Bruker mzML), is already what the compact
-store holds, and is fine enough that quantisation cannot change a tolerance decision. The native TOF
-index is what the *loader* can exploit to avoid a double round-trip, not what the algorithm should
-depend on. This keeps one code path instead of two, which is the whole reason the compact store was
-chosen over per-vendor readers in the first place.
+Three reasons the native axis is better in kind, not merely smaller:
+
+1. **It is lossless.** No quantum has to be justified, because there is no quantisation. The
+   compact store's 1e-5 Da grid was a coarse approximation of a *derived* quantity.
+2. **The same ion gives the same bin in every frame.** A calibrated m/z wobbles with the digitizer
+   temperature -- that per-frame factor is exactly what `TdfMzCalibration::frameFactor` models, and
+   it is why recovering the exact calibration was worth 12% of identifications. In m/z space part
+   of the ppm tolerance is spent absorbing that drift. In bin space it is not spent at all.
+3. **An index of 5e5 is a usable subscript.** 1.7e8 is not.
+
+`spextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+`mzToTof(mz, b)`, plus `frameFactor(T1)`. So the axis is:
+
+```cpp
+using TofIdx = uint32_t;
+struct TofAxis {
+  spextract::TdfMzCalibration cal;
+  vector<double> b_by_frame;     // per vendor frame Id
+  double factor(size_t frame_id) const;
+  double mzOf(TofIdx tof, double b) const;      // report time only
+  TofIdx tofOf(double mz, double b) const;      // load time only
+  TofIdx span(TofIdx tof, double b, double ppm) const;   // tolerance in BINS, derived not assumed
+};
+```
+
+`span()` converts both ends of the tolerance through the calibration rather than assuming
+`m ~ tof^2`, so the quadratic term the model carries is respected.
+
+**The extraction never needs a calibrated m/z at all.** Grouping, gating and correlation all work on
+bins; the calibration is applied once per trace, at report time, with the apex frame's own factor --
+which is also the most accurate place to apply it.
+
+**Fail closed.** Without the vendor calibration there is no flight-time axis, and `trace:detector=
+integer` refuses to run rather than inventing one. Inventing one would silently reintroduce the
+approximation the detector exists to avoid.
+
+**The loader does not have to change.** The compact store's 1e-5 Da quantum is ~400x finer than one
+TOF bin at m/z 600, so inverting the calibration on a stored value recovers the original bin
+exactly. The conversion happens once, when a window's slab is built.
 
 ## 3. The data structures
 
 ```cpp
 /// The m/z axis is global, uniform and integer: index i means m/z = i / MZ_Q. Stored nowhere,
 /// because it is an affine function of the index -- unlike the RT axis, which has to be a table.
-using MzIdx = uint32_t;                       // m/z * 1e5, so <= 1.7e8 for m/z 1700
-inline double mzOf(MzIdx i) { return (double)i / MZ_Q; }
-inline MzIdx  idxOf(double mz) { return (MzIdx)llround(mz * MZ_Q); }
-/// A tolerance in ppm becomes a tolerance in index units, exactly:
-inline MzIdx  ppmSpan(MzIdx i, double ppm) { return (MzIdx)((double)i * ppm * 1e-6 + 0.5); }
+using TofIdx = uint32_t;                      // the instrument's flight-time bin
+// mzOf / tofOf / span live on TofAxis (section 2): they need the frame's calibration factor.
 ```
 
 A frame is what `CompactFrame` already is. A **peak** never becomes a `Peak1D` again:
@@ -66,7 +97,8 @@ A frame is what `CompactFrame` already is. A **peak** never becomes a `Peak1D` a
 struct PeakSlab
 {
   vector<uint32_t> frame_off;   ///< size F+1; frame f owns [frame_off[f], frame_off[f+1])
-  vector<MzIdx>    mz;          ///< ascending within each frame (the loader already sorts)
+  vector<TofIdx>   tof;         ///< flight-time bin, ascending within each frame
+  vector<double>   b;           ///< size F: the frame's calibration factor
   vector<float>    inten;
   vector<uint16_t> imq;         ///< the same uint16 mobility quantum as the compact store
   vector<uint32_t> rt_index;    ///< size F: each frame's index on the GLOBAL RT axis
@@ -82,7 +114,7 @@ A **trace** keeps the shape it has after the RT-axis change, with m/z now an ind
 ```cpp
 struct Trace
 {
-  MzIdx    mz;          ///< reported m/z as an index (apex peak's, per trace:mz_estimator)
+  double   mz;          ///< reported m/z: the apex BIN calibrated with the apex frame's factor
   uint32_t rt;          ///< apex frame, on the global RT axis
   uint16_t imq;
   float    intensity;

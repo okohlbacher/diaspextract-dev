@@ -420,24 +420,62 @@ namespace
   /// Cost: 10 B/peak (4+4+2) vs ~20 B/peak for Peak1D+FloatDataArray, plus no per-MSSpectrum overhead.
   constexpr double MZ_Q = 1e5;      ///< m/z quantum = 1e-5 Da
 
-  /// THE M/Z AXIS IS GLOBAL, UNIFORM AND INTEGER. A TOF instrument measures integer flight times,
-  /// so m/z is discrete at the source; the compact store has always held it that way (uint32 at
-  /// 1e-5 Da) and then thrown it away at materialisation, converting back to double so OpenMS
-  /// MassTraceDetection could match by a ppm tolerance with a binary search per comparison. These
-  /// primitives make the index the working representation. Unlike the RT axis, no table is needed:
-  /// the axis is an affine function of the index. See docs/MZ-AXIS-DESIGN.md.
-  using MzIdx = uint32_t;
-  inline double mzOf(MzIdx i) { return (double)i / MZ_Q; }
-  inline MzIdx  idxOf(double mz) { return (MzIdx)llround(mz * MZ_Q); }
-  /// A ppm tolerance in index units. Exact, because the axis is uniform: 20 ppm at m/z 600 is
-  /// 0.012 Da is 1,200 index units, and the comparison becomes an integer difference.
-  inline MzIdx  ppmSpan(MzIdx i, double ppm) { return (MzIdx)((double)i * ppm * 1e-6 + 0.5); }
+  /// THE M/Z AXIS IS THE INSTRUMENT'S FLIGHT-TIME INDEX. A timsTOF measures an integer TOF bin;
+  /// m/z is a calibrated function of it, not a measured quantity. The compact store had been
+  /// quantising the CALIBRATED m/z onto a uniform 1e-5 Da grid -- a second discretisation on top of
+  /// the instrument's own, and a coarse approximation of the wrong axis. This tool only runs on
+  /// ion-mobility TOF data, so the native axis is always available and there is no reason to
+  /// approximate it.
+  ///
+  /// Why the native axis is better than a uniform m/z grid, not merely smaller:
+  ///   * it is LOSSLESS -- the bin IS the measurement, so no quantum has to be justified;
+  ///   * ~5e5 bins instead of ~1.7e8 grid points, so a bin index is a usable array subscript;
+  ///   * the SAME ion gives the SAME bin in every frame, while its calibrated m/z wobbles with the
+  ///     digitizer temperature -- so grouping in TOF space does not have to spend part of its ppm
+  ///     tolerance absorbing calibration drift, which is exactly what the m/z-space tolerance does;
+  ///   * a tolerance in m/z ppm becomes a handful of integer bins (m ~ tof^2, so a relative m/z
+  ///     tolerance is about half of it in tof), which makes candidate lookup pure arithmetic.
+  ///
+  /// The per-frame factor `b` (from the digitizer temperature) is what turns a bin into an m/z, and
+  /// it is applied at REPORT time, where it belongs -- the extraction never needs a calibrated m/z.
+  using TofIdx = uint32_t;
+
+  /// The flight-time axis for one run: the calibration model plus each frame's temperature factor.
+  /// Fail-closed: without a calibration there is no TOF axis and the caller must not pretend there
+  /// is one.
+  struct TofAxis
+  {
+    spextract::TdfMzCalibration cal;
+    vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
+    bool ok = false;
+
+    double factor(size_t frame_id) const
+    { return frame_id < b_by_frame.size() ? b_by_frame[frame_id] : cal.frameFactor(cal.T1_ref); }
+    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
+    TofIdx tofOf(double mz, double b) const
+    {
+      const double t = cal.mzToTof(mz, b);
+      return t > 0.0 ? (TofIdx)llround(t) : 0u;
+    }
+    /// A relative m/z tolerance as a bin count, derived rather than assumed: convert both ends.
+    TofIdx span(TofIdx tof, double b, double ppm) const
+    {
+      const double mz = mzOf(tof, b);
+      if (!(mz > 0.0)) return 1u;
+      const double t2 = cal.mzToTof(mz * (1.0 + ppm * 1e-6), b);
+      const double d = fabs(t2 - (double)tof);
+      return (TofIdx)std::max(1.0, d + 0.5);
+    }
+  };
+
+  inline TofAxis& tofAxis() { static TofAxis a; return a; }
   constexpr double IM_LO = 0.4, IM_HI = 1.8;
   constexpr double IM_Q = 65535.0 / (IM_HI - IM_LO);
 
   struct CompactFrame
   {
     double rt = 0.0;
+    uint32_t frame_id = 0;   ///< vendor frame Id: the key the per-frame calibration factor is on
     vector<uint32_t> mzq;
     vector<float> inten;
     vector<uint16_t> imq;
@@ -517,11 +555,12 @@ namespace
   {
     vector<uint32_t> frame_off;    ///< size F+1: frame f owns [frame_off[f], frame_off[f+1])
     vector<uint32_t> rt_index;     ///< size F: the frame's index on the GLOBAL RT axis
-    vector<MzIdx>    mz;           ///< ascending within a frame (the loader sorts by m/z)
+    vector<TofIdx>   tof;          ///< flight-time bin, ascending within a frame
+    vector<double>   b;            ///< size F: the frame's calibration factor (bin -> m/z)
     vector<float>    inten;
     vector<uint16_t> imq;
     size_t frames() const { return rt_index.size(); }
-    size_t peaks()  const { return mz.size(); }
+    size_t peaks()  const { return tof.size(); }
   };
 
   /// Move a window's compact frames into a slab, consuming them as it goes (the compact store has
@@ -534,20 +573,28 @@ namespace
     sl.rt_index.resize(F);
     size_t total = 0;
     for (const auto& f : frames) total += f.mzq.size();
-    sl.mz.reserve(total); sl.inten.reserve(total); sl.imq.reserve(total);
+    sl.tof.reserve(total); sl.inten.reserve(total); sl.imq.reserve(total);
+    sl.b.resize(F);
+    const TofAxis& ax = tofAxis();
     for (size_t i = 0; i < F; ++i)
     {
       CompactFrame& f = frames[i];
       sl.rt_index[i] = rtIndex(f.rt);
-      sl.frame_off[i] = (uint32_t)sl.mz.size();
-      sl.mz.insert(sl.mz.end(), f.mzq.begin(), f.mzq.end());
+      // The compact store keeps m/z at a 1e-5 Da quantum, ~400x finer than one TOF bin at m/z 600,
+      // so inverting the calibration recovers the ORIGINAL bin exactly -- no approximation is
+      // introduced here, and the loader does not have to change.
+      const double b = ax.factor(f.frame_id);
+      sl.b[i] = b;
+      sl.frame_off[i] = (uint32_t)sl.tof.size();
+      for (size_t k = 0; k < f.mzq.size(); ++k)
+        sl.tof.push_back(ax.tofOf((double)f.mzq[k] / MZ_Q, b));
       sl.inten.insert(sl.inten.end(), f.inten.begin(), f.inten.end());
       sl.imq.insert(sl.imq.end(), f.imq.begin(), f.imq.end());
       vector<uint32_t>().swap(f.mzq);
       vector<float>().swap(f.inten);
       vector<uint16_t>().swap(f.imq);
     }
-    sl.frame_off[F] = (uint32_t)sl.mz.size();
+    sl.frame_off[F] = (uint32_t)sl.tof.size();
     return sl;
   }
 
@@ -576,13 +623,14 @@ namespace
     vector<Trace> out;
     if (sl.frames() == 0) return out;
     const uint16_t imq_tol = (uint16_t)std::max(1.0, im_tol * IM_Q);
+    const TofAxis& ax = tofAxis();
     // Bucket width: one shift for the whole window, wide enough that no live trace can reach past
-    // an adjacent bucket. The widest span is at the top of the window's m/z range.
-    MzIdx mz_max = 0;
-    for (MzIdx v : sl.mz) mz_max = std::max(mz_max, v);
-    const MzIdx worst = std::max<MzIdx>(ppmSpan(mz_max, mass_ppm), 1);
-    int shift = 0; while (((MzIdx)1 << shift) < worst && shift < 31) ++shift;
-    const MzIdx bucket_w = (MzIdx)1 << shift;
+    // an adjacent bucket. The tolerance in BINS is largest at the high-m/z end, so size it there.
+    TofIdx tof_max = 0;
+    for (TofIdx v : sl.tof) tof_max = std::max(tof_max, v);
+    const double b_ref = sl.b.empty() ? ax.factor(0) : sl.b[0];
+    const TofIdx worst = std::max<TofIdx>(ax.span(tof_max, b_ref, mass_ppm), 1);
+    int shift = 0; while (((TofIdx)1 << shift) < worst && shift < 31) ++shift;
 
     /// A trace under construction. Kept as a running sum so the centroid is the same
     /// intensity-weighted mean the OpenMS detector uses.
@@ -590,15 +638,16 @@ namespace
     {
       double mz_sum = 0, int_sum = 0;     ///< for the intensity-weighted centroid
       double im_sum = 0;
-      MzIdx  centroid = 0;                ///< current centroid, in index units
+      TofIdx centroid = 0;                ///< current centroid, in BINS
       uint32_t last_frame = 0;            ///< frame index of the most recent point
-      MzIdx  apex_mz = 0; float apex_int = 0; uint32_t apex_frame = 0;
+      TofIdx apex_tof = 0; float apex_int = 0; uint32_t apex_frame = 0;
+      double apex_b = 0.0;                ///< the apex frame's factor, for the reported m/z
       vector<uint32_t> xi; vector<float> xv;
     };
     vector<Live> live;
     vector<char> closed;                  ///< a retired trace stays in `live` until it is harvested
     // bucket -> indices into `live`, so a peak's candidates are three bucket lookups
-    std::unordered_map<MzIdx, vector<uint32_t>> by_bucket;
+    std::unordered_map<TofIdx, vector<uint32_t>> by_bucket;
     by_bucket.reserve(sl.peaks() / 8 + 16);
     // A trace not extended for this many frames is CLOSED and dropped from its buckets. Without
     // retirement the buckets accumulate every trace ever seen and the lookup degrades to a scan of
@@ -610,19 +659,20 @@ namespace
     for (size_t fi = 0; fi < sl.frames(); ++fi)
     {
       const uint32_t rti = sl.rt_index[fi];
+      const double bf = sl.b[fi];
       for (uint32_t k = sl.frame_off[fi]; k < sl.frame_off[fi + 1]; ++k)
       {
-        const MzIdx m = sl.mz[k];
+        const TofIdx m = sl.tof[k];
         const float  v = sl.inten[k];
         if (v <= (float)noise) continue;                   // membership threshold, as in the gate
         const uint16_t iq = sl.imq[k];
-        const MzIdx span = std::max<MzIdx>(ppmSpan(m, mass_ppm), 1);
+        const TofIdx span = ax.span(m, bf, mass_ppm);
         // find the closest compatible live trace among three buckets
-        long best = -1; MzIdx best_d = span + 1;
-        const MzIdx b0 = m >> shift;
+        long best = -1; TofIdx best_d = span + 1;
+        const TofIdx b0 = m >> shift;
         for (int db = -1; db <= 1; ++db)
         {
-          const MzIdx bb = (MzIdx)((long long)b0 + db);
+          const TofIdx bb = (TofIdx)((long long)b0 + db);
           auto it = by_bucket.find(bb);
           if (it == by_bucket.end()) continue;
           vector<uint32_t>& v = it->second;
@@ -635,7 +685,7 @@ namespace
             if (rti > L.last_frame + max_gap) { closed[li] = 1; continue; }   // retire, drop
             v[w++] = li;                                   // keep
             if (L.last_frame == rti) continue;             // one point per trace per frame
-            const MzIdx d = L.centroid > m ? L.centroid - m : m - L.centroid;
+            const TofIdx d = L.centroid > m ? L.centroid - m : m - L.centroid;
             if (d > span) continue;
             const double lim = L.im_sum / std::max(L.int_sum, 1e-12);
             if (fabs(lim - (double)iq) > (double)imq_tol) continue;
@@ -648,7 +698,7 @@ namespace
           Live L;
           L.mz_sum = (double)m * v; L.int_sum = v; L.im_sum = (double)iq * v;
           L.centroid = m; L.last_frame = rti;
-          L.apex_mz = m; L.apex_int = v; L.apex_frame = rti;
+          L.apex_tof = m; L.apex_int = v; L.apex_frame = rti; L.apex_b = bf;
           L.xi.push_back(rti); L.xv.push_back(v);
           live.push_back(std::move(L));
           closed.push_back(0);
@@ -656,13 +706,13 @@ namespace
           continue;
         }
         Live& L = live[(size_t)best];
-        const MzIdx old_bucket = L.centroid >> shift;
+        const TofIdx old_bucket = L.centroid >> shift;
         L.mz_sum += (double)m * v; L.int_sum += v; L.im_sum += (double)iq * v;
-        L.centroid = (MzIdx)llround(L.mz_sum / L.int_sum);
+        L.centroid = (TofIdx)llround(L.mz_sum / L.int_sum);
         L.last_frame = rti;
-        if (v > L.apex_int) { L.apex_int = v; L.apex_mz = m; L.apex_frame = rti; }
+        if (v > L.apex_int) { L.apex_int = v; L.apex_tof = m; L.apex_frame = rti; L.apex_b = bf; }
         L.xi.push_back(rti); L.xv.push_back(v);
-        const MzIdx nb = L.centroid >> shift;
+        const TofIdx nb = L.centroid >> shift;
         if (nb != old_bucket) by_bucket[nb].push_back((uint32_t)best);   // drifted into a neighbour
       }
     }
@@ -675,7 +725,10 @@ namespace
       const double len = rtAxis()[L.xi.back()] - rtAxis()[L.xi.front()];
       if (min_len_sec > 0.0 && len < min_len_sec) continue;
       Trace t;
-      t.mz = (mz_est == "apex") ? mzOf(L.apex_mz) : L.mz_sum / L.int_sum / MZ_Q;
+      // The extraction never needed a calibrated m/z; it is applied HERE, once per trace, with
+      // the apex frame's own temperature factor -- which is also the most accurate place for it.
+      t.mz = (mz_est == "apex") ? ax.mzOf(L.apex_tof, L.apex_b)
+                                : ax.mzOf((TofIdx)llround(L.mz_sum / L.int_sum), L.apex_b);
       t.rt = rtAxis()[L.apex_frame];
       t.im = IM_LO + (L.im_sum / L.int_sum) / IM_Q;
       t.intensity = L.apex_int;
@@ -2612,6 +2665,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // /proc/meminfo at each admission so the run yields to other jobs instead of fighting them.
     // Always admit when nothing is in flight, so the loop cannot deadlock on a single huge window.
     const bool integer_detector = (getStringOption_("trace:detector") == "integer");
+    if (integer_detector && !tofAxis().ok)
+    {
+      // Fail closed. Without the vendor calibration there is no flight-time axis, and inventing one
+      // would silently reintroduce the coarse m/z approximation this detector exists to avoid.
+      writeLogError_("Error: trace:detector=integer needs the vendor flight-time calibration "
+                     "(MzCalibration + Frames.T1 from analysis.tdf); it was not available for this "
+                     "input. Use trace:detector=openms, or supply a .d / an mzPeak archive with its tdf.");
+      return INCOMPATIBLE_INPUT_DATA;
+    }
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
     std::atomic<size_t> inflight{0};
     // Projected footprint per window, from its own compact size. RE-CALIBRATED 2026-09-03: the
@@ -2724,7 +2786,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           frag_traces = detectTracesInteger_(wslab, mass_ppm, delta_im, ms2_noise, ms2_snr,
                                              ms2_minlen, mzEstimator());
           PeakSlab().frame_off.swap(wslab.frame_off);   // consumed
-          vector<MzIdx>().swap(wslab.mz); vector<float>().swap(wslab.inten);
+          vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
+          vector<double>().swap(wslab.b);
           vector<uint16_t>().swap(wslab.imq);
         }
         else
