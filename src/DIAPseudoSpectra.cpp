@@ -154,6 +154,7 @@ namespace
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
   bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
   int backfill_raw_ = std::getenv("SPEXTRACT_BACKFILL_RAW") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_RAW")) : 0;   ///< [content 3] raw apex-frame peaks added per spectrum
+  int backfill_maxfrags_ = std::getenv("SPEXTRACT_BACKFILL_MAXFRAGS") ? std::atoi(std::getenv("SPEXTRACT_BACKFILL_MAXFRAGS")) : 0;   ///< [content 3] only spectra with <= K fragments
 
   static std::string rss_()
   {
@@ -2474,7 +2475,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             // matched ions that never become a trace (coverage arms falsified). Add the N most intense raw
             // picked peaks of the frame nearest the precursor's RT, inside its IM band, that are not already
             // in the spectrum (10 ppm) -- the peak-level content diaTracer's ~500-peak spectra carry.
-            if (backfill_raw_ > 0 && !ms2.empty() && !wraw.empty())
+            // SPEXTRACT_BACKFILL_MAXFRAGS=K restricts the backfill to spectra with <= K assembled fragments (the faint tail)
+            if (backfill_raw_ > 0 && !ms2.empty() && !wraw.empty() && (backfill_maxfrags_ <= 0 || (int)ms2.size() <= backfill_maxfrags_))
             {
               size_t si = (size_t)(lower_bound(wrt.begin(), wrt.end(), pc.rt) - wrt.begin());
               if (si == wrt.size() || (si > 0 && pc.rt - wrt[si - 1] < wrt[si] - pc.rt)) --si;

@@ -615,3 +615,19 @@ drops a hypothesised precursor at assembly is `assembly:min_fragments` (a spectr
 not emitted). Arm: min_fragments 2 (the default is already 3), both engines. Prediction: the dt-only "we have SOME PSM"
 fraction rises from 64% and MSFragger gains if those spectra are identifiable; falsifier: the added spectra are
 unidentifiable noise (Sage/MSFragger flat or down, emission up). Runs after the backfill rerun (`bench_minfrag.sh`).
+
+### CONTENT CANDIDATE 3 CONFIRMED (2026-09-03, 05:39): raw apex-frame peak backfill lifts MSFragger to 90% -- at a Sage cost
+| S30 arm | Sage @1% (vs apex 12,537) | MSFragger @1% (vs apex 11,927) | ratio vs dt | shared with dt / dt-only | dt-only matched-ion deficit |
+|---|---|---|---|---|---|
+| apex | 12,537 | 11,927 | 85.6% | 11,037 / 3,937 | +2 |
+| **backfill N=50** | 12,208 (−2.6%; 1,215 / 886) | **12,539 (+5.1%)** | **90.0%** | **12,188 / 2,786** | +3 (on the smaller remaining set) |
+| backfill N=150 | 11,190 (−10.7%) | 12,042 (+1.0%) | 86.4% | 11,437 / 3,537 | +2 |
+The untraced peaks of the precursor's apex frame ARE the missing content: adding the 50 most intense of them inside the
+IM band converts 1,151 diaTracer-only peptides into shared ones and moves the MSFragger ratio from 85.6% to 90.0% --
+the first lever that moves it since the calibration fix. It costs Sage 2.6% (the added peaks are noise for the
+spectra that were already rich: Sage's scoring is hurt by them, MSFragger's top-150 cap is not); N=150 is too much
+for both. Not a default as measured -- the engines disagree. **Pre-registered next arm:** backfill only the faint
+tail: `SPEXTRACT_BACKFILL_RAW=50` + `SPEXTRACT_BACKFILL_MAXFRAGS=K` (apply only to spectra with <= K assembled
+fragments; K = 30 and 60). Prediction: MSFragger keeps most of +5% while Sage returns to ~12,500; falsifier: Sage still
+drops -> the noise cost is in the faint spectra themselves, and the selection must be per-peak (IM/RT co-elution of the
+raw peak, i.e. MS2 aggregation across neighbouring frames, C6).
