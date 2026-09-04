@@ -1,9 +1,0 @@
-=== SAGE (nominal 1% peptide_q) ===
-  ours-best(imw005)=10394  baseline-gate=9989  diaTracer=11517
-=== ENTRAPMENT FDR (Sage) ===
-  entrap baseline  target=9304 entrap=222 frac=2.33%
-  entrap imw005    target=9798 entrap=227 frac=2.26%
-=== MSFragger (target-decoy 1% peptide FDR) ===
-  MSFragger imw005      MSFragger dt        baseline : 13932 target peptides @1% FDR   (distinct pep+mod keys: 407432)   proteins-sample: sp|O00515|LAD1_HUMAN Ladinin-1 OS=Homo sapiens OX=9606 GN=LA
-  (baseline-gate MSFragger = 11,033 from msf_gate)
-FULL_DONE

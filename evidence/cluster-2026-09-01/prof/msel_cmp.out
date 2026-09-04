@@ -1,9 +1,0 @@
-[msel] mono_averagine_guard=0 ...
-  emission: Wrote 924716
-  closed Sage: 11458   (control 10,802)
-
-msel: 160546 PSMs @1%FDR | unmod 26.4% | isotope-shift 15.24% | modified 73.6%
-  top delta-mass bins (Da: count): +1:21591, +16:4046, +2:3879, +43:3025, +17:2693, +0:2528, -1:2314, -4:2199, +12:1588, -5:1558, +14:1497, -3:1448
-arm             target entrap   raw%   FDR%       FDR 95% CI
-open_msel         8916     81  0.90%  1.33%   1.05-1.65%
-MSEL_DONE

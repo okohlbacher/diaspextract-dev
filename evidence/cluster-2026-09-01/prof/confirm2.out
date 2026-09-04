@@ -1,9 +1,0 @@
-=== ENTRAPMENT FDR (target peptides + raw entrap fraction @ nominal 1%) ===
-  baseline  target=9304  entrap=222  raw_entrap_frac=2.33%
-  imw005    target=9798  entrap=227  raw_entrap_frac=2.26%
-=== MSFragger on imw005 (baseline MSFragger was 11,138) ===
-  ...20000000 lines, 4444423 cvParams fixed
-  ...40000000 lines, 8888866 cvParams fixed
-done: 42515853 lines, 9242553 valueless cvParams patched -> /scratch/kohlbach/prof/msf_imw005/fixed.mzML
-baseline : 11060 target peptides @1% FDR   (distinct pep+mod keys: 310158)   proteins-sample: rev_sp|Q9Y5K3|PCY1B_HUMAN decoy
-CONFIRM2_DONE

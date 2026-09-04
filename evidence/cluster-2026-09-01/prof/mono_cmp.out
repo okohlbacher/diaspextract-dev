@@ -1,9 +1,0 @@
-[g05] mono_averagine_guard=0.5 ...
-  emission: Wrote 1005353
-  closed Sage: 11697   (control 10,802)
-
-g05: 183415 PSMs @1%FDR | unmod 24.3% | isotope-shift 16.43% | modified 75.7%
-  top delta-mass bins (Da: count): +1:23994, +2:5940, +16:4295, +43:3122, +17:3023, -1:2734, +0:2447, -2:2070, +12:1862, +18:1812, -3:1797, -18:1726
-arm             target entrap   raw%   FDR%       FDR 95% CI
-open_g05          8939     78  0.87%  1.28%   1.02-1.58%
-[g10] mono_averagine_guard=1.0 ...
