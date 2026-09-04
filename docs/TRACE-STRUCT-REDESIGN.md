@@ -113,3 +113,105 @@ IDENTICAL before and after (this is pure representation; any difference is a bug
 `traces` ledger line must fall from 35.6 GB to under 12 GB. A digest match with no memory drop
 means the arithmetic in section 3 is wrong; a memory drop with a digest change means a consumer
 was not as zero-tolerant as section 4 claims.
+
+---
+
+# Revision 2 (2026-09-04) — after adversarial review
+
+Reviewed by codex and vibe (kimi was silent on the first pass and is being retried); full texts in
+`docs/reviews/trace-struct-2026-09-04/`. Both reviewers reached the same verdict independently:
+**the representation is viable and most of the memory win is real, but the design as written is
+NOT pure representation.** Sections 2-5 above are corrected as follows.
+
+## R1. The zero sentinel is a PRESENCE mask, and every consumer must honour it
+
+The claim "every consumer already skips zeros" was false. A zero entry is semantically visible in:
+`overlap` (counts every stored fragment point whose precursor slot is non-zero -- a padding zero
+at such a slot would be counted), `touched` (pushes a slot whenever the precursor value was zero
+before adding, so a zero point still pushes), `atrousLevels` (the median inter-point gap collapses
+to the frame interval), both FWHM routines (a padding zero becomes an artificial half-max
+crossing), the wavelet smoother (runs over the packed observed sequence and needs uniform sampling
+of REAL points), `xicCorr` (intersects real points), and ElutionPeakDetection (must be handed real
+points only: it derives scan time and smooths over the sequence it is given).
+
+The zero sentinel is valid as presence because every observed intensity is strictly greater than
+`noise_threshold_int >= 0`. **The rule is: no consumer walks the span; every consumer walks the REAL
+points in chronological order, skipping zeros.** With that rule the floating-point sums are visited
+in the same order as today, which is what makes bit-identity achievable (codex §7).
+
+`npts` (real point count, `uint16`) is stored next to `len`, because the `< 5` / `< 3` tests and
+`G` need it and scanning for it would be an O(len) hidden cost.
+
+## R2. `G` and the MS1-to-MS2 alignment survive as small tables, not as the frame sequence
+
+"The grid IS the window's frame sequence" was the riskiest line (codex). Two things must stay:
+
+* **`G` = the number of DISTINCT frames that carry at least one real fragment point**, not the
+  window's frame count. It is the Pearson denominator and changing it changes every correlation.
+  Kept as a bitmask over the window's frames (~1,400 bits) plus its popcount.
+* **The precursor-to-fragment nearest-frame table** stays, computed per window from the two RT
+  tables: `nearest_frag_local[ms1_local]`, ties to the LATER fragment frame, exactly as today's
+  `nearest_slot`. An MS1-local index and a window-local index with the same value are different
+  times; the mapping goes through `rt_index[]` on both sides.
+
+`FragGrid.flat` and `FragGrid.off` are deleted (the arena and `(off, len)` replace them);
+`mean`/`invnorm` per fragment stay, computed once over real points.
+
+## R3. Traces carry a frame-table CONTEXT, and some scalars are not derivable
+
+* A bare `Trace` cannot say whether `frame0` indexes the MS1 map or a window. Accessors take an
+  explicit `const FrameTable&` (`rt_index` + `b`); there are two tables per window in flight, the
+  MS1 map's and the window's. No type split -- one struct, an explicit argument.
+* The OpenMS detector's `mz` under the `median`/`mean` estimators is a function of per-point m/z
+  the redesign does not keep, and its `rt` is the CENTROID RT, not the apex RT. Neither is
+  derivable. **Step 1 keeps `mz`, `rt`, `im` as stored doubles** (24 B/trace). The points are the
+  bulk; the scalars can be revisited once the point encoding has landed and been gated.
+* A split child's exported m/z today comes from the child's own measured apex peak. With a single
+  per-trace bin the child would inherit the parent's, which codex lists as an output change. Step 1
+  therefore keeps a per-frame bin array in a SECOND arena (`uint32`, 4 B per spanned frame) whose
+  lifetime ends when valley splitting has assigned each child its apex bin. It exists only between
+  detection and splitting.
+
+## R4. Arena sequencing (codex §4, adopted verbatim as the implementation order)
+
+1. each band task appends to a PRIVATE arena; its `off` values are band-local;
+2. the detection taskloop joins (the existing taskloop has the implicit taskgroup barrier);
+3. prefix-sum the band arena sizes; allocate the window arena once; move each band arena into
+   its range and add its base to every `off`; concatenate records in band order;
+4. chunked EPD tasks run against the now IMMUTABLE arena; each child stores absolute offsets;
+5. EPD joins; concatenate children; canonical sort of the records (safe: offsets are absolute);
+6. build the used-frame mask, `G`, `mean`/`invnorm`, and the SoA gate arrays;
+7. scorer tasks start only now; the arena and BOTH frame tables (`rt_index`, `b`) live until the
+   scoring taskgroup joins. **Today `wslab.b` is freed before scoring** (~line 3202); that is a bug
+   under the new accessors and is fixed as part of the change.
+8. `assert(arena.size() < 2^32)` before any `off` is written; `assert(len < 65536)`.
+
+## R5. Corrected arithmetic and bound
+
+`sizeof` of the record is 20 B with natural alignment, not 18. The padding factor is bounded by
+`1/min_sample_rate`, not 2: the sample-rate test is against frames visited minus trailing misses,
+which is at least the span, so `span <= floor(npts / r)`. At the default `r = 0.5` the worst case
+is 2x; at `r = 0.3` it is 3.3x; at `r = 0` there is no bound and the span can be the whole window.
+Realistic estimate at 10.7 real points and ~75% occupancy: 20 + 4 x 14.3 = 77 B/trace against
+248 B/trace tracked today (the 35.6 GB ledger excludes malloc headers), i.e. **35.6 GB -> ~11 GB
+typical, ~15 GB at the r = 0.5 worst case.** The "~9 GB" above was unsupported.
+
+## R6. What is deleted, and what is deliberately kept
+
+Deleted: `xi`, `xt` (the persistent one), the three per-trace vectors and their three mallocs,
+`FragGrid.flat`/`off`/`slot_of_frame`. Kept, with the reviewers' reasons: `off` (a prefix sum only
+works if records are never re-sorted, and they are); `apex` (2 B against a 10-20 float scan at
+every sort/gate/emit); `imq` for MS2 (already the compact form of a quantity that is needed);
+`len` (dropping it needs an offsets array and costs random access).
+
+## R7. The falsifier, staged
+
+The spectrum-list SHA-256 of the integer path on S30 must be identical before and after -- this IS
+a pure representation change once R1-R3 hold, and codex confirms the arena concatenation does not
+by itself alter floating-point order. Because the existing `[det]` trace digest hashes only
+`mz`/`rt`/`intensity` and is order-insensitive, three staged checks precede it so a mismatch can be
+localised rather than debugged from the output: (1) exact trace count and the exact ordered
+`(local frame, intensity bits)` tuples before valley splitting; (2) exact child boundaries and
+scalar bits after it; (3) exact used-frame mask, `G`, `mean` and `invnorm`. A digest match with no
+drop in the `traces` ledger line means R5's arithmetic is wrong; a memory drop with a digest change
+means a consumer still walks the span.
