@@ -301,6 +301,10 @@ namespace
         throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
       inten.insert(inten.end(), other.inten.begin(), other.inten.end());
       if (!other.bins.empty()) { bins.resize(base, 0u); bins.insert(bins.end(), other.bins.begin(), other.bins.end()); }
+      // Once ANY source has contributed bins, keep bins index-parallel to inten: a later binless
+      // source would otherwise leave bins short, and a bins[t.off + k] read would run off the end.
+      // No current caller mixes the two, which is exactly why this is worth pinning down here.
+      else if (!bins.empty()) bins.resize(inten.size(), 0u);
       vector<float>().swap(other.inten); vector<uint32_t>().swap(other.bins);
       return (uint32_t)base;
     }
@@ -752,12 +756,12 @@ namespace
   /// bytes per structure, which is what this records. One atomic add per structure (never per
   /// element), so the measurement cost is unmeasurable against stages that run for minutes.
   /// Enabled with SPEXTRACT_MEM_LEDGER=1.
-  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_LIST, MEM_EPD_MT,
+  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_MT,
                 MEM_GRID, MEM_PDENSE, MEM_SPECTRA, MEM_WMAP, MEM_N };
   inline const char* memName(int c)
   {
     static const char* n[MEM_N] = {"slab (peaks)", "prep (frame_live/order)", "visited flags",
-                                   "traces (spans)", "EPD MassTrace (input)", "EPD MassTrace (split)",
+                                   "traces (spans)", "EPD MassTrace (parent+children, streamed)",
                                    "FragGrid", "pdense scratch", "emitted spectra", "PeakMap (openms path)"};
     return n[c];
   }
@@ -1081,24 +1085,6 @@ namespace
     return out;
   }
 
-  /// ElutionPeakDetection on a trace list -- the identical step the OpenMS path runs inside
-  /// detectTraces_ (same parameters), lifted out so the integer detector's output goes through it
-  /// too. The review of the first integer version found this step silently skipped.
-  vector<MassTrace> splitValleys(vector<MassTrace>& in, double split_valleys)
-  {
-    if (split_valleys <= 0.0 || in.empty()) return std::move(in);
-    ElutionPeakDetection epd;
-    epd.setLogType(ProgressLogger::NONE);
-    Param ep = epd.getParameters();
-    ep.setValue("chrom_fwhm", split_valleys);
-    ep.setValue("width_filtering", "off");
-    ep.setValue("masstrace_snr_filtering", "false");
-    epd.setParameters(ep);
-    vector<MassTrace> out; out.reserve(in.size());
-    epd.detectPeaks(in, out);
-    return out;
-  }
-
   /// Integer traces -> MassTrace objects for EPD -> Trace again, with the flight-time bin
   /// re-attached from the apex frame's calibration. Only the TRACES become OpenMS objects -- the
   /// peak arrays never do, which is the point of the integer path.
@@ -1125,17 +1111,35 @@ namespace
       const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
       TraceStore& cst = stores[ci];
       cst.setFrames(wst.rt_index, &wst.b);
-      vector<MassTrace> mts; mts.reserve(hi - lo);
-      long long mt_in_bytes = 0;                            // the real payload: vector<Peak2D> + object
+      // STREAMED: one MassTrace in flight, not the chunk's worth. The two-phase version built every
+      // input trace of the chunk as a MassTrace and kept them all alive across the split, so the
+      // input payload and the whole split output coexisted -- the two largest ledger lines after the
+      // slab. Per-trace is exactly equivalent: with width_filtering=off and masstrace_snr_filtering
+      // =false the cross-trace routines are unreachable, and the lock-free patch's nested path is
+      // itself `for (i..) detectElutionPeaks_(mt_vec[i], out)` appending in the same order.
+      //
+      // epd is hoisted to chunk scope deliberately. splitValleys constructed one and did
+      // getParameters/setValue x4/setParameters on EVERY call; moving that inside a per-trace loop
+      // would be ~4e4 Param round-trips per chunk and would trade the memory win for a slowdown.
+      ElutionPeakDetection epd;
+      epd.setLogType(ProgressLogger::NONE);
+      {
+        Param ep = epd.getParameters();
+        ep.setValue("chrom_fwhm", split_valleys);
+        ep.setValue("width_filtering", "off");
+        ep.setValue("masstrace_snr_filtering", "false");
+        epd.setParameters(ep);
+      }
+      vector<Trace>& out = parts[ci];
+      out.reserve(hi - lo);   // ponytail: parents, not children -- a heavily split chunk regrows it.
+                              // Measured no regression (S30 got faster and lighter); revisit only if it shows up.
+      vector<Peak2D> pk;                                      // reused: a vector, not a per-point list
+      vector<MassTrace> split;                                // reused: detectPeaks clears it itself
       for (size_t q = lo; q < hi; ++q)
       {
         const Trace& t = in[q];
-        // (the std::list is per trace and dies each iteration -- the first ledger charged a
-        //  chunk-wide list that never existed, a 6 GB phantom; the MassTrace's own vector<Peak2D>
-        //  is what lives for the whole chunk)
-        mt_in_bytes += (long long)t.np() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
-        std::list<Peak2D> pk;                                  // REAL points only: EPD smooths what it is given
-        for (size_t k = 0; k < t.span(); ++k)
+        pk.clear();
+        for (size_t k = 0; k < t.span(); ++k)                 // REAL points only: EPD smooths what it is given
         {
           if (!t.real(k)) continue;
           Peak2D pt; pt.setRT(t.rtAtSpan(k)); pt.setIntensity(t.xv(k));
@@ -1145,39 +1149,46 @@ namespace
         }
         MassTrace mt(pk);
         mt.setCentroidIM(t.im);
-        mts.push_back(std::move(mt));
-      }
-      MemGuard g_in(MEM_EPD_LIST, mt_in_bytes);               // input MassTraces, alive across the split
-      vector<MassTrace> split = splitValleys(mts, split_valleys);
-      long long mt_out_bytes = 0;
-      for (const auto& m : split) mt_out_bytes += (long long)m.getSize() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
-      MemGuard g_out(MEM_EPD_MT, mt_out_bytes);               // split MassTraces, coexisting with the input
-      vector<Trace>& out = parts[ci];
-      out.reserve(split.size());
-      // Each child carries its own measured m/z: the parent's per-frame bin was written into
-      // every Peak2D above, so the child's APEX PEAK m/z is that bin's m/z and the bin comes back
-      // by inverting the calibration -- which is what the pre-span code did.
-      //
-      // The first version of this walked the parent list to look the bin up by frame. That was
-      // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
-      // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
-      // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
-      // which is what localised it here. [2026-09-04]
-      for (const MassTrace& mt : split)
-      {
-        Trace c = toTrace(mt, cst);
-        if (c.np() == 0) continue;
-        const uint32_t cf = c.frame0 + c.apex;                 // apex frame, window-local
-        c.b = wst.b.empty() ? ax.factor(0) : wst.b[cf];
-        const double amz = mt.getSize() ? mt[mt.findMaxByIntPeak(false)].getMZ() : c.mz;
-        c.tof = ax.ok ? ax.tofOf(amz, c.b) : 0u;
-        out.push_back(std::move(c));
+        epd.detectPeaks(mt, split);
+        long long live = (long long)t.np() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
+        for (const auto& m : split) live += (long long)m.getSize() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
+        // Charged for the life of THIS iteration, while mt, pk and split are all still alive. The
+        // first version constructed the guard after the loop, when the payload it named was already
+        // destroyed, so it measured nothing. It still undercounts: pk is copied into mt, and the
+        // smoother's own temporaries are inside OpenMS and invisible here.
+        MemGuard g_mt(MEM_EPD_MT, live);
+        // Each child carries its own measured m/z: the parent's per-frame bin was written into
+        // every Peak2D above, so the child's APEX PEAK m/z is that bin's m/z and the bin comes back
+        // by inverting the calibration -- which is what the pre-span code did.
+        //
+        // The first version of this walked the parent list to look the bin up by frame. That was
+        // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
+        // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
+        // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
+        // which is what localised it here. [2026-09-04]
+        for (const MassTrace& cm : split)
+        {
+          Trace c = toTrace(cm, cst);
+          if (c.np() == 0) continue;
+          const uint32_t cf = c.frame0 + c.apex;               // apex frame, window-local
+          c.b = wst.b.empty() ? ax.factor(0) : wst.b[cf];
+          const double amz = cm.getSize() ? cm[cm.findMaxByIntPeak(false)].getMZ() : c.mz;
+          c.tof = ax.ok ? ax.tofOf(amz, c.b) : 0u;
+          out.push_back(std::move(c));
+        }
       }
     }
     // the parents' spans are dead: rebuild the window arena from the chunk arenas
     vector<Trace>().swap(in);
     vector<float>().swap(wst.inten); vector<uint32_t>().swap(wst.bins);
-    size_t tot = 0; for (const auto& v : parts) tot += v.size();
+    size_t tot = 0, arena = 0; bool any_bins = false;
+    for (int ci = 0; ci < nchunk; ++ci)
+    { tot += parts[ci].size(); arena += stores[ci].inten.size(); any_bins |= !stores[ci].bins.empty(); }
+    // absorb() appends without reserving and the window arena was just swapped empty, so without
+    // this the 48 chunk appends regrow it geometrically. Note this trades regrowth for allocating
+    // the whole destination while every source is still live: it removes the copies, but whether
+    // it lowers the PEAK is a measurement, not a deduction.
+    wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);
     vector<Trace> out; out.reserve(tot);
     for (int ci = 0; ci < nchunk; ++ci)
     {
@@ -2222,12 +2233,61 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     return removed;
   }
 
+  /// The fragment RT gate field. 99.4% of scoring visits die on |rt - pc.rt| > delta_rt, and
+  /// reading an 8-byte double to reject each one is the last large bandwidth term in the scorer:
+  /// 867e9 visits x 8 B = 6.9 TB per S30 run, against a measured ~150-226 GB/s. `q` is the same RT
+  /// quantised into buckets NEVER NARROWER than delta_rt, so two RTs within delta_rt of each other
+  /// can never be more than one bucket apart; the reject then reads 2 bytes instead of 8 and the
+  /// exact double test runs only on what survives it. Identical candidates in identical order --
+  /// the exact test is the original one, unmoved, and the quantised test only precedes it. [soa2]
+  ///
+  /// The reject admits +/-2 buckets where +/-1 is provably enough in exact arithmetic. The extra
+  /// bucket is insurance against a floor() landing on the far side of a boundary through rounding,
+  /// which would silently DROP a candidate; it costs a pass rate of ~0.9% instead of ~0.6%.
+  struct FragRt
+  {
+    vector<double> rt;
+    vector<uint16_t> q;
+    double rt0 = 0.0, inv = 0.0;
+    double operator[](size_t i) const { return rt[i]; }
+    /// Signed at the low end and clamped at both: a precursor may sit outside the window's
+    /// fragment RT range. The test is written `!(x > 0.0)` rather than `x <= 0.0` so that a NaN
+    /// coordinate lands in bucket 0 instead of reaching (int)NaN, which is undefined behaviour.
+    int bucketOf(double v) const
+    { const double x = (v - rt0) * inv; return !(x > 0.0) ? 0 : (x >= 65535.0 ? 65535 : (int)x); }
+    /// inv == 0 is the DISABLED state, not an error: every bucket is then 0, every dq is 0, and
+    /// the exact test alone decides. That is the fallback for every degenerate parameter below,
+    /// and it costs no branch in the scan.
+    void build(const vector<Trace>& fr, double delta_rt)
+    {
+      const size_t n = fr.size();
+      rt.resize(n); q.assign(n, 0);
+      rt0 = 0.0; inv = 0.0;
+      double lo = 0.0, hi = 0.0;
+      for (size_t i = 0; i < n; ++i) { rt[i] = fr[i].rt; if (!i || rt[i] < lo) lo = rt[i]; if (!i || rt[i] > hi) hi = rt[i]; }
+      // A denormal delta_rt makes 1/delta_rt infinite, and an RT range spanning +/-DBL_MAX makes
+      // the span infinite; both then produce inf*0 = NaN inside bucketOf. Neither survives real
+      // acquisition, but both are reachable and both were UB, so every one degrades to disabled.
+      if (!(delta_rt > 0.0) || !std::isfinite(delta_rt)) return;
+      if (!std::isfinite(lo) || !std::isfinite(hi)) return;
+      const double span = hi - lo;
+      if (!std::isfinite(span)) return;
+      double iv = 1.0 / delta_rt;
+      // Buckets are delta_rt wide, but widened if the window's RT span would overflow uint16.
+      // Wider is always safe: it can only put more fragments in reach of the exact test.
+      if (span > 0.0 && span * iv > 65000.0) iv = 65000.0 / span;
+      if (!std::isfinite(iv) || !(iv > 0.0)) return;
+      rt0 = lo; inv = iv;
+      for (size_t i = 0; i < n; ++i) q[i] = (uint16_t)bucketOf(rt[i]);
+    }
+  };
+
   /// Resample the precursor XIC onto the window grid (once), then for every IM+RT+overlap-passing
   /// candidate fragment compute the Pearson correlation and, if >= min_corr, call emit(fi, corr).
   /// Shared by the per-precursor path and the competitive (best-precursor) assignment. [bench]
   template <class Emit>
   void scoreCandidates_(const Precursor_& pc, const vector<Trace>& frag_traces,
-                        const vector<double>& frag_im, const vector<double>& frag_rt,
+                        const vector<double>& frag_im, const FragRt& frag_rt,
                         const vector<Trace>& ms1_traces,
                         const FragStats& fg, double delta_im, double delta_rt, double min_corr,
                         int min_corr_pts, vector<float>& pdense, Emit&& emit) const
@@ -2279,8 +2339,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       size_t hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + delta_im) - frag_im.begin();
       long long n_rtpass = 0;
       stat_slice_ += (long long)(hi - lo); ++stat_prec_;
+      const int pq = frag_rt.bucketOf(pc.rt);
       for (size_t fi = lo; fi < hi; ++fi)
       {
+        const int dq = (int)frag_rt.q[fi] - pq;
+        if (dq < -2 || dq > 2) continue;                                // 2 B reject, see FragRt
         // Read the gate field from a parallel array, and do NOT touch the 96-byte trace record
         // until the fragment has passed: 99.4% of visits end here, and at 8 B instead of 96 B the
         // scan moves ~12x fewer bytes. [soa]
@@ -2524,7 +2587,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
   /// be shared across precursors -> chimeric). Leaves @p out empty on failure.
   void assembleOne_(const Precursor_& pc, double win_lo, double win_hi,
                     const vector<Trace>& frag_traces, const vector<double>& frag_im,
-                    const vector<double>& frag_rt,
+                    const FragRt& frag_rt,
                     const vector<Trace>& ms1_traces, const FragStats& fg,
                     double delta_im, double delta_rt, double min_corr, int min_corr_pts,
                     Size min_frags, Size max_frags, vector<float>& pdense, MSSpectrum& out) const
@@ -3379,8 +3442,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
                                             max_trace_len, max_span, blo, bhi);
             }
-            size_t tot = 0; for (const auto& v : per) tot += v.size();
+            size_t tot = 0, arena = 0; bool any_bins = false;
+            for (int b = 0; b < nb; ++b)
+            { tot += per[b].size(); arena += bst[b].inten.size(); any_bins |= !bst[b].bins.empty(); }
             frag_traces.reserve(tot);
+            wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);   // as in splitIntegerTraces
             for (int b = 0; b < nb; ++b)
             {
               const uint32_t base = wst.absorb(bst[b]);
@@ -3443,9 +3509,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (a.rt != b.rt) return a.rt < b.rt;
           return a.intensity < b.intensity;
         });
-        vector<double> frag_im(frag_traces.size()), frag_rt(frag_traces.size());
-        for (size_t i = 0; i < frag_traces.size(); ++i)
-        { frag_im[i] = frag_traces[i].im; frag_rt[i] = frag_traces[i].rt; }
+        vector<double> frag_im(frag_traces.size());
+        for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
+        FragRt frag_rt; frag_rt.build(frag_traces, delta_rt);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
         // window's precursors (this window runs on one thread). [perf]

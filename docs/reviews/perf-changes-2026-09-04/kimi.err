@@ -1,0 +1,1030 @@
+kimi version 0.40.1
+• The user wants a hostile review of three performance changes in src/DIAPseudoSpectra.cpp. I need to read the actual code and the patch. This is a substantial investigation task. I could do it directly or delegate. The user said "Read the actual code and the OpenMS source; do not reason from this description alone." Let me read the files myself since the review quality hinges on details. The file might be large. Let me start reading.
+
+  I should read src/DIAPseudoSpectra.cpp and patches/openms-epd-lockfree.patch. The cpp file may be big — let me check size first, and read relevant sections. Also possibly the OpenMS source is on "the cluster" — maybe not accessible. The patch shows modified regions; I may need to reconstruct the original OpenMS ElutionPeakDetection source from knowledge or search the repo for a vendored copy.
+
+  Let me start with parallel reads: check file sizes, then read.    4008 src/DIAPseudoSpectra.cpp
+      68 patches/openms-epd-lockfree.patch
+     385 src/MzPeakStreamLoad.h
+     111 src/TdfMzCalibration.h
+    4572 total
+Now read the main file. 4008 lines. I need to find the three changes: TraceStore::absorb, splitIntegerTraces, scoreCandidates_ RT gate. Let me grep for the relevant sections.Now read the relevant sections. Key regions:
+
+  1. TraceStore + absorb: lines ~240-330.
+  2. splitIntegerTraces: ~1085-1200.
+  3. FragRt + scoreCandidates_: ~2220-2350.
+
+  Let me read these regions in parallel.Now I have the core. Let me analyze each change carefully.
+
+  **CHANGE 1 — arena reserves.**
+
+  The merge loop in splitIntegerTraces (lines 1177-1190) and the banded merge (3424-3436).
+
+  Questions:
+  1. Is `any_bins` right given absorb does `bins.resize(base, 0u)` before inserting? 
+     - absorb: if other.bins non-empty, it resizes `bins` to `base` (filling zeros for earlier sources that had no bins) then inserts other's bins. So the invariant is: once any source has bins, bins arena size tracks inten arena size. The final bins size = total inten size only if the last-having-bins source is the last one... Actually let's trace: bins is resized to base (current inten size before append) then appended with other.bins.size(). If other.inten.size() == other.bins.size() (is that invariant? bins arena is parallel to inten arena — for the integer path, yes: every span has a bin per frame). Then after absorb, bins.size() == inten.size() provided bins was either empty or equal to inten size before. Induction: initially both empty. absorb with other.bins non-empty: bins resized to base = inten.size() before; then += other.bins.size() = other.inten.size(); so bins.size() == inten.size() after. absorb with other.bins empty: bins unchanged; if bins non-empty already, bins.size() = old inten.size() < new inten.size() — bins now SHORTER than inten. That's handled by consumers checking `wst.bins.empty()`? Wait, consumers check `wst.bins.empty()` and index `wst.bins[t.off + k]`. If bins is non-empty but shorter than inten, and a trace from a bins-less source is indexed → out-of-bounds read! Hmm, but can a bins-less source be absorbed after a bins-ful source? In splitIntegerTraces, all chunk stores come from the same path (integer traces), so either all have bins or none. Actually `cst.setFrames` — chunk stores; bins filled where? Let me check where bins arena gets populated in chunk stores — toTrace(cm, cst). Does toTrace populate bins? Need to check. In the banded merge at 3424-3436, all band stores are integer path, uniform.
+
+     So `any_bins` condition: reserve bins to `arena` (sum of inten sizes). Is that enough? bins final size = sum over sources-with-bins of their inten sizes + zeros for preceding bins-less sources (resize(base)). If sources with bins are interleaved with sources without, final bins size could be... Let's compute: bins.size() after all absorbs = base_at_last_bins_source + that source's bins.size. base at that point = sum of inten of all sources before it. So bins final = sum of inten of all sources up to and including the last bins-ful source ≤ total arena. So reserving `arena` (total inten) is ≥ needed. Fine — reserving bins to the inten total can NOT be too small... unless: what if a source has bins but other.bins.size() != other.inten.size()? If bins arena could be LARGER than inten arena for some store. Where does bins get appended? Need to check toTrace and detectTracesInteger_. Let me check makeSpan — doesn't touch bins. toTrace at 424 — need to read the rest (lines 439-470ish) to see if it appends bins. Let me read.
+
+     Also: does any_bins miss the case where bins is needed but all chunk stores have empty bins at merge time, yet the destination later expects bins? After splitIntegerTraces, bins arena is "freed once valley splitting has assigned each child its apex bin" (TraceStore doc: bins "is freed once valley splitting has assigned each child its apex bin"). In splitIntegerTraces, wst.bins is swapped empty at 1176, then rebuilt from chunk stores IF they have bins. Do chunk stores have bins? If toTrace appends to store.bins... need to read toTrace fully.
+
+  2. Can reserving bins to the inten total ever be too small? Only if some store has bins.size() > inten.size(). Check.
+
+  3. Can the reserve raise peak memory rather than lower it? Yes: reserve(arena) allocates the full final capacity up front while all source arenas are still live. Without reserve, geometric growth: peak during insert = old capacity freed after new allocated... std::vector growth peak is old + new (during reallocation both alive). Geometric doubling: when growing from capacity C to 2C, peak = 3C at the moment of reallocation (old C + new 2C)... final arena size A: without reserve, the last growth goes from ~A/2 capacity to ~A (or 2A worst). Transient peak ≈ A/2 (old) + A (new) = 1.5A plus sources. With reserve: A allocated immediately, sources still live, then inserts don't reallocate (capacity A, no growth). So reserve peak = A + sources vs geometric peak = up to 1.5A + sources? Hmm wait — with geometric growth, at the moment of the last reallocation both the old buffer (~A/2+) and new buffer (~A-2A) coexist → peak 1.5A–2.5A? Actually if growth factor is 2 and final size A, last realloc allocates capacity ≥ A, up to 2A... no: growth happens when size exceeds capacity. Capacities: ..., A/2, A (if A is a power-of-two multiple of start). Final size A ≤ capacity 2^k. If A just exceeds A/2 capacity, new capacity = A... For final size A with doubling, capacity C ∈ [A, 2A). During last realloc, old buffer C/2 and new C coexist: peak = 1.5C ≤ 3A... hmm but libc++/libstdc++ use 2x. So geometric transient up to old C/2 + new C where C < 2A → peak < A + 2A = 3A? No: at realloc moment, size = C/2 + 1... The comment in the code says "a transient of up to 2x the final arena while every source arena is still live". 
+
+     The reserve: allocates A immediately. The sources are freed one at a time by absorb (each absorb swaps other's arenas empty). So peak with reserve = A (destination, full capacity from the start, mostly unused at first) + sum of all sources (still live initially) = A + S where S ≈ A (sources total = arena total A... wait arena = sum of source inten sizes, and destination final size = arena = A; sources total S = A). So peak = A + A = 2A either way at the start? Hmm: at the moment reserve returns, we have A (dest, unused) + A (sources) = 2A. Without reserve: sources A + dest grows; near the end, sources mostly consumed... The last absorbs: dest size approaching A, some sources still live. With doubling, peak dest transient 1.5C plus remaining sources. Actually the peak without reserve: dest capacity grows to C≥A while remaining sources ≈ A - (C/2) ... it's a tradeoff. The claim "reserve lowers peak" is plausible but not strictly — with reserve, at t=0 you hold A+A = 2A. Without reserve, the max of (dest transient + remaining sources) — at the last realloc, dest holds old C/2 + new C ≈ 1.5A... plus remaining sources which are small then. So both ≈ 2A. Not clearly higher. BUT: reserve could raise peak if `arena` overestimates: `arena += stores[ci].inten.size()` — size, not capacity — exact. Hmm, but what about bins reserve when any_bins: extra arena*4 bytes allocated up front that geometric growth would only reach at the end. Fine.
+
+     Real case where reserve RAISES peak: if the destination wst.inten after swap(empty) — reserve(arena) is exact; fine. But in the banded path at 3428, `wst.inten.reserve(arena)` — if wst already had capacity from a previous window iteration? reserve only grows, never shrinks — that's fine for peak (capacity reused, not added). Actually reserve when existing capacity > arena is a no-op — good, avoids the 2A transient entirely on later windows. Hmm wait, in splitIntegerTraces, wst.inten was just swapped empty (capacity 0), so reserve allocates fresh A while chunk stores (total A) still live → transient 2A. Without reserve, first insert from a big chunk store would... vector::insert with geometric growth: single insert of a huge range allocates exactly size+needed? No — insert computes required capacity and if it exceeds 2*current, allocates exactly required. Inserting chunk arenas one at a time: dest grows by each chunk's size. With insert(end, first, last), if needed > capacity, new capacity = max(2*capacity, size+needed). Starting from 0: first insert allocates exactly chunk0 size. Second insert: max(2*c0, c0+c1)... So growth is not purely doubling; transient = old capacity + new allocation at each step. Peak ≈ final A + previous capacity (~A - last chunk) ≈ 2A - lastchunk. So reserve's 2A at t=0 is marginally HIGHER than the geometric peak which only reaches ~2A - lastchunk at the very end... but wait, with reserve the sources get freed as absorbed, so the 2A instant is at the very start when dest capacity A is allocated but empty and all sources live: exactly A + A = 2A. Without reserve, peak is at last realloc: old cap ≈ A - c_last + new alloc A → 2A - c_last, plus remaining sources c_last = 2A. Equal! Hmm: at last realloc without reserve: old buffer (cap C_old ≈ A - c_last... roughly), new buffer A, remaining sources ≈ c_last + maybe more. Total ≈ C_old + A + remaining. If C_old ≈ size before last insert = A - c_last, and remaining sources = c_last, total = A - c_last + A + c_last = 2A. Same. OK so roughly equal; reserve not meaningfully worse. But one more subtlety: reserve(arena) where arena counts inten SIZES, but absorb also resizes bins with zeros — covered.
+
+     Actually, the sharper question the user asks: "Can the reserve itself raise peak memory rather than lower it?" Answer: In splitIntegerTraces, yes marginally — at the instant after reserve, dest capacity = full final A while ALL 48 chunk arenas are still live (2A total), whereas geometric growth reaches its max only at the final realloc, by which time most sources are consumed... as computed, both ≈2A. But there IS a case: `if (any_bins) wst.bins.reserve(arena)` — bins final size may be much smaller than arena (e.g., only the last chunk store has bins, or bins only present on some). Then bins reserve over-allocates. More importantly in the BAND merge (3424-3436): wst already holds the MS1/other data? Let me look at 3387-3440 to see the band merge context. wst is the window store holding frag_traces' arenas... At 3436, `if (thi <= tlo || nb == 1)` single-band fallback. Need to read that region.
+
+     Another subtle bug for change 1: `wst.inten.reserve(arena)` — but in the banded merge, does wst.inten already contain data (not swapped empty)? If wst already has content, reserve(arena) might be LESS than needed (arena is only the sum of sources, but dest already has base content). reserve only ensures capacity ≥ arena; if existing size + incoming > arena, insert will grow geometrically anyway — correctness fine, just less effective. But wait — worse: if wst.inten already has size S and capacity C with S < arena < C... fine.
+
+     Let me read the banded merge region (3380-3460) to check.
+
+  **CHANGE 2 — streamed valley splitting.**
+
+  Key verification points against OpenMS ElutionPeakDetection source:
+
+  1. Single-trace detectPeaks overload: in OpenMS, `ElutionPeakDetection::detectPeaks(MassTrace& mt, std::vector<MassTrace>& single_mtraces)` — what does it do? From OpenMS source (I recall): 
+
+  ```cpp
+  void ElutionPeakDetection::detectPeaks(MassTrace& mt, std::vector<MassTrace>& single_mtraces)
+  {
+      single_mtraces.clear();
+      // use vector with 1 element
+      std::vector<MassTrace> mts;
+      mts.push_back(mt);
+      detectPeaks(mts, single_mtraces);  // hmm, or detectElutionPeaks_ directly?
+  }
+  ```
+
+  Actually I need to check the real OpenMS source. In OpenMS 3.x, ElutionPeakDetection::detectPeaks(MassTrace&, vector<MassTrace>&):
+
+  ```cpp
+  void ElutionPeakDetection::detectPeaks(MassTrace& mt, std::vector<MassTrace>& single_mtraces)
+  {
+    single_mtraces.clear();
+    detectElutionPeaks_(mt, single_mtraces);
+  }
+  ```
+
+  I believe that's right — the single overload calls detectElutionPeaks_ directly. And the vector overload does: `single_mtraces.clear();` then the parallel for loop calling detectElutionPeaks_ per trace, then `filterByPeakWidth_` / SNR filtering? Let's recall the vector overload structure (OpenMS 2.x/3.x):
+
+  ```cpp
+  void ElutionPeakDetection::detectPeaks(std::vector<MassTrace>& mt_vec, std::vector<MassTrace>& single_mtraces)
+  {
+    single_mtraces.clear();
+    if (mt_vec.empty()) return;
+    ...
+    // chrom_fwhm stuff? 
+    #pragma omp parallel for
+    for (...) detectElutionPeaks_(mt_vec[i], single_mtraces);  // with critical push_back
+
+    if (width_filtering_ != "off") filterByPeakWidth_(single_mtraces);
+    if (masstrace_snr_filtering_) ... filterBySignalNoise_(?) 
+  }
+  ```
+
+  Actually there might be more: `computeMassTraceSNR_`? The SNR filtering is `if (masstrace_snr_filtering_) filterBySignalNoise_(...)`? Hmm. There's also the "addNoise" ? No. Key cross-trace dependency: smoothing. detectElutionPeaks_ per-trace: it calls `smoothData`? ElutionPeakDetection smoothing: in detectElutionPeaks_, there's Savitzky-Golay smoothing using `chrom_fwhm` to compute window. That's per-trace only. findLocalExtrema operates on the single trace's smoothed intensities. Noise estimation: detectElutionPeaks_ computes noise per trace? I recall in ElutionPeakDetection::detectElutionPeaks_:
+
+  ```cpp
+  void ElutionPeakDetection::detectElutionPeaks_(MassTrace& mt, std::vector<MassTrace>& single_mtraces)
+  {
+    // Get intensities
+    ...
+    if (mt.getSize() < 5?) return / push unsplit?
+    ...
+  }
+  ```
+
+  There's `mt.computeMedianIntensity_`? Hmm. I genuinely need the OpenMS source. The user says "The OpenMS ElutionPeakDetection source is on the cluster" — maybe there's a local copy? Let me check if OpenMS is installed locally (e.g., in a build dir or Homebrew). Search the filesystem for ElutionPeakDetection.cpp. Also check docs in the repo which may quote it.
+
+  Critical correctness questions for change 2:
+
+  a) Does single-trace detectPeaks clear the output first? The user says it calls single_mtraces.clear() first — is that safe given buffer reuse? Yes, clear is exactly what reuse needs. Fine. But WAIT: the vector overload per the patch's nested path does NOT clear? Look at the patch: nested path is `for (i..) detectElutionPeaks_(mt_vec[i], ...)`. Where's the clear in the vector overload? Presumably at its top: `single_mtraces.clear();` — unchanged by patch. So both clear. OK.
+
+  b) Does the vector overload do anything beyond per-trace detectElutionPeaks_ + width/SNR filtering? Potential extras:
+     - Progress logger startProgress/endProgress — output-neutral.
+     - `if (mt_vec.size() < 2) { single_mtraces = mt_vec; return; }` — hmm! Is there an early-out for small inputs? Actually I recall in MassTraceDetection or EPD there might be. If the vector overload has an early path for mt_vec.size() < 2 that SKIPS splitting (just copies), while the single-trace overload always runs detectElutionPeaks_... For a 1-trace input, old behavior (vector overload with 1 trace) = maybe no split; new behavior (single-trace overload) = detectElutionPeaks_ on it. If detectElutionPeaks_ on a single trace behaves identically either way, fine. But if the vector overload early-outs for size<2, then old code (chunk with 1 trace... old code was per-chunk vector with many traces, so chunks with 1 trace would early-out and not split; new code splits every trace individually → different output!). Wait, old code: splitValleys(mts) for the whole chunk — chunk sizes = in.size()/nchunk; a chunk could have exactly 1 trace if nchunk == in.size(). nchunk = max(1, min(nchunk, in.size())) and in.size() ≥ 2, so chunk could be 1 trace when in.size() == nchunk (e.g., 2 traces, 2 chunks? nchunk passed as max(1,w_bands)*4 — could exceed trace count, clamped to in.size(); then chunks of size 1 each). So yes, old code could call splitValleys on a 1-trace vector. Does OpenMS EPD detectPeaks(vector) early-out for size<2? Hmm. I don't recall such an early-out in EPD. There IS one in MassTraceDetection? Not sure. Need the source.
+
+     Also note line 1098: `if (split_valleys <= 0.0 || in.size() < 2) return std::move(in); // OpenMS branch: EPD needs > 1` — the comment "EPD needs > 1" suggests EPD's vector overload does something special for size < 2. That comment is evidence the author believed EPD needs >1 traces. If detectPeaks(vector) with 1 element early-outs (no splitting), then per-trace calls to the single-trace overload would differ IF the single overload splits. But does detectElutionPeaks_ on a short trace split? For a single trace, the vector overload loop would call detectElutionPeaks_ anyway unless early-out. Need source.
+
+  c) chrom_fwhm/noise estimation across traces: In OpenMS EPD, `detectElutionPeaks_` uses `chrom_fwhm_` and computes a per-trace noise level? There's "masstrace_snr_filtering" with `min_masstrace_snr_`, computed via `mt.estimateFWHM`? The SNR filter is cross-trace only in that it filters the output vector; disabled anyway. Smoothing: Savitzky-Golay window derived from chrom_fwhm and the trace's own RT sampling. No cross-trace dependency. findLocalExtrema: operates on the single trace's intensity array with half-window derived from chrom_fwhm. No neighbours. I believe per-trace is safe — but need source verification.
+
+  d) MassTrace(vector<Peak2D>) vs MassTrace(list<Peak2D>): MassTrace stores `std::vector<Peak2D> peaks_`? Actually OpenMS MassTrace internally holds `std::vector<Peak2D>`? Hmm — older OpenMS MassTrace used `std::list<Peak2D>`? Let me recall: OpenMS MassTrace class has `typedef std::vector<Peak2D> container_type`? I believe modern OpenMS MassTrace stores peaks in a `std::vector<Peak2D>` internally and the constructor takes... Actually I recall MassTrace constructor is default, and you push_back peaks. There's a constructor `MassTrace(const std::list<Peak2D>&)`? Hmm. In OpenMS 3.x, MassTrace:
+
+  ```cpp
+  class OPENMS_DLLAPI MassTrace
+  {
+  public:
+    typedef std::vector<Peak2D> container_type;
+    ...
+    MassTrace() = default;
+    explicit MassTrace(const container_type& peaks) ...?
+  ```
+
+  Hmm, not sure there's a container constructor at all. The user's change says "build one MassTrace from a REUSED vector<Peak2D> (was a per-trace std::list<Peak2D>)" — so there is a `MassTrace(const std::vector<Peak2D>&)` or similar constructor, and previously code built `std::list<Peak2D>` and constructed MassTrace from it. Maybe MassTrace has both `MassTrace(const std::vector<Peak2D>&)` and `MassTrace(const std::list<Peak2D>&)` overloads. Question: does the internal centroid computation happen in the constructor (updateWeightedMeanMz etc.)? Differences in ordering: vector preserves insertion order; list too. But if the vector overload does something like sort or if centroid computed on construction differs... Should be identical if both constructors just copy into internal storage and call the same update methods. BUT: one subtle thing — does the vector constructor exist, or does the code rely on implicit conversion? The code at 1146: `MassTrace mt(pk);` where pk is vector<Peak2D>. So a vector constructor exists in the OpenMS version in use.
+
+  Potential difference: MassTrace constructors may call `updateWeightedMeanRt()` etc. — same for both. Need source check.
+
+  e) Peak2D IM: the old code presumably set... Peak2D doesn't carry IM in the trace; they setCentroidIM after. Same.
+
+  f) One REAL issue I can already see: the old two-phase code built MassTrace from `t`'s real points as list, and called splitValleys(mts) — where splitValleys presumably called epd.detectPeaks(mts, split) for the whole chunk, then converted children. The NEW code calls `epd.detectPeaks(mt, split)` — the single-trace overload. What does the single-trace overload do in real OpenMS? Let me recall the actual OpenMS source (ElutionPeakDetection.cpp, OpenMS 3.x):
+
+  ```cpp
+  void ElutionPeakDetection::detectPeaks(MassTrace& mt, std::vector<MassTrace>& single_mtraces)
+  {
+    single_mtraces.clear();
+
+    std::vector<MassTrace> mt_vec(1);
+    mt_vec[0] = mt;
+
+    detectPeaks(mt_vec, single_mtraces);
+
+    mt = mt_vec[0];
+  }
+  ```
+
+  Hmm, is that right? If the single-trace overload delegates to the VECTOR overload, then with the lock-free patch, calling it from within speXtract's omp taskloop region means omp_in_parallel() is TRUE → nested serial path → fine, no lock. And behavior = vector overload on a 1-element vector = exactly the equivalence argument. In that case single-trace overload does `mt = mt_vec[0]` copy-back — extra copy, slower, but output-neutral. And "it calls single_mtraces.clear() first" — matches.
+
+  Alternatively the single overload directly calls detectElutionPeaks_.
+
+  Also important: does detectElutionPeaks_ MODIFY the input trace (smoothing in place)? The vector overload loop operates on mt_vec[i] — e.g., `detectElutionPeaks_(MassTrace& mt, ...)` might smooth/replace the trace's intensities. If it modifies the input, then... the new code builds mt fresh each iteration, so no issue.
+
+  g) THE ORDERING question: old code: split output for the whole chunk appended in trace order (per patch, appending in order in nested path; at top level, per-thread merge changes order! The patch's top-level path collects per-thread buffers then concatenates thread 0's, thread 1's, ... — that does NOT preserve trace order! But the patch comment says combined with ms1_traces canonical sort it's deterministic. For splitIntegerTraces, called from within the window loop which is parallel (nested) → serial path → order preserved. OK.)
+
+     In the new streamed code, children of each trace are appended in the same order as detectElutionPeaks_ appends them. Same as old per-chunk call. Order-neutral.
+
+  h) Another subtle difference: the OLD code built MassTrace for EVERY input trace including those with... new code: `for k in span, real points only`. Old code presumably same. But what about traces with <2 real points? MassTrace with 0 or 1 points → detectElutionPeaks_ behavior (probably needs ≥ some min, pushes the trace unsplit or skips?). If detectElutionPeaks_ SKIPS empty traces (pushes nothing), the child loop `if (c.np()==0) continue;` handles empties. But could the single-trace overload vs vector overload differ for degenerate traces? E.g., vector overload might early-out `if (mt_vec.empty()) return;` only. Both call detectElutionPeaks_ per trace. Same.
+
+     BUT what does detectElutionPeaks_ do for a trace that is too short to smooth? I recall something like: if the trace has fewer points than the smoothing window or < min_trace_length, it may be pushed unsplit, or DROPPED. If old code passed a chunk containing some degenerate traces, they'd be handled by detectElutionPeaks_ the same way. Same per-trace. OK.
+
+  i) `epd.detectPeaks(mt, split)` — is there an overload resolution trap? detectPeaks has two overloads: (MassTrace&, vector<MassTrace>&) and (vector<MassTrace>&, vector<MassTrace>&). mt is MassTrace → single overload. Fine.
+
+  Now — I need the actual OpenMS source. The user says it's "on the cluster" but the patch shows modified regions. The patch is a context diff with line numbers (328-355, 459-464, 544-549) against ElutionPeakDetection.cpp. From the patch context I can reconstruct parts:
+
+  - Line ~328-342 (original): vector overload body:
+  ```
+  #ifdef _OPENMP   (implied)
+  #pragma omp parallel for
+  #endif
+      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+      {
+        IF_MASTERTHREAD this->setProgress(progress);
+  #ifdef _OPENMP
+        ++progress;
+
+        // push_back to 'single_mtraces' is protected, so threading is ok
+        detectElutionPeaks_(mt_vec[i], single_mtraces);
+      }
+  ```
+  Wait, the patch hunk: lines 328,330 removed: `#pragma omp parallel for`, `#endif`, `for (SignedSize i...)`. Then 332,334: `IF_MASTERTHREAD this->setProgress(progress);`, blank, `#ifdef _OPENMP`. Then 337,339: `++progress;`, blank, `// push_back...` comment replaced. 341,342 removed: `}`, blank. 344 removed: blank.
+
+  So original vector overload (reconstructed):
+  ```cpp
+  #ifdef _OPENMP
+  #pragma omp parallel for
+  #endif
+      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+      {
+        IF_MASTERTHREAD this->setProgress(progress);
+
+  #ifdef _OPENMP
+        ++progress;
+
+        // push_back to 'single_mtraces' is protected, so threading is ok
+  #endif? 
+        detectElutionPeaks_(mt_vec[i], single_mtraces);
+      }
+  ```
+  Hmm, the exact brace structure: line 341,342 are `}` and blank — probably `#endif` then `}`? The diff shows "341,342d354: < }" and "< (blank)". So after detectElutionPeaks_ there was `}` closing the for, then blank. And 344: blank. OK.
+
+  New (patched) version:
+  ```cpp
+      if (!omp_in_parallel())
+      {
+        const int nthreads = omp_get_max_threads();
+        std::vector<std::vector<MassTrace>> local(nthreads > 0 ? nthreads : 1);
+  #pragma omp parallel for
+        for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+        {
+          IF_MASTERTHREAD this->setProgress(progress);
+          ++progress;
+          detectElutionPeaks_(mt_vec[i], local[omp_get_thread_num()]);
+        }
+        for (Size t...) for (Size k...) single_mtraces.push_back(std::move(local[t][k]));
+        this->endProgress();
+        return;
+      }
+      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+        detectElutionPeaks_(mt_vec[i], single_mtraces);   (presumably with ++progress or braces)
+  ```
+
+  The other two hunks (459-464, 544-549): inside detectElutionPeaks_, the two `single_mtraces.push_back` sites (pushing unsplit trace `mt` at 459 and split child `new_mt` at 544) had the critical removed.
+
+  Key insight from the patch: the patched NESTED path is literally `for (i..) detectElutionPeaks_(mt_vec[i], single_mtraces)` appending in order — as the user claimed. So the equivalence argument hinges on what happens AROUND that loop in the vector overload that the patch does NOT show: startProgress, clear, and crucially any post-loop cross-trace filtering (width filtering, SNR filtering), and any PRE-loop setup (e.g., computing a global chrom_fwhm-derived parameter? or `if (mt_vec.size() < 2)` early-out).
+
+  Things the patch does NOT show (before line 328 and after line 355): I need the actual ElutionPeakDetection.cpp. Check if there's a local copy: OpenMS might be vendored or installed. Let me search the filesystem. Also docs/ may quote it (docs/AlphaDIA-and-DIA-BERT.md, docs/reviews/). Also check git log for the change and any docs.
+
+  From my knowledge of OpenMS 3.x ElutionPeakDetection.cpp, detectPeaks(vector, vector):
+
+  ```cpp
+  void ElutionPeakDetection::detectPeaks(std::vector<MassTrace>& mt_vec, std::vector<MassTrace>& single_mtraces)
+  {
+    single_mtraces.clear();
+
+    if (mt_vec.empty())
+    {
+      return;
+    }
+
+    // elaborate on the peak filtering
+    ...
+    Size progress = 0;
+    startProgress(0, mt_vec.size(), "elution peak detection");
+    ...
+    #pragma omp parallel for ...
+    for (...) { detectElutionPeaks_(mt_vec[i], single_mtraces); }
+    endProgress();
+
+    // filter by peak width
+    if (width_filtering_ == "auto") { ... compute median FWHM across ALL traces ... filter ... }
+    else if (width_filtering_ == "fixed") { filterByPeakWidth_(single_mtraces); }
+
+    if (masstrace_snr_filtering_) { ... filter ... }
+  }
+  ```
+
+  The "auto" width filtering computes a cross-trace statistic (median of trace FWHMs across single_mtraces) — cross-trace dependency, but width_filtering is forced "off" here, so unreachable. SNR filtering off. So equivalence holds for those.
+
+  But WAIT — is there anything else? In some OpenMS versions, detectPeaks(vector) begins with:
+
+  ```cpp
+      if (mt_vec.size() < 2)
+      {
+        single_mtraces = mt_vec;
+        return;
+      }
+  ```
+
+  Hmm, do I actually remember this? The code comment at line 1098 says "OpenMS branch: EPD needs > 1" — `if (split_valleys <= 0.0 || in.size() < 2) return std::move(in); // OpenMS branch: EPD needs > 1`. This strongly suggests the author saw something in EPD requiring ≥2 traces. Where else is EPD invoked — the OpenMS path at line 1700. Let me look at that call site (detectTraces_, ~1673-1760) to see the guard there.
+
+  Actually, I recall in OpenMS FeatureFinderAlgorithmMassTrace / MassTraceDetection there's the EPD call. In ElutionPeakDetection itself... Let me think about detectElutionPeaks_:
+
+  ```cpp
+  void ElutionPeakDetection::detectElutionPeaks_(MassTrace& mt, std::vector<MassTrace>& single_mtraces)
+  {
+    // if (mt.getSize() < min_trace_length?) ...
+    std::vector<double> smoothed;
+    ... 
+    if (mt.getSize() < 2 * something) { single_mtraces.push_back(mt); return; }  // ??
+    ...
+  }
+  ```
+
+  I really need the source. Let me check locally for OpenMS headers/sources on this machine (the user develops speXtract here, likely with OpenMS installed — maybe in ~/OpenMS or via build dirs). Also check CMakeLists.txt for how OpenMS is found, and scripts/build hints.
+
+  Also CHANGE 2 subtlety: "single_mtraces.clear() first -- is that safe given I reuse the buffer?" — yes safe.
+
+  But here's a REAL potential output difference I should check: **the single-trace overload might setLogType or do smoothing with a window computed from the trace's own RT range — same either way.** And **MassTrace(vector) vs MassTrace(list)**: does MassTrace even have a list constructor? If the old code used std::list<Peak2D>, maybe via `std::copy` into the MassTrace? The user description says "was a per-trace std::list<Peak2D>". Hmm, maybe MassTrace internally IS a list in the OpenMS version used?? No — OpenMS MassTrace uses std::vector<Peak2D> internally (I'm fairly confident; MassTrace has `peaks_` as std::vector<Peak2D> in recent versions... actually I recall `std::vector<Peak2D> peaks_;` yes). Constructors: I believe MassTrace only has a default constructor; you add peaks via push_back or operator+=. Hmm, but the code does `MassTrace mt(pk);`. So this OpenMS version has a container constructor. There might be both template/vector and list overloads. The centroid computation: MassTrace constructor from container probably calls `updateWeighted (juRt useless). But wait — if delta_rt <= 0 and rt contains inf: x = inf*0 = NaN → (int)NaN UB. Edge.
+
+  Negative RTs: covered.
+
+  Empty/single: covered.
+
+  NaN pc.rt: bucketOf(NaN): x=NaN, NaN<=0 false, NaN>=65535 false → (int)NaN UB. But exact test with NaN pc.rt: fabs(NaN) > delta false → PASSES exact?! Actually fabs(NaN - ...) = NaN, NaN > delta_rt is false → fragment NOT rejected. So original code with NaN pc.rt accepts all fragments in the IM slice; new code casts NaN to int (UB, typically INT_MIN or 0) → pq garbage → likely rejects everything → OUTPUT CHANGE. Bu FragRt quantization edge cases.
+
+  **CHANGE 3 analysis** (I can do much of this from the code already):
+
+  FragRt::build: 
+  - n = fr.size(). If n == 0: lo=hi=0.0 (initial), rt0=0, span=0, inv = 1/delta_rt or 0. q empty. Loop no-op. In scoreCandidates_, lower_bound on empty frag_im → lo==hi, inner loop never runs; pq = bucketOf(pc.rt) computed but unused. Safe.
+  - bucketOf: `x = (v - rt0) * inv; x <= 0 ? 0 : (x >= 65535 ? 65535 : (int)x)`. For v == rt0 exactly: x=0 → bucket 0. For v slightly less than rt0 (possible) per window — fine.
+
+  Also: does the quantised gate interact with ORDER of emitted candidates? No — it only skips; survivors identical.
+
+  One more: `q[fi]` uint16_t but dq computed as (int)q[fi] - pq — fine.
+
+  But WAIT — a bigger one: `bucketOf` clamps fragments?? Fragments never clamp (shown). But what about when delta_rt <= 0 → inv = 0: then for the exact test, delta_rt <= 0 means... is delta_rt ever <= 0 in practice? It's a user parameter presumably > 0.
+
+  Hmm, actually one more subtl ≤ 1 (since |a-b| ≤ w → differ by at most 1). With rounding (double), floor could land off by one → ±2 covers. But clamping: if pc.rt is outside [rt0, rt0 + span]: pq clamped to 0 or 65535. Fragment at rt0 (bucket 0), pc.rt < rt0((span + 0.5delta)*inv) = floor(, then exact test rejects if > delta_rt. Fine — clamp can only make dq SMALLER in magnitude than true... wait: pc.rt way below rt0 → pq=0; fragment near hi → q=65535, dq huge → rejected by quantised test. Exac: OUTPUT-NEUTRAL under realistic inputs, with flagged . Consistent: rejection by quantised implies... we need: exact-pass ⇒ quantised-pass (no false rejects). If |frag_rt - pc.rt| ≤ delta_rt then both are within delta_rt; true bucket indices differ by ≤1 (exact arithmetic) + rounding ≤1 → ≤2. Clamping: clamp only moves pq toward the fragments' bucket range (pc.rt < rt0 → pq=0 = min fragment bucket; pc.rt > hi → 65535 = max). Clamping reduces |dq| vs unclamped true index? If pc.rt < rt0, true unclamped index would be negative; fragments at bucket ≥ 0; |q - 0| ≤ |q - (negative)|. So clamp reduces |dq| — safe on that end. If pc.rt > hi: pq = 65535; fragment buckets ≤ 65535 (clamped); |q[fi] - 65535| ≤ |q[fi] - true_index| since true_index ≥ 65535. Safe. Both ends safe.
+  - NaN: if pc.rt is NaN → x = NaN; `x <= 0.0` false; `x >= 65535.0` false → `(int)NaN` = UB (typically INT_MIN on x86 → cvttsd2si gives INT_MIN). pq = INT_MIN (as int). Then dq = q[fi] - INT_MIN → signed overflow UB! In practice wraps to huge positive → dq > 2 → continue for every fragment → spectrum emits nothing, whereas exact test `fabs(NaN - rt) > delta_rt` is false (NaN comparisons false) → NOT rejected by exact test → old code would score every fragment in the IM slice! So NaN pc.rt → OLD: all IM-slice fragments pass RT gate; NEW: all rejected. NOT OUTPUT-NEUTRAL if pc.rt can be NaN. Can pc.rt be NaN — let me fetch OpenMS develop ElutionPeakDetection.cpp and compare. Also MassTrace constructors.
+
+  Let me do the greps and fetches in parallel.
+
+• Now let me look at line 1060-1075 (bins population), line 3420-3460 (banded merge), line 3480-3500 (FragRt::build call site), and line 1700-1715 (the other detectPeaks vector call — the OpenMS path MS1?).
+
+  Also check: splitIntegerTraces at line 3451 is called AFTER the banded merge at 3424-3428. And in splitIntegerTraces, wst.bins is swapped empty at 1176, then rebuilt by absorb. Output children traces: do they need bins afterward? Line 1142 reads wst.bins during split; after split, children don't read bins (they use c.tof). But is splitIntegerTraces called a second time on the result? Grep showed only one call at 3451. Also MS1 path? splitIntegerTraces called elsewhere? Grep showed definition 1096 and call 3451 only. OK.
+
+  But wait — the banded merge at 3424 happens BEFORE splitIntegerTraces (3451). After banded merge, wst.bins contains merged bins IF any_bins. Then splitIntegerTraces reads wst.bins[t.off+k] at 1142 for every input trace. If some band stores had bins and some didn't, absorb leaves bins SHORTER than inten (trailing sources without bins contribute inten but no bins) → wst.bins[t.off + k] OUT OF BOUNDS for traces from no-bins bands! But wait — is that pre-existing (absorb unchanged) or introduced by the reserve change? absorb is unchanged; the reserve doesn't change that behavior. The question asks about the `any_bins` condition for reserve correctness. But hold on — the `any_bins` condition: if any_bins is false, no bins reserve; absorb also never touches bins. Fine. If any source has bins, reserve(arena) — sized to inten total, bins total <= that (if per-store bins.size() <= inten.size()). Line 1072: store.bins.resize(store.inten.size()) — bins exactly inten size when populated. So per-store bins.size() ∈ {0, inten.size()}. Sum of bins after absorb <= sum inten = arena. Reserve never too small. 
+
+  But: is `any_bins` the right condition vs "all bins"? absorb's `bins.resize(base, 0u)` pads zeros for EARLIER sources lacking bins, but LATER sources lacking bins leave bins short — a pre-existing absorb property, not the reserve. However — does it matter for output? In the integer path, do all band stores have bins or none? Line 1072-1073: bins populated in... let me read context around 1060-1075. If that's the integer detection path, then in the integer path every band store has bins (any_bins == all_bins), and in OpenMS path none. The mixed case might be impossible. But the trailing-short-bins case: in splitIntegerTraces merge (1177-1190), after absorb, wst.bins might be short if a later chunk store lacks bins — but after splitIntegerTraces, is wst.bins ever read again? Line 1142 is inside splitIntegerTraces itself reading the OLD wst.bins (before swap at 1176). After the function, children have c.tof; bins "freed once valley splitting has assigned each child its apex bin" per comment at line 273. So bins not read after. OK.
+
+  Now can the reserve RAISE peak memory? Case: mixed any_bins where bins actually needed is small — over-reserve. But more pointed: in splitIntegerTraces, at the time of reserve, the 48 chunk stores are ALL still live (their inten+bins). wst.inten.reserve(arena) allocates the full final size immediately; then absorb frees each source as it goes. Without reserve, geometric growth: peak transient old+new buffers during realloc ≈ 1.5-2x final. With reserve: exactly 1x final + sources. So reserve lowers peak for inten. For bins: if any_bins, reserve(arena) for bins too — if in reality only some sources have bins, actual bins need < arena → over-allocation of up to 4B*arena extra vs geometric. Could raise peak vs no-reserve IF bins total << arena. In the integer path all stores have bins==inten size, so bins final == arena, exact. In OpenMS path any_bins false. Mixed only if... chunks in splitIntegerTrace)? skip widening; inv = 1/delta_rt; x = 0 for all → bucket bins in splitIntegerTraces? toTrace doesn't touch bins (children compute c.tof from apex m/z). So stores[ci].bins always EMPTY in splitIntegerTraces → any_bins always false there → no bins reserve. Wait but then why the `any_bins` logic there at all? Because absorb would... stores[ci].bins empty always → bins never populated → wst.bins stays empty after merge. Good: children don't need bins.
+
+  Hmm wait, actually check toTrace at ==rt0), pc.rt - rt0 = 1.5*delta_rt → x=1.5 → bucket 1 → dq = 0-1 = -1 → passes quantised; exact: 1.5*delta_rt > delta_rt → reject. Fine.
+
+    Now the KEY correctness question: is it possible that |a-b| ≤ delta_rt but bucket(a)-bucket each has bins (line 1072 populates store.bins when ax.ok?). Need to read around 1050-1075.
+
+  Then after the banded merge, wst.bins is read at 1142 during split. If integer path: all bands have bins → any_bins true → reserve exact. If OpenMS path: none → false. Mix The product rounding: |x_computed - x_true| ≤ ulp(x)*small. For x near 65535, ulp(65535) ≈ 7e-12. So computed floor off by at most 1 only if x_true is within 1e-11 of an integer boundary. ±2 covers ±1 of arithmetic floor + 1 rounding slip. Safe.
+
+  So CHANGE 3 looks essentially OUTPUT-NEUTRAL except the NaN-pc.rt corner (UB in (int)NaN + int  issue: reserve(arena) with arena==0 → fine.
+
+  Real hostile point for CHANGE 1: `if (any_bins) wst.bins.reserve(arena)` — but absorb pads bins with `bins.resize(base, 0u)` only when other._traces reordering?** build at 3493 after splitIntegerTraces at 3451 — same order used in scoring. Fine.
+
+  Wait, actually one more potential break in change 3: `bucketOf(pc.rt)` — pc.rt could be slightly less than some fragment rt within delta_rt where fragment is at bucket b and pc at bucket b+2? |a-b| ≤ w, floor diff ≤ 1. Covered.
+
+  What about the (int)x cast when x is in [65535, band1.inten.size() > bins.size()-1 → later read at 1142 wst.bins[t.off+k] is OOB. But that's absorb's pre-existing behavior, and whether mixed is possible depends on line 1072'1 details**:
+
+  absorb: `bins.resize(base, 0u)` — resizes bins to `base` = inten.size() BEFORE inserting inten? No wait: base = inten.size() at entry; then inten.insert(...); then `if (!other.bins.empty()) { bins.resize(base, 0u); bins.insert(...); }`. So bins is grown with zeros up to base (covering earlier sources that lacked bins), then other's bins appended. If other.bins.size() == other.inten.size() invariant holds per store, then bins stays parallel to inten for the prefix up to <= inten per store, sum bins' final <= arena. Never too small.
+
+  Can reserve raise peak memory? For bins in the mixed case: yes, marginally (4B*arena reserved where geometric growth would have peaked at ~2*actual_bins which could be much less than arena). In the all-bins case: no, exact. Also inten reserve: always exact = final. One more: the reserve happens while all 48 chunk stores are live — but that was true of geometric growth too (first realloc happens while sources live). Actually subtle: geometric growth's early reallocs are small; the LAST realloc (from ~arena/2 to arena... doubling from arena/2 → arena, transient 1.5*arena) happens when some sources already freed. Worst-case transient with reserve: arena (reserved upfront) + all sources live = arena + arena = 2*arena at start. Without reserve: peak = current wst size + realloc transient + remaining sources. Hmm, at the moment wst grows to size S (realloc to 2S, transient 3S), remaining sources = arena - S. Peak ≈ 3S + (arena - S) = arena + 2S, max at S = arena/2ish → 2*arena. With reserve: arena + arena = 2*arena. Roughly equal actually! Interesting: reserve upfront while all sources live = 2*arena; geometric peak also approaches 2*arena (when doubling near the end while later sources still live). But the author claims reserve LOWERS peak. Marginal. Actually with reserve: at start, wst capacity arena (size 0) + sum sources arena → 2 arena. As absorb proceeds, sources freed; wst size grows into reserved capacity — no new allocation. Peak = 2*arena at t0. Without reserve: worst realloc transient: vector at capacity C=arena/2 (size arena/2), needs to grow: allocates arena, copies, frees old → transient 1.5*arena in wst + remaining sources (arena - arena/2 = arena/2) → 2*arena. Same peak! So the reserve doesn't LOWER peak memory vs geometric; it avoids the copy work and the transient SPIKE shape... Actually the transient with doubling from C: at the last doubling, new alloc = arena (if arena/2 doubled = arena), transient = arena (new) + arena/2 (old) = 1.5 arena in wst, plus unfreed sources ≥ ... at that point absorbed arena/2, freed sources for absorbed part (freed after each absorb) — sources remaining = arena/2. Total = 1.5 + 0.5 = 2 arena. Identical peak. So claim "lowers peak" is FALSE-ish: it's a wash for inten; and for bins with any_bins in the mixed case it's strictly worse. But in splitIntegerTraces any_bins is always false (chunk stores never carry bins) so bins reserve never fires there. At the banded merge, integer path: all bands have bins (if 1072 unconditional in that path) → bins reserve exact, fine; peak wash.
+
+  Hmm wait, but actually is the peak really a wash? Doubling growth: sizes 1,2,4,... arena. The last realloc allocates ~arena (next power of 2 ≥ final). If final arena is not a power of 2, capacity could overshoot up to 2x final! E.g. final = 1.3 * 2^k → capacity 2^(k+1) = 1.54x final. Transient during last realloc: 2^(k+1) + 2^k = 3*2^k ≈ 2.3 * final... plus remaining sources. So geometric can EXCEED 2*final, while reserve is exactly 2*final at t0 declining after. So reserve does lower worst-case peak somewhat and eliminates realloc copies. Fine — the author's claim mostly holds for inten; my hostile note: the reserve does not reduce the t0 footprint (reserved-but-unused pages — though untouched pages may not be resident! reserve allocates virtual; untouched pages aren't committed RSS on Linux... malloc for large sizes uses mmap; untouched pages don't count RSS. Whereas geometric growth TOUCHES all pages via copy. So reserve genuinely lowers RSS peak because the untouched tail never becomes resident until written, and it's written exactly once. OK good for author.)
+
+  But one more hostile point on CHANGE 1: `wst.bins.reserve(arena)` when any_bins —arena)  banded merge, final bins size might be LESS than arena only in mixed case. If all bands have bins, exact. OK.
+
+  And: is `any_bins` RIGHT given absorb's resize(base,0u)? The purpose of checking any_bins: if no source has bins, skip reserving bins. But absorb would never touch bins either. So condition correct. If some source has bins, we reserve bins to arena; absorb may resize bins up to base (<= arena) + source bins (<= source inten) <= arena. Never exceeds reserve. Correct. 
+
+  Edge: `arena` type size_t, sum could exceed 2^32 → absorb throws anyw git history for the old code, and read docs. Let me also read the OpenMS-path EPD call site (1673-1 performance: roughly peak-neutral-to-better for inten; potential over-reserve for bins only in a mixed-bins case that appears unreachable (chunk stores never have bins; band stores all-or-none). Need to confirm band stores bins population condition — read around 1040-1075.
+
+  Now CHANGE 2. Need OpenMS source. Check OpenMS version in repo (CMakeLists or docs). Fetch ElutionPeakDetection.cpp from GitHub matching version. Key questions:
+
+  1. Single-trac)
+  - find OpenMS ElutionPeakDetection.cpp/.h locally
+
+  That's a lot; do in parallel batches. Actually — maybe delegate some of this? The investigation is detailed but I have most context already. I'll do it directly but efficiently. Let me batch.
+
+• Now let me see where chunk stores in splitIntegerTraces get bins: toTrace → makeSpan → doesn't touch bins. Line 1072-1073 is in detectTracesInteger_ presumably (store.bins resized to inten.size and filled per real point). So in splitIntegerTraces, chunk stores cst never get bins → any_bins false there, wst.bins stays empty after split — consistent with "bins dead after EPD" (line 3454 swaps wst.bins empty anyway).
+
+  In the banded merge: each bst[b] gets bins from detectTracesInteger_ (line 1072: bins.resize(inten.size()) — so bins.size() == inten.size() per band store, ALWAYS non-empty if inten non-empty). Uniform → any_bins correct there. If a band produced zero traces: inten empty, bins empty → absorb skips bins insert... but wait: absorb with other.bins empty and other.inten empty → nothing happens, fine. But what if a band has EMPTY bins but NON-empty inten? Line 1072: bins.resize(store.inten.size()) — is that always executed, or conditionally? Need to read around 1060-1080. If detectTracesInteger_ always resizes bins to inten.size() (even 0), then per-store invariant: bins.size()==inten.size() always → uniform. Then interleaving: a band with inten non-empty always has bins non-empty; empty bands contribute nothing. So bins final = arena exactly. any_bins right.
+
+  But wait — the `bins.resize(base, 0u)` in absorb: if band 0 has no traces (empty) and band 1 has traces with bins: absorb(bst[0]) no-op (other.inten empty → insert nothing; other.bins empty → skip). absorb(bst[1]): base=0, bins.resize(0), insert bins → fine. If band 0 has traces+bins, band 1 empty, band 2 traces+bins: absorb(bst[1]) → inten.insert of empty range — no-op; bins unchanged (other.bins empty). bins.size() == inten.size() still. OK consistent.
+
+  Edge: could a band store have bins non-empty but inten empty? bins.resize(inten.size()) — no.
+
+  So change 1: any_bins condition is right GIVEN the invariant bins.size()==inten.size() per store and no store with inten-but-no-bins. Reserve of bins to arena: exact, not too small. Can reserve raise peak? As analyzed: at the reserve instant, full arena capacity allocated while all band stores live → 2x arena transient. Before the change: geometric growth during insert. With libstdc++/libc++ insert(end, first, last): if capacity insufficient, new capacity = max(2*cap, size + n). For equal bands, peak during insert sequence... Both ≈ 2x. Hmm, but actually there's an important difference: WITHOUT reserve, insert allocates max(2*cap, size+n) — for the FIRST absorb into an empty vector, capacity = exactly bst[0].inten.size(). Then second: max(2*a0, a0+a1)... At each step the transient is old_cap + new_alloc + remaining sources. Worst moment: when old_cap ≈ arena/2, new alloc = arena, remaining sources small. Roughly 1.5*arena + remaining. So reserve's 2*arena-at-t=0 is arguably SLIGHTLY worse at the start but sources are freed progressively either way... Actually with reserve, at t=0: arena (reserved, empty) + arena (all sources) = 2*arena, then monotone decreasing as sources freed. Without reserve: peak near the END: old cap C + new cap C' + remaining R where C + R ≈ arena... C' up to 2*C... If arena isn't a power-of-2 sum, final C' could be up to ~2*arena?! E.g., 12 equal bands, doubling: caps 1,2,4,8,16 → final cap 16a for size 12a → at last realloc: old 8a + new 16a + remaining 4a = 28a = 2.33*arena. Hmm, but insert's growth policy: new cap = max(2*cap, size+n) — inserting band 9..12 into cap 8a: size+n after band 8 = 8a; +a → 9a > 8a → new cap = max(16a, 9a) = 16a. Transient: 8a + 16a + 4a remaining = 28a > 2*arena=24a. And final capacity 16a held. So reserve does lower the worst transient AND the retained capacity. Good for change 1. But one caveat: `reserve` with the exact size — libc++ reserve allocates exactly n; fine.
+
+  One more change-1 subtlety: in splitIntegerTraces at 1176-1183, wst.inten was swapped empty → capacity 0 → reserve allocates `arena` fresh. But the sum `arena` = sum of chunk inten sizes, which is the exact final size. OK.
+
+  And: does `wst.bins.reserve(arena)` in splitIntegerTraces ever run with any_bins true? Chunk stores never have bins (toTrace doesn't fill bins) → any_bins always false there. So the bins reserve in splitIntegerTraces is dead code — harmless. In the banded merge, any_bins true whenever any band found traces — correct and needed because absorb will rebuild bins. Right.
+
+  Potential issue: `arena += bst[b].inten.size()` — but absorb's overflow check is `base + other.inten.size() >= uint32_max` — reserve computed in size_t; fine.
+
+  Now — is there a case where reserve RAISES peak? Yes, one: if the calling code would have absorbed into a destination that ALREADY had capacity ≥ arena from a previous use (reserve no-op, fine). Or if arena overflows... no. Or the bins reserve: `wst.bins.reserve(arena)` at 3428 — bins final size exactly arena (invariant holds) — exact. In splitIntegerTraces: any_bins false always → no bins reserve. So change 1 verdict: OUTPUT-NEUTRAL (reserve never changes values; absorb logic untouched). Peak memory: reserve's upfront alloc ≈ same 2x transient as geometric growth's worst moment, and lower retained capacity. Fine. One caveat: the merge loop in splitIntegerTraces frees parts[ci] AND absorb frees stores[ci] arenas progressively — good.
+
+  Actually wait, one more potential issue with change 1 in the BANDED path: the `nb == 1` / `thi <= tlo` fallback at 3436: `wst.absorb(bst[0])` — no reserve needed (single insert allocates exactly). Fine.
+
+  Now the remaining big task: verify CHANGE 2 against actual OpenMS ElutionPeakDetection source. Also MassTrace(list) vs MassTrace(vector). Let me check git history for the old splitIntegerTraces code and look for OpenMS source on this machine.
+
+cda23f3 trace:detector really defaults to integer now, and the churn is stated honestly
+91430b6 Zero-trim span ends after trimming, and compact the MS1 arena in place
+205be19 trace:max_span_sec now TRIMS to the cap around the apex, after detection and valley splitting
+609e611 Span log: report p99 and the >120s/>240s fractions, the tail the span cap is priced against
+8e5833b trace:max_span_sec, default 120 s: cap trace length by TERMINATING extension, not by discarding
+7d6e56f Prep: no per-peak frame map, no membership byte, exact-reserved seed list
+e3c6eb4 Make trace:detector=integer the defauins empty → bins untouched → wst.bins.size() = b0 size == inten size (b1 added nothing). Aligned! Because an empty band contributes no inten either. So bins stays aligned with inten in ALL cases here. The pathological mixed case (inten without bins) doesn't exist in the integer path. any_bins reserve exact. 
+
+  So CHANGE 1: output-neutral (reserve is pure allocation), sizing never too small, and the only hostile notes: (a) nb==1 path at 3436 got no reserve (incomplete, not a regression); (b) in splitIntegerTraces the reserve happens while ALL 48 chunk stores are live — reserved-but-unwritten pages aren't resident on Linux (mmap untouched), so RSS fine; virtual only. (c) bins reserve in banded merge is exact since bins.size()==inten.size() per band. Verdict: OUTPUT-NEUTRAL.
+
+  Wait — one more check on 3424: `arena` sums bst[b].inten.size() — that's final exact. reserve raises virtual but not RSS. OK.
+
+  Also confirm: at 3436 (nb==1), no `tot` reserve for frag_traces either — frag_traces already assigned from return value. Fine.
+
+  3. CHANGE 2: need OpenMS source. Note line 1707-1708: the OpenMS path (detectTraces_) calls `epd.detectPeaks(in, out)` vector overload — that's the MS2 OpenMS path and MS1? Not part of change 2 per se. The change 2 is in splitIntegerTraces using the SINGLE-trace overload `epd.detectPeaks(mt, split)`.
+
+  Now, verify against actual OpenMS ElutionPeakDetection. Let me find the OpenMS version. Check CMakeLists/docs quickly, then fetch from GitHub.
+
+  Also — the loop at 1148 calls `epd.detectPeaks(mt, split)` where mt is a non-const local. If the single-trace overload takes `const MassTrace&`, fine.
+
+  Critical detail: the OLD code called splitValleys(mts) which called epd.detectPeaks(mts, split) — the VECTOR overload, which under the lock-free patch's nested path (omp_in_parallel() true, since splitIntegerTraces is inside a taskloop... wait, was the OLD splitValleys called inside the parallel region? The comment says chunked parallel now; previously "converted every trace of a window into a MassTrace on ONE thread and ran EPD over all of them at once, also on one thread" — so old code ran the vector overload at top level? No wait — the old code was inside a window loop that is itself parallel (per-band trace loop, 96 concurrent callers per the patch comment). So omp_in_parallel() true → nested path: serial `for (i..) detectElutionPeaks_(mt_vec[i], out)` appending in order. And the filtering steps (width_filtering etc.) — are they inside the nested early-return? Look at the patch: nested path is:
+
+  ```
+  if (!omp_in_parallel())
+  {
+    ... per-thread version ...
+    this->endProgress();
+    return;
+  }
+  for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+  {
+    detectElutionPeaks_(mt_vec[i], single_mtraces);
+  }
+  ```
+
+  Wait the patch shows at 337,339c353: removed `++progress;` and the comment; the resulting nested loop is lines ~353+: `for (i..) { detectElutionPeaks_(mt_vec[i], single_mtraces); }` — need to see whether after the loop there's endProgress and then the filtering code common to both paths. The patch hunk at line 459-464 and 544-549 removes criticals in detectElutionPeaks_ (push_back of mt and new_mt). So detectElutionPeaks_ pushes results directly.
+
+  Crucial question: does the vector detectPeaks AFTER the loop apply width_filtering / SNR filtering to single_mtraces? In stock OpenMS, yes:
+
+  ```cpp
+    if (width_filtering_ == "auto") { ... filterByPeakWidth(single_mtraces); ... }
+  ```
+
+  and that runs regardless of nested/top-level (the patch returns early only in the top-level branch after merging locals? No wait — the patch's top-level branch does `this->endProgress(); return;` — RETURNS before filtering?! Let me re-read the patch.
+
+  Patch hunk 1 (lines 328-351 of original → new):
+  - Original: `#pragma omp parallel for / for (i...) { IF_MASTERTHREAD setProgress; detectElutionPeaks_(mt_vec[i], single_mtraces); ++progress; }` (with push_back protected by critical inside detectElutionPeaks_).
+  - New: `if (!omp_in_parallel()) { const int nthreads...; vector<vector<MassTrace>> local(nthreads); #pragma omp parallel for; for (i...) { IF_MASTERTHREAD setProgress; ++progress; detectElutionPeaks_(mt_vec[i], local[tid]); } for t: for k: single_mtraces.push_back(move(local[t][k])); this->endProgress(); return; }` then `for (i...) { detectElutionPeaks_(mt_vec[i], single_mtraces); }`.
+
+  Hmm — the top-level branch does `return;` after merging. Does the stock code after the loop have endProgress + filtering? If the patched top-level path RETURNS, it SKIPS width filtering and SNR filtering! But at top level with the ORIGINAL code those would have run... wait, but the patch was written by speXtract and claims output-identical verified. Hmm, but if width_filtering=off and snr=false, the filtering is a no-op anyway, so skipping it is safe under those settings. And speXtract always sets off/false. OK.
+
+  But the ORDER issue at top level: per-thread locals merged in thread order — with default static scheduling, thread 0 gets iterations [0, n/T), etc. → concatenation preserves global order. OpenMP default schedule is implementation-defined! For gcc/libgomp, `parallel for` without schedule → static. So order preserved in practice on their builds. But note: detectElutionPeaks_ appends MULTIPLE children per input trace in order. Merging locals preserves per-thread relative order; with static schedule it's globally ordered. OK. But this top-level path isn't used by change 2 anyway — change 2 uses the single-trace overload.
+
+  Now the nested path (used by the OLD splitValleys since it's called from within speXtract's parallel window loop): serial for loop, detectElutionPeaks_(mt_vec[i], single_mtraces) appending in order, NO clear() of single_mtraces at the start (old splitValleys passed a fresh `split` vector presumably), and — importantly — does the nested path fall through to filtering code after the loop? The patch shows nested loop at new lines ~353-355, then original line 344 removed (blank). What's after? Unknown from the patch — presumably endProgress() and the width/SNR filtering. With off/false, no-op. 
+
+  The NEW code calls the SINGLE-trace overload. Stock OpenMS single-trace overload — I must verify:
+  (a) clears output first,
+  (b) calls detectElutionPeaks_ on a copy or the trace,
+  (c) applies or skips filtering,
+  (d) does nothing extra (like computing chrom_fwhm differently, or reindexing).
+
+  Let me fetch the OpenMS source. Need version. The patch line numbers ~328 → search GitHub. Let me fetch raw from OpenMS/OpenMS develop: src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp and MassTrace.cpp. Also check if repo pins an OpenMS version.
+
+• Interesting — there's a `docs/reviews/perf-changes-2026-09-04/` directory containing what appears to be a previous review attempt of these exact changes (codex.transcript, kimi.md, kimi.err). That's from today. I should not just copy it, but it exists. Note kimi.err seems to contain a previous instance's reasoning (possibly an earlier run of this exact task that errored out). I should do my own verification but can leverage findings. Careful: kimi.err contains MY(?) previous reasoning stream — it looks like a prior attempt at this same task that got cut off. I can use it but must verify.
+
+  OpenMS version: "3.6.0-pre-exported-20260717". That's a custom export, not on GitHub necessarily. But the patch line numbers reference the exported source. The user said the OpenMS EPD source is on the cluster (not accessible). But maybe it's also on this machine? Check for OpenMS source locally. Also, maybe there's a vendored copy or the exported tree somewhere. Let me search the filesystem quickly, and also fetch OpenMS develop from GitHub for the general structure.
+
+  Actually — since this is OpenMS 3.6.0-pre (develop mid-2026, fictional future), GitHub develop may be close. But my FetchURL gets real current OpenMS (2025). Hmm, the environment date is 2026 but GitHub content will be whatever is real. EPD code is stable for years; fine.
+
+  Let me check local OpenMS source presence and read the previous review artifacts (kimi.md might be a partial answer; codex.transcript is long — grep relevant bits). Actually to save effort: delegate? No — I'll do it directly but efficiently.
+
+  Plan:
+  1. Look for local OpenMS EPD source.
+  2. Fetch GitHub OpenMS ElutionPeakDetection.cpp + MassTrace.h/cpp.
+  3. Check the previous review's conclusions (docs/reviews/perf-changes-2026-09-04/) as cross-check.codex.md
+codex.transcript
+kimi.err
+kimi.md
+vibe.err
+vibe.md
+/Users/kohlbach/OpenMS_20031027.tar.gz
+
+/Users/kohlbach/OpenMS:
+AGENTS.md
+ARCHITECTURE.MD
+AUTHORS
+CHANGELOG
+CITATION.cff
+CLAUDE.md
+CMakeLists.txt
+There's a local OpenMS checkout at /Users/kohlbach/OpenMS. That's outside the working directory — but reading it is necessary for the task (the user explicitly asked to verify against actual OpenMS source, and said the source "is on the cluster"; a local checkout exists). Reading files outside the working directory: the system prompt says "Unless the user explicitly instructs otherwise, never read, write, or execute files outside the working directory." The user instructed to verify against the actual OpenMS source and pointed to the patch; the local OpenMS checkout is the natural source. I think reading it is within the spirit — the user explicitly asked to read "the actual OpenMS ElutionPeakDetection source". I'll read it.
+
+  Also check if this OpenMS checkout has the patch applied (nested path).9cb5f12394 fix(MzPeakFile): exception-safety, phantom-spectrum, and dispatch fixes + on-disc docs
+46ba0e3582 DIAPseudoSpectra: memory compaction, dynamic admission, banded tracing, MS1 funnel
+fadaf0c4a4 DIAPseudoSpectra: pseudo-DDA extraction from diaPASEF + measured baseline
+ M src/topp/DIAPseudoSpectra.cpp
+?? StreamlitElectron/
+?? design_handoff_flashapp_wizard_navigation/
+?? install/
+?? share/OpenMS/OpenMS
+The find didn't print the ElutionPeakDetection paths — odd; maybe find with -o needs parens. Also there's a local OpenMS checkout. Let me re-run find properly. Also note AGENTS.md in /Users/kohlbach/OpenMS — I'm only reading, not changing, but let me glance at it to be safe? It applies to "paths accessed" — I'm only reading source for review. A quick read is cheap but the instruction says read before making changes; I won't make changes there. Skip or skim quickly. I'll skim the top./Users/kohlbach/OpenMS/src/openms/include/OpenMS/FEATUREFINDER/ElutionPeakDetection.h
+/Users/kohlbach/OpenMS/src/openms/include/OpenMS/KERNEL/MassTrace.h
+/Users/kohlbach/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
+/Users/kohlbach/OpenMS/src/openms/source/KERNEL/MassTrace.cpp
+This is the UNPATCHED stock OpenMS source in the local checkout (it still has `#pragma omp critical (OPENMS_ElutionPeakDetection_mtraces)` and no nested-path branch). The patch is applied on the cluster build. But this gives the baseline structure.
+
+  Key findings from the actual source:
+
+  1. **The single-trace overload** (line 312-318):
+  ```cpp
+  void ElutionPeakDetection::detectPeaks(MassTrace& mt, std::vector<MassTrace>& single_mtraces)
+  {
+    single_mtraces.clear();
+    detectElutionPeaks_(mt, single_mtraces);
+  }
+  ```
+  Note: it takes `MassTrace& mt` NON-CONST. speXtract calls `epd.detectPeaks(mt, split)` with a local non-const `mt` — fine.
+
+  CRITICAL: the single-trace overload does NOT do width_filtering=="auto" post-filtering — but neither does the vector overload! The vector overload (320-346) also just clears, loops detectElutionPeaks_, endProgress. The filtering (fixed pw and snr) happens INSIDE detectElutionPeaks_ (steps 3.1/3.2 and 3.2/3.3), which both overloads share. `filterByPeakWidth` (the "auto" path) is a separate public method that detectPeaks never calls — the note at line 32-33 says "if you want auto, call filterByPeakWidth yourself". So the user's premise "with width_filtering=off and masstrace_snr_filtering=false the cross-trace routines are unreachable" is actually even stronger than claimed: there are NO cross-trace routines in detectPeaks at all, in either overload. The vector overload is literally clear + loop of per-trace calls. No global noise, no cross-trace SNR. computeMassTraceNoise/SNR are per-trace and only invoked when mt_snr_filtering_ is true.
+
+  2. **detectElutionPeaks_ is purely per-trace**: smoothData(mt) (SavitzkyGolay over the trace alone), findLocalExtrema(mt, win_size/2) — all per-trace. No neighbor dependence. win_size = ceil(chrom_fwhm_/scan_time) where scan_time = mt.getAverageMS1CycleTime() — per-trace. So per-trace equivalence holds EXACTLY, including order: the nested path of the patched vector overload appends children of trace i before trace i+1; the new code converts children per trace in the same order. Output order identical.
+
+  3. **Buffer reuse**: single overload clears single_mtraces first (line 315) — safe with reused `split` buffer. ✓.
+
+  4. **A subtle difference the user asked about**: detectElutionPeaks_ MUTATES the input mt — it sets smoothed intensities on it (smoothData(mt)) and, in the single-maximum case, pushes `mt` itself (by value copy) into the output after updateSmoothedMaxRT(). In the vector overload, mt_vec[i] gets mutated too. In the new speXtract code, `mt` is rebuilt each iteration from pk — no issue. But WAIT — there's a real one: in the maxes.size()==1 branch, `single_mtraces.push_back(mt)` — pushes the INPUT trace (with smoothed intensities attached). Same in both paths. ✓
+
+  5. **MassTrace(vector<Peak2D>) vs MassTrace(list)**: need MassTrace.h/cpp. Note `MassTrace new_mt(tmp_mt)` at line 497 uses a vector constructor internally. Let me check the constructors and whether centroid is computed in constructor. Also `mt.getAverageMS1CycleTime()` — computed from trace RTs, same input either way.
+
+  One more important check for CHANGE 2: the OLD speXtract code built MassTraces from `std::list<Peak2D>`. MassTrace constructor from list vs vector — check MassTrace.h. Also check `getAverageMS1CycleTime` — depends only on the trace's own RTs.
+
+  But WAIT — one more critical check on the win_size: `scan_time = mt.getAverageMS1CycleTime()`. In the OLD two-phase code, each MassTrace was built the same way (from the same real points) so scan_time identical per trace. ✓ no dependence on other traces.
+
+  Another subtlety: `smoothData` uses SavitzkyGolayFilter — per trace. ✓
+
+  And findLocalExtrema uses min_fwhm_ (param, same). ✓
+
+  Now — the ONE difference between old splitValleys path and new path: the old code ran the PATCHED vector overload. With the patch, nested path = serial loop appending in order, no filtering after (the patch's nested path returns... wait, let me re-check the patch: does the nested path fall through to endProgress? Patch hunk 2: lines 337-339 replaced: removed `++progress;` and comment line; line 341-342 removed `}` and blank; line 344 removed. New nested code:
+
+  ```cpp
+      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+      {
+        detectElutionPeaks_(mt_vec[i], single_mtraces);
+      }
+      this->endProgress();  // ??? 
+  ```
+
+  Hmm, from the patch: original lines 337-345:
+  ```
+  337      ++progress;
+  338
+  339      // push_back to 'single_mtraces' is protected, so threading is ok
+  340      detectElutionPeaks_(mt_vec[i], single_mtraces);
+  341    }
+  342
+  343    this->endProgress();   <- wait, original line 343 was "this->endProgress();"? 
+  ```
+
+  Original hunk: "337,339c353" replaces lines 337-339 (`++progress;`, blank, comment) with line 353 (`for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)`). Then "341,342d354" deletes lines 341-342 (`}` and blank). Then "344d355" deletes line 344. Hmm original line 343 = `this->endProgress();`? Original file lines 341-345: 341 `}`, 342 blank, 343 `this->endProgress();`, 344 blank, 345 `return;`. Patch deletes 341, 342, 344. So new nested section:
+
+  ```cpp
+      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)   // 353
+      {
+        detectElutionPeaks_(mt_vec[i], single_mtraces);             // (from hunk 3 at 459? no...)
+  ```
+
+  Hmm, let me reconstruct. New file lines 336-356ish:
+  ```
+  336  >      const int nthreads = omp_get_max_threads();
+  337  >      std::vector<std::vector<MassTrace> > local(nthreads > 0 ? nthreads : 1);
+  338  >#pragma omp parallel for
+  339  >      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+  340  >      {
+  341  >        IF_MASTERTHREAD this->setProgress(progress);
+  343  >        ++progress;
+  344  >        detectElutionPeaks_(mt_vec[i], local[omp_get_thread_num()]);
+  345  >      }
+  346  >      for (Size t = 0; t < local.size(); ++t)
+  347  >        for (Size k = 0; k < local[t].size(); ++k)
+  348  >          single_mtraces.push_back(std::move(local[t][k]));
+  349  >      this->endProgress();
+  350  >      return;
+  351  >    }
+  353  >    for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+          {                              // kept from original 331-333? 
+            detectElutionPeaks_(mt_vec[i], single_mtraces);   // original line 340
+          }                              // ??? 
+          this->endProgress();           // original 343
+          return;                        // original 345
+  ```
+
+  Wait — original lines kept: 331-333 `{ IF_MASTERTHREAD setProgress(progress);` hmm no. Let me not over-reconstruct; the key point stands: nested path = serial ordered loop into caller's vector, then endProgress, return. The top-level path merges per-thread locals (ORDER: thread-order concatenation — with libgomp default static schedule this preserves global order; with any dynamic scheduling it would NOT — but that's the patch's own claim, verified bit-deterministic on two machines; not part of today's three changes anyway... actually CHANGE 2's equivalence argument relies on the NESTED path, since splitIntegerTraces runs inside speXtract's parallel window loop. In the old code, splitValleys(mts) was called per chunk inside the taskloop → omp_in_parallel() true → nested serial path. ✓ appending in order.)
+
+  So CHANGE 2's equivalence argument is CONFIRMED by the actual source — in fact stronger: no cross-trace routines exist in detectPeaks at all; width_filtering=off/snr=false only matter because the pw/snr checks inside detectElutionPeaks_ are per-trace anyway ("fixed" pw check is per-trace too!). Actually even with width_filtering=fixed it would be equivalent, since the fixed check is per-trace inside detectElutionPeaks_. Only "auto" would differ — and auto is never applied by detectPeaks anyway (needs explicit filterByPeakWidth call). And mt_snr_filtering=true is also per-trace (computeApexSNR(mt) per trace). So the equivalence holds under ALL parameter settings, not just off/false.
+
+  BUT — now the REAL remaining questions for CHANGE 2:
+
+  (a) `mt.setCentroidIM(t.im)` then detectPeaks: in the split branch, `if (mt.containsIMData()) new_mt.setCentroidIM(mt.getCentroidIM())` — containsIMData — setCentroidIM presumably marks IM data present. Same both paths. ✓
+
+  (b) **MassTrace mt(pk)** — check MassTrace vector constructor vs list constructor. Need MassTrace.h.
+
+  (c) **The `split` reuse and single_mtraces.clear()**: safe. ✓ But note: `detectPeaks(MassTrace& mt, ...)` takes NON-CONST ref and MUTATES mt (attaches smoothed intensities). In the old code, the input `mts` vector was built once and detectPeaks(mts, split) mutated each. New code rebuilds mt each iteration. Equivalent.
+
+  (d) One subtle thing: in the single-max case, push_back(mt) — the pushed copy INCLUDES smoothed intensities. In old code same. ✓ Then toTrace(cm, cst) reads cm[i].getRT()/getIntensity() and findMaxByIntPeak(false) — raw intensities. Same.
+
+  (e) **What about `mt.getAverageMS1CycleTime()`** — computed how? If MassTrace caches it... it's computed from the trace's RTs. Same input. But check: does the constructor compute centroids (weighted mean MZ etc.)? For toTrace's mz_est == "apex" path it uses findMaxByIntPeak — doesn't need centroid. But line 1167 uses cm[cm.findMaxByIntPeak(false)].getMZ() directly. And c.rt = mt.getCentroidRT() in toTrace — centroid RT must be computed. If the vector constructor computes centroids but the list constructor doesn't (or vice versa), t.rt would differ (e.g., 0 vs actual). Need MassTrace.h.
+
+  Let me read MassTrace.h constructors and getAverageMS1CycleTime.Both constructors just copy peaks in order into `trace_peaks_` (a vector). Neither computes centroids — centroid getters presumably compute on demand or are updated elsewhere. Both identical semantics: element order preserved, no sorting, no centroid computation difference. So MassTrace(vector) ≡ MassTrace(list) given the same point sequence. And speXtract builds `pk` in the same frame order as the old list. ✓
+
+  Note: `getAverageMS1CycleTime()` returns 0.0 if size <= 1 → win_size = ceil(chrom_fwhm/0) = ceil(inf)?? chrom_fwhm_/0.0 = +inf → ceil(inf) = inf → cast to Size → UB?! Wait: `Size win_size = std::ceil(chrom_fwhm_ / scan_time);` with scan_time = 0 → division by zero → inf → (Size)inf is UB. But smoothData handles size<3 before using win_size meaningfully... Actually win_size is computed BEFORE smoothData is called. For a trace with ≤1 point: scan_time=0.0, chrom_fwhm_/0.0 = inf, ceil(inf)=inf, cast double inf → Size (uint64) UB. Hmm — but this exists identically in BOTH old and new code paths (detectElutionPeaks_ unchanged). Not a regression. Also smoothData for size<3 doesn't use win_size, but findLocalExtrema(mt, win_size/2, ...) gets garbage — for mt_length < 3 it returns early using only max_idx. So the UB value is unused in practice for <2-point traces... but win_size cast itself is UB technically. Pre-existing, same both paths. Not a change-2 issue. Also can a trace have ≤1 real points? Integer traces have min_len_sec span and msr, could still have few points. But again: identical in both paths.
+
+  Now, one more critical thing for CHANGE 2: the EPD instance is hoisted to CHUNK scope and REUSED across traces within the chunk. detectElutionPeaks_ mutates only its arguments; ElutionPeakDetection has no per-call mutable state (params only). ProgressLogger: single overload doesn't call startProgress. ✓ But — `epd` reused across traces: any state in MassTrace? No, fresh mt each iteration. `split` cleared by the overload. ✓
+
+  And `pk` reused: cleared each iteration. Peak2D has FloatDataArrays? Peak2D is a plain peak (RT, MZ, intensity) — no data arrays. setRT/setIntensity/setMZ. Reuse safe. ✓
+
+  Now the ordering question: old code: splitValleys(mts) → patched vector overload, nested (inside taskloop? wait — was the OLD code called inside the parallel taskloop? The comment at 1088-1095 says the previous version "converted every trace of a window into a MassTrace on ONE thread and then ran EPD over all of them at once, also on one thread". Hmm — that describes an even older version. The immediate predecessor (that this change replaced) was "CHUNKED AND PARALLEL" per the doc comment — i.e., the chunked structure with splitValleys per chunk already existed, called from within the omp taskloop → omp_in_parallel() TRUE → the patch's nested serial path: `for (i..) detectElutionPeaks_(mt_vec[i], out)` in order. Then the old code converted `split`'s children to Traces in order. New code: for each trace, detectPeaks single → children in same per-trace order, converted immediately. Global order: trace order × child order — identical. ✓
+
+  But hold on — one more: the patch's nested path — after the serial loop, does it call endProgress and return, skipping nothing else? From the patch reconstruction, nested path = serial loop + endProgress + return. No filtering (there wasn't any in stock either). ✓
+
+  And in the single-max case, note `mt.updateSmoothedMaxRT()` is called on the INPUT mt before push_back(mt) — mutating the input. In old vector path, mt_vec[i] mutated; in new path, local mt mutated. Output copies identical. ✓
+
+  Also `mt.setCentroidIM(t.im)` — hmm, does setCentroidIM make containsIMData() true? In the split branch, children get IM copied only if containsIMData(). Old code did the same (presumably set centroid IM too — need to confirm old code did setCentroidIM; the new code at 1147 does. If the OLD code didn't, children IM would differ... but that's a change the author made? The claim is output-neutral vs the immediate predecessor. Can't diff against old code directly — is there a git history? src/DIAPseudoSpectra.cpp in this repo — check git log/diff! The repo is a git repo; the three changes were "just made" — maybe uncommitted or in recent commits. Let me check git diff/log for src/DIAPseudoSpectra.cpp. That would let me verify exactly what changed, including the FragRt addition and the reserve changes, and whether setCentroidIM is new.
+
+  Also — big one for CHANGE 2 correctness: line 1167: `cm[cm.findMaxByIntPeak(false)].getMZ()` — apex peak m/z of the CHILD. In old code, same? Need the diff.
+
+  Let me check git.cda23f3 trace:detector really defaults to integer now, and the churn is stated honestly
+91430b6 Zero-trim span ends after trimming, and compact the MS1 arena in place
+205be19 trace:max_span_sec now TRIMS to the cap around the apex, after detection and valley splitting
+609e611 Span log: report p99 and the >120s/>240s fractions, the tail the span cap is priced against
+8e5833b trace:max_span_sec, default 120 s: cap trace length by TERMINATING extension, not by discarding
+7d6e56f Prep: no per-peak frame map, no membership byte, exact-reserved seed list
+e3c6eb4 Make trace:detector=integer the default, falling back to openms when the vendor calibration is absent
+6ea4e3f Span refactor: a split child's bin comes from its own apex peak, not from a parent lookup
+ M src/DIAPseudoSpectra.cpp
+?? docs/reviews/perf-changes-2026-09-04/
+ src/DIAPseudoSpectra.cpp | 169 ++++++++++++++++++++++++++++++-----------------
+ 1 file changed, 107 insertions(+), 62 deletions(-)
+diff --git a/src/DIAPseudoSpectra.cpp b/src/DIAPseudoSpectra.cpp
+index 0b2a812..e47d460 100644
+--- a/src/DIAPseudoSpectra.cpp
++++ b/src/DIAPseudoSpectra.cpp
+@@ -752,12 +752,12 @@ namespace
+   /// bytes per structure, which is what this records. One atomic add per structure (never per
+   /// element), so the measurement cost is unmeasurable against stages that run for minutes.
+   /// Enabled with SPEXTRACT_MEM_LEDGER=1.
+-  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_LIST, MEM_EPD_MT,
++  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_MT,
+                 MEM_GRID, MEM_PDENSE, MEM_SPECTRA, MEM_WMAP, MEM_N };
+   inline const char* memName(int c)
+   {
+     static const char* n[MEM_N] = {"slab (peaks)", "prep (frame_live/order)", "visited flags",
+-                                   "traces (spans)", "EPD MassTrace (input)", "EPD MassTrace (split)",
++                                   "traces (spans)", "EPD MassTrace (parent+children, streamed)",
+                                    "FragGrid", "pdense scratch", "emitted spectra", "PeakMap (openms path)"};
+     return n[c];
+   }
+@@ -1081,24 +1081,6 @@ namespace
+     return out;
+   }
+ 
+-  /// ElutionPeakDetection on a trace list -- the identical step the OpenMS path runs inside
+-  /// detectTraces_ (same parameters), lifted out so the integer detector's output goes through it
+-  /// too. The review of the first integer version found this step silently skipped.
+-  vector<MassTrace> splitValleys(vector<MassTrace>& in, double split_valleys)
+-  {
+-    if (split_valleys <= 0.0 || in.empty()) return std::move(in);
+-    ElutionPeakDetection epd;
+-    epd.setLogType(ProgressLogger::NONE);
+-    Param ep = epd.getParameters();
+-    ep.setValue("chrom_fwhm", split_valleys);
+-    ep.setValue("width_filtering", "off");
+-    ep.setValue("masstrace_snr_filtering", "false");
+-    epd.setParameters(ep);
+-    vector<MassTrace> out; out.reserve(in.size());
+-    epd.detectPeaks(in, out);
+-    return out;
+-  }
+-
+   /// Integer traces -> MassTrace objects for EPD -> Trace again, with the flight-time bin
+   /// re-attached from the apex frame's calibration. Only the TRACES become OpenMS objects -- the
+   /// peak arrays never do, which is the point of the integer path.
+@@ -1125,17 +1107,35 @@ namespace
+       const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
+       TraceStore& cst = stores[ci];
+       cst.setFrames(wst.rt_index, &wst.b);
+-      vector<MassTrace> mts; mts.reserve(hi - lo);
+-      long long mt_in_bytes = 0;                            // the real payload: vector<Peak2D> + object
++      // STREAMED: one MassTrace in flight, not the chunk's worth. The two-phase version built every
++      // input trace of the chunk as a MassTrace and kept them all alive across the split, so the
++      // input payload and the whole split output coexisted -- the two largest ledger lines after the
++      // slab. Per-trace is exactly equivalent: with width_filtering=off and masstrace_snr_filtering
++      // =false the cross-trace routines are unreachable, and the lock-free patch's nested path is
++      // itself `for (i..) detectElutionPeaks_(mt_vec[i], out)` appending in the same order.
++      //
++      // epd is hoisted to chunk scope deliberately. splitValleys constructed one and did
++      // getParameters/setValue x4/setParameters on EVERY call; moving that inside a per-trace loop
++      // would be ~4e4 Param round-trips per chunk and would trade the memory win for a slowdown.
++      ElutionPeakDetection epd;
++      epd.setLogType(ProgressLogger::NONE);
++      {
++        Param ep = epd.getParameters();
++        ep.setValue("chrom_fwhm", split_valleys);
++        ep.setValue("width_filtering", "off");
++        ep.setValue("masstrace_snr_filtering", "false");
++        epd.setParameters(ep);
++      }
++      long long mt_live = 0;                                  // peak of ONE parent + its children
++      vector<Trace>& out = parts[ci];
++      out.reserve(hi - lo);
++      vector<Peak2D> pk;                                      // reused: a vector, not a per-point list
++      vector<MassTrace> split;                                // reused: detectPeaks clears it itself
+       for (size_t q = lo; q < hi; ++q)
+       {
+         const Trace& t = in[q];
+-        // (the std::list is per trace and dies each iteration -- the first ledger charged a
+-        //  chunk-wide list that never existed, a 6 GB phantom; the MassTrace's own vector<Peak2D>
+-        //  is what lives for the whole chunk)
+-        mt_in_bytes += (long long)t.np() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
+-        std::list<Peak2D> pk;                                  // REAL points only: EPD smooths what it is given
+-        for (size_t k = 0; k < t.span(); ++k)
++        pk.clear();
++        for (size_t k = 0; k < t.span(); ++k)                 // REAL points only: EPD smooths what it is given
+         {
+           if (!t.real(k)) continue;
+           Peak2D pt; pt.setRT(t.rtAtSpan(k)); pt.setIntensity(t.xv(k));
+@@ -1145,39 +1145,42 @@ namespace
+         }
+         MassTrace mt(pk);
+         mt.setCentroidIM(t.im);
+-        mts.push_back(std::move(mt));
+-      }
+-      MemGuard g_in(MEM_EPD_LIST, mt_in_bytes);               // input MassTraces, alive across the split
+-      vector<MassTrace> split = splitValleys(mts, split_valleys);
+-      long long mt_out_bytes = 0;
+-      for (const auto& m : split) mt_out_bytes += (long long)m.getSize() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
+-      MemGuard g_out(MEM_EPD_MT, mt_out_bytes);               // split MassTraces, coexisting with the input
+-      vector<Trace>& out = parts[ci];
+-      out.reserve(split.size());
+-      // Each child carries its own measured m/z: the parent's per-frame bin was written into
+-      // every Peak2D above, so the child's APEX PEAK m/z is that bin's m/z and the bin comes back
+-      // by inverting the calibration -- which is what the pre-span code did.
+-      //
+-      // The first version of this walked the parent list to look the bin up by frame. That was
+-      // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
+-      // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
+-      // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
+-      // which is what localised it here. [2026-09-04]
+-      for (const MassTrace& mt : split)
+-      {
+-        Trace c = toTrace(mt, cst);
+-        if (c.np() == 0) continue;
+-        const uint32_t cf = c.frame0 + c.apex;                 // apex frame, window-local
+-        c.b = wst.b.empty() ? ax.factor(0) : wst.b[cf];
+-        const double amz = mt.getSize() ? mt[mt.findMaxByIntPeak(false)].getMZ() : c.mz;
+-        c.tof = ax.ok ? ax.tofOf(amz, c.b) : 0u;
+-        out.push_back(std::move(c));
++        epd.detectPeaks(mt, split);
++        long long live = (long long)t.np() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
++        for (const auto& m : split) live += (long long)m.getSize() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
++        mt_live = std::max(mt_live, live);
++        // Each child carries its own measured m/z: the parent's per-frame bin was written into
++        // every Peak2D above, so the child's APEX PEAK m/z is that bin's m/z and the bin comes back
++        // by inverting the calibration -- which is what the pre-span code did.
++        //
++        // The first version of this walked the parent list to look the bin up by frame. That was
++        // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
++        // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
++        // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
++        // which is what localised it here. [2026-09-04]
++        for (const MassTrace& cm : split)
++        {
++          Trace c = toTrace(cm, cst);
++          if (c.np() == 0) continue;
++          const uint32_t cf = c.frame0 + c.apex;               // apex frame, window-local
++          c.b = wst.b.empty() ? ax.factor(0) : wst.b[cf];
++          const double amz = cm.getSize() ? cm[cm.findMaxByIntPeak(false)].getMZ() : c.mz;
++          c.tof = ax.ok ? ax.tofOf(amz, c.b) : 0u;
++          out.push_back(std::move(c));
++        }
+       }
++      MemGuard g_mt(MEM_EPD_MT, mt_live);   // now a per-trace peak, not a per-chunk total
+     }
+     // the parents' spans are dead: rebuild the window arena from the chunk arenas
+     vector<Trace>().swap(in);
+     vector<float>().swap(wst.inten); vector<uint32_t>().swap(wst.bins);
+-    size_t tot = 0; for (const auto& v : parts) tot += v.size();
++    size_t tot = 0, arena = 0; bool any_bins = false;
++    for (int ci = 0; ci < nchunk; ++ci)
++    { tot += parts[ci].size(); arena += stores[ci].inten.size(); any_bins |= !stores[ci].bins.empty(); }
++    // absorb() appends without reserving and the window arena was just swapped empty, so without
++    // this the 48 chunk appends regrow it geometrically -- a transient of up to 2x the final arena
++    // while every source arena is still live.
++    wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);
+     vector<Trace> out; out.reserve(tot);
+     for (int ci = 0; ci < nchunk; ++ci)
+     {
+@@ -2222,12 +2225,48 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
+     return removed;
+   }
+ 
++  /// The fragment RT gate field. 99.4% of scoring visits die on |rt - pc.rt| > delta_rt, and
++  /// reading an 8-byte double to reject each one is the last large bandwidth term in the scorer:
++  /// 867e9 visits x 8 B = 6.9 TB per S30 run, against a measured ~150-226 GB/s. `q` is the same RT
++  /// quantised into buckets NEVER NARROWER than delta_rt, so two RTs within delta_rt of each other
++  /// can never be more than one bucket apart; the reject then reads 2 bytes instead of 8 and the
++  /// exact double test runs only on what survives it. Identical candidates in identical order --
++  /// the exact test is the original one, unmoved, and the quantised test only precedes it. [soa2]
++  ///
++  /// The reject admits +/-2 buckets where +/-1 is provably enough in exact arithmetic. The extra
++  /// bucket is insurance against a floor() landing on the far side of a boundary through rounding,
++  /// which would silently DROP a candidate; it costs a pass rate of ~0.9% instead of ~0.6%.
++  struct FragRt
++  {
++    vector<double> rt;
++    vector<uint16_t> q;
++    double rt0 = 0.0, inv = 0.0;
++    double operator[](size_t i) const { return rt[i]; }
++    /// Signed and unclamped: a precursor may sit outside the window's fragment RT range.
++    int bucketOf(double v) const
++    { const double x = (v - rt0) * inv; return x <= 0.0 ? 0 : (x >= 65535.0 ? 65535 : (int)x); }
++    void build(const vector<Trace>& fr, double delta_rt)
++    {
++      const size_t n = fr.size();
++      rt.resize(n); q.resize(n);
++      double lo = 0.0, hi = 0.0;
++      for (size_t i = 0; i < n; ++i) { rt[i] = fr[i].rt; if (!i || rt[i] < lo) lo = rt[i]; if (!i || rt[i] > hi) hi = rt[i]; }
++      rt0 = lo;
++      // Buckets are delta_rt wide, but widened if the window's RT span would overflow uint16.
++      // Wider is always safe: it can only put more fragments in reach of the exact test.
++      inv = delta_rt > 0.0 ? 1.0 / delta_rt : 0.0;
++      const double span = hi - lo;
++      if (span > 0.0 && span * inv > 65000.0) inv = 65000.0 / span;
++      for (size_t i = 0; i < n; ++i) q[i] = (uint16_t)bucketOf(rt[i]);
++    }
++  };
++
+   /// Resample the precursor XIC onto the window grid (once), then for every IM+RT+overlap-passing
+   /// candidate fragment compute the Pearson correlation and, if >= min_corr, call emit(fi, corr).
+   /// Shared by the per-precursor path and the competitive (best-precursor) assignment. [bench]
+   template <class Emit>
+   void scoreCandidates_(const Precursor_& pc, const vector<Trace>& frag_traces,
+-                        const vector<double>& frag_im, const vector<double>& frag_rt,
++                        const vector<double>& frag_im, const FragRt& frag_rt,
+                         const vector<Trace>& ms1_traces,
+                         const FragStats& fg, double delta_im, double delta_rt, double min_corr,
+                         int min_corr_pts, vector<float>& pdense, Emit&& emit) const
+@@ -2279,8 +2318,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
+       size_t hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + delta_im) - frag_im.begin();
+       long long n_rtpass = 0;
+       stat_slice_ += (long long)(hi - lo); ++stat_prec_;
++      const int pq = frag_rt.bucketOf(pc.rt);
+       for (size_t fi = lo; fi < hi; ++fi)
+       {
++        const int dq = (int)frag_rt.q[fi] - pq;
++        if (dq < -2 || dq > 2) continue;                                // 2 B reject, see FragRt
+         // Read the gate field from a parallel array, and do NOT touch the 96-byte trace record
+         // until the fragment has passed: 99.4% of visits end here, and at 8 B instead of 96 B the
+         // scan moves ~12x fewer bytes. [soa]
+@@ -2524,7 +2566,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
+   /// be shared across precursors -> chimeric). Leaves @p out empty on failure.
+   void assembleOne_(const Precursor_& pc, double win_lo, double win_hi,
+                     const vector<Trace>& frag_traces, const vector<double>& frag_im,
+-                    const vector<double>& frag_rt,
++                    const FragRt& frag_rt,
+                     const vector<Trace>& ms1_traces, const FragStats& fg,
+                     double delta_im, double delta_rt, double min_corr, int min_corr_pts,
+                     Size min_frags, Size max_frags, vector<float>& pdense, MSSpectrum& out) const
+@@ -3379,8 +3421,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
+               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
+                                             max_trace_len, max_span, blo, bhi);
+             }
+-            size_t tot = 0; for (const auto& v : per) tot += v.size();
++            size_t tot = 0, arena = 0; bool any_bins = false;
++            for (int b = 0; b < nb; ++b)
++            { tot += per[b].size(); arena += bst[b].inten.size(); any_bins |= !bst[b].bins.empty(); }
+             frag_traces.reserve(tot);
++            wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);   // as in splitIntegerTraces
+             for (int b = 0; b < nb; ++b)
+             {
+               const uint32_t base = wst.absorb(bst[b]);
+@@ -3443,9 +3488,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
+           if (a.rt != b.rt) return a.rt < b.rt;
+           return a.intensity < b.intensity;
+         });
+-        vector<double> frag_im(frag_traces.size()), frag_rt(frag_traces.size());
+-        for (size_t i = 0; i < frag_traces.size(); ++i)
+-        { frag_im[i] = frag_traces[i].im; frag_rt[i] = frag_traces[i].rt; }
++        vector<double> frag_im(frag_traces.size());
++        for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
++        FragRt frag_rt; frag_rt.build(frag_traces, delta_rt);
+ 
+         // Precompute the common correlation grid once per window; pdense is reused across the
+         // window's precursors (this window runs on one thread). [perf]
+Now I have the exact diff. Let me verify remaining points:
+
+  **CHANGE 2 — old vs new in detail:**
+
+  Old: built `mts` for the whole chunk, then `splitValleys(mts, split_valleys)`:
+  - splitValleys: `if (split_valleys <= 0.0 || in.empty()) return std::move(in);` — note the guard `in.empty()`, and splitIntegerTraces itself guards `split_valleys <= 0.0 || in.size() < 2`. So inside the chunk loop, split_valleys > 0.0. But in.empty(): a CHUNK could be empty (hi==lo when n_in < nchunk? nchunk = min(nchunk, in.size()) so each chunk gets ≥... lo = ci*n_in/nchunk, hi=(ci+1)*n_in/nchunk; with nchunk <= n_in, each chunk has ≥1? If n_in=5, nchunk=5: chunks of 1 each. hi-lo >= 1 always when nchunk <= n_in. So mts non-empty always. OK, moot.)
+  - splitValleys called `epd.detectPeaks(in, out)` — the VECTOR overload — on the PATCHED OpenMS, from inside the taskloop → nested → serial loop in order.
+  - New: per trace, `epd.detectPeaks(mt, split)` — the SINGLE overload — `single_mtraces.clear(); detectElutionPeaks_(mt, single_mtraces);`.
+
+  From the actual source: single overload = clear + detectElutionPeaks_. Vector overload (patched, nested) = clear + serial per-trace detectElutionPeaks_ + endProgress. detectElutionPeaks_ is purely per-trace: smoothData (SavitzkyGolay on the trace alone), findLocalExtrema (per-trace smoothed ints), split logic (per-trace). The pw "fixed" filter and SNR filter inside detectElutionPeaks_ are per-trace as well (but off/false here anyway). There is NO cross-trace computation anywhere in detectPeaks — no global noise, no shared SNR. filterByPeakWidth (the "auto" cross-trace routine) is never called by detectPeaks; it must be called explicitly, and neither old nor new code calls it. So the equivalence argument is CONFIRMED — stronger than claimed: it holds for ANY width_filtering/SNR settings because both filters are per-trace and inside detectElutionPeaks_.
+
+  One asymmetry: the vector overload calls startProgress/endProgress; single doesn't — but setLogType(NONE) and progress has no output effect. ✓
+
+  Buffer reuse: single overload clears `split` first — safe. ✓
+
+  `MassTrace mt(pk)` — vector ctor vs list ctor: both copy elements in order into trace_peaks_ vector; NEITHER computes centroids at construction. Getters: getCentroidRT etc. — check whether they compute on demand (updateWeightedMeanRT?) or return cached values updated lazily. If centroid_rt_ is computed lazily by getter (getCentroidRT() computes if dirty?) — need to check that getCentroidRT computes on demand rather than returning a stale member. In old code, the parent's centroid was never queried (only children's via toTrace). Children are constructed inside detectElutionPeaks_ via MassTrace new_mt(tmp_mt) (vector ctor) + updateWeightedMeanMZ() etc. — same in both paths. For the single-max case, the pushed child IS the input mt — and toTrace calls mt.getCentroidRT() on it. If getCentroidRT() computes on demand, fine either way. Both paths build the input MassTrace via a container ctor that does NOT update centroids — old: list ctor; new: vector ctor — symmetric. Let me quickly verify getCentroidRT computes on demand in MassTrace.h. Actually both paths are symmetric regardless: same construction semantics, same getters called. The only difference is list vs vector ctor, and both just copy. So identical. ✓
+
+  Also `mt.setCentroidIM(t.im)` — unchanged from old code (was there before). ✓
+
+  Order: old — all input traces' children appended in chunk order into one `split`, then converted in order. New — per trace, children converted immediately. Same global order: for q in [lo,hi): children of q in detectElutionPeaks_ emission order. ✓ IDENTICAL order.
+
+  Wait, one more: in the split branch, children are pushed per `mins` in order; in single-max branch one child. Same. ✓
+
+  Memory claim: old peak = chunk input payload (all mts) + whole split output + converted Trace spans accumulating in cst. New peak per trace = one parent + its children. ✓ clearly lower. The `mt_live` ledger measures size, not capacity — bookkeeping only, no output effect.
+
+  One perf regression candidate for CHANGE 2: `epd.detectPeaks(mt, split)` per trace — the single overload is fine. But SavitzkyGolayFilter construction per smoothData call — same as before (per trace either way). The hoisted epd saves Param round-trips. Also: `split` capacity retained across calls (clear keeps capacity) — good.
+
+  BUT: is there any subtle state in ElutionPeakDetection carried between calls? updateMembers_ called on setParameters. No mutable state. ✓
+
+  And smoothData constructs MSSpectrum + SavitzkyGolayFilter per call — unchanged count (one per input trace, same as old). ✓
+
+  One more potential difference: in the OLD code, `split` from splitValleys had `out.reserve(in.size())` — irrelevant.
+
+  **Now the REAL remaining check for CHANGE 2 — the `q` uint16 apex etc.:** not related.
+
+  So CHANGE 2 verdict: OUTPUT-NEUTRAL, verified against actual source. But wait — I should double-check one thing: the patched OpenMS on the cluster vs the local checkout. The local checkout is UNPATCHED (still has the critical). The patch shows the patched vector overload nested path = serial loop. But CRUCIALLY: is the single-trace overload also present and unchanged in the patched version? The patch only touches the vector overload and the two criticals in detectElutionPeaks_. The single overload (lines 312-318) is untouched by the patch (patch hunks start at 328). ✓ And with the patch, detectElutionPeaks_ no longer takes the critical — single overload unaffected semantically. ✓
+
+  Hmm — but ONE more thing: the patch's TOP-LEVEL path changes ORDER (per-thread merge). Could the old code path ever have been top-level? Old splitValleys was called from inside the omp taskloop in splitIntegerTraces → nested. So old behavior = nested serial. ✓ New = single overload. Both serial per-trace in order. ✓
+
+  Also confirm the old code ran inside a parallel region: splitIntegerTraces is called at 3451 inside the window loop — is the window loop parallel? "#pragma omp taskloop" appears at 3416 within the window body; the window loop itself — `#pragma omp parallel for` over windows presumably. omp_in_parallel() true inside taskloop regardless (taskloop is a parallel construct only inside a parallel region; the window loop is parallel per the comment "window loop is parallel" at 2287). Even if omp_in_parallel() were FALSE, the patched top-level path would reorder children across threads — but with libgomp default static scheduling order is preserved... The old code worked and digest matched, so nested was the path. Fine.
+
+  **CHANGE 1 final check:**
+
+  - splitIntegerTraces merge: chunk stores never have bins (toTrace doesn't populate bins; only detectTracesInteger_ does) → any_bins always false → `wst.bins.reserve(arena)` never fires there; absorb never touches bins; wst.bins stays empty (was swapped at 1176). Dead but harmless condition. inten reserve exact = final size.
+  - Banded merge: every band store with ≥1 accepted trace has bins.size() == inten.size() (line 1072 resize after every makeSpan — wait, makeSpan is called at 1071 BEFORE the resize at 1072; the resize brings bins up to inten.size() INCLUDING the new span. But what about traces... every accepted trace goes through makeSpan then bins.resize. So invariant bins.size()==inten.size() holds. But — makeSpan with EMPTY pts returns early without appending (line 366: if pts.empty() return t). Can pts be empty at 1071? got is non-empty (got[0] used at 1054) → pts non-empty. OK invariant holds.)
+  - So at the banded merge, any_bins ⇔ any band accepted a trace, and every non-empty band contributes bins == inten. Absorb order: a band with zero traces contributes nothing to either arena. bins.size() == inten.size() maintained after every absorb: absorb with other.bins non-empty: bins.resize(base) — base == inten.size() before insert == bins.size() before (invariant) → resize no-op → append → invariant restored. Absorb with other.bins empty AND other.inten empty → nothing changes. So aligned, final bins == arena when any_bins. Reserve exact. any_bins condition CORRECT.
+  - Edge: what if a band store has bins but wst already had bins from before? wst.bins — was it empty before the banded merge? wst is the window store; earlier in the window flow, wst.setFrames was called and... is wst.inten empty at 3428? frag_traces was presumably freshly built this window. If wst.inten were NON-empty at reserve time (e.g., reused store from a previous window — no, wst is per-window), reserve(arena) with existing content — reserve to arena when size()+needed... reserve sets capacity to max(arena, current); if wst already had content, reserve(arena) could be too small to prevent regrowth but absorb's base accounts for existing. Not the case here (per-window store). OK.
+  - Can reserve raise peak memory? The reserve allocates the exact final arena UP FRONT while all source arenas are live: instantaneous committed... reserve via malloc/mmap: untouched pages are not resident on Linux, so RSS impact is only as pages are written by the inserts — same as geometric growth but without the copy transient and without capacity overshoot (geometric can overshoot up to 2x final capacity, and the last realloc holds old+new simultaneously: up to 3x final transient in the worst case... more precisely old cap C (≥final/2) + new cap 2C ≥ final → ≥ 1.5×final, plus untouched-but-committed new pages — realloc commits pages only as written... the copy writes `size` pages in the new block; the remainder stays uncommitted. Transient committed ≈ size + size = 2×size during copy. So geometric worst-case committed ≈ 2×final + live sources (final − absorbed)... roughly 2×final + remaining sources. Reserve: committed grows 0→final while sources shrink final→0; sum ≈ final + final = 2×final at the midpoint... hmm actually at the moment half absorbed: wst size = final/2 committed, sources live = final/2 → total final. Plus reserved-uncommitted (free). At t0: 0 + final = final. So reserve peak ≈ final + (largest single source?) ≈ final + final/48. Geometric peak ≈ 2×final at the last doubling + remaining sources. So reserve genuinely lowers committed peak by ~2x. The author's claim holds. For bins at the banded merge: same, exact sizing.
+  - The one place reserve is MISSING: the nb==1 path at 3436 — `wst.absorb(bst[0])` with no reserve. That's the degenerate single-band case (nb==1 or thi<=tlo): a full-window arena absorbed into an empty wst with geometric regrowth — the exact defect the change claims to fix, still present on that path. Not a regression vs old code (old code did the same), but the change is incomplete. w_bands default? If default nb>1, minor. Check default of w_bands... "std::max(1, w_bands)". w_bands presumably = threads or a param. Minor note.
+
+  - "Can reserving bins to the inten total ever be too small?" — Given absorb's resize(base, 0u): final bins.size() = max over absorbs... in general (arbitrary mixed sources), final bins size = (inten base at last bins-carrying absorb) + that source's bins. If a source could have bins.size() > inten.size(), reserve could be too small — but bins.size() ≤ inten.size() per construction (equal or zero). So never too small HERE. In the mixed case (unreachable today), reserve(arena) is still ≥ final bins. ✓ Never too small.
+
+  **CHANGE 3 final check:**
+
+  Call site 3493: `frag_rt.build(frag_traces, delta_rt)` — same delta_rt passed to scoreCandidates_ (line 3534/3545/3620 pass delta_rt).• getAverageMS1CycleTime grep failed — maybe different formatting. Let me grep for it. Also I should double-check the windows loop is parallel (for the nested-path ordering equivalence of old code — though this affects old-vs-new ORDER only in the no-parallel edge). And check inferPrecursors_ to confirm pc.rt is always finite (ms1 traces from OpenMS path — getCentroidRT). Actually the frag filter at 3480 handles frag; pc.rt from ms1_traces[pc.trace_idx].rt — Trace.rt set from getCentroidRT() (toTrace line 434) or integer path rtAxis (finite). getCentroidRT could theoretically be... MassTrace computes centroid_rt_ via updateWeightedMeanRt — called during MassTraceDetection run. For valid traces, finite. And is there a non-finite filter on ms1_traces? Not that I saw, but inferPrecursors_ derives pc.rt from trace rt — presumably finite in practice.
+
+  Let me quickly grep getAverageMS1CycleTime./Users/kohlbach/OpenMS/src/openms/include/OpenMS/KERNEL/MassTrace.h:234:    double getAverageMS1CycleTime() const
+getAverageMS1CycleTime returns 0.0 for size ≤ 1 → win_size = ceil(chrom_fwhm / 0.0) = ceil(inf) = inf → static_cast<Int>(inf) — UB in theory (in practice INT_MIN or INT_MAX on x86: cvttsd2si of inf → INT64_MIN → truncated to Int (int) → ... undefined but deterministic-ish per platform). Then smoothData(mt, win_size): for mt.getSize() < 3 → early path copies raw intensities, win_size unused. findLocalExtrema(mt, win_size/2, ...): for mt_length < 3 → pushes max, returns. So a 1- or 2-point trace: maxes.size()==1 → pushed unsplit. win_size garbage value unused in those paths? For mt_length < 3 yes — smoothData and findLocalExtrema both early-out before using win_size. For empty trace (size 0): getAverageMS1CycleTime → 0.0; smoothData: size<3 → smoothed empty; findLocalExtrema: mt_length 0 → return with maxes empty → detectElutionPeaks_: maxes.empty() → return → trace DROPPED silently. Same in old and new code (both route every trace through detectElutionPeaks_). Identical behavior — including the identical platform-dependent UB on static_cast<Int>(inf) which is never used. So output-neutral either way; the UB is pre-existing, not introduced.
+
+  But WAIT — one important check: can a single-point trace behave differently? win_size = ceil(fwhm/0) — UB cast — but unused for size<3. OK identical.
+
+  Also for traces with ≥3 points but where all RTs are equal (scan_time = 0): win_size inf-cast UB → used: smoothData(mt, win_size): frame_length = max(3, win_size) — garbage but huge → SG filter with frame length > spectrum size — SavitzkyGolayFilter behavior with frame_length > n? Pre-existing, identical both paths. Fine — not a regression.
+
+  Now, remaining verification items:
+
+  1. Confirm the window loop calling splitIntegerTraces is parallel (affects whether OLD code took the patch's nested ordered path). Actually — does it matter for the verdict? The claim is old-vs-new identical. If old code ran the vector overload at TOP level (not nested), the patch's top-level path concatenates per-thread buffers → order = thread-grouped. New code order = trace order. THEN the order of frag_traces after splitIntegerTraces could differ old vs new! But line 3485 re-sorts frag_traces canonically before scoring → final spectra identical. However, the [det] digest at 3471 is computed BEFORE the sort — digest would differ, but that's a diagnostic, not output. Also — does anything else consume frag_traces order before the sort? Line 3453 trimToSpan (per-trace, order-independent), 3454 bins swap. No. So even in that edge, spectra identical.
+
+     But actually the window loop: let me check quickly. It's almost certainly `#pragma omp parallel for` over windows (comments say "8 windows x 12 chunks", "window loop is parallel" at line 2287 comment). So nested. And NEW code's per-trace single-overload calls don't depend on the patch at all — actually wait, the single overload was never patched (patch only touched vector overload + criticals inside detectElutionPeaks_). The single overload calls detectElutionPeaks_ directly — which in the UNPATCHED OpenMS takes the named critical on push_back. Patched: no critical. Either way output same; patch is about performance/deadlock-free nesting. And in the new code, is detectPeaks(mt, split) called from multiple threads concurrently? Yes — chunk tasks in the taskloop. Each has its own `split` and own `epd` instance (chunk scope). detectElutionPeaks_ touches no globals except the critical (patched away) — and ProgressLogger? The single overload doesn't call startProgress. detectElutionPeaks_ itself — no progress calls. setLogType(NONE) anyway. Thread-safe. ✓
+
+  2. inferPrecursors_ pc.rt finiteness — for change 3's NaN corner. pc.rt assigned from ms1 trace rt. OpenMS MassTrace getCentroidRT: computed by updateWeightedMeanRt during MTD run (mtd.run calls updateWeightedMeanRt? Actually MassTraceDetection calls mt.updateWeightedMeanRt() etc. for each trace). Finite for real peaks. Also the integer path for MS1? Line 2820: TraceStore ms1_store; MS1 always OpenMS path (comment at 325-327: "MS1 is always traced by the OpenMS path"). So pc.rt finite in practice. Also there's the isfinite filter for frag traces at 3480 but ms1 traces aren't filtered — however getCentroidRT of a real trace is a real RT. Verdict stands: NaN corner unreachable.
+
+  3. For change 3, also double check: `frag_rt.build(frag_traces, delta_rt)` is called AFTER the canonical sort at 3485 → q parallel to sorted frag_traces, and frag_im built in the same order → fi indices consistent. ✓ (build at 3493, sort at 3485, frag_im at 3491-3492.) ✓
+
+  4. One more change-3 check — `n_rtpass` and stats: `stat_slice_` counts slice visits unchanged. n_rtpass incremented after exact test — same as before (was it incremented after the exact gate in old code? old code: `if (fabs(...) > delta_rt) continue; ++n_rtpass;` — yes, and the new quantised continue is before it; n_rtpass only counts exact-pass — unchanged semantics). ✓ Where's n_rtpass used? Some stat — unchanged.
+
+  5. Change 2 performance: any way it's SLOWER? Per-trace detectPeaks(single) — no progress logger calls (cheaper). MassTrace mt(pk) — vector copy vs list copy: vector copy is one malloc + memcpy-ish — FASTER than list (per-node mallocs). pk reuse: capacity retained → fewer mallocs. split reuse: capacity retained. epd hoisted: 4 Param round-trips per chunk instead of per chunk (splitValleys was per chunk too! Old code: splitValleys called ONCE PER CHUNK — it constructed epd per chunk, same as new. So epd hoisting is neutral vs old... wait old: splitValleys(mts, split_valleys) called once per chunk → epd constructed once per chunk. New: epd constructed once per chunk. SAME. The comment says "splitValleys constructed one and did getParameters/setValue x4/setParameters on EVERY call" — every call = every chunk. Neutral, not a win. Fine.)
+
+     Memory: old peak per chunk = input mts (all traces) + split output (all children) coexisting + then conversion appends to parts[ci] while split alive. New: one parent + its children + growing parts[ci] arena. Strictly lower. ✓
+
+     BUT one subtle thing: new code converts children to Trace (appending spans into cst arena) WHILE the parent spans in wst.inten are still live (they're freed only at 1175 after ALL chunks). Old code: same — wst.inten freed after taskloop. Same. ✓
+
+     And MemGuard: old had two guards (input + output), new one max guard — accounting only.
+
+  6. Change 1, the "12 band stores after banded detection" claim — nb = max(1, w_bands) bands; and 48 chunk stores = w_bands*4 chunks... user said 12 band stores and 48 chunk stores (w_bands=3? whatever, config-dependent). Fine.
+
+  7. One more possible change-1 issue: `wst.inten.reserve(arena)` in the BANDED path — wst.setFrames was called at 3390, but wst.inten is fresh-empty (TraceStore wst; at 3387) — unless... wst is fresh per window. But wait: in the banded path, before the merge, was anything else absorbed into wst? No — first use of wst.inten is the merge. reserve exact. ✓ And in the `thi <= tlo || nb == 1` sub-case at 3436, no reserve but single absorb — insert allocates exactly other.inten.size() — fine.
+
+     Hmm, actually — line 3436: `if (thi <= tlo || nb == 1)` absorb bst[0]. But if nb > 1 AND thi > tlo, the merge happened at 3429-3434, and 3436's condition is false → skip. ✓ consistent.
+
+  8. Also verify: after banded merge, wst.bins is non-empty and sized == inten — then splitIntegerTraces at 1142 reads wst.bins[t.off + k] for parent traces — offs rebased at 3432 — parallel ✓.
+
+  Now — the bins reserve in splitIntegerTraces is dead (any_bins always false there since chunk stores never receive bins — toTrace→makeSpan doesn't write bins; line 1072 is only in detectTracesInteger_). Confirm: in splitIntegerTraces, children are converted via toTrace(cm, cst) — makeSpan only touches inten. So stores[ci].bins always empty → any_bins false → `wst.bins.reserve` never executes; wst.bins stays empty after 1176 swap — correct since bins are dead after splitting (line 3454 swaps wst.bins anyway... wait, 3454 swaps wst.bins empty AFTER splitIntegerTraces — but wst.bins was already swapped empty INSIDE splitIntegerTraces at 1176 and never rebuilt → 3454 is a no-op. Fine. But note: if ms2_split <= 0, splitIntegerTraces returns early WITHOUT clearing wst.bins — then bins live until 3454. And consumers between 3451 and 3454 — trimToSpan doesn't read bins. OK.)
+
+  Edge: ms2_split <= 0 → early return `std::move(in)` at 1098 — parents unsplit, bins retained until 3454. Fine, unchanged behavior.
+
+  So final verdicts:
+
+  CHANGE 1: OUTPUT-NEUTRAL. reserve never changes values. any_bins correct given the per-store invariant (bins.size()==inten.size(), maintained at 1072 for every accepted trace, and empty stores contribute nothing). Reserve never too small (bins final ≤ arena). Peak: reserve's upfront allocation (arena dest + arena sources = 2×arena at t=0, declining) is LOWER than geometric growth's worst transient (up to ~2.3×arena with doubling when final capacity overshoots + remaining sources) and retained capacity drops from up-to-2× to exactly 1×. The one nit: in splitIntegerTraces, `any_bins` is always false (chunk stores never carry bins — toTrace/makeSpan don't write the bins arena), so the bins reserve there is dead code; harmless. Latent hazard NOT introduced but worth naming: absorb()+consumer assume "no store with inten but no bins"; if that invariant ever broke, bins would be non-empty-but-short and line 1142 would read OOB → silent garbage. Current code upholds it on every path (1072 runs for every emitted trace before push_back... wait — 1072 runs after makeSpan, inside the same iteration; is there any `continue` between makeSpan and 1072? No — 1071 makeSpan, 1072 resize, 1073 fill, 1079 push_back. Unconditional. And empty store: both empty. ✓)
+
+  CHANGE 2: OUTPUT-NEUTRAL — verified against /Users/kohlbach/OpenMS source (the actual pre-patch 633-line file the patch context matches):
+  - detectPeaks(vector) (ElutionPeakDetection.cpp:320-346) contains NOTHING but clear + progress + per-trace detectElutionPeaks_. No cross-trace routines exist in it — filterByPeakWidth (line 348) is a separate public method detectPeaks never calls; SNR/width filters are PER-TRACE inside detectElutionPeaks_ (and disabled anyway). So the equivalence argument is stronger than stated: even with filtering ON, the filters are per-trace (computeApexSNR(mt), estimateFWHM per trace) — no cross-trace state anywhere. chrom_fwhm→win_size uses mt.getAverageMS1CycleTime() — per-trace. findLocalExtrema operates on the trace's own smoothed vector. No neighbour influence.
+  - Single overload (312-318): clear + detectElutionPeaks_ — exactly the per-trace body of the vector overload. clear() first is exactly what buffer reuse needs; safe.
+  - MassTrace(list) vs MassTrace(vector) (MassTrace.cpp:28-48): both copy peaks in order into the same internal vector<Peak2D>; neither computes centroids. Identical.
+  - Order: patched nested path appends in trace order; new code appends per trace in the same order. Children order within a trace identical (mins order).
+  - Degenerate traces (0/1/2 points): same code path in both (dropped if maxes empty, passed through otherwise), including the pre-existing win_size UB for scan_time==0 — unchanged, not introduced.
+  - The reuse of `split`: single overload clears it each call. ✓
+  - Perf: strictly lighter (one parent + children alive vs whole chunk's input+output coexisting); per-chunk epd construction is unchanged (splitValleys was already per-chunk); vector<Peak2D> copy beats per-node list.
+  - One caveat: the memory ledger's MEM_EPD_LIST category was removed (MemCat enum changed) — if harness/critical_guards or scripts reference "EPD MassTrace (input)" string, they'd break. Check harness/critical_guards.txt quickly? memName strings changed. Worth a grep.
+
+  CHANGE 3: OUTPUT-NEUTRAL for every reachable input — with two flagged items:
+  (a) Latent NaN/UB corner: pc.rt == NaN → (int)NaN is UB (x86: INT_MIN) → dq = q - INT_MIN overflows int (UB) → in practice rejects everything, whereas the old exact test `fabs(NaN-rt) > delta_rt` is false → passed everything. Unreachable in practice: pc.rt comes from MS1 MassTrace centroids (finite), and non-finite FRAGMENT traces are removed at 3480 before build. But nothing GUARDS pc.rt; a defensive isfinite in build/bucketOf would close it. Also delta_rt NaN not possible via option (min 0).
+  (b) Comment bug: bucketOf's doc says "Signed and unclamped" — it IS clamped to [0,65535]; the clamp is load-bearing for the safety argument (it only moves pq toward the fragment bucket range, never away).
+  - ±2 sufficiency: proven — exact-arithmetic floor diff ≤ 1 for width ≥ delta_rt (boundary case delta_rt·fl(1/delta_rt) marginally >1 can give 2), plus ≤1 computed-floor slip from double rounding → ≤ 3? My analysis: worst case 2; and ±2 covers it. Let me re-verify the "quotient diff can exceed 1" case: inv = fl(1/delta_rt) can round UP, so two points exactly delta_rt apart have quotient diff = delta_rt·inv = 1+1.1e-16 → can straddle two boundaries → floor diff 2. Covered by ±2. Can rounding of x push to 3? x error ~1e-11 buckets ≪ 1, and exceeding floor diff 2 requires true quotient diff > 2 - 2e-11 → Δt > 2·delta_rt·(1-...) → exact test rejects. So ±2 sufficient with a wide margin. ✓
+  - Widening: width = span/65000 > delta_rt exactly when applied; max fragment bucket ≈ 65000, never near 65535 → clamp only ever binds pc.rt, and clamping is monotone toward the fragment range → safe on both ends. Negative RTs: rt0 = min fragment rt so fragments never negative in x; pc.rt < rt0 → bucket 0 → safe.
+  - delta_rt == 0: inv = 0 → every bucket 0 → quantised test passes all → exact test (unchanged) decides → identical.
+  - Empty/single-element: covered; scoring loop doesn't execute or works with pq∈{0,1}.
+  - Memory: FragRt keeps rt (8 B) AND q (2 B) = 10 B/fragment vs 8 B before — the change is +2 B/fragment STEADY-STATE (not saved), the win is scan bandwidth (2 B read per reject vs 8 B). The question "does the extra 2 B/fragment cost more memory than the scan saves" — the scan saves TIME/BANDWIDTH, not memory; memory is strictly +25% on this array. On S30-scale fragment counts (~1e7?), that's ~20 MB — trivial against the arena. Build loop is two O(n) passes. ✓ claim O(n) true.
+
+  Ranking by silent-result-change risk:
+  1. None of the three changes silently changes results on reachable inputs.
+  2. The only result-changing hazards found are latent/pre-existing: (a) NaN pc.rt in change 3 (new UB path vs old pass-through; unreachable today), (b) the absorb bins/inten invariant (pre-existing; change 1's reserve relies on it but doesn't weaken it).
+  3. Change 2's deleted splitValleys removes the per-call `if (split_valleys <= 0.0 || in.empty()) return` guard — new code checks at 1098 for the whole function. Within the loop, per-trace empty MassTraces go through detectElutionPeaks_ — same as old (old guard was chunk-level too). ✓
+
+  Let me quickly check harness/critical_guards.txt for the memName strings, and confirm the window loop is parallel. Also check where "EPD MassTrace (input)" string might be referenced in harness. Quick greps.
+
+5:3318:    #pragma omp parallel num_threads(n_threads)
+    #pragma omp parallel num_threads(n_threads)
+    #pragma omp single
+      #pragma omp task default(shared) firstprivate(wi)
+          #pragma omp critical(admit)
+          #pragma omp taskyield
+          #pragma omp critical
+• Window loop: `#pragma omp parallel num_threads(n_threads)` at 3318 with tasks per window → splitIntegerTraces runs inside a parallel region → old vector overload took the patch's nested (in-order) path. Ordering equivalence confirmed. And nothing in harness/scripts references the removed ledger category.
+
+  I have everything I need. Now write the final review. Structure: verdict per change with evidence (file:line), ranked findings.
+
+  Verdicts:
+  1. OUTPUT-NEUTRAL (with one latent invariant note; bins reserve in splitIntegerTraces is dead code)
+  2. OUTPUT-NEUTRAL — verified against the real OpenMS source; equivalence argument is actually stronger than claimed
+  3. OUTPUT-NEUTRAL for reachable inputs; latent NaN/UB corner + a wrong comment; memory is +2 B/fragment steady-state (the saving is bandwidth, not memory)
+
+  Ranking: nothing silently changes results on reachable inputs. Items ranked:
+  1. (Latent, new-code hazard) Change 3 NaN pc.rt → UB (int)NaN + int overflow in dq → would silently drop all candidates where old code passed them. Unreachable today (pc.rt from finite MS1 centroids; frag non-finite filtered at DIAPseudoSpectra.cpp:3480). One-line guard fixes.
+  2. (Pre-existing, relied upon) absorb bins/inten invariant: if a store ever had inten non-empty + bins empty after a bins-ful source, bins non-empty-but-short → OOB read at :1142 → garbage bins → silent wrong m/z. Current paths uphold it (:1072 unconditional; chunk stores never have bins).
+  3. (Comment defects) bucketOf doc says "Signed and unclamped" but it clamps — and the clamp is load-bearing. Minor.
+  4. (Perf honesty) Change 3 adds +2 B/fragment steady state (rt kept alongside q); savings are time/bandwidth not memory. Change 2's epd hoist is neutral vs old (splitValleys was already per-chunk). Change 1's reserve: peak at reserve instant = 2×arena vs geometric worst ~2.33×arena → actually lower; retained capacity exactly arena instead of up to 2×.
+
+  Also answer the specific questions:
+
+  Change 1:
+  - any_bins right? Yes, given absorb only touches bins when other.bins non-empty and per-store invariant bins.size()==inten.size() holds (:DIAPseudoSpectra.cpp 1072-1073 runs unconditionally for every emitted trace; empty stores have both empty). Also note: in splitIntegerTraces any_bins is always FALSE — chunk stores are filled via toTrace→makeSpan which never write bins (:443) — so the bins reserve there is dead code (harmless); in the banded merge it's live and exact.
+  - Can bins reserve be too small? No: final bins size = inten size up to and including the last bins-ful source ≤ arena = total inten.
+  - Can reserve raise peak? At the reserve instant, dest capacity = full arena while all sources live = 2×arena. Geometric growth's worst moment is the last realloc: old buffer + new buffer + still-live sources ≈ up to ~2.3×arena (doubling overshoots to next power of two, e.g. 48 equal chunks → capacity 64a for size 48a, transient 32a+64a+16a). So reserve lowers both transient and retained. Only pathological case: bins reserve when bins final ≪ arena — can't happen (either all stores have full bins or none).
+
+  Change 2: all four verification questions answered NO with citations:
+  - single overload (ElutionPeakDetection.cpp:312-318) = clear + detectElutionPeaks_; does nothing the vector overload doesn't; clear() is exactly what reuse needs.
+  - No global noise/SNR across mt_vec anywhere in detectPeaks(vector) (:320-346) — it's literally clear/progress/loop. filterByPeakWidth (:348) is a separate public method never called by detectPeaks. The SNR and width checks are inside detectElutionPeaks_ and are pe So indeed max computed dq = 2, and by symmetry min = −2. The ±2 is PROVABLY sufficient even with independent two-sided rounding errors of < 1 in floor crossing, PROVIDED each floor can cross at most one boundary (err < 1 absolute, i.e., |x|·2.3e-16 < 1 → |x| < 4e15 ✓ always).
+
+  So my earlier ±3 fear was wrong — the co-occurrence constraint kills it. ±2 is provably tight: the worst case (computed dq = ±2) REQUIRES the adverse double-crossing, and ±2 exactly absorbs it. The author's "insurance" comment is precisely correct, and even necessary: with ±1 the double-cross case (true dq
