@@ -1799,9 +1799,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       sort(spans.begin(), spans.end());
       size_t n = spans.size();
       size_t over45 = spans.end() - lower_bound(spans.begin(), spans.end(), 45.0);
+      // the tail fractions the trace:max_span_sec cap is priced against
+      size_t over120 = spans.end() - lower_bound(spans.begin(), spans.end(), 120.0);
+      size_t over240 = spans.end() - lower_bound(spans.begin(), spans.end(), 240.0);
       if (span_log) *span_log = "traces=" + String(n) + " span_s median=" + String(spans[n/2])
-                      + " p90=" + String(spans[(size_t)(0.9*n)]) + " max=" + String(spans.back())
-                      + " frac>45s=" + String((int)(1000.0*over45/n)/10.0) + "%";
+                      + " p90=" + String(spans[(size_t)(0.9*n)]) + " p99=" + String(spans[(size_t)(0.99*n)])
+                      + " max=" + String(spans.back())
+                      + " frac>45s=" + String((int)(1000.0*over45/n)/10.0) + "%"
+                      + " frac>120s=" + String((int)(10000.0*over120/n)/100.0) + "%"
+                      + " frac>240s=" + String((int)(10000.0*over240/n)/100.0) + "%";
     }
     vector<Trace> out;
     out.reserve(mts.size());
