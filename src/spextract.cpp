@@ -1575,7 +1575,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                           "the memory floor and no downstream compaction can lower it, so with this off the "
                           "floor alone exceeds the whole tool's current peak). ON BY DEFAULT since 2026-09-04; "
                           "every benchmark figure on record was taken with it on. Bruker .d only -- ignored "
-                          "for other inputs, which fall back to the one-shot reader.", false);
+                          "for other inputs, which fall back to the one-shot reader. "
+                          "CHANGES OUTPUT: this is not a pure performance switch. Measured on S30 2026-09-04, "
+                          "true = 655,776 spectra in 5:11 at 78.4 GB, false = 656,371 in 10:30 at 121.8 GB, "
+                          "spectrum lists NOT identical (0.09% more spectra with the one-shot reader). The two "
+                          "readers pick peaks on different frame groupings; which is closer to the truth is "
+                          "UNMEASURED. Everything this project has benchmarked used true.", false);
     setValidStrings_("perf:stream_load", {"true", "false"});
     registerIntOption_("trace:native_ms2_neighbors", "<n>", 0, "[stream] NATIVE cross-frame aggregation in the READER (BrukerTimsFile Config dia_ms2_n_neighbors): adjacent frames each side, 0=off, 1=3-frame sum, 2=5-frame sum. This sums RAW frames BEFORE centroiding, which is what diaTracer does; the tool-level frame_aggregation_n sums AFTER centroiding and lost 26% of peptides. Requires perf:stream_load.", false);
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "[stream] Same, for MS1 frames (BrukerTimsFile Config ms1_n_neighbors). Requires perf:stream_load.", false);

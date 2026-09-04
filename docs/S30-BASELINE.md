@@ -48,6 +48,20 @@ and it barely parallelises -- so the guessed singletons cost far more than their
 at a MEASURED 90.3 GB floor at t=0, which alone exceeds the tool's entire current peak (80 GB).
 Every figure in this file was taken with it on.
 
+**And it is NOT output-neutral, contrary to the assumption every benchmark has rested on.** Measured
+2026-09-04 on S30, both arms on one node:
+
+| `perf:stream_load` | spectra | wall | peak RSS | digest |
+|---|---|---|---|---|
+| true (shipped, and what every figure here used) | 655,776 | 5:11 | 78.4 GB | -- |
+| false | 656,371 | 10:30 | 121.8 GB | **DIFFERS** |
+
+0.09% more spectra from the one-shot reader. The two paths pick peaks on different frame groupings,
+so this is a second detector-like choice hiding in an option named for performance. **Which reader
+is closer to the truth is UNMEASURED** -- neither arm has been through a search engine. What can be
+said is that the shipped default is the arm every number in this file was taken with, and that the
+alternative costs 2x the wall and 1.6x the memory. The help text now says CHANGES OUTPUT.
+
 ## Measurement methodology (2026-07-28) — variance model + estimator fix
 
 * **BOTH engines are DETERMINISTIC: run-to-run sigma = 0.** Re-searching one mzML (S30 corr_power=2)

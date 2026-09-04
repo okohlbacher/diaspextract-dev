@@ -15,7 +15,11 @@
   sign flipped somewhere behind the charge gate, the apex estimator and the integer detector.)
   Without `stream_load` the loader holds the entire run at a measured 90.3 GB floor, which by itself
   exceeds the tool's current total peak. Both are now `<true/false>` options, since a flag cannot
-  default to true; pass `false` to restore the old behaviour. This is the same class of defect as
+  default to true; pass `false` to restore the old behaviour. **`perf:stream_load` also CHANGES
+  OUTPUT** -- checked rather than assumed, and the assumption was wrong: true gives 655,776 spectra
+  in 5:11 at 78.4 GB, false gives 656,371 in 10:30 at 121.8 GB, and the spectrum lists are not
+  identical. The two readers pick peaks on different frame groupings; which is closer to the truth
+  is unmeasured. Every figure this project has published used `true`. This is the same class of defect as
   the `ms2_noise_threshold_int` / `ms2_split_valleys` mismatch fixed on 2026-09-03 -- that sweep
   checked value-bearing options and missed the flags.
 
