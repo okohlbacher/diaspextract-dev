@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.0 — 2026-09-04
+
 ### Changed
 - **`assembly:require_isotope_support` and `perf:stream_load` now default to TRUE.** Both were
   `registerFlag_`, so they defaulted to OFF -- while every benchmark figure this project has ever
