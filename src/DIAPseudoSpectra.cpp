@@ -715,7 +715,7 @@ namespace
                 MEM_GRID, MEM_PDENSE, MEM_SPECTRA, MEM_WMAP, MEM_N };
   inline const char* memName(int c)
   {
-    static const char* n[MEM_N] = {"slab (peaks)", "prep (frame_of/member/order)", "visited flags",
+    static const char* n[MEM_N] = {"slab (peaks)", "prep (frame_live/order)", "visited flags",
                                    "traces (spans)", "EPD MassTrace (input)", "EPD MassTrace (split)",
                                    "FragGrid", "pdense scratch", "emitted spectra", "PeakMap (openms path)"};
     return n[c];
@@ -848,8 +848,6 @@ namespace
   /// exactly where its extra time (9:28 vs 7:22) and extra memory (174 vs 166 GB) came from.
   struct TracePrep
   {
-    vector<uint32_t> frame_of;    ///< P
-    vector<char>     member;      ///< P: intensity > noise
     vector<char>     frame_live;  ///< F: has at least one member
     vector<uint32_t> order;       ///< seeds, intensity desc, later-index-first among equals
   };
@@ -857,17 +855,19 @@ namespace
   {
     TracePrep tp;
     const size_t F = sl.frames(), P = sl.tof.size();
-    tp.frame_of.assign(P, 0); tp.member.assign(P, 0); tp.frame_live.assign(F, 0);
+    // No per-peak frame map and no membership byte: a peak's frame is the loop variable at every
+    // hot site (and one binary search at the two that lack it), and membership IS
+    // `inten > noise`. Measured: 100% of above-noise peaks are seeds at the shipped snr of 1.0, so
+    // `order` was reserved at P/4 and grew by doubling to ~2P -- count first, reserve exactly.
+    tp.frame_live.assign(F, 0);
+    const double min_apex = snr * noise;
+    size_t n_seed = 0;
     for (size_t f = 0; f < F; ++f)
       for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
-      {
-        tp.frame_of[k] = (uint32_t)f;
-        if ((double)sl.inten[k] > noise) { tp.member[k] = 1; tp.frame_live[f] = 1; }   // double compare, as OpenMS
-      }
-    const double min_apex = snr * noise;
-    tp.order.reserve(P / 4);
+        if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++n_seed; }
+    tp.order.reserve(n_seed);
     for (uint32_t k = 0; k < P; ++k)
-      if (tp.member[k] && (double)sl.inten[k] > min_apex) tp.order.push_back(k);
+      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order.push_back(k);
     // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
     // intensities the LATER peak seeds first.
     sort(tp.order.begin(), tp.order.end(), [&](uint32_t a, uint32_t b) {
@@ -878,7 +878,7 @@ namespace
   }
 
   vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm,
-                                     double im_tol, double min_len_sec, double min_sample_rate,
+                                     double im_tol, double noise, double min_len_sec, double min_sample_rate,
                                      double max_len_sec, TofIdx band_lo = 0, TofIdx band_hi = 0)
   {
     vector<Trace> out;
@@ -889,14 +889,17 @@ namespace
     const double msr = min_sample_rate >= 0.0 ? min_sample_rate : 0.5;   // -1 = OpenMS default
     const double imq_tol = im_tol * IM_Q;
     const Size max_missed = 5;                                            // trace_termination_outliers
-    const vector<uint32_t>& frame_of = tp.frame_of;
-    const vector<char>& member = tp.member;
+    // a peak's frame, for the two sites that do not already have it in a loop variable
+    auto frameOfPeak = [&](uint32_t k) {
+      return (uint32_t)(std::upper_bound(sl.frame_off.begin(), sl.frame_off.end(), k) - sl.frame_off.begin() - 1);
+    };
+    const auto member = [&](uint32_t k) { return (double)sl.inten[k] > noise; };
 
     vector<uint64_t> visited((P + 63) / 64, 0);   // one BIT per peak: 8x less than the char array
     auto seen = [&](size_t k) { return (visited[k >> 6] >> (k & 63)) & 1u; };
     auto mark = [&](size_t k) { visited[k >> 6] |= (uint64_t)1 << (k & 63); };
     MemGuard g_vis(MEM_VISITED, vbytes(visited));  // x n_bands concurrently: the thing to watch
-    auto mzAt = [&](uint32_t k) { return ax.mzOf(sl.tof[k], sl.b[frame_of[k]]); };
+    auto mzAt = [&](uint32_t k, size_t f) { return ax.mzOf(sl.tof[k], sl.b[f]); };
     auto iwm = [](double v, double w, double& c, double& cnt, double& den) {   // updateIterativeWeightedMean_
       const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
       c *= (ct / dt); cnt += w * v; den += w;
@@ -928,7 +931,7 @@ namespace
       long bk = -1; double bd = std::numeric_limits<double>::infinity();
       for (uint32_t k = s0; k < b && sl.tof[k] <= hi_t; ++k)
       {
-        if (!member[k]) continue;
+        if (!member(k)) continue;
         if (std::abs((double)sl.imq[k] - cim) > imq_tol) continue;
         // "Closest" is measured in m/z, as OpenMS does, NOT in bins: I had argued the calibration
         // is monotone so the two agree, and that is true only for candidates on the same side of
@@ -944,19 +947,19 @@ namespace
     };
 
     struct Dir { Size hits = 0, missed = 0, scans = 0; bool active = true; };
-    vector<uint32_t> got;                 // provisional members, marked only if the trace is valid
+    vector<pair<uint32_t, uint32_t>> got;   // (frame, peak); marked only if the trace is valid
     for (uint32_t seed : tp.order)
     {
       if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
       if (seen(seed)) continue;
-      const size_t f0 = frame_of[seed];
-      const double w0 = sl.inten[seed], m0 = mzAt(seed);
+      const size_t f0 = frameOfPeak(seed);
+      const double w0 = sl.inten[seed], m0 = mzAt(seed, f0);
       double cmz = m0, cnt = w0 * m0, den = w0;
       iwm(m0, w0, cmz, cnt, den);                             // seed counted twice, as run_ does
       double cim = sl.imq[seed], cnt_im = w0 * cim, den_im = w0;
       iwm((double)sl.imq[seed], w0, cim, cnt_im, den_im);
       double sd = (cmz / 1e6) * mass_ppm, wsum = w0;
-      got.clear(); got.push_back(seed);
+      got.clear(); got.emplace_back((uint32_t)f0, seed);
       Dir dn, up;
       long fd = (long)f0, fu = (long)f0;
       while ((fd > 0 && dn.active) || (fu + 1 < (long)F && up.active))
@@ -978,11 +981,11 @@ namespace
             const long k = best(f, cmz, sd, cim, taken);
             if (k >= 0)
             {
-              const double mz = mzAt((uint32_t)k), w = sl.inten[k];
+              const double mz = mzAt((uint32_t)k, f), w = sl.inten[k];
               iwm(mz, w, cmz, cnt, den);
               iwm((double)sl.imq[k], w, cim, cnt_im, den_im);
               sdRobust(mz, w, cmz, sd, wsum);   // reestimate_mt_sd: the tool never turns it off
-              got.push_back((uint32_t)k);
+              got.emplace_back((uint32_t)f, (uint32_t)k);
               ++d.hits; d.missed = 0;
             }
             else ++d.missed;
@@ -993,28 +996,29 @@ namespace
         }
       }
       // isTraceValid_
-      uint32_t fmin = frame_of[got[0]], fmax = fmin;
-      for (uint32_t k : got) { fmin = std::min(fmin, frame_of[k]); fmax = std::max(fmax, frame_of[k]); }
+      uint32_t fmin = got[0].first, fmax = fmin;
+      for (const auto& g : got) { fmin = std::min(fmin, g.first); fmax = std::max(fmax, g.first); }
       const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
       if (span_s < min_len_sec) continue;
       if (max_len_sec > 0.0 && span_s > max_len_sec) continue;   // the tool passes 0 for "off"
       const Size total = dn.scans + up.scans + 1;
       const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
       if ((double)got.size() / (double)adjusted < msr) continue;
-      for (uint32_t k : got) mark(k);                         // valid: now they are taken
+      for (const auto& g : got) mark(g.second);               // valid: now they are taken
 
       // the span: (store-local frame, intensity) points, plus the per-frame bin arena the valley
       // splitter needs to give each child ITS measured apex bin
       vector<pair<uint32_t, float>> pts;
       pts.reserve(got.size());
-      uint32_t kap = got[0];
-      for (uint32_t k : got) { pts.emplace_back(frame_of[k], sl.inten[k]); if (sl.inten[k] > sl.inten[kap]) kap = k; }
+      uint32_t kap = got[0].second, fap = got[0].first;
+      for (const auto& g : got) { pts.emplace_back(g.first, sl.inten[g.second]);
+                                  if (sl.inten[g.second] > sl.inten[kap]) { kap = g.second; fap = g.first; } }
       Trace t = makeSpan(pts, store);
       store.bins.resize(store.inten.size(), 0u);
-      for (uint32_t k : got) store.bins[t.off + (frame_of[k] - t.frame0)] = sl.tof[k];
-      t.tof = sl.tof[kap]; t.b = sl.b[frame_of[kap]];
+      for (const auto& g : got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
+      t.tof = sl.tof[kap]; t.b = sl.b[fap];
       t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
-      t.rt = rtAxis()[sl.rt_index[frame_of[kap]]];
+      t.rt = rtAxis()[sl.rt_index[fap]];
       t.im = IM_LO + cim / IM_Q;
       t.intensity = sl.inten[kap];
       out.push_back(std::move(t));
@@ -3274,14 +3278,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           const int nb = std::max(1, w_bands);
           {
           const TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);   // once per window
-          g_prep.grow(vbytes(tprep.frame_of) + vbytes(tprep.member) + vbytes(tprep.frame_live) + vbytes(tprep.order));
+          g_prep.grow(vbytes(tprep.frame_live) + vbytes(tprep.order));
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(tprep.order.size())
                         + " of " + String(wslab.peaks()) + " peaks (" + String((int)(1000.0 * tprep.order.size() / std::max<size_t>(wslab.peaks(), 1)) / 10.0) + "%)");
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
           // store absorbs them in band order and every offset is rebased (R4 sequencing).
           vector<TraceStore> bst(std::max(1, nb));
           if (thi <= tlo || nb == 1)
-            frag_traces = detectTracesInteger_(wslab, tprep, bst[0], mass_ppm, delta_im, ms2_minlen, ms2_msr, max_trace_len);
+            frag_traces = detectTracesInteger_(wslab, tprep, bst[0], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr, max_trace_len);
           else
           {
             vector<vector<Trace>> per(nb);
@@ -3291,7 +3295,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             {
               const TofIdx blo = tlo + (TofIdx)(b * wdt);
               const TofIdx bhi = (b + 1 == nb) ? thi + 1 : tlo + (TofIdx)((b + 1) * wdt);
-              per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_minlen, ms2_msr,
+              per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
                                             max_trace_len, blo, bhi);
             }
             size_t tot = 0; for (const auto& v : per) tot += v.size();
