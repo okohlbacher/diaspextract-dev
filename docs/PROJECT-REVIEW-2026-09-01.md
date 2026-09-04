@@ -9,7 +9,7 @@ under-shipped. Highest-leverage week = turning finished, honest science into som
 party can build, run, and verify — not another quality lever.
 
 ## Scoreboard (S30; engines deterministic sigma=0; diaTracer denominators NOT yet reconciled)
-| metric | speXtract | diaTracer | ratio |
+| metric | SpeXtract | diaTracer | ratio |
 |---|---|---|---|
 | closed Sage (corr_power=2 default) | 10,802 | 11,517 | 93.8% (+im_weight opt: 11,112 = 96.5%) |
 | closed MSFragger | 11,560 | 13,932 | 83.0% |
@@ -45,7 +45,7 @@ experiment. Second: two unreconciled diaTracer reference sets (Sage 11,552/11,51
   serialises the window loop; only the mono peak is excluded from fragment lists (M+1/M+2 can
   emit as fragments); mono can cross isolation-window routing boundary.
 - Product: adoption case is structural (license-blocked users, pipeline builders, calibration
-  trustworthiness), not benchmark parity. Never claim parity. Binary must be renamed speXtract.
+  trustworthiness), not benchmark parity. Never claim parity. Binary must be renamed SpeXtract.
   Closed-search gap chasing = non-goal (corrupt metric).
 
 ## THE PLAN (implementing in this order; kimi+codex adversarial review after each step)
@@ -61,7 +61,7 @@ experiment. Second: two unreconciled diaTracer reference sets (Sage 11,552/11,51
 03. Public-PXD replication + v0.2.0 as ONE unit (1-2 wks): diaTracer paper's own public
     diaPASEF data end-to-end (both tools, both engines, corrected estimator); then main FF,
     README rewrite (S30-BASELINE + public numbers), EPD patch + OpenMS pin docs, apportion/
-    rp_max guard, falsified-flag help pass, binary rename to speXtract, build CI + determinism
+    rp_max guard, falsified-flag help pass, binary rename to SpeXtract, build CI + determinism
     smoke test on public-derived fixture, tag v0.2.0 (v0.1.0 burned) + CHANGELOG + CITATION.cff.
 04. R2+R3+R4 runtime batch (3-5 d, low risk): cull span-0 MS2 traces, two-lower_bound band
     construction (byte-identical), double-score dedup → −25-40% wall → headline <2x.

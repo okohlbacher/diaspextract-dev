@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""speXtract benchmark harness v2 -- run identity, plan binding, artifact production.
+"""SpeXtract benchmark harness v2 -- run identity, plan binding, artifact production.
 
 This file produces ARTIFACTS and PROVENANCE. It computes no measurements; every number lives in
 collate2.py. The separation is deliberate: the failure class this rewrite exists to kill is
@@ -1458,7 +1458,7 @@ def do_adopt(bench, plan, reg, sample, arm, refs, entry, pinned):
     """An external mzML (diaTracer) becomes a first-class arm.
 
     v1 registered diatracer_mzml, printed its existence in preflight, and never read it -- so
-    every published speXtract-vs-diaTracer ratio entered through an unguarded external procedure.
+    every published SpeXtract-vs-diaTracer ratio entered through an unguarded external procedure.
     An adopt stage gives the external file a sealed identity so the SAME search, scoring and
     truth stages run against it.
     """
@@ -1931,7 +1931,7 @@ def st_make_fake_d(path, mz_centers=(500.0, 600.0), width=25.0, serial="SER-1",
 
 
 FAKETOOL_SRC = r'''#!/usr/bin/env python3
-"""Stand-in for DIAPseudoSpectra, driven by $FAKETOOL_MODE. Used only by --selftest."""
+"""Stand-in for spextract, driven by $FAKETOOL_MODE. Used only by --selftest."""
 import os, sys, xml.etree.ElementTree as ET
 sys.path.insert(0, %(harness)r)
 import bench2

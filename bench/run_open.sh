@@ -37,7 +37,7 @@ echo "entrapment: $NT target / $NE foreign, ratio $RATIO" >> $L
 # split_count exists only on spock, from a different binary. Comparing across nodes/binaries is
 # precisely the error class this benchmark was built to eliminate, so it is re-extracted here
 # rather than copied.
-TOOL=/scratch/kohlbach/OpenMS/build/bin/DIAPseudoSpectra
+TOOL=/scratch/kohlbach/OpenMS/build/bin/spextract
 DD=/scratch/kohlbach/rawd/FKL4341-S23-A-8_K253-09-2_QKL29026AF_Slot1-17_1_1320.d
 COMMON="-trace:ms2_chrom_peak_snr 1.0 -trace:ms2_noise_threshold_int 10 -trace:ms2_min_length_sec 0 -trace:ms2_split_valleys 7.0"
 SC=$B/out/open_split_count

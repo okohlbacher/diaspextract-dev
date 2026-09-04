@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Truth-set metrics and vault reporting for the speXtract harness.
+"""Truth-set metrics and vault reporting for the SpeXtract harness.
 
 Kept separate from bench.py because these run against EXISTING output and must be re-runnable
 without recomputing a benchmark. Everything here obeys the same rule: no uncorrected number is

@@ -56,7 +56,7 @@ using namespace std;
 //-------------------------------------------------------------
 
 /**
-  @page TOPP_DIAPseudoSpectra DIAPseudoSpectra
+  @page TOPP_SpeXtract SpeXtract
 
   @brief Extracts pseudo-MS/MS ("pseudo-DDA") spectra from diaPASEF (ion-mobility DIA) data.
 
@@ -75,9 +75,9 @@ using namespace std;
   for the adversarial reviews.
 
   <B>The command line parameters of this tool are:</B>
-  @verbinclude TOPP_DIAPseudoSpectra.cli
+  @verbinclude TOPP_SpeXtract.cli
   <B>INI file documentation of this tool:</B>
-  @htmlinclude TOPP_DIAPseudoSpectra.html
+  @htmlinclude TOPP_SpeXtract.html
 */
 
 /// @cond TOPPCLASSES
@@ -1451,11 +1451,15 @@ namespace
   }
 }
 
-class TOPPDIAPseudoSpectra : public TOPPBase
+class TOPPSpeXtract : public TOPPBase
 {
 public:
-  TOPPDIAPseudoSpectra() :
-    TOPPBase("DIAPseudoSpectra", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.")
+  TOPPSpeXtract() :
+    // official=false: SpeXtract is a STANDALONE tool that links against OpenMS, not a tool IN
+    // OpenMS, so it is deliberately absent from ToolHandler's official list. TOPPBase rejects an
+    // unregistered name when official is left true -- which is how the rename surfaced that the
+    // old name had been passing itself off as an official TOPP tool.
+    TOPPBase("SpeXtract", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
   {
   }
 
@@ -2669,7 +2673,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        writeLogError_("Error: input has no ion-mobility data at MS1. DIAPseudoSpectra requires diaPASEF (IM DIA) input.");
+        writeLogError_("Error: input has no ion-mobility data at MS1. SpeXtract requires diaPASEF (IM DIA) input.");
         return ILLEGAL_PARAMETERS;
       }
     }
@@ -3955,6 +3959,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
 int main(int argc, const char** argv)
 {
-  TOPPDIAPseudoSpectra tool;
+  TOPPSpeXtract tool;
   return tool.main(argc, argv);
 }

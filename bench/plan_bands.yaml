@@ -15,7 +15,7 @@ title: "topology sweep: does running more windows concurrently (fewer bands) cut
 # concurrent windows may hit the admission throttle (~13 GB/window x 24 ~ 300 GB of ~1 TB) -- watch
 # that n_conc actually reaches the target and is not throttled below it.
 samples: [S30]
-binary: /scratch/kohlbach/OpenMS/build/bin/DIAPseudoSpectra
+binary: /scratch/kohlbach/OpenMS/build/bin/spextract
 threads: 100
 arms:
   - name: b12

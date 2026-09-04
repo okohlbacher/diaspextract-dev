@@ -20,7 +20,7 @@ These exercise the default (OpenMS) detector only. `trace:detector=integer` refu
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
 real data in the benchmark harness and not here.
 
-Usage: test_spextract.py /path/to/DIAPseudoSpectra [workdir]
+Usage: test_spextract.py /path/to/spextract [workdir]
 Exit status is 0 only if every check passes.
 """
 import base64, hashlib, os, re, struct, subprocess, sys, tempfile

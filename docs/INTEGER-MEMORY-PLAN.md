@@ -1,8 +1,8 @@
-The plan below is written against the **current** file (`/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp`, 3853 lines), not against the file the eight analyses read. That distinction is load-bearing and is the first thing in the document.
+The plan below is written against the **current** file (`/Users/kohlbach/Claude/speXtract/src/spextract.cpp`, 3853 lines), not against the file the eight analyses read. That distinction is load-bearing and is the first thing in the document.
 
 ---
 
-# speXtract integer detector: memory and lifetime plan
+# SpeXtract integer detector: memory and lifetime plan
 
 **Reading note that changes everything below.** The eight analyses and both skeptic passes were run against the pre-redesign file (3754 lines). Since then four commits landed — `1ed875b` (design), `a3ce034` (revision 2), `3a1d91e` (implementation), `3bdcb60` (comment) — all *after* `9adcfcf`, the commit that produced the measured ledger. **The 68.6 GB / 105 GB ledger of record does not describe the code in the tree**, and no benchmark has been run since the redesign. Two of the eight dimensions are now about structures that no longer exist:
 

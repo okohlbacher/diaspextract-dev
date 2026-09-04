@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Joint benchmark: 3 samples x {diaTracer, speXtract} x {Sage, MSFragger}
+# Joint benchmark: 3 samples x {diaTracer, SpeXtract} x {Sage, MSFragger}
 # Metrics: FDR-corrected PSMs and FDR-corrected unique peptides, both at 1%, both computed by
 # ONE procedure in joint_bench.py so the engine is the only thing that varies.
 #

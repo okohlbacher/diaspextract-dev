@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""speXtract benchmark harness v2 -- measurement, pairing, and the publish gate.
+"""SpeXtract benchmark harness v2 -- measurement, pairing, and the publish gate.
 
 Everything between "a sealed artifact exists" and "a number appears in the vault" lives here.
 Run identity and plan binding are bench2.py's problem; this file consumes its runset contract

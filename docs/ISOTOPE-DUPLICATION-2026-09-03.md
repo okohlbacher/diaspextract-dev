@@ -87,7 +87,7 @@ wrong-mono rate and with `findPartner` matching m/z, RT and IM but never intensi
 
 ## 4. Mechanism: a consumed peak is invisible, so the leftover seeds its own precursor
 
-`findPartner` skips any peak already marked `used[]` (src/DIAPseudoSpectra.cpp:1129). When an earlier
+`findPartner` skips any peak already marked `used[]` (src/spextract.cpp:1129). When an earlier
 seed consumes a run, a remaining peak one step up can no longer walk left to it, finds nothing, and
 becomes its own monoisotope. The signature is visible in the emitted metadata: heavy members carry
 systematically FEWER isotope partners than their light partners (`spx_n_isotopes` mean 3.53 vs 4.59;

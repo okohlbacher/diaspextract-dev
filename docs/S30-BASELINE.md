@@ -147,8 +147,8 @@ PSMs by precursor coordinate ACROSS RT (charge + expmass 10 ppm + IM 0.01, singl
 **The multiple-testing-burden hypothesis is REFUTED.** Every arm's FDR CI sits at ~0.6-1.3%: collapse
 removes true AND entrapment PSMs PROPORTIONALLY, so the FDR does not improve -- peptides are simply
 lost. Emitting fewer spectra does NOT buy open-search sensitivity.
-**It is INTRINSIC, not a speXtract defect:** diaTracer collapses the same way (-24% at top10, -54% at
-apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- speXtract
+**It is INTRINSIC, not a SpeXtract defect:** diaTracer collapses the same way (-24% at top10, -54% at
+apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- SpeXtract
 just emits 1.33x more spectra per feature (6.43 vs 4.84). The across-cycle multiplicity is INDEPENDENT
 EVIDENCE (each cycle = a different noise realisation + co-isolation mixture, another shot at a different
 co-eluting peptide), not redundancy. Consistent with the long-standing "across-cycle spread 2.66 is
@@ -223,7 +223,7 @@ Unit = (peptide, delta-bin); classes scored separately: unmod (|d|<=8 mDa), near
 mass-error tail, NOT a mod), artifact (iso lattice +-k*1.00335, k=1..9), known (curated Unimod list),
 other (off-lattice, per-BIN FDR walks for top bins -- pooled class FDR let junk bins ride; the spx
 -485..-499 Da window-edge wall at ~36% raw entrap collapses to ~30-80 @1% under per-bin walks).
-| class @1% corrected FDR | speXtract | diaTracer | ratio |
+| class @1% corrected FDR | SpeXtract | diaTracer | ratio |
 |---|---|---|---|
 | unmodified | 4,885 | 7,015 | 70% |
 | known-PTM (the raison-d'etre number) | 2,692 | 3,092 | **87%** |
@@ -272,7 +272,7 @@ bootstrap CIs, min-evidence rule (per-name @1% only when accepted e>=10), proven
 (1) 70.1% of spx nearzero peptides ARE dt's unmod peptides; (2) 89.4% same-scan concordance with our
 OWN closed search (same scan -> same peptide; 0.7% different -> chimeric explanation dead);
 (3) deltas 93.8% negative, median -16.2 mDa, slope -18.3 ppm vs calcmass (dt control ~symmetric).
-=> speXtract's reported precursor masses carry a SYSTEMATIC ~-18 ppm CALIBRATION BIAS introduced by
+=> SpeXtract's reported precursor masses carry a SYSTEMATIC ~-18 ppm CALIBRATION BIAS introduced by
 our pipeline (same raw data as dt). Fixable (per-run linear recalibration of reported mono m/z);
 distinct from the old falsified "mass recalibration" lever (different target, corrupt metric).
 Scheduled as its own arm AFTER step 02 (both reviewers: do not confound the pre-registered arm).
@@ -284,12 +284,12 @@ sequence-level and is within 2% of 12,752 — unit mismatch closed, ratios now l
 **Step-01 bottom line:** the old "89% on open search" dissolves. At peptide level we are at ~parity
 on unmodified; known-PTM scale is comparable (ambiguity-limited both ways); BOTH tools' open-search
 delta dimension is dominated by non-PTM structure (lattice + integer-Da junk = 5-9x the legitimate
-classes) — a tool-CLASS finding worth publishing; and speXtract's one distinctive open-search defect
+classes) — a tool-CLASS finding worth publishing; and SpeXtract's one distinctive open-search defect
 is the -18 ppm mass bias (fixable), vs diaTracer's up-ladder envelope artifacts. Step 02 (emission
 arm) runs AS REGISTERED with a nearzero-stratified secondary readout, scored under this v3 metric.
 
 ## THE -8 ppm MASS BIAS: mechanism found + fixed (2026-09-01, follows the step-01 nearzero finding)
-**Every speXtract-reported m/z to date carries a systematic, m/z-dependent -5..-11 ppm error**
+**Every SpeXtract-reported m/z to date carries a systematic, m/z-dependent -5..-11 ppm error**
 (median -8.3 ppm on identified precursors; dt control -1.1 ppm on the same raw data).
 **Mechanism (proven by direct comparison against Bruker's timsdata library via ctypes):** the loader
 (BrukerTimsFile -> opentims++) converts TOF->m/z with `OpenSourceTof2MzConverter (linear-in-sqrt)` --
@@ -347,7 +347,7 @@ step over-claimed in four ways, now corrected:
 2. **12,128 = provisional S30/vendor-SDK regression oracle, NOT a validated reference** until: cp0
    ablation (running), the IM-isolation arm, and S08/S23 re-validation under vendor-cal.
 3. **"Leads diaTracer" is not citable.** Maximum defensible wording (codex): "On S30, using Sage and
-   the vendor-SDK calibration configuration, speXtract yielded 5.3% more closed-search peptides; under
+   the vendor-SDK calibration configuration, SpeXtract yielded 5.3% more closed-search peptides; under
    MSFragger it yielded 17.7% fewer." Per-1k-spectra efficiency: spx 13.2 vs dt 16.4 (dt +25%) -- the
    emission column stays in any public row. MSFragger flatness is UNINFORMATIVE (its default
    calibrate_mass auto-corrects input bias), not evidence against the fix.
@@ -391,12 +391,12 @@ head-to-head running to test whether part of it is instrument/per-file rather th
 
 ### FIRST 3-FILE HEAD-TO-HEAD vs diaTracer (Sage closed, corrected calibration, 2026-09-01)
 diaTracer had ONLY ever been measured on S30; S08/S23 references created here under identical config.
-| file | speXtract (table model) | diaTracer | ratio | our ppm | dt ppm |
+| file | SpeXtract (table model) | diaTracer | ratio | our ppm | dt ppm |
 |---|---|---|---|---|---|
 | S30 | **11,976** | 11,517 | **104.0%** | +1.49 | -1.37 |
 | S08 | **10,333** | 10,242 | **100.9%** | +3.19 | +0.27 |
 | S23 | **9,891**  |  8,948 | **110.5%** | +2.29 | -0.60 |
-**speXtract reaches 100.9-110.5% of diaTracer on closed Sage across the three files** -- no vendor
+**SpeXtract reaches 100.9-110.5% of diaTracer on closed Sage across the three files** -- no vendor
 library, open BSD path. STATISTICALLY (n=3 paired): mean 105.1%, 95% CI [93.0, 117.3] = consistent
 with PARITY, not an advantage; the earlier phrasing "matches or exceeds on ALL THREE files" was
 over-claiming on S08's +91. CORRECTION (review F4): the "ours 1.26% [1.00-1.51]" entrapment figure
@@ -516,7 +516,7 @@ FragPipe 24.0 headless, Basic-Search (MSFragger 25 ppm, our human_decoy FASTA) -
 (sequential, picked, 1% peptide), MSBooster OFF for both (it aborts on our pepXML, see above):
 | S30 arm | peptides @1% | PSMs @1% | PSMs / peptide | ratio spx/dt |
 |---|---|---|---|---|
-| speXtract apex | 13,211 | 113,685 | 8.6 | — |
+| SpeXtract apex | 13,211 | 113,685 | 8.6 | — |
 | diaTracer | 15,947 | 31,700 | 2.0 | **82.8%** |
 | (raw-hyperscore walk, for reference) | 11,927 vs 13,932 | | | 85.6% |
 | (diaTracer + MSBooster RT+spectra) | 18,670 | 37,086 | 2.0 | ours unavailable |

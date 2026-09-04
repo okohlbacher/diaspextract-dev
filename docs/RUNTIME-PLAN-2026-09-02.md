@@ -174,7 +174,7 @@ Remaining sweep: batch 64, batch 1024, MALLOC_ARENA_MAX=4.
 - Reader: OpenMS' in-tree `MzPeakFile` (2,571 lines, direct Arrow) has no ims-compact/tof or
   per-peak-IM support and returned 0 spectra on these files; the mzPeak C++ library fork
   (okohlbacher/mzpeak-openms trunk 139cc64, 2026-09-01; 164 ahead of / 1 behind OpenMS/mzpeak)
-  reads ims-compact, per-peak IM and per-window mobility bands. speXtract now carries
+  reads ims-compact, per-peak IM and per-window mobility bands. SpeXtract now carries
   `src/MzPeakStreamLoad.h`: a streaming .mzpeak loader on that library with the same (MS1 first,
   then per-(frame, window)) hand-off contract as the .d loader; build-optional via `-DMZPEAK_ROOT`.
   Cluster build: library against contrib Arrow 23 (pin relaxed from >=24), Boost 1.89 from the
@@ -220,7 +220,7 @@ the consumer's parallel flush (buffer MS1 like MS2, keep frame order). Expected 
   model; converter-recalibrated 1/K0 vs our rational TIMS calibration): 50/50 stage digests differ,
   +0.3% spectra. Sage accepted-peptide set overlap and the ppm shift are the meaningful comparison
   (pending in this chain).
-- The lever is the MS1 path, for BOTH inputs: parallel MS1 decode in the loader (`[speXtract ms1-par]`)
+- The lever is the MS1 path, for BOTH inputs: parallel MS1 decode in the loader (`[SpeXtract ms1-par]`)
   and parallel MS1 pick in the consumer (`flushMS1_`), queued as the next timed run.
 **mzPeak input, identification (13:58):** Sage @1%: `.d` 12,217 peptides / 97,793 PSMs; mzPeak 10,785 / 89,012
 (**-11.7% peptides**; 9,987 shared, 2,230 only-.d, 798 only-mzPeak). Mass errors of accepted PSMs:
@@ -251,7 +251,7 @@ hand-off 25.0 s -> the ~380 s residual is the MS1 path on this file too.
 | spectra / digest | 922,902 / `ca1ddbbd…` | 922,902 / **`ca1ddbbd…` (byte-identical spectrum data)** |
 | Sage @1% | 12,217 | **12,217, symdiff 0** |
 Pre-registered gate (LOAD <= 45 s, stage digests identical, Sage set identical): **PASSED**. The change is
-in the OpenMS loader patch (`[speXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD ctx and
+in the OpenMS loader patch (`[SpeXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD ctx and
 FrameCentroider, ordered hand-off) and the consumer (`flushMS1_`: parallel MS1 pick). Remaining wall is
 83% window loop; LOAD is now 4%. Baseline for the next measures: 15:21.
 **B3 CLOSED (15:14): output is identical across thread counts.** Re-digested with the fixed script: final_t8 ==

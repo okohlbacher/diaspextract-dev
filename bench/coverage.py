@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What do we LOSE vs diaTracer? Properties of the coverage gap, on one raw acquisition.
 
-This is the clean comparison the project has been missing. diaTracer and speXtract both extract
+This is the clean comparison the project has been missing. diaTracer and SpeXtract both extract
 pseudo-spectra from the SAME S30 .d, and both were searched with the SAME sage_deiso.json against
 the SAME fasta. So the peptide sets differ ONLY by extraction -- no second injection, no RT drift,
 no DDA-conditioning. Precursor RT / m/z / ion mobility are directly comparable between the two.

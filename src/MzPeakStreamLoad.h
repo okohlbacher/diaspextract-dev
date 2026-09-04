@@ -1,4 +1,4 @@
-// speXtract: streaming diaPASEF load from an .mzpeak archive through the mzPeak C++ library
+// SpeXtract: streaming diaPASEF load from an .mzpeak archive through the mzPeak C++ library
 // (github.com/OpenMS/mzpeak, fork okohlbacher/mzpeak-openms). Mirrors BrukerTimsFile::
 // loadDIAStreaming's contract so PickCompactConsumer sees the same stream: every MS1 spectrum
 // first (frame order), then one MSSpectrum per (MS2 frame, isolation window) holding only the

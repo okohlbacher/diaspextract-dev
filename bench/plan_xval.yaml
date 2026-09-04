@@ -9,7 +9,7 @@ title: "min_correlation tightening: portability to S23/S08 (the entrapment-confi
 # (b) not raise the entrapment error rate (scored after). If the direction flips sign on S23 or S08,
 # the S30 gain was sample-specific and the default stays at 0.3.
 samples: [S23, S08]
-binary: /scratch/kohlbach/OpenMS/build/bin/DIAPseudoSpectra
+binary: /scratch/kohlbach/OpenMS/build/bin/spextract
 threads: 100
 arms:
   - name: base

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy src/DIAPseudoSpectra.cpp to the cluster OpenMS tree, rebuild, record provenance.
+# Deploy src/spextract.cpp to the cluster OpenMS tree, rebuild, record provenance.
 # The ONLY sanctioned deploy path (2026-09-01 review, hardened per kimi F7/F8/F11 + codex #17-22):
 #   - refuses staged OR unstaged dirt (git status --porcelain), --allow-dirty to override
 #   - remote lock so deploys cannot interleave with each other
@@ -9,8 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NODE=${1:-ibminode05}
-SRC=src/DIAPseudoSpectra.cpp
-REMOTE_SRC=/scratch/kohlbach/OpenMS/src/topp/DIAPseudoSpectra.cpp
+SRC=src/spextract.cpp
+REMOTE_SRC=/scratch/kohlbach/OpenMS/src/topp/spextract.cpp
 if [ -n "$(git status --porcelain -- "$SRC" src/TdfMzCalibration.h)" ]; then
   if [ "${2:-}" != "--allow-dirty" ]; then
     echo "REFUSED: $SRC has staged or unstaged changes. Commit first, or pass --allow-dirty." >&2; exit 1
@@ -39,16 +39,16 @@ ssh "$NODE" "set -eu
   cp -p '$REMOTE_SRC' '${REMOTE_SRC}.bak' 2>/dev/null || true
   mv '${REMOTE_SRC}.new' '$REMOTE_SRC'
   cd /scratch/kohlbach/OpenMS/build
-  if ! make DIAPseudoSpectra -j32 > /scratch/kohlbach/build_sync_\$(date +%Y%m%d-%H%M%S).log 2>&1; then
+  if ! make spextract -j32 > /scratch/kohlbach/build_sync_\$(date +%Y%m%d-%H%M%S).log 2>&1; then
     mv '${REMOTE_SRC}.bak' '$REMOTE_SRC' 2>/dev/null || true
     echo 'BUILD FAILED - source restored, binary and provenance unchanged' >&2; exit 2
   fi
   OMSVER=\$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
   EPD=/scratch/kohlbach/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
   { printf 'src_sha256=%s\ncalibration_header_sha256=$HDR_SHA\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\n' \
-      '$SHA' '$GITREV' \"\$(date -Is)\" \"\$(sha256sum bin/DIAPseudoSpectra | cut -d' ' -f1)\" \
-      \"\$OMSVER\" \"\$(sha256sum \$EPD | cut -d' ' -f1)\" \"\$(grep -c 'speXtract\|lock' \$EPD || true)\"
-  } > bin/DIAPseudoSpectra.provenance.tmp && mv bin/DIAPseudoSpectra.provenance.tmp bin/DIAPseudoSpectra.provenance
-  cat bin/DIAPseudoSpectra.provenance | tee -a /scratch/kohlbach/deploys.log"
+      '$SHA' '$GITREV' \"\$(date -Is)\" \"\$(sha256sum bin/spextract | cut -d' ' -f1)\" \
+      \"\$OMSVER\" \"\$(sha256sum \$EPD | cut -d' ' -f1)\" \"\$(grep -c 'SpeXtract\|lock' \$EPD || true)\"
+  } > bin/spextract.provenance.tmp && mv bin/spextract.provenance.tmp bin/spextract.provenance
+  cat bin/spextract.provenance | tee -a /scratch/kohlbach/deploys.log"
 { echo "## $(date -Iseconds) -> $NODE"; echo '```'; echo "src_sha256=$SHA"; echo "git=$GITREV"; echo '```'; } >> evidence/DEPLOY-LOG.md
 echo "deploy recorded in evidence/DEPLOY-LOG.md"

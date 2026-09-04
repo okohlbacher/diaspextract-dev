@@ -1,6 +1,6 @@
 # Where the redundancy comes from (S23, Sage, common FDR)
 
-speXtract emits ~9.5 PSMs/peptide against diaTracer's ~1.7. That ratio alone cannot separate two
+SpeXtract emits ~9.5 PSMs/peptide against diaTracer's ~1.7. That ratio alone cannot separate two
 very different situations, so it factorises exactly:
 
 ```
@@ -14,7 +14,7 @@ precursor.** Cycle period 1.385 s, read from `analysis.tdf` (1,342 cycles, 16,10
 
 | | PSMs/pep | **within-cycle** | across-cycle | **% within-cycle dups** |
 |---|---|---|---|---|
-| **speXtract** | 7.57 | **2.85** | 2.66 | **64.9%** |
+| **SpeXtract** | 7.57 | **2.85** | 2.66 | **64.9%** |
 | **diaTracer** | 1.62 | **1.25** | 1.29 | **20.3%** |
 
 **64.9% of all our PSMs are within-cycle repeats**, against diaTracer's 20.3%.
@@ -25,7 +25,7 @@ PSMs per (peptide, cycle):
 
 | | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|---|---|---|---|
-| speXtract | 12,318 | 5,221 | 2,915 | 1,889 | 1,206 | 838 | 567 | **370** |
+| SpeXtract | 12,318 | 5,221 | 2,915 | 1,889 | 1,206 | 838 | 567 | **370** |
 | diaTracer | 9,894 | 1,912 | 409 | 85 | 26 | 6 | 1 | 0 |
 
 diaTracer's tail dies at 4. Ours has **370 peptide-cycle pairs yielding 8+ PSMs** — one cycle,

@@ -145,10 +145,10 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 - An unused per-window band-count heuristic that a comment described as kept for reference.
 
 ### Runtime
-- **MS1 path parallelised** (loader `[speXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and
+- **MS1 path parallelised** (loader `[SpeXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and
   `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). S30/100 threads: LOAD 445 s -> 39 s,
   total 22:22 -> **15:21**; spectrum data byte-identical, Sage peptide set identical.
-- Decode-once frame-major parallel MS2 loader (`[speXtract par-load]`), batched parallel MS2 pick; per-phase `[perf]`
+- Decode-once frame-major parallel MS2 loader (`[SpeXtract par-load]`), batched parallel MS2 pick; per-phase `[perf]`
   table and `[perf-load]` decode/hand-off/pick timers; `SPEXTRACT_LOAD_ONLY=1` for load-only profiling.
 - Falsified and recorded: `MALLOC_ARENA_MAX=4` (10x slower at 100 threads), loader batch depth (64/256/1024 flat).
 
@@ -230,7 +230,7 @@ handicap rather than establishing a lead.
 | Sage peptides @1% FDR | 11,976 | 10,333 | 9,891 | mean 105.1%, 95% CI [93.0, 117.3] -- consistent with PARITY |
 | MSFragger peptidoforms @1% | 11,463 | 11,465 | 9,404 | mean 85.0%, 95% CI [76.7, 93.2] -- a supported DEFICIT |
 | median precursor mass error | +1.5 | +3.2 | +2.3 ppm | diaTracer -1.4 / +0.3 / -0.6 |
-speXtract also emits ~1.32x more spectra, so per-spectrum efficiency favours diaTracer. The MSFragger
+SpeXtract also emits ~1.32x more spectra, so per-spectrum efficiency favours diaTracer. The MSFragger
 gap survives perfect masses and is therefore search/detection-side.
 
 ### Safety

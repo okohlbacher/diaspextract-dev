@@ -1,4 +1,4 @@
-// Copyright (c) 2026, speXtract authors. BSD-3-Clause.
+// Copyright (c) 2026, SpeXtract authors. BSD-3-Clause.
 //
 // Exact TOF -> m/z conversion for Bruker TDF (timsTOF) data, ModelType 1.
 //

@@ -20,7 +20,7 @@ title: "wavelet precursor smoothing + intensity ranking, vs shipped defaults"
 # discriminant threshold (bench/fdrcheck.py) and (b) not raise the entrapment error rate
 # (bench/entrapment.py). Failing either, it is recorded as another falsified lever.
 samples: [S30]
-binary: /scratch/kohlbach/OpenMS/build/bin/DIAPseudoSpectra
+binary: /scratch/kohlbach/OpenMS/build/bin/spextract
 threads: 100
 arms:
   - name: base

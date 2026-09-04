@@ -1,4 +1,4 @@
-# speXtract
+# SpeXtract
 
 Extraction of pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data.
 
@@ -7,7 +7,7 @@ The goal is **blind / open search** — finding variants and unexpected modifica
 library-based DIA tool cannot report, because its search space is enumerated before the search
 begins.
 
-speXtract is a standalone application. **OpenMS is a prerequisite, not a host** — the tool links
+SpeXtract is a standalone application. **OpenMS is a prerequisite, not a host** — the tool links
 against an OpenMS installation but lives outside the OpenMS source tree.
 
 ## Build
@@ -16,7 +16,7 @@ Needs OpenMS with `WITH_OPENTIMS` (to read Bruker `.d`). **Apply this repo's Ope
 
 ```bash
 scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
-# then rebuild the OpenMS DIAPseudoSpectra target
+# then rebuild the OpenMS spextract target
 ```
 
 **Why this is not optional.** Without the calibration patch the Bruker reader converts TOF to m/z with
@@ -35,7 +35,7 @@ oracle for cross-checking; not required, not redistributed).
 
 Build the library once against the same Arrow/Parquet/libzip OpenMS uses (`scripts/build_mzpeak_lib.sh`;
 GCC 13 / Arrow 23 need `patches/spx_ranges_to.h` and `patches/mzpeak-cpp-arrow23.py`, both applied by the
-script), then configure speXtract with `-DMZPEAK_ROOT=<checkout>`. Inside an OpenMS source tree use
+script), then configure SpeXtract with `-DMZPEAK_ROOT=<checkout>`. Inside an OpenMS source tree use
 `patches/openms-topp-mzpeak-cmake.py` instead. ims-compact archives store raw TOF behind a two-point
 transform; the loader recovers the exact TDF calibration from the embedded `vendor/analysis.tdf.gz` (or
 `SPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz>` for `--no-vendor` archives) and refuses to run without it unless
@@ -44,7 +44,7 @@ transform; the loader recovers the exact TDF calibration from the embedded `vend
 ## Run
 
 ```bash
-build/DIAPseudoSpectra -in sample.d -out pseudo.mzML -threads 64
+build/spextract -in sample.d -out pseudo.mzML -threads 64
 ```
 
 Recommended: preload tcmalloc. It is worth more than the structural memory work in this
