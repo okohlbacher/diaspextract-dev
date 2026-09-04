@@ -46,12 +46,15 @@ unchanged by construction and no search was run.
 | RSS at end of the window loop | 65.0 -> **48.3 GB** | 85.6 -> **55.1 GB** | 70.0 -> **49.8 GB** |
 | window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
 
-**These are memory changes, not speed changes.** A first pass appeared to show 5-6% off wall clock
-on all three files, but the benchmark machines are shared and an interleaved base/clean/base/clean
-replication on S23 found base and clean means of 5:27 and 5:27.5 -- no wall-clock difference, with
-the within-arm spread larger than the apparent gain. Window-loop CPU-seconds are consistently ~4%
-higher for the new code. The memory result replicates tightly (two reps of each arm within 2 GB)
-and is corroborated structurally by the EPD lines below. Do not cite a speed-up.
+**These are memory changes, not speed changes.** Replicated as interleaved base/clean pairs on
+shared machines with the load recorded before each run -- three pairs on S30, two on S23, every
+digest identical. S30: wall 321.3 -> 312.7 s (−2.7%), window-loop CPU 9,229 -> 9,690 (**+5.0%**),
+RSS at end of the window loop 63,880 -> 46,922 MB (−26.5%), process peak 81.3 -> 77.9 GB (−4.1%),
+all with non-overlapping ranges. S23: no wall-clock difference at all, same ~4% CPU cost, same
+~30% memory drop. So the trade is **~27% of the window loop's memory for ~5% more CPU at roughly
+unchanged wall time** -- worth taking because concurrency is bounded by the free-RAM admission
+gate, but it is a memory change. A first pass of single pairs appeared to show 5-6% off wall on
+three files; that was load drift on shared nodes and is withdrawn. Do not cite a speed-up.
 
 - **Valley splitting is streamed.** It used to build every trace of a chunk as an OpenMS `MassTrace`
   and then split the whole chunk, so the input payload and the entire split output were alive at

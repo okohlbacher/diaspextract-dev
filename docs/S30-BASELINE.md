@@ -829,7 +829,28 @@ in what exists, not a measurement.
 **So the defensible claim is: identical output, ~30% less memory in the window loop, no measured
 wall-clock change, and possibly ~4% more CPU.** The earlier "−5 to −6% wall on three files" was
 three single pairs taken while another user's load drifted underneath them, and it is withdrawn.
-A three-pair replication on the quietest node is running to bound the wall-clock and CPU deltas.
+
+#### THREE-PAIR REPLICATION, S30 on spock (the settled numbers)
+
+Six runs, interleaved base/clean x3, load recorded before each, **all five digest comparisons
+identical**. Every metric below has NON-OVERLAPPING ranges between the arms, which is the bar the
+single pairs failed:
+
+| metric | base mean [range] | clean mean [range] | delta |
+|---|---|---|---|
+| wall | 321.3 s [320-323] | 312.7 s [310-317] | **−2.7%** |
+| window-loop CPU-s | 9,228.9 [9,182-9,309] | 9,689.7 [9,624-9,802] | **+5.0%** |
+| RSS at end of loop | 63,880 MB [63,715-64,137] | 46,922 MB [46,459-47,313] | **−26.5%** |
+| process peak RSS | 81.3 GB [80.9-81.9] | 77.9 GB [76.4-78.9] | **−4.1%** |
+
+**Final reading, both files together.** The memory result is large, tight and certain: ~27-30% off
+the window loop on both files, ~4% off process peak, arms never overlapping. The wall-clock result
+is a REAL BUT SMALL win on S30 (−2.7%, half what the single pairs claimed) and ZERO on S23 --
+so "up to ~3% on one file, none on another", not "−5 to −6% on three files". The CPU cost is real
+and reproduces on both files (+5.0% S30, +4.2% S23): per-trace `detectPeaks` calls and the gate's
+extra build pass cost CPU that batching did not. **The trade is ~27% of the window loop's memory
+for ~5% more CPU at roughly unchanged wall time.** For a tool whose concurrency is bounded by the
+free-RAM admission gate, that is worth taking -- but it is a memory change and must be cited as one.
 
 **THE MACHINES ARE SHARED, AND THIS WAS NEARLY MISREPORTED.** The peer nodes were called "idle"
 on the strength of `nproc` and `free` alone -- load average was never checked. They were not idle:
