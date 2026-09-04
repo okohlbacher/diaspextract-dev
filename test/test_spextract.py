@@ -47,7 +47,9 @@ def spectrum(idx, ms_level, rt, peaks, im, prec=None):
 <cvParam cvRef="MS" accession="MS:1000828" name="isolation window lower offset" value="{target-lo}" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/>
 <cvParam cvRef="MS" accession="MS:1000829" name="isolation window upper offset" value="{hi-target}" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/>
 </isolationWindow><activation><cvParam cvRef="MS" accession="MS:1000044" name="dissociation method"/></activation></precursor></precursorList>"""
-    return f"""<spectrum id="spectrum={idx}" index="{idx}" defaultArrayLength="{len(peaks)}">
+    # "frame=<N>" is the vendor key frameIdOf() parses; without it every frame is unmappable and
+    # the integer detector falls back, which is how all 8 checks silently ran on the OTHER detector.
+    return f"""<spectrum id="frame={idx + 1} scan=0" index="{idx}" defaultArrayLength="{len(peaks)}">
 <cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>
 <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{ms_level}"/>
 <cvParam cvRef="MS" accession="MS:1000294" name="mass spectrum"/>
@@ -115,12 +117,39 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=()):
     return z2_mono, z1_mono
 
 
-def run(binary, inp, out, extra=(), threads=1, expect_fail=False):
+def synth_tdf(path, n_frames):
+    """A minimal analysis.tdf: the real S30 MzCalibration row plus a Frames table.
+
+    The calibration constants are the measured S30 ones from tests/calibration_golden.json, not
+    invented numbers -- an invented row would either fail isSupported() or silently define a
+    different mass scale. T1 is given a small per-frame spread so the per-frame factor is actually
+    exercised rather than collapsing to the reference.
+    """
+    import sqlite3, json, os
+    g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests",
+                                    "calibration_golden.json")))[0]
+    if os.path.exists(path):
+        os.remove(path)
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE MzCalibration (Id INTEGER, ModelType INTEGER, DigitizerTimebase REAL,"
+               " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL,"
+               " C3 REAL, C4 REAL)")
+    db.execute("INSERT INTO MzCalibration VALUES (1,?,?,?,?,?,?,?,?,0,0,0)",
+               (g["model_type"], g["timebase"], g["delay"], g["C0"], g["C1"], g["C2"],
+                g["T1_ref"], g["dC1"]))
+    db.execute("CREATE TABLE Frames (Id INTEGER, T1 REAL)")
+    db.executemany("INSERT INTO Frames VALUES (?,?)",
+                   [(i + 1, g["T1_ref"] + 0.03 * (i % 3)) for i in range(n_frames)])
+    db.commit(); db.close()
+    return path
+
+
+def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
     cmd = [binary, "-in", inp, "-out", out, "-threads", str(threads),
-           "-assembly:min_fragments", "2", "-assembly:require_isotope_support",
+           "-assembly:min_fragments", "2", "-assembly:require_isotope_support", "true",
            "-trace:ms2_min_length_sec", "0", "-trace:ms1_split_valleys", "0",
            "-trace:ms2_split_valleys", "0"] + list(extra)
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if expect_fail:
         assert r.returncode != 0, "expected a non-zero exit, got success:\n" + r.stdout[-800:]
         return r
@@ -263,7 +292,37 @@ def main():
                 assert any(abs(m - 233.11) < 0.02 for m in pk), f"gapped fragment 233.11 missing from the z=2 spectrum: {pk}"
         check(f"trace extension: {label}", cg)
 
-    total = 6 + 2
+    # 9 + 10: the SHIPPED detector, and the calibration failing closed.
+    # Until 2026-09-04 every check above ran on spx:detector=openms -- the fallback -- because the
+    # synthetic nativeIDs carried no "frame=" key and there was no tdf, so the integer detector
+    # (the default since that morning) was never once exercised by the suite.
+    def detector_of(path):
+        import re
+        m = re.search(r'spx:detector"[^>]*value="([a-z]+)"', open(path, encoding="utf-8",
+                                                                  errors="replace").read())
+        return m.group(1) if m else None
+
+    def c9():
+        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
+        out_i = os.path.join(work, "integer.mzML")
+        env = dict(os.environ, SPEXTRACT_MZPEAK_TDF=tdf)
+        run(binary, inp, out_i, env=env)
+        got = detector_of(out_i)
+        assert got == "integer", (
+            f"the SHIPPED default detector did not run: spx:detector={got}. With a parseable "
+            f"frame= nativeID and a valid tdf there is nothing left to fall back for.")
+    check("the shipped detector (integer) actually runs", c9)
+
+    def c10():
+        # No tdf: the integer detector cannot calibrate, and must SAY so rather than invent one.
+        out_f = os.path.join(work, "fallback.mzML")
+        r = run(binary, inp, out_f, extra=("-trace:detector", "integer"))
+        assert detector_of(out_f) == "openms", "no calibration available, yet integer still ran"
+        assert "alling back" in (r.stdout + r.stderr), \
+            "fell back to the OpenMS detector without warning -- a silent detector switch"
+    check("no calibration -> falls back to openms, loudly", c10)
+
+    total = 6 + 2 + 2
     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 

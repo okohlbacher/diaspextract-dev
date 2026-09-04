@@ -586,6 +586,8 @@ namespace
 
     double factor(size_t frame_id) const
     { return frame_id < b_by_frame.size() ? b_by_frame[frame_id] : cal.frameFactor(cal.T1_ref); }
+    /// frame 0 is the unknown-frame sentinel; nothing may be calibrated against it
+    bool mapped(uint32_t frame_id) const { return frame_id != 0 && factor(frame_id) > 0.0; }
     double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
     TofIdx tofOf(double mz, double b) const
     {
@@ -636,8 +638,14 @@ namespace
         ax.b_by_frame[(size_t)id] = ax.cal.frameFactor(fr.getColumn(1).getDouble());
       }
       // frames the tdf did not list keep the reference factor rather than a zero
+      // Frames the tdf did not list keep the reference factor rather than a zero -- but index 0
+      // is NOT such a frame. It is the "unknown frame" sentinel (the tdf's Frames.Id starts at 1),
+      // and frameIdOf() returns 0 for any nativeID it cannot parse. Backfilling it to bref is what
+      // let an mzML+sidecar input skip the fallback warning and calibrate every unmapped frame at
+      // reference temperature -- the invented calibration this path is supposed to refuse.
       const double bref = ax.cal.frameFactor(ax.cal.T1_ref);
-      for (double& b : ax.b_by_frame) if (!(b > 0.0)) b = bref;
+      for (size_t i = 1; i < ax.b_by_frame.size(); ++i) if (!(ax.b_by_frame[i] > 0.0)) ax.b_by_frame[i] = bref;
+      if (!ax.b_by_frame.empty()) ax.b_by_frame[0] = 0.0;
       if (ax.b_by_frame.size() < 2) { why = "no Frames rows"; return false; }
       ax.ok = true;
       return true;
@@ -670,11 +678,13 @@ namespace
   struct CompactStats
   {
     size_t no_im_array = 0, size_mismatch = 0, bad_mz = 0, bad_im = 0, kept = 0;
+    size_t unmapped_frame = 0;   ///< nativeID carried no parseable "frame=": cannot be calibrated
     /// merge per-frame stats after a parallel batch [perf-load]
     CompactStats& operator+=(const CompactStats& o)
     {
       no_im_array += o.no_im_array; size_mismatch += o.size_mismatch;
       bad_mz += o.bad_mz; bad_im += o.bad_im; kept += o.kept;
+      unmapped_frame += o.unmapped_frame;
       return *this;
     }
   };
@@ -704,6 +714,7 @@ namespace
     CompactFrame f;
     f.rt = s.getRT();
     f.frame_id = frameIdOf(s.getNativeID());
+    if (f.frame_id == 0) ++st.unmapped_frame;
     if (!s.containsIMData()) { st.no_im_array += s.size(); return f; }
     const auto& im = s.getFloatDataArrays()[s.getIMData().first];
     const Size n = s.size();
@@ -3236,6 +3247,24 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       for (const std::string& c : cand)
         if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
               + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
+    }
+    // FAIL CLOSED on frames the calibration cannot address. A .d names every frame "frame=<Id>";
+    // an mzML (or an archive index) may not, and frameIdOf() returns 0 for anything it cannot
+    // parse. With index 0 backfilled to the reference factor those frames used to calibrate
+    // SILENTLY at reference temperature, skipping the warning below entirely -- an mzML plus a
+    // sidecar tdf loaded "fine" and produced masses that were never calibrated per frame. The
+    // temperature term is small (0.669 ppm, tests/test_calibration.py) but it is exactly the
+    // invented calibration this path exists to refuse, so an unmapped frame now costs the integer
+    // detector rather than being papered over.
+    if (integer_detector && tofAxis().ok && cstat.unmapped_frame > 0)
+    {
+      writeLogWarn_("trace:detector=integer needs a per-frame calibration factor for EVERY frame, and "
+                    + String(cstat.unmapped_frame) + " frame(s) carry a nativeID with no parseable "
+                    "\"frame=<Id>\" key, so they cannot be addressed in the tdf's Frames table. Falling "
+                    "back to trace:detector=openms rather than calibrating them at reference "
+                    "temperature. A Bruker .d always names its frames; an mzML converted from one may "
+                    "not. Pass -trace:detector openms to silence this.");
+      integer_detector = false;
     }
     if (integer_detector && !tofAxis().ok)
     {
