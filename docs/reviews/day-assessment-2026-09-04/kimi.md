@@ -99,4 +99,16 @@
   2. **Re-run S08 with the current binary** — both engines plus entrapment. This single run covers the missing second-file leg for the default decision *and* the never-executed digest gate for `7d6e56f` *and* gives the occupancy sampler a ride. It is the cheapest highest-value run available.
   3. **Fix the ledger before quoting another component-level number**: move `g_tr` above detection, guard the EPD structures at allocation time with the 32 B/pt payload, release `g_wmap` at map clear, hoist the `MEM_SPECTRA` add out of the share-all branch, capacity-consistent subtraction at `:3009`, rename the stale label. Until then, quote RSS (86 GB), not 27.9 GB.
   4. **The v0.3.0 blockers, before any further optimisation.** Public-dataset replication, dependency SHAs/compiler identity, a worked example with expected output, and resource requirements (a tool that needs 86–164 GB and says so nowhere). Every one of today's gains is a number no external party can reproduce; that is the project's largest credibility gap and it predates this week.
-  5. **Small correctness fixes** (each a few lines): `fwhm_of` return −1 on no crossing; `off`/arena asserts
+  5. **Small correctness fixes** (each a few lines): `fwhm_of` return −1 on no crossing; `off`/arena asserts per R4.8; `q.second > 0` assert in `makeSpan`; align the apex-tie rule; document the unsplit-path scalar divergence.
+  6. **Integer-path tests**: a tiny injectable calibration fixture exercising span holes, split-child apex bins, unknown frame IDs, and detector selection — right now the only coverage of the intended default is one S30 digest.
+
+  **Stop:**
+
+  - **Slab compaction / "slab lifetime" as open items.** The lifetime fix already shipped (`:3313-3321`). The remaining slab-compaction item (E5) is gated on seed fraction m < 0.8, and the seed counter measured **m = 1.0** (`docs/TRACE-STRUCT-REDESIGN.md:250-252`: 100% of above-noise peaks are seeds at shipped snr). Its own precondition failed; close it.
+  - **Trace scalar removal** (1.6–3.2 GB): rests on a trace population the plan itself flags as unmeasured, touches ~8 read sites of the hottest loop, worth <2% of process RSS. Not now.
+  - **Allocator experiments**: falsified for speed already, and confounded for RSS because `availableBytes_()` adds our own RSS back (plan §8). The glibc↔tcmalloc A/B is on record (101.8 → 94.3 GB).
+  - **Per-trace valley splitting (8–11 GB) as currently justified**: its size estimate derives from the ledger this review just showed is untrustworthy, and its motivation is memory on a node that tolerated 164 GB. If anything in EPD is worth doing it is the SG coefficient cache (measured 87–95% of per-trace `detectPeaks` cost — a *wall-time* item), gated on the split-stage timer. Don't do the memory surgery first.
+  - **Declaring defaults ahead of the evidence**: two consecutive days produced a held-then-adopted flip on the same −1.3% number. The project's own both-engines-plus-second-file rule exists precisely for this; either follow it or rewrite it deliberately, not accidentally.
+
+  One meta-observation: the day's adversarial-review round is itself incomplete — `docs/reviews/day-assessment-2026-09-04/kimi.md` contains only stray status lines (no review), vibe.md's occupancy and uint16 sections are wrong as noted, and codex.md (the one solid review) landed after the commits it reviews. The two findings that matter most — the default that was never flipped and the fail-open frame-ID path — were catchable by reading the diff of `e3c6eb4` alone, which is four hunks long.
+

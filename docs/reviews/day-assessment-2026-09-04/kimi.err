@@ -734,3 +734,5 @@ The day-assessment reviews have grown since the subagent read them (they're bein
 
   Length: substantial but organized. Write final answer now.
 
+To resume this session: kimi -r session_b99e7266-62e0-4acf-bc5b-4b38cf8706a8
+exit=0

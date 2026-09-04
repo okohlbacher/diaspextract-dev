@@ -317,6 +317,41 @@ namespace
       if (t.real(k)) { rt.push_back(t.rtAtSpan(k)); v.push_back((double)t.xv(k)); }
   }
 
+  /// TRIM a trace to at most `cap` seconds around its apex, AFTER detection and valley splitting
+  /// have decided what the peak is. This is the safe form of a length limit:
+  ///   * detection is untouched, so the greedy consume-and-mark ownership of peaks is unchanged --
+  ///     unlike terminating extension, which changes which peaks belong to which trace;
+  ///   * it works on MS1 as well as MS2, because it is a step on Trace objects rather than
+  ///     something inside OpenMS's extension loop (MS1 is always traced by the OpenMS path, and
+  ///     MS1 is where the long traces are: 15.2% of S30 MS1 traces span >45 s, the longest 1,244 s
+  ///     of a 1,860 s gradient, against a 375 s maximum for fragments);
+  ///   * what it removes is the far tail of a blob that ElutionPeakDetection did not split, not
+  ///     part of a chromatographic peak -- real peaks here are 5-30 s wide.
+  /// On the span representation this is free: three integers move, no bytes are copied. The arena
+  /// still holds the untrimmed bytes; reclaiming them needs a compaction pass (MS1 already has one).
+  inline void trimToSpan(Trace& t, double cap)
+  {
+    if (cap <= 0.0 || t.span() == 0) return;
+    const size_t a = t.apex;
+    size_t lo = a, hi = a;
+    // grow symmetrically outward from the apex while the span fits, preferring the earlier frame on
+    // a tie so the result does not depend on which side is tested first
+    for (;;)
+    {
+      const bool can_lo = lo > 0, can_hi = hi + 1 < t.span();
+      if (!can_lo && !can_hi) break;
+      const double d_lo = can_lo ? t.rtAtSpan(hi) - t.rtAtSpan(lo - 1) : 1e30;
+      const double d_hi = can_hi ? t.rtAtSpan(hi + 1) - t.rtAtSpan(lo) : 1e30;
+      if (d_lo <= d_hi) { if (!can_lo || d_lo > cap) { if (!can_hi || d_hi > cap) break; ++hi; } else --lo; }
+      else              { if (!can_hi || d_hi > cap) { if (!can_lo || d_lo > cap) break; --lo; } else ++hi; }
+    }
+    if (lo == 0 && hi + 1 == t.span()) return;                  // already within the cap
+    uint16_t np = 0;
+    for (size_t k = lo; k <= hi; ++k) if (t.xv(k) > 0.0f) ++np;
+    t.frame0 += (uint32_t)lo; t.off += (uint32_t)lo;
+    t.len = (uint16_t)(hi - lo + 1); t.apex = (uint16_t)(a - lo); t.npts = np;
+  }
+
   /// Build a span from (store-local frame, intensity) points into `store`, returning the trace
   /// with `st` UNSET: the caller sets it once the store is immutable. Points may arrive unsorted.
   inline Trace makeSpan(vector<pair<uint32_t, float>>& pts, TraceStore& store)
@@ -984,7 +1019,8 @@ namespace
             // over-length trace that is thrown away also throws away every peak in it, which is
             // why trace:max_trace_length_sec is falsified. Here the trace simply stops growing and
             // ElutionPeakDetection still splits what was found.
-            if (k >= 0 && max_span_sec > 0.0)
+            static const bool span_terminate = std::getenv("SPEXTRACT_SPAN_TERMINATE") != nullptr;
+            if (span_terminate && k >= 0 && max_span_sec > 0.0)
             {
               const uint32_t nlo = std::min(sfmin, (uint32_t)f), nhi = std::max(sfmax, (uint32_t)f);
               if (rtAxis()[sl.rt_index[nhi]] - rtAxis()[sl.rt_index[nlo]] > max_span_sec)
@@ -1513,15 +1549,16 @@ protected:
     registerDoubleOption_("trace:wavelet_smooth", "<x>", 0.0, "[wavelet] Smooth the PRECURSOR XIC with a stationary (a-trous) B3-spline wavelet before correlating fragments against it, at a scale of x TIMES THE MEASURED MS1 FWHM. diaTracer smooths its precursor profile (2D Gaussian + Savitzky-Golay) and then applies a 0.3 correlation threshold; we copied the 0.3 but not the smoothing. Pearson r between two NOISY profiles is attenuated toward 0 as S/N falls, so an unsmoothed 0.3 is a systematically weaker constraint than a smoothed 0.3 -- and worst at faint precursors, which is where the coverage analysis says peptides are lost. Fragment XICs stay RAW (as in diaTracer) and emitted peak intensities are unaffected. 0 = off. Try 0.25-0.5 (measured MS1 FWHM is 3.61 s on S30, so 0.5 ~ 1.8 s ~ 1.3 cycles).", false);
     registerDoubleOption_("trace:split_valleys_fwhm", "<x>", 0.0, "[fwhm] Set the valley-splitting window as a MULTIPLE OF THE MEASURED MS1 FWHM instead of absolute seconds. Overrides trace:ms2_split_valleys when > 0 (the MS2 window is the one it sets). Absolute seconds cannot be right across methods: 14.0 s is +0.0% peptides on a 31 min gradient and -1.06% on a 5.6 min one. Measured MS1 FWHM is 3.61 s on S30, so the old 7.0 s default is ~1.9x FWHM and 14.0 s is ~3.9x. 0 = off (use absolute seconds).", false);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys via ElutionPeakDetection. DEFAULT 7.0 s: MassTraceDetection never splits at a local minimum, so two peptides eluting ~25 s apart within the m/z tolerance merge into ONE multi-modal trace, producing a merged precursor with the wrong monoisotope and charge. Measured +36.7% peptides on S23 and +37.4% on S08 at peptide-level FDR. Costs ~1.7x wall time and ~25% peak RAM. 0 = off.", false);
-    registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Stop extending a mass trace once it spans "
-                          "this many seconds (integer detector). This TERMINATES extension and keeps everything found "
-                          "so far -- it is not trace:max_trace_length_sec, which DISCARDS an over-length trace and "
-                          "therefore deletes all signal at that m/z (falsified; see its help). A cap is wanted because "
-                          "an unbounded trace has no locality: 15.2%% of S30 MS1 traces span >45 s and the longest "
-                          "spans 1,244 s of a 1,860 s gradient, which is what prevents processing the run in "
-                          "retention-time blocks. Chromatographic peaks here are 5-30 s, so 120 s is ~4x the widest "
-                          "real peak and only truncates blobs that ElutionPeakDetection would split anyway. 0 = no "
-                          "cap. CHANGES OUTPUT: measured with both search engines before this default was set.", false);
+    registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim a mass trace to at most this many "
+                          "seconds around its apex, AFTER detection and valley splitting have decided what the peak "
+                          "is. Applies to precursor and fragment traces alike. An unbounded trace has no locality: "
+                          "15.2%% of S30 precursor traces span >45 s and the longest spans 1,244 s of a 1,860 s "
+                          "gradient, while real chromatographic peaks here are 5-30 s -- so what a 120 s cap removes "
+                          "is the far tail of a blob ElutionPeakDetection did not split. Trimming AFTER the fact is "
+                          "deliberate: it leaves detection's peak ownership untouched, unlike terminating extension "
+                          "(SPEXTRACT_SPAN_TERMINATE=1, diagnostic), and unlike trace:max_trace_length_sec, which "
+                          "DISCARDS an over-length trace and deletes all signal at that m/z (falsified). 0 = no cap. "
+                          "CHANGES OUTPUT.", false);
     setMinFloat_("trace:max_span_sec", 0.0);
     registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
 registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Same as frame_aggregation_n but for the MS1 (PRECURSOR) map. This is the one that can add DEPTH: measurement shows we identify MORE spectra than diaTracer (3.7%% vs 2.0%% of spectra) but cover FEWER distinct peptides (4.6 vs 1.46 PSMs/peptide), i.e. we miss low-abundance PRECURSORS. Aggregating MS2 alone cannot fix that. 1 = off.", false);
@@ -2739,6 +2776,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
     for (auto& t : ms1_traces) t.st = &ms1_store;          // the store is immutable from here
+    { const double cap = getDoubleOption_("trace:max_span_sec");
+      if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(t, cap); }
     memAdd(MEM_TRACES, vbytes(ms1_store.inten) + (long long)ms1_traces.size() * (long long)sizeof(Trace));
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_traces)));
     { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
@@ -3353,6 +3392,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           // store pointers are set again afterwards; the per-frame bins are dead after it.
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4);
           for (auto& t : frag_traces) t.st = &wst;
+          if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(t, max_span);
           vector<uint32_t>().swap(wst.bins);
         }
         else
@@ -3362,6 +3402,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             wst.setFrames(ri, nullptr); }
           frag_traces = detectTraces_(wmap, wst, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
           for (auto& t : frag_traces) t.st = &wst;
+          if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(t, max_span);
         }
         // the window's spans and records, released with the window (the old add-only line was
         // cumulative over the run, not a peak)
