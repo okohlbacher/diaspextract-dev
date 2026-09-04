@@ -801,6 +801,15 @@ search was run.
 | sum of per-structure peaks | 36.2 -> 28.3 GB | 58.5 -> 46.9 GB | 41.3 -> 31.2 GB |
 | digest vs base | **IDENTICAL** | **IDENTICAL** | **IDENTICAL** |
 
+**THE MACHINES ARE SHARED, AND THIS WAS NEARLY MISREPORTED.** The peer nodes were called "idle"
+on the strength of `nproc` and `free` alone -- load average was never checked. They were not idle:
+ibminode05 was carrying another user's three python jobs at load 42, spock three `jackhmmer` at
+load 21. A later unpaired run of the shipping binary came back at S30 6:28 / S08 8:40, i.e. back at
+baseline, purely because it ran in a more contended window than the arms it was being compared to.
+**Rule from here: quote a wall-clock delta only from arms run BACK TO BACK on one node, check
+`uptime` before and after, and prefer the interleaved A/B/A/B below to a single pair.** The table
+above satisfies the back-to-back condition; the unpaired 11:02 runs did not and are not quoted.
+
 **Read the memory row that matters.** Process peak RSS barely moves (2-5 GB) because the peak is
 set outside the window loop; the window loop itself now ENDS 26-36% lighter. That is the number
 that governs how many windows can be in flight, not the process peak.
