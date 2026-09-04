@@ -716,7 +716,7 @@ namespace
   inline const char* memName(int c)
   {
     static const char* n[MEM_N] = {"slab (peaks)", "prep (frame_of/member/order)", "visited flags",
-                                   "traces (xi/xv/xt)", "EPD list<Peak2D>", "EPD MassTrace+split",
+                                   "traces (spans)", "EPD MassTrace (input)", "EPD MassTrace (split)",
                                    "FragGrid", "pdense scratch", "emitted spectra", "PeakMap (openms path)"};
     return n[c];
   }
@@ -743,6 +743,7 @@ namespace
     int c; long long b;
     MemGuard(int cat, long long bytes) : c(cat), b(bytes) { memAdd(c, b); }
     void grow(long long extra) { memAdd(c, extra); b += extra; }
+    void release() { memSub(c, b); b = 0; }          ///< free early, when the structure dies early
     ~MemGuard() { memSub(c, b); }
   };
   template <class V> long long vbytes(const V& v) { return (long long)v.capacity() * sizeof(typename V::value_type); }
@@ -891,7 +892,9 @@ namespace
     const vector<uint32_t>& frame_of = tp.frame_of;
     const vector<char>& member = tp.member;
 
-    vector<char> visited(P, 0);                    // the only per-band P-sized array
+    vector<uint64_t> visited((P + 63) / 64, 0);   // one BIT per peak: 8x less than the char array
+    auto seen = [&](size_t k) { return (visited[k >> 6] >> (k & 63)) & 1u; };
+    auto mark = [&](size_t k) { visited[k >> 6] |= (uint64_t)1 << (k & 63); };
     MemGuard g_vis(MEM_VISITED, vbytes(visited));  // x n_bands concurrently: the thing to watch
     auto mzAt = [&](uint32_t k) { return ax.mzOf(sl.tof[k], sl.b[frame_of[k]]); };
     auto iwm = [](double v, double w, double& c, double& cnt, double& den) {   // updateIterativeWeightedMean_
@@ -936,7 +939,7 @@ namespace
         const double d = std::abs(ax.mzOf(sl.tof[k], bf) - cmz);
         if (d < bd) { bd = d; bk = (long)k; }          // strict <: first of equals wins
       }
-      if (bk >= 0 && visited[(size_t)bk]) { taken = true; return -1; }
+      if (bk >= 0 && seen((size_t)bk)) { taken = true; return -1; }
       return bk;
     };
 
@@ -945,7 +948,7 @@ namespace
     for (uint32_t seed : tp.order)
     {
       if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
-      if (visited[seed]) continue;
+      if (seen(seed)) continue;
       const size_t f0 = frame_of[seed];
       const double w0 = sl.inten[seed], m0 = mzAt(seed);
       double cmz = m0, cnt = w0 * m0, den = w0;
@@ -998,7 +1001,7 @@ namespace
       const Size total = dn.scans + up.scans + 1;
       const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
       if ((double)got.size() / (double)adjusted < msr) continue;
-      for (uint32_t k : got) visited[k] = 1;                  // valid: now they are taken
+      for (uint32_t k : got) mark(k);                         // valid: now they are taken
 
       // the span: (store-local frame, intensity) points, plus the per-frame bin arena the valley
       // splitter needs to give each child ITS measured apex bin
@@ -1064,11 +1067,14 @@ namespace
       TraceStore& cst = stores[ci];
       cst.setFrames(wst.rt_index, &wst.b);
       vector<MassTrace> mts; mts.reserve(hi - lo);
-      long long list_bytes = 0, mt_bytes = 0;
+      long long mt_in_bytes = 0;                            // the real payload: vector<Peak2D> + object
       for (size_t q = lo; q < hi; ++q)
       {
         const Trace& t = in[q];
-        list_bytes += (long long)t.np() * (long long)(sizeof(Peak2D) + 2 * sizeof(void*) + 8);
+        // (the std::list is per trace and dies each iteration -- the first ledger charged a
+        //  chunk-wide list that never existed, a 6 GB phantom; the MassTrace's own vector<Peak2D>
+        //  is what lives for the whole chunk)
+        mt_in_bytes += (long long)t.np() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
         std::list<Peak2D> pk;                                  // REAL points only: EPD smooths what it is given
         for (size_t k = 0; k < t.span(); ++k)
         {
@@ -1081,28 +1087,31 @@ namespace
         MassTrace mt(pk);
         mt.setCentroidIM(t.im);
         mts.push_back(std::move(mt));
-        mt_bytes += (long long)sizeof(MassTrace);
       }
-      MemGuard g_list(MEM_EPD_LIST, list_bytes);
-      MemGuard g_mt(MEM_EPD_MT, mt_bytes);
+      MemGuard g_in(MEM_EPD_LIST, mt_in_bytes);               // input MassTraces, alive across the split
       vector<MassTrace> split = splitValleys(mts, split_valleys);
-      g_mt.grow((long long)split.size() * (long long)sizeof(MassTrace));
+      long long mt_out_bytes = 0;
+      for (const auto& m : split) mt_out_bytes += (long long)m.getSize() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
+      MemGuard g_out(MEM_EPD_MT, mt_out_bytes);               // split MassTraces, coexisting with the input
       vector<Trace>& out = parts[ci];
       out.reserve(split.size());
-      // A child is a sub-range of its parent (EPD copies consecutive ranges between minima), and
-      // children come back in parent order: walk parents alongside to hand each child ITS apex bin.
-      size_t par = lo;
+      // Each child carries its own measured m/z: the parent's per-frame bin was written into
+      // every Peak2D above, so the child's APEX PEAK m/z is that bin's m/z and the bin comes back
+      // by inverting the calibration -- which is what the pre-span code did.
+      //
+      // The first version of this walked the parent list to look the bin up by frame. That was
+      // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
+      // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
+      // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
+      // which is what localised it here. [2026-09-04]
       for (const MassTrace& mt : split)
       {
         Trace c = toTrace(mt, cst);
         if (c.np() == 0) continue;
         const uint32_t cf = c.frame0 + c.apex;                 // apex frame, window-local
-        while (par + 1 < hi && cf > in[par].frame0 + in[par].len - 1) ++par;
-        const Trace& P = in[par];
-        const bool inside = cf >= P.frame0 && cf < P.frame0 + P.len;
-        const uint32_t bin = (inside && !wst.bins.empty()) ? wst.bins[P.off + (cf - P.frame0)] : 0u;
         c.b = wst.b.empty() ? ax.factor(0) : wst.b[cf];
-        c.tof = bin ? bin : (ax.ok ? ax.tofOf(c.mz, c.b) : 0u);
+        const double amz = mt.getSize() ? mt[mt.findMaxByIntPeak(false)].getMZ() : c.mz;
+        c.tof = ax.ok ? ax.tofOf(amz, c.b) : 0u;
         out.push_back(std::move(c));
       }
     }
@@ -3260,8 +3269,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
           const int nb = std::max(1, w_bands);
+          {
           const TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);   // once per window
           g_prep.grow(vbytes(tprep.frame_of) + vbytes(tprep.member) + vbytes(tprep.frame_live) + vbytes(tprep.order));
+          writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(tprep.order.size())
+                        + " of " + String(wslab.peaks()) + " peaks (" + String((int)(1000.0 * tprep.order.size() / std::max<size_t>(wslab.peaks(), 1)) / 10.0) + "%)");
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
           // store absorbs them in band order and every offset is rebased (R4 sequencing).
           vector<TraceStore> bst(std::max(1, nb));
@@ -3290,17 +3302,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           }
           if (thi <= tlo || nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
           for (auto& t : frag_traces) t.st = &wst;
+          }                                                  // tprep dies here
+          g_prep.release();
+          // The slab is dead too: valley splitting reads only the window store (which copied the
+          // frame table) and the spans. Holding 12 GB of peaks plus the prep across the stage where
+          // the MassTrace payloads peak was the largest lifetime defect the plan found.
+          PeakSlab().frame_off.swap(wslab.frame_off);
+          vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
+          vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
+          vector<uint16_t>().swap(wslab.imq);
+          g_slab.release();
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
           // defects behind the first version's 92% peptide loss. It rebuilds the arena, so the
           // store pointers are set again afterwards; the per-frame bins are dead after it.
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4);
           for (auto& t : frag_traces) t.st = &wst;
           vector<uint32_t>().swap(wst.bins);
-          memAdd(MEM_TRACES, vbytes(wst.inten) + (long long)frag_traces.size() * (long long)sizeof(Trace));
-          PeakSlab().frame_off.swap(wslab.frame_off);   // consumed
-          vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
-          vector<double>().swap(wslab.b);
-          vector<uint16_t>().swap(wslab.imq);
         }
         else
         {
@@ -3309,8 +3326,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             wst.setFrames(ri, nullptr); }
           frag_traces = detectTraces_(wmap, wst, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
           for (auto& t : frag_traces) t.st = &wst;
-          memAdd(MEM_TRACES, vbytes(wst.inten) + (long long)frag_traces.size() * (long long)sizeof(Trace));
         }
+        // the window's spans and records, released with the window (the old add-only line was
+        // cumulative over the run, not a peak)
+        MemGuard g_tr(MEM_TRACES, vbytes(wst.inten) + (long long)frag_traces.size() * (long long)sizeof(Trace));
         if (detOn_())
         {
           #pragma omp critical
