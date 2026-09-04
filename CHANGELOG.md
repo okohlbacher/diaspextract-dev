@@ -43,10 +43,15 @@ unchanged by construction and no search was run.
 
 | | S30 | S08 | S23 |
 |---|---|---|---|
-| wall | 6:31 -> **6:07** | 8:36 -> **8:09** | 5:40 -> **5:22** |
 | RSS at end of the window loop | 65.0 -> **48.3 GB** | 85.6 -> **55.1 GB** | 70.0 -> **49.8 GB** |
 | window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
-| system time | −32% | −30% | −27% |
+
+**These are memory changes, not speed changes.** A first pass appeared to show 5-6% off wall clock
+on all three files, but the benchmark machines are shared and an interleaved base/clean/base/clean
+replication on S23 found base and clean means of 5:27 and 5:27.5 -- no wall-clock difference, with
+the within-arm spread larger than the apparent gain. Window-loop CPU-seconds are consistently ~4%
+higher for the new code. The memory result replicates tightly (two reps of each arm within 2 GB)
+and is corroborated structurally by the EPD lines below. Do not cite a speed-up.
 
 - **Valley splitting is streamed.** It used to build every trace of a chunk as an OpenMS `MassTrace`
   and then split the whole chunk, so the input payload and the entire split output were alive at
@@ -60,8 +65,8 @@ unchanged by construction and no search was run.
   digit between arms).
 - **Trace arenas are reserved before merging.** `absorb()` appended without reserving into a
   just-emptied destination, so 12 band merges and 48 chunk merges regrew geometrically.
-- Process peak RSS falls only 2-5 GB because the peak is set outside the window loop; CPU-seconds
-  rise slightly on two of three files while wall falls on all three, because occupancy rose.
+- Process peak RSS falls only 2-5 GB because the peak is set outside the window loop; the loop
+  ENDING ~30% lighter is what governs how many windows fit in flight.
 - Rejected on evidence: compacting the peak slab to above-noise peaks (the seeds line reads 100.0%
   -- there are no sub-noise peaks, so the slab is irreducible), and moving the seed sort into the
   band tasks (<1% of CPU, and it re-partitions seeds across bands, which cost 3.3% of peptides once).

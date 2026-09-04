@@ -791,7 +791,7 @@ search was run.
 
 | | S30 (ibminode05, 128c) | S08 (spock, 224c) | S23 (data, 224c) |
 |---|---|---|---|
-| wall base -> perf | 6:31 -> **6:07** (−6.1%) | 8:36 -> **8:09** (−5.2%) | 5:40 -> **5:22** (−5.3%) |
+| wall base -> perf (SINGLE PAIR -- see the retraction below) | 6:31 -> 6:07 | 8:36 -> 8:09 | 5:40 -> 5:22 |
 | process peak RSS | 85.7 -> 83.3 GB (−2.8%) | 119.6 -> 114.2 GB (−4.5%) | 91.3 -> 88.6 GB (−2.9%) |
 | **RSS at end of window loop** | 65.0 -> **48.3 GB** (−25.8%) | 85.6 -> **55.1 GB** (−35.6%) | 70.0 -> **49.8 GB** (−28.9%) |
 | window loop wall | 209.5 -> 192.7 s (−8.0%) | 317.6 -> 303.5 s (−4.4%) | 175.6 -> 162.7 s (−7.3%) |
@@ -800,6 +800,36 @@ search was run.
 | EPD MassTrace (ledger) | 7,502 -> 0.08 MB | 10,578 -> 0.08 MB | 9,192 -> 0.08 MB |
 | sum of per-structure peaks | 36.2 -> 28.3 GB | 58.5 -> 46.9 GB | 41.3 -> 31.2 GB |
 | digest vs base | **IDENTICAL** | **IDENTICAL** | **IDENTICAL** |
+
+### RETRACTION (same day): the wall-clock claim does NOT survive replication
+
+The single-pair table above was replicated as an interleaved **base/clean/base/clean** on S23,
+`data`, with the load recorded before each run. Four runs, all four digest-identical:
+
+| run | load before | wall | window loop | window-loop CPU | RSS at end of loop |
+|---|---|---|---|---|---|
+| base rep1 | 3.4 | 5:29 | 174.3 s | 9,850.8 | 69,999 MB |
+| clean rep1 | 29.5 | 5:19 | 159.8 s | 10,269.2 | 48,215 MB |
+| base rep2 | 41.8 | 5:25 | 168.3 s | 9,988.9 | 69,536 MB |
+| clean rep2 | 44.7 | 5:36 | 173.8 s | 10,400.5 | 50,135 MB |
+
+**Wall clock: base mean 5:27, clean mean 5:27.5. There is no wall-clock difference.** The within-arm
+spread (base 5:25-5:29, clean 5:19-5:36) is larger than the −5% the single pairs appeared to show.
+The window loop is 171.3 s vs 166.8 s (−2.6%) with overlapping ranges. **Window-loop CPU-seconds are
+consistently ~4% HIGHER for the new code** (9,850/9,988 vs 10,269/10,400), which is the one timing
+signal that reproduces, and it points the wrong way: per-trace `detectPeaks` calls and the gate's
+extra build pass cost CPU that batching did not.
+
+**What DOES replicate, tightly, is the memory.** RSS at the end of the window loop: 69,999 / 69,536
+(base) vs 48,215 / 50,135 (clean) -- **−20.6 GB, −29.5%**, with the two reps of each arm within
+2 GB of each other. That matches the −25.8% / −35.6% / −28.9% seen on the first pass and is
+corroborated structurally by the EPD ledger lines falling 7.5-10.6 GB -> 0.08 MB, which is a change
+in what exists, not a measurement.
+
+**So the defensible claim is: identical output, ~30% less memory in the window loop, no measured
+wall-clock change, and possibly ~4% more CPU.** The earlier "−5 to −6% wall on three files" was
+three single pairs taken while another user's load drifted underneath them, and it is withdrawn.
+A three-pair replication on the quietest node is running to bound the wall-clock and CPU deltas.
 
 **THE MACHINES ARE SHARED, AND THIS WAS NEARLY MISREPORTED.** The peer nodes were called "idle"
 on the strength of `nproc` and `free` alone -- load average was never checked. They were not idle:
