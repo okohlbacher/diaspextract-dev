@@ -225,3 +225,28 @@ map (`rt_index`, `b`, `frame_rt`, `inten` arena, `bins` arena until valley split
 stores absorbed after each join with offsets rebased; the MS1 release compacts the arena. Compiles
 clean. **The gate is running:** the 8-check suite, then the S30 spectrum digest of BOTH detectors
 against the pre-refactor outputs, then the memory ledger's `traces` line.
+
+
+## Gate result (2026-09-04, 06:41) — PASSED on both detectors
+
+| S30 | digest vs pre-span | ledger simultaneous peak | visited | traces | process RSS |
+|---|---|---|---|---|---|
+| OpenMS detector | **IDENTICAL** (656,254 spectra) | 68.6 -> 32.4 GB | -- | 35.6 -> 7.3 GB | 164 -> 147 GB |
+| integer detector | **IDENTICAL** (656,256 spectra) | 68.6 -> 27.9 GB | 4.87 -> 0.61 GB | 35.6 -> 6.9 GB | 105 -> 88 GB |
+
+So the span representation IS pure representation, as claimed, once one bug introduced by the
+refactor was removed: `splitIntegerTraces` had gained a walk over the parent traces to look a
+child's flight-time bin up by frame, but parents within a chunk are ordered by mobility and m/z,
+not frame, and their frame ranges overlap freely. The pre-span code never looked anything up -- the
+bin travels inside the MassTrace as each peak's m/z -- and restoring that fixed it. The OpenMS arm
+being digest-identical WHILE the integer arm lost 3.3% of peptides is what localised it, since that
+arm exercises every shared consumer.
+
+Landed together with the ledger corrections it made measurable: `visited` as a bitset (4.87 -> 0.61
+GB), the slab and prep released before valley splitting, the trace bytes guarded rather than
+add-only (the old 35.6 GB line was cumulative over the run, not a peak), and the phantom 6.0 GB
+`list<Peak2D>` line replaced by the two `MassTrace` payloads that really coexist.
+
+Seed fraction, measured: **100% of above-noise peaks are seeds** (`min_apex = snr x noise` with
+snr 1.0 equals the membership threshold), so `order` is P-sized, not P/4 -- the exact-reserve item
+is worth its full 2.4 GB, and `member` is redundant with the seed list as well as with `inten`.
