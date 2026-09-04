@@ -94,9 +94,11 @@ Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **7:17 wall, ~164 
 with the current defaults (2026-09-03 evening; peptide set identical to the 12:49 build). The
 scoring gate had been striding 96-byte records to read one field; it now reads a parallel array.
 It was 12:49 that morning after `charge:min_charge` removed ~30% of the emission, 15:21 before
-that, and 33:05 on 09-01 before the MS1 path was parallelised. An experimental integer-array
-detector (`trace:detector=integer`) reaches 6:53 and 105 GB on the same file at −1.4% peptides,
-pending the both-engines rule; it is not the default. The loader is
+that, and 33:05 on 09-01 before the MS1 path was parallelised. Mass-trace detection runs on the
+instrument's own integer axes by default (`trace:detector=integer`), which is faster and uses ~40%
+less memory than the OpenMS detector; the two agree to about 1% of identified peptides in either
+direction. Without the vendor flight-time calibration the tool falls back to the OpenMS detector and
+records which one ran in the output. The loader is
 4% of the run; the window loop is 83%. Reading from `.mzpeak` instead of `.d` is supported
 (build-optional, mzPeak C++ library) but slower (17:04); the archive's two-point TOF transform costs
 12% of identifications, so the loader recovers the exact TDF calibration from the embedded

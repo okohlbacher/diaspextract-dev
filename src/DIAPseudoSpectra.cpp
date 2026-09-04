@@ -3108,7 +3108,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // window only when its projected footprint fits in currently-free RAM, re-read from
     // /proc/meminfo at each admission so the run yields to other jobs instead of fighting them.
     // Always admit when nothing is in flight, so the loop cannot deadlock on a single huge window.
-    const bool integer_detector = (getStringOption_("trace:detector") == "integer");
+    bool integer_detector = (getStringOption_("trace:detector") == "integer");
     String why = "not attempted";
     if (integer_detector && !tofAxis().ok)
     {
@@ -3125,13 +3125,16 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
     if (integer_detector && !tofAxis().ok)
     {
-      // Fail closed. Without the vendor calibration there is no flight-time axis, and inventing one
-      // would silently reintroduce the coarse m/z approximation this detector exists to avoid.
-      writeLogError_("Error: trace:detector=integer needs the vendor flight-time calibration "
-                     "(MzCalibration + Frames.T1 from analysis.tdf); it was not available for this "
-                     "input. Reason: " + why + ". Use trace:detector=openms, or supply a .d / an "
-                     "mzPeak archive with its tdf.");
-      return INCOMPATIBLE_INPUT_DATA;
+      // FALL BACK, do not refuse. Failing closed is right when the alternative is inventing a
+      // calibration -- that would put wrong masses in the output. Here there is a second detector
+      // that needs no calibration at all, so refusing would only make the tool unusable on inputs
+      // it handled before this became the default. Which one ran is recorded in the output as
+      // spx:detector, so a file is always attributable.
+      writeLogWarn_("trace:detector=integer needs the vendor flight-time calibration (MzCalibration "
+                    "+ Frames.T1 from analysis.tdf) and it was not available for this input ("
+                    + why + "). Falling back to trace:detector=openms; the two detectors differ by "
+                    "about 1% of identified peptides. Pass -trace:detector openms to silence this.");
+      integer_detector = false;
     }
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
     std::atomic<size_t> inflight{0};
@@ -3852,6 +3855,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     else
 #endif
     out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
+    out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     out_exp.setMetaValue("spx:require_isotope_support", (int)getFlag_("assembly:require_isotope_support"));

@@ -23,6 +23,29 @@
   `bench/iso_guard.py`: the isotope-duplication census, collapse-rule evaluation, content-similarity
   test and loss trace behind the emission findings.
 
+### Changed
+- **`trace:detector` now defaults to `integer`.** Mass-trace detection runs on the instrument's own
+  integer axes -- flight-time bin for m/z, frame index for retention time -- following OpenMS
+  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On S30 it is
+  faster and uses ~40% less memory than the OpenMS path, and the two agree to about 1% of identified
+  peptides in either direction (Sage -1.3% on S30 but +0.3% on S08; MSFragger +2.1%; entrapment
+  slightly lower). Without the vendor flight-time calibration the tool **falls back to `openms` and
+  says so**; the emitted mzML records which detector ran as `spx:detector`.
+
+### Performance (2026-09-04, trace representation)
+- **A trace's profile is a span, not a point list.** A trace point has one degree of freedom -- its
+  intensity -- so the three parallel 4-byte arrays (frame, intensity, flight-time bin) and their
+  three allocations per trace are replaced by an entry frame and a range in a per-window arena, with
+  zero meaning a missed frame. Verified **byte-identical on both detectors** on S30. The per-window
+  correlation grid, which was a second copy of every profile, is gone. Window-loop memory falls from
+  a 68.6 GB simultaneous peak to 27.9 GB (integer) / 32.4 GB (OpenMS); process peak RSS 105 -> 88 GB
+  and 164 -> 147 GB.
+- **Memory ledger corrections** (`SPEXTRACT_MEM_LEDGER=1`): the trace line was cumulative rather
+  than a peak, and a 6.0 GB `list<Peak2D>` line was a phantom (that list is per trace and dies each
+  iteration) now replaced by the two `MassTrace` payloads that really coexist. The visited flags are
+  a bitset (4.87 -> 0.61 GB), and the slab and per-window preparation arrays are released before
+  valley splitting instead of being held across it.
+
 ### Performance (2026-09-03, window loop)
 - **The scoring gate reads its one field from a parallel array instead of striding the 96-byte
   trace record.** The gate rejects 99.4% of the fragments it visits; the scan was moving ~83 TB per
