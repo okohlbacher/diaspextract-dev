@@ -345,7 +345,13 @@ namespace
       if (d_lo <= d_hi) { if (!can_lo || d_lo > cap) { if (!can_hi || d_hi > cap) break; ++hi; } else --lo; }
       else              { if (!can_hi || d_hi > cap) { if (!can_lo || d_lo > cap) break; --lo; } else ++hi; }
     }
-    if (lo == 0 && hi + 1 == t.span()) return;                  // already within the cap
+    // Zero-trim the ends. makeSpan starts and ends a span on a real point by construction, but
+    // growing outward from the apex can stop on a gap, and a leading or trailing zero is pure
+    // padding: it costs 4 B, it is skipped by every consumer, and it makes `span()` overstate the
+    // trace. Interior zeros are the gaps and MUST stay -- they are the presence encoding.
+    while (lo < hi && t.xv(lo) == 0.0f) ++lo;
+    while (hi > lo && t.xv(hi) == 0.0f) --hi;
+    if (lo == 0 && hi + 1 == t.span()) return;                  // already within the cap, ends real
     uint16_t np = 0;
     for (size_t k = lo; k <= hi; ++k) if (t.xv(k) > 0.0f) ++np;
     t.frame0 += (uint32_t)lo; t.off += (uint32_t)lo;
@@ -3064,18 +3070,22 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (pc.trace_idx < ms1_traces.size()) needed[pc.trace_idx] = true;
       // The spans share one arena, so releasing a trace means COMPACTING: copy only the needed
       // spans into a fresh arena and rebase. The freed traces keep their scalars and lose their span.
+      // IN PLACE: traces were appended in increasing offset order and a kept span only ever moves
+      // to a LOWER offset, so the copy never overlaps forward. A second arena here would have
+      // doubled the MS1 arena at exactly the moment it is largest.
       Size freed = 0;
-      vector<float> keep; keep.reserve(ms1_store.inten.size() / 2);
+      const long long before_bytes = vbytes(ms1_store.inten);
+      size_t w = 0;
       for (size_t i = 0; i < ms1_traces.size(); ++i)
       {
         Trace& t = ms1_traces[i];
         if (!needed[i]) { if (t.np() > 0) ++freed; t.freeProfile(); continue; }
-        const uint32_t noff = (uint32_t)keep.size();
-        keep.insert(keep.end(), ms1_store.inten.begin() + t.off, ms1_store.inten.begin() + t.off + t.len);
-        t.off = noff;
+        if (w != t.off) std::memmove(ms1_store.inten.data() + w, ms1_store.inten.data() + t.off,
+                                     (size_t)t.len * sizeof(float));
+        t.off = (uint32_t)w; w += t.len;
       }
-      memSub(MEM_TRACES, vbytes(ms1_store.inten) - (long long)keep.size() * (long long)sizeof(float));
-      ms1_store.inten.swap(keep); vector<float>().swap(keep);
+      ms1_store.inten.resize(w); ms1_store.inten.shrink_to_fit();
+      memSub(MEM_TRACES, before_bytes - vbytes(ms1_store.inten));
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_());
     }
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
