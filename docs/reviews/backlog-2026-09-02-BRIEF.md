@@ -5,7 +5,7 @@ nothing. Modify nothing.
 REVIEW TARGET: docs/BACKLOG-ANALYSIS-2026-09-02.md -- a consolidation of every open issue in the project into tables
 (A runtime, B determinism, C identification quality, D mzPeak, E engineering) with status, root cause, fix, cost, and a
 4-week plan. Sources it consolidates: docs/BACKLOG.md, docs/RUNTIME-PLAN-2026-09-02.md, docs/PROJECT-REVIEW-2026-09-01.md,
-docs/BENCHMARK-MATRIX-2026-09-01.md, docs/S30-BASELINE.md (long; read the last ~150 lines), docs/RECALL-UPSTREAM-SCOPE-2026-07-26.md,
+docs/BENCHMARK-MATRIX-2026-09-01.md, docs/dataset D-BASELINE.md (long; read the last ~150 lines), docs/RECALL-UPSTREAM-SCOPE-2026-07-26.md,
 docs/WINDOW-LOOP-AUDIT.md (sections 3-6), docs/RUNTIME-QUALITY-ASSESSMENT-2026-07-27.md, docs/ROADMAP-2026-07-23.md (sections 1.4, 5).
 
 Answer these, decisively, with file:line or doc-section citations, most damaging first:

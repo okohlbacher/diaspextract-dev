@@ -576,7 +576,7 @@ class RtUnitState(object):
 
 
 def rt_minutes(scan, state, where):
-    """FAILURE 8: our mzML writes RT in SECONDS, diaTracer's in MINUTES, DIA-NN reports minutes.
+    """FAILURE 8: our mzML writes RT in SECONDS, the reference implementation's in MINUTES, DIA-NN reports minutes.
     Trusting the bare number matched 31 of ~300,000 spectra.
 
     v1 read the CV unit -- which was right -- but then did
@@ -606,7 +606,7 @@ def rt_minutes(scan, state, where):
 def precursor_of(spec):
     """Returns (mz, mz_source, charge_or_None, im_or_None).
 
-    FAILURE 8b: diaTracer omits 'selected ion m/z' and writes the precursor as its isolation
+    FAILURE 8b: the reference implementation omits 'selected ion m/z' and writes the precursor as its isolation
     window; we write the real acquisition window. v1 handled this with
     `ion.get("selected ion m/z", iso.get("isolation window target m/z", 0))` -- but a .get()
     default only fires on ABSENCE, so a present-but-zero value skipped the fallback entirely and
@@ -642,7 +642,7 @@ def precursor_of(spec):
 def assign_window(windows, mz, im):
     """2-D assignment: m/z AND ion mobility. Returns (window, reason).
 
-    v1 hardcoded 24 one-dimensional S23 m/z intervals, applied them to S08 and S30, and resolved
+    v1 hardcoded 24 one-dimensional dataset B m/z intervals, applied them to dataset A and dataset D, and resolved
     overlaps by taking the FIRST match. diaPASEF tiles are 2-D (m/z x 1/K0) objects that overlap
     in m/z precisely because they are separated in mobility; a 1-D projection with first-match
     resolution assigns a large fraction of spectra to the wrong tile, which biases the
@@ -833,7 +833,7 @@ def read_sage(tsv_path, expected_mzml_name, header_sha_pin=None):
 def search_metrics(rows, eid):
     """peptide_q is the published metric (FAILURE 3). spectrum_q is computed for diagnostics only
     and NEVER enters a vault table -- v1 printed it in the headline row, where it was quotable,
-    and it inflated every ratio by 9-11 points against diaTracer."""
+    and it inflated every ratio by 9-11 points against the reference implementation."""
     rank1 = [r for r in rows if int(float(r["rank"])) == 1]
     pep_q = set()
     spec_q = set()
@@ -882,7 +882,7 @@ LIB_COLUMNS = ["Precursor.Id", "Product.Mz"]
 def verify_reference(report_path, sample, raw_realpath):
     """Content-derived binding of a reference to a sample.
 
-    FAILURE 9 / codex #9: S08's diann_report pointing at an S30 parquet. v1 printed OK because
+    FAILURE 9 / codex #9: dataset A's diann_report pointing at an dataset D parquet. v1 printed OK because
     the file existed. Pinning its digest (bench2 G-B06) makes the WRONG reference stable, not
     correct -- the check that actually catches it is here: the DIA-NN report's own Run /
     File.Name column must name this sample's raw file.
@@ -914,7 +914,7 @@ def verify_reference(report_path, sample, raw_realpath):
     if not keep:
         die("G-C09", "%s contains no rows for sample %s (raw %s).\n       Run values present: %s\n"
                      "       This reference describes a DIFFERENT acquisition. v1 read it anyway "
-                     "and published S08 metrics against another sample's truth."
+                     "and published dataset A metrics against another sample's truth."
             % (report_path, sample, stem, distinct[:6]))
     return tbl, keep, runcol, distinct
 
@@ -1208,7 +1208,7 @@ class Pair(object):
     """A pair is two cells in ONE runset, in ONE sample.
 
     FAILURE 1 -- the worst published error this project has made -- was a cross-sample ratio:
-    7,430 was an S30 result divided by S08's diaTracer reference. A Pair carries a single
+    7,430 was an dataset D result divided by dataset A's the reference implementation reference. A Pair carries a single
     `sample` and is only ever constructed by build_pairs(), which iterates within a sample. A
     cross-sample pair is not representable, and Delta cannot be built from anything else.
     """
@@ -1218,7 +1218,7 @@ class Pair(object):
     def __init__(self, sample, baseline, treatment, kind):
         if baseline["sample"] != sample or treatment["sample"] != sample:
             die("G-C18", "attempted to build a pair spanning samples %r / %r. FAILURE 1 was "
-                         "exactly this: a published ratio of S30's number over S08's reference."
+                         "exactly this: a published ratio of dataset D's number over dataset A's reference."
                 % (baseline["sample"], treatment["sample"]))
         self.sample = sample
         self.baseline = baseline
@@ -1614,7 +1614,7 @@ def render_report(runset, cells, payloads, stage_meta, pairs, bench):
          "bytes -- see Provenance.", "",
          "All peptide counts are **`peptide_q <= 0.01`**. `spectrum_q` is a diagnostic and does "
          "not appear in any table here; quoting it inflated this project's counts by 9-11 points "
-         "against diaTracer (FAILURE 3).", ""]
+         "against the reference implementation (FAILURE 3).", ""]
 
     for sample in sorted(runset["plan_samples"]):
         L += ["## %s" % sample, "",
@@ -1958,15 +1958,15 @@ def selftest_collate(tmp):
 
     # ---- G-C18 cross-sample delta ----------------------------------------------------------------
     def cross_sample():
-        Pair("S08", {"sample": "S08", "arm": "base"}, {"sample": "S30", "arm": "x"},
+        Pair("dataset A", {"sample": "dataset A", "arm": "base"}, {"sample": "dataset D", "arm": "x"},
              "param_delta")
     st.expect_abort("G-C18", "a Pair spanning two samples is refused (FAILURE 1)", cross_sample)
     st.expect_ok("G-C18", "same-sample pair accepted",
-                 lambda: Pair("S08", {"sample": "S08", "arm": "b"},
-                              {"sample": "S08", "arm": "t"}, "param_delta"))
+                 lambda: Pair("dataset A", {"sample": "dataset A", "arm": "b"},
+                              {"sample": "dataset A", "arm": "t"}, "param_delta"))
 
     def pct_of_pct():
-        pr = Pair("S08", {"sample": "S08", "arm": "b"}, {"sample": "S08", "arm": "t"},
+        pr = Pair("dataset A", {"sample": "dataset A", "arm": "b"}, {"sample": "dataset A", "arm": "t"},
                   "param_delta")
         d = Delta("recall", pr,
                   Value(69.9, 500, "percent", "truth_precursors", eid),
@@ -1996,10 +1996,10 @@ def selftest_collate(tmp):
         t = dict(base_meta)
         t["ini_sha256"] = "i2"
         t.update(mutate)
-        pr = Pair("S08", {"sample": "S08", "arm": "b"}, {"sample": "S08", "arm": "t"},
+        pr = Pair("dataset A", {"sample": "dataset A", "arm": "b"}, {"sample": "dataset A", "arm": "t"},
                   "param_delta")
         validate_pair({"host_node": "n1"}, pr,
-                      {("S08", "b"): b, ("S08", "t"): t})
+                      {("dataset A", "b"): b, ("dataset A", "t"): t})
     st.expect_abort("G-C19", "pair with different converter binaries (FAILURE 7)",
                     lambda: pair_case({"tool_sha256": "t2"}))
     st.expect_abort("G-C19", "pair on different hosts",
@@ -2015,13 +2015,13 @@ def selftest_collate(tmp):
     st.expect_ok("G-C19", "well-formed pair validates", lambda: pair_case({}))
 
     def missing_baseline():
-        cells = {("S08", "t"): {"sample": "S08", "arm": "t", "baseline_arm": "b"}}
+        cells = {("dataset A", "t"): {"sample": "dataset A", "arm": "t", "baseline_arm": "b"}}
         build_pairs({}, cells)
     st.expect_abort("G-C19", "treatment whose baseline has no cell", missing_baseline)
 
     # ---- G-C01 RT units ------------------------------------------------------------------------
     def mzml(name, specs, **kw):
-        return bench2.st_build_mzml(tmp / name, specs, "file:///raw/S08.d", **kw)
+        return bench2.st_build_mzml(tmp / name, specs, "file:///raw/dataset A.d", **kw)
 
     def base_spec(i=0, **kw):
         s = {"mz": 500.0 + i * 0.001, "z": 2, "im": 1.0, "rt": 600.0, "iso_target": 500.0,
@@ -2199,31 +2199,31 @@ def selftest_collate(tmp):
                        "diagnostics=%s" % sm["diagnostics"]))
 
     # ---- G-C09 reference binding ----------------------------------------------------------------------
-    rep_ok = _mk_parquet(tmp / "rep_ok.parquet", _truth_rows("FKL4341-S08-A-3_x_1305", 300),
+    rep_ok = _mk_parquet(tmp / "rep_ok.parquet", _truth_rows("dataset-A", 300),
                          TRUTH_PARQUET_COLS)
     rep_multi = _mk_parquet(tmp / "rep_multi.parquet",
-                            _truth_rows("FKL4341-S08-A-3_x_1305", 200) +
-                            _truth_rows("FKL4341-S30-A-10_y_1326", 200),
+                            _truth_rows("dataset-A", 200) +
+                            _truth_rows("dataset-D", 200),
                             TRUTH_PARQUET_COLS)
     rep_wrong = _mk_parquet(tmp / "rep_wrong.parquet",
-                            _truth_rows("FKL4341-S30-A-10_y_1326", 300), TRUTH_PARQUET_COLS)
+                            _truth_rows("dataset-D", 300), TRUTH_PARQUET_COLS)
     rep_nan = _mk_parquet(tmp / "rep_nan.parquet",
-                          _truth_rows("FKL4341-S08-A-3_x_1305", 300)[:-1] +
-                          [dict(_truth_rows("FKL4341-S08-A-3_x_1305", 1)[0],
+                          _truth_rows("dataset-A", 300)[:-1] +
+                          [dict(_truth_rows("dataset-A", 1)[0],
                                 **{"Q.Value": float("nan")})], TRUTH_PARQUET_COLS)
     rep_nocol = _mk_parquet(tmp / "rep_nocol.parquet",
                             [{k: v for k, v in r.items() if k != "Run"}
                              for r in _truth_rows("x", 5)], TRUTH_PARQUET_COLS[1:])
-    raw08 = "/raw/FKL4341-S08-A-3_x_1305.d"
+    raw08 = "/raw/dataset-A"
     st.expect_abort("G-C09", "reference parquet describing ANOTHER sample (codex #9)",
-                    lambda: verify_reference(rep_wrong, "S08", raw08))
+                    lambda: verify_reference(rep_wrong, "dataset A", raw08))
     st.expect_abort("G-C09", "parquet with no Run/File.Name column",
-                    lambda: verify_reference(rep_nocol, "S08", raw08))
+                    lambda: verify_reference(rep_nocol, "dataset A", raw08))
     st.expect_ok("G-C09", "single-run reference accepted",
-                 lambda: verify_reference(rep_ok, "S08", raw08))
+                 lambda: verify_reference(rep_ok, "dataset A", raw08))
 
     def multirun():
-        tbl, keep, runcol, distinct = verify_reference(rep_multi, "S08", raw08)
+        tbl, keep, runcol, distinct = verify_reference(rep_multi, "dataset A", raw08)
         if len(keep) != 200:
             die("G-C09", "multi-run parquet was not filtered to this sample (%d rows)"
                 % len(keep))
@@ -2233,16 +2233,16 @@ def selftest_collate(tmp):
                          [{"Precursor.Id": "PREC%d" % i, "Product.Mz": 300.0 + j, "Decoy": 0}
                           for i in range(300) for j in range(4)], LIB_PARQUET_COLS)
     st.expect_abort("G-C09", "NaN Q.Value silently changes the truth population",
-                    lambda: load_truth(rep_nan, lib_ok, "S08", raw08))
+                    lambda: load_truth(rep_nan, lib_ok, "dataset A", raw08))
     st.expect_abort("G-C08", "absent fragment library -> abort, not 0% purity",
-                    lambda: load_truth(rep_ok, tmp / "nope.parquet", "S08", raw08))
+                    lambda: load_truth(rep_ok, tmp / "nope.parquet", "dataset A", raw08))
     lib_thin = _mk_parquet(tmp / "lib_thin.parquet",
                            [{"Precursor.Id": "PREC%d" % i, "Product.Mz": 300.0, "Decoy": 0}
                             for i in range(10)], LIB_PARQUET_COLS)
     st.expect_abort("G-C08", "library covering 3% of truth precursors",
-                    lambda: load_truth(rep_ok, lib_thin, "S08", raw08))
+                    lambda: load_truth(rep_ok, lib_thin, "dataset A", raw08))
     st.expect_ok("G-C08", "adequate library accepted",
-                 lambda: load_truth(rep_ok, lib_ok, "S08", raw08))
+                 lambda: load_truth(rep_ok, lib_ok, "dataset A", raw08))
 
     # ---- G-C23 vault O_EXCL --------------------------------------------------------------------------
     def vault_collision():
@@ -2278,8 +2278,8 @@ def _selftest_integration(st, tmp):
     def build(name, control_fires):
         root = work / name
         root.mkdir()
-        raw = bench2.st_make_fake_d(root / "S08.d", mz_centers=(520.0,), width=80.0,
-                                    serial="SER-08", sample_name="S08",
+        raw = bench2.st_make_fake_d(root / "dataset A.d", mz_centers=(520.0,), width=80.0,
+                                    serial="SER-08", sample_name="dataset A",
                                     full_mobility_span=True)
         tool = bench2.st_write_faketool(root / "faketool.py")
         sage = bench2.st_write_fakesage(root / "fakesage.py")
@@ -2295,7 +2295,7 @@ def _selftest_integration(st, tmp):
         rows = []
         frag = []
         for i in range(300):
-            rows.append({"Run": "S08", "Precursor.Id": "T%d" % i,
+            rows.append({"Run": "dataset A", "Precursor.Id": "T%d" % i,
                          "Precursor.Mz": 500.0 + i * 0.02, "Precursor.Charge": 2,
                          "RT": 10.0, "RT.Start": 9.0, "RT.Stop": 11.0,
                          "IM": 0.7 + i * 0.002, "Q.Value": 0.001})
@@ -2303,7 +2303,7 @@ def _selftest_integration(st, tmp):
                 frag.append({"Precursor.Id": "T%d" % i,
                              "Product.Mz": 1000.0 + i * 7.0 + j * 0.37, "Decoy": 0})
             if control_fires and i % 3 == 0:
-                rows.append({"Run": "S08", "Precursor.Id": "D%d" % i,
+                rows.append({"Run": "dataset A", "Precursor.Id": "D%d" % i,
                              "Precursor.Mz": 500.0 + i * 0.02 + DECOY_SHIFT,
                              "Precursor.Charge": 2, "RT": 10.0, "RT.Start": 9.0,
                              "RT.Stop": 11.0, "IM": 0.7 + i * 0.002, "Q.Value": 0.001})
@@ -2319,7 +2319,7 @@ def _selftest_integration(st, tmp):
             "search": {"sage_binary": {"path": str(sage), "sha256": sha256_file(sage)},
                        "sage_config": {"path": str(cfg), "sha256": sha256_file(cfg)},
                        "fasta": {"path": str(fasta), "sha256": sha256_file(fasta)}},
-            "samples": {"S08": {
+            "samples": {"dataset A": {
                 "raw": str(raw),
                 "pinned": {"raw_content_id": ident["content_id"],
                            "acquisition_id": ident["acquisition_id"],
@@ -2332,7 +2332,7 @@ def _selftest_integration(st, tmp):
         regp = root / "samples.yaml"
         regp.write_text(yaml.safe_dump(reg, default_flow_style=False, sort_keys=True))
         plan = {"schema": "spextract.plan/2", "title": "integration %s" % name,
-                "binary": str(tool), "threads": 2, "tcmalloc": False, "samples": ["S08"],
+                "binary": str(tool), "threads": 2, "tcmalloc": False, "samples": ["dataset A"],
                 "arms": [{"name": "base", "role": "baseline", "params": {}},
                          {"name": "split", "role": "treatment", "baseline": "base",
                           "params": {"trace:ms1_split_valleys": 7.0}}]}
@@ -2449,7 +2449,7 @@ def _selftest_truth_e2e(st, tmp, report, lib, raw08):
     specs.append({"mz": 500.0, "z": 2, "im": 1.0, "rt": 600.0, "iso_target": 500.0,
                   "peaks": [(300.0, 1.0), (301.0, 2.0)]})
     path = bench2.st_build_mzml(tmp / "e2e.mzML", specs, "file://" + raw08)
-    precursors, frags, refinfo = load_truth(report, lib, "S08", raw08)
+    precursors, frags, refinfo = load_truth(report, lib, "dataset A", raw08)
 
     def run():
         return truth_metrics(path, precursors, frags, windows, "method1", len(specs))

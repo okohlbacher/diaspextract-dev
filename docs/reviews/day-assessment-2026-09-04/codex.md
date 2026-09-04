@@ -6,13 +6,13 @@ The most immediate defect is factual: commit `e3c6eb4` says “Make `trace:detec
 
 Even if that coding error were fixed, the evidence does not satisfy the stated rule:
 
-- S30 has both engines and entrapment (`4bd81c2`), and `bbb2121` establishes that the span build produces the same S30 spectrum-list digest as the pre-span build.
-- S08 (`4a22ad7`) has only Sage, memory and runtime, predates `3a1d91e`, and has not been rerun after the span change. MSFragger and entrapment are explicitly still missing in [FAILURE-ANALYSIS.md:117](/Users/kohlbach/Claude/speXtract/docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md:117).
+- dataset D has both engines and entrapment (`4bd81c2`), and `bbb2121` establishes that the span build produces the same dataset D spectrum-list digest as the pre-span build.
+- dataset A (`4a22ad7`) has only Sage, memory and runtime, predates `3a1d91e`, and has not been rerun after the span change. MSFragger and entrapment are explicitly still missing in [FAILURE-ANALYSIS.md:117](/Users/kohlbach/Claude/speXtract/docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md:117).
 - Therefore: both-engine/entrapment evidence exists on one file; second-file evidence exists for only Sage and memory on the old representation. The full rule was not met.
 
 The honest evidence statement is:
 
-> On S30, the integer detector reduces wall time 6:54→6:21 (8.0%), peak RSS 150→86 GB (42.7%), and window-loop CPU 19,440→14,249 CPU-s (26.7%). Sage decreases 1.3%, MSFragger increases 2.1%, and entrapment shows no detectable worsening. On pre-span S08, Sage increases 0.3%, RSS falls 39%, and wall time is effectively unchanged. Generalization across engines and files remains unverified.
+> On dataset D, the integer detector reduces wall time 6:54→6:21 (8.0%), peak RSS 150→86 GB (42.7%), and window-loop CPU 19,440→14,249 CPU-s (26.7%). Sage decreases 1.3%, MSFragger increases 2.1%, and entrapment shows no detectable worsening. On pre-span dataset A, Sage increases 0.3%, RSS falls 39%, and wall time is effectively unchanged. Generalization across engines and files remains unverified.
 
 “Agree to about 1%” is misleading because it describes the net count, not membership. The sets intersect at 11,494 peptides: OpenMS-only is 1,148/12,642 = 9.1%, integer-only is 981/12,475 = 7.9%, and the symmetric difference is 2,129/13,623 = **15.6% of the union**. That is substantial deterministic churn.
 
@@ -26,10 +26,10 @@ Worse, having a calibration is not sufficient. Unknown frame IDs become zero at 
 
 ### Actually verified by runs
 
-- The scoring-array change in `1a7158e` was measured at 7:17 and produced the same **Sage peptide set**, replicated three times. That is what [S30-BASELINE.md:764](/Users/kohlbach/Claude/speXtract/docs/S30-BASELINE.md:764) and [CHANGELOG.md:49](/Users/kohlbach/Claude/speXtract/CHANGELOG.md:49) support. They do **not** document a spectrum digest comparison. Calling it “digest-identical” overstates the record.
-- The span representation from `3a1d91e`, after the child-bin bug was fixed in `6ea4e3f`, has a reported S30 spectrum-list digest match for both detectors in `bbb2121`, [TRACE-STRUCT-REDESIGN.md:230](/Users/kohlbach/Claude/speXtract/docs/TRACE-STRUCT-REDESIGN.md:230). This is the strongest identity evidence from today.
+- The scoring-array change in `1a7158e` was measured at 7:17 and produced the same **Sage peptide set**, replicated three times. That is what [dataset D-BASELINE.md:764](/Users/kohlbach/Claude/speXtract/docs/dataset D-BASELINE.md:764) and [CHANGELOG.md:49](/Users/kohlbach/Claude/speXtract/CHANGELOG.md:49) support. They do **not** document a spectrum digest comparison. Calling it “digest-identical” overstates the record.
+- The span representation from `3a1d91e`, after the child-bin bug was fixed in `6ea4e3f`, has a reported dataset D spectrum-list digest match for both detectors in `bbb2121`, [TRACE-STRUCT-REDESIGN.md:230](/Users/kohlbach/Claude/speXtract/docs/TRACE-STRUCT-REDESIGN.md:230). This is the strongest identity evidence from today.
 - That is a semantic `<spectrumList>` digest, not byte identity of the complete mzML: the project’s digest deliberately excludes parameters, timestamps, and the trailing byte-offset index, as explained at [README.md:83](/Users/kohlbach/Claude/speXtract/README.md:83).
-- S30 integer search results and entrapment were measured in `4bd81c2`; pre-span S08 Sage/RSS/runtime were measured in `4a22ad7`.
+- dataset D integer search results and entrapment were measured in `4bd81c2`; pre-span dataset A Sage/RSS/runtime were measured in `4a22ad7`.
 
 ### Asserted or incompletely verified
 
@@ -54,7 +54,7 @@ The RSS reduction to 86–88 GB is real process evidence. The 27.9 GB attributio
 
 ## 3. Correctness of the span implementation
 
-The main S30 path appears semantically sound, and `bbb2121` provides real evidence for that. I did not find the suspected dangling-store-pointer bug in the exercised paths:
+The main dataset D path appears semantically sound, and `bbb2121` provides real evidence for that. I did not find the suspected dangling-store-pointer bug in the exercised paths:
 
 - Band stores are absorbed before `st` is assigned at [DIAPseudoSpectra.cpp:3303](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3303).
 - Chunk stores are absorbed and offsets rebased at [DIAPseudoSpectra.cpp:1122](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1122), after which the caller resets every `st` to the stable window store at [DIAPseudoSpectra.cpp:3325](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3325).
@@ -72,7 +72,7 @@ There are nevertheless real defects and missing guards:
 - **The MS1 arena compaction is logically correct but accounting-incorrect and overflow-unsafe**, as described above.
 - **Integer calibration provenance remains unsafe.** The comment says frame ID zero “must” be treated as unknown, but the caller does not do so; it silently uses a reference factor. That is a correctness blocker independent of the span.
 
-The existing synthetic suite explicitly exercises only the OpenMS detector at [test_spextract.py:19](/Users/kohlbach/Claude/speXtract/test/test_spextract.py:19). Thus S30 digest equality is the only meaningful coverage of the integer span/split path.
+The existing synthetic suite explicitly exercises only the OpenMS detector at [test_spextract.py:19](/Users/kohlbach/Claude/speXtract/test/test_spextract.py:19). Thus dataset D digest equality is the only meaningful coverage of the integer span/split path.
 
 ## 4. Occupancy
 
@@ -112,7 +112,7 @@ Ranked by value:
 
 1. **Correct the false default claim immediately.** Either leave OpenMS as the documented default or actually switch only after validation. Rename fallback behavior to explicit `auto`. Reject missing/unknown frame IDs instead of applying the reference factor. Fix README/CHANGELOG contradictions introduced by `e3c6eb4`.
 
-2. **Complete the validation matrix before any default change.** First digest-gate `7d6e56f` against `bbb2121`. Then rerun post-span S08 with Sage, MSFragger and entrapment. Given 15.6% union churn, also report set differences—not just net counts.
+2. **Complete the validation matrix before any default change.** First digest-gate `7d6e56f` against `bbb2121`. Then rerun post-span dataset A with Sage, MSFragger and entrapment. Given 15.6% union churn, also report set differences—not just net counts.
 
 3. **Repair the ledger before quoting another component-level GB saving.** Track arenas while they are allocated, include `bins` and child stores, release `g_wmap` when the map is cleared, use capacities consistently, cover every assembly branch, and obtain a coherent peak snapshot. Until then, use 86 GB RSS as truth and treat 27.9 GB as an incomplete lower-dimensional accounting result.
 
@@ -120,9 +120,9 @@ Ranked by value:
 
 5. **Add integer-path tests.** Provide a tiny injectable calibration fixture and test span holes, split-child apex bins, unknown frame IDs, band equivalence, zero rejection, offset limits, and OpenMS/integer mode selection. The current suite silently falling back to OpenMS would not test the proposed default.
 
-6. **Measure occupancy once, cheaply.** Attach the thread-state/admission sampler to the required S08 reruns. Do not spend a separate benchmark campaign on it.
+6. **Measure occupancy once, cheaply.** Attach the thread-state/admission sampler to the required dataset A reruns. Do not spend a separate benchmark campaign on it.
 
-7. **Only then try per-trace valley splitting.** It may remove the 7.6+1.0 GB MassTrace coexistence, but “8–11 GB” is presently derived from an incomplete ledger. Isolate it, add a split-stage timer, and require an S30 spectrum-list digest match.
+7. **Only then try per-trace valley splitting.** It may remove the 7.6+1.0 GB MassTrace coexistence, but “8–11 GB” is presently derived from an incomplete ledger. Isolate it, add a split-stage timer, and require an dataset D spectrum-list digest match.
 
 Lower value:
 

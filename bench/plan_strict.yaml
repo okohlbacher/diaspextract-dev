@@ -8,12 +8,12 @@ title: "co-elution gate, STRICT direction: the loosening sweep's derivative says
 #
 # Pre-registered:
 #   * peptides rise at 0.40 and/or 0.50 -> the shipped default 0.3 is too loose; the gain is real
-#     and the new optimum should be adopted only after replication on a second sample (S23/S08).
+#     and the new optimum should be adopted only after replication on a second sample (dataset B/dataset A).
 #   * peptides flat/fall -> 0.3 is at or near the optimum; the gate is fully characterised and
 #     CLOSED in both directions. No further gate work.
 # A PSM-only gain does NOT count: peptides at peptide_q<=0.01 is the metric, since we already
-# over-produce PSMs 8.98/peptide vs diaTracer's 1.66.
-samples: [S30]
+# over-produce PSMs 8.98/peptide vs the reference implementation's 1.66.
+samples: [dataset D]
 binary: /scratch/kohlbach/rv/opt/bin/spextract
 threads: 128
 arms:

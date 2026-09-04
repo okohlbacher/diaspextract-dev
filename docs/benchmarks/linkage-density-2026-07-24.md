@@ -1,4 +1,4 @@
-# Per-spectrum ID linkage, density, and the long/high-mass gap (S30, 2026-07-24)
+# Per-spectrum ID linkage, density, and the long/high-mass gap (dataset D, 2026-07-24)
 
 Follow-up to `miss-analysis-2026-07-23.md`. That analysis listed four next steps; this doc executes
 them. Three of the four are **measurements**; the fourth (#3) is a decision. The headline is that
@@ -28,7 +28,7 @@ unscorable junk. The emitted spectra are *full*, not empty (73.5% at ≥500 peak
 Honest limits (stated up front — the MS1 funnel was retracted for skipping these):
 * "identified" = a Sage PSM at `peptide_q<=0.01` on that spectrum id. A spectrum with only a
   sub-FDR PSM counts as NOT identified. Correct: we emitted it, we could not confirm it.
-* This is internal to our S30 run. It does **not** relabel the external DDA miss set.
+* This is internal to our dataset D run. It does **not** relabel the external DDA miss set.
 
 ## #1 — the long/high-mass hypothesis is FALSIFIED internally
 
@@ -128,8 +128,8 @@ against the source. The **measurements stand; several interpretive claims do not
    / length 35), NOT in per-spectrum ID of what we emit. The two analyses are not commensurable;
    neither overrides the other.
 2. **Config mixing (codex #15).** The linkage ran on `rebase_s30` = `sage_closed_s30.json`
-   (9,966 peptides / 90,159 PSMs). The FROZEN S30 baseline is **10,072 peptides** under
-   `sage_deiso.json` (`docs/S30-BASELINE.md`). Calling 90,159 the "reference" for a `sage_deiso`
+   (9,966 peptides / 90,159 PSMs). The FROZEN dataset D baseline is **10,072 peptides** under
+   `sage_deiso.json` (`docs/dataset D-BASELINE.md`). Calling 90,159 the "reference" for a `sage_deiso`
    base arm was wrong. All linkage rates are `sage_closed_s30.json`; re-run on the base arm's
    `sage_deiso` pair when the cluster returns.
 3. **`max_fragments` falsification not airtight (codex #6).** SpeXtract ranks the top-500 by
@@ -148,7 +148,7 @@ against the source. The **measurements stand; several interpretive claims do not
 6. **peptide_q vs spectrum_q mixing (codex #3).** "Identified" uses `peptide_q<=0.01` (113,495);
    the 90,159 is `spectrum_q`. Rates should be reported under both. Arithmetic: "~13.5/PSM" mixed
    denominators — it is 1,528,147/113,495; per spectrum_q PSM it is 16.95.
-7. **Length claim is survivorship-biased (codex #7)**; **"over-emission" needs a diaTracer
+7. **Length claim is survivorship-biased (codex #7)**; **"over-emission" needs a the reference implementation
    spectrum-level baseline to be a finding rather than a label (both #4)**; **no chance floors /
    cluster-bootstrap CIs on any rate (codex #18 / vibe #7)** — the exact MS1-funnel failure mode.
 
@@ -170,9 +170,9 @@ overreached and are downgraded to open questions requiring the controls above.
 
 Both reviewers made this a BLOCKER: 7.4% has no meaning without a reference extractor's
 spectrum-level ID rate on the same data. Measured on spock (ibminode05/06 in maintenance) by
-running the SAME `sage_deiso.json` on diaTracer's S30 mzML from `/ceph`:
+running the SAME `sage_deiso.json` on the reference implementation's dataset D mzML from `/ceph`:
 
-| | SpeXtract | diaTracer |
+| | SpeXtract | the reference implementation |
 |---|---|---|
 | emitted spectra | 1,528,147 | **700,434** |
 | identified spectra (peptide_q ≤ .01) | 113,495 | 26,986 |
@@ -182,42 +182,42 @@ running the SAME `sage_deiso.json` on diaTracer's S30 mzML from `/ceph`:
 | identified spectra per peptide | ~11.3 | **2.34** |
 
 **"Over-emission = we spray low-quality spectra" is FALSIFIED by its own baseline.** Our
-per-spectrum ID rate is roughly **twice** diaTracer's; the emitted spectra are not junk. diaTracer
+per-spectrum ID rate is roughly **twice** the reference implementation's; the emitted spectra are not junk. the reference implementation
 also caps at 500 peaks (`defaultArrayLength="500"`), so cap saturation is not ours either.
 
 **The real defect is redundancy vs coverage.** We emit 2.18× more spectra and identify **1,445
 fewer peptides** (10,072 vs 11,517, −12.6%). Our identified spectra pile onto ~11.3 per peptide
-against diaTracer's 2.34 — the emission-side view of the documented 8.98 vs 1.66 PSMs/peptide.
-So the deficit is **breadth**: peptides diaTracer covers that we never do. That is precisely the
+against the reference implementation's 2.34 — the emission-side view of the documented 8.98 vs 1.66 PSMs/peptide.
+So the deficit is **breadth**: peptides the reference implementation covers that we never do. That is precisely the
 class-A/emission axis the reviewers said the internal instrument is blind to — which makes
-"which peptides does diaTracer get that we don't, and are they emitted at all" the single
+"which peptides does the reference implementation get that we don't, and are they emitted at all" the single
 highest-value next measurement, replacing both falsified levers.
 
 Caveats: emitted-spectrum counts and the peptide comparison are config-matched and solid
 (both `sage_deiso.json`; peptide reference is the frozen 10,072 baseline). The 7.4% figure is
 still from the `sage_closed_s30.json` linkage run, so the ID-RATE ratio is preliminary until the
-base arm re-run under `sage_deiso` lands; the direction (ours ≫ diaTracer) is not in doubt at
+base arm re-run under `sage_deiso` lands; the direction (ours ≫ the reference implementation) is not in doubt at
 this margin.
 
 ## What we actually lose: the coverage gap characterised (spock, 2026-07-24)
 
-The clean comparison the project never had: diaTracer and SpeXtract pseudo-spectra from the **same
-S30 acquisition**, searched with the **same `sage_deiso.json`** against the same FASTA. Extraction
+The clean comparison the project never had: the reference implementation and SpeXtract pseudo-spectra from the **same
+dataset D acquisition**, searched with the **same `sage_deiso.json`** against the same FASTA. Extraction
 is the only variable — no second injection, no RT drift, no DDA-conditioning. `bench/coverage.py`.
 
 | | peptides |
 |---|---|
 | shared | 8,481 |
-| **diaTracer only (we lose)** | **3,036** |
-| ours only (diaTracer loses) | 1,545 |
+| **the reference implementation only (we lose)** | **3,036** |
+| ours only (the reference implementation loses) | 1,545 |
 | union | 13,062 |
 
-We are **not a subset**: we find 1,545 peptides diaTracer does not. Coverage of the union: ours
-76.8%, diaTracer 88.2%.
+We are **not a subset**: we find 1,545 peptides the reference implementation does not. Coverage of the union: ours
+76.8%, the reference implementation 88.2%.
 
 ### The distinguishing property is ABUNDANCE, and nothing structural
 
-MISS vs SHARED medians (diaTracer's own best PSM for each of its peptides):
+MISS vs SHARED medians (the reference implementation's own best PSM for each of its peptides):
 
 | property | MISS | SHARED | ratio |
 |---|---|---|---|
@@ -225,7 +225,7 @@ MISS vs SHARED medians (diaTracer's own best PSM for each of its peptides):
 | ms2_intensity | 1.26e4 | 3.57e4 | 0.35 |
 | matched_intensity_pct | 8.45% | 17.41% | 0.49 |
 | matched_peaks | 9 | 12 | 0.75 |
-| hyperscore (diaTracer's own) | 26.9 | 35.1 | 0.77 |
+| hyperscore (the reference implementation's own) | 26.9 | 35.1 | 0.77 |
 | spectrum TIC | 2.76e5 | 3.65e5 | 0.76 |
 | peptide length | 13 | 14 | 0.93 |
 | precursor m/z | 650 | 685 | 0.95 |
@@ -236,7 +236,7 @@ Precursor-intensity enrichment is monotonic: **9.4×** below 500, 5.7× at 1–2
 10k (70.3% of SHARED is >10k vs 28.4% of MISS). Everything structural is flat. Charge is exactly
 1.00 — a third independent confirmation it is not the axis. Length and m/z lean SHORT and LOW
 (7-10 aa 1.70×; m/z 300-500 1.43×; 900-1200 0.61×), the opposite of the DDA-conditioned analysis,
-as expected for a non-DDA-conditioned comparison. Part of the gap is diaTracer's own FDR edge
+as expected for a non-DDA-conditioned comparison. Part of the gap is the reference implementation's own FDR edge
 (6.2× enriched at hyperscore 15-25, 0.06× above 40).
 
 ### Class A/B: we DO emit them — the gap is identification, not emission
@@ -258,7 +258,7 @@ So the "we never emit high-value peptides" hypothesis is ALSO falsified. We emit
 20 ppm / RT / IM of the coordinate, not proof that the spectrum is of that peptide — the decoy
 floor bounds the coincidence, it does not identify the content.
 
-**Synthesis.** We are not less accurate than diaTracer — our spectra identify at ~2× its
+**Synthesis.** We are not less accurate than the reference implementation — our spectra identify at ~2× its
 per-spectrum rate. We are less **sensitive**: at faint precursors we emit a spectrum that is too
 thin (8.5% matched intensity, 9 matched peaks) to clear the identification threshold, while
 spending emission budget re-deriving spectra for peptides already covered (11.3 identified spectra
@@ -283,7 +283,7 @@ absent"; the right one is that winner-take-all assignment strips real signal alo
 pollution. Lever closed.
 
 Two bugs were caught by controls during this analysis and fixed before reporting: a native-id
-parse that collapsed 700,434 diaTracer spectra into 1, and FAILURE 8 again — our mzML writes
+parse that collapsed 700,434 the reference implementation spectra into 1, and FAILURE 8 again — our mzML writes
 `scan start time` in SECONDS (`unitName="second"`) while Sage reports minutes, so the first A/B
 attempt compared seconds to minutes and the positive control read a physically impossible 100%
 class A. `coverage.py` now reads the unit from the CV accessor and aborts if the RT ranges fail to
@@ -337,9 +337,9 @@ default. It **wins, and has not turned over**:
 
 Base replicate spread is **0.34%**, so +2.7% and +5.5% are 8–16× noise. **PSMs FALL as peptides
 RISE** (90,176 → 88,130) — redundancy converting into coverage, which is the direction that matters
-given we over-produce PSMs ~8.9/peptide against diaTracer's 1.69. PSMs/peptide improves 8.92 → 8.27.
+given we over-produce PSMs ~8.9/peptide against the reference implementation's 1.69. PSMs/peptide improves 8.92 → 8.27.
 
-Against diaTracer's 11,517 on the same acquisition, this narrows the peptide gap from **−12.0% to
+Against the reference implementation's 11,517 on the same acquisition, this narrows the peptide gap from **−12.0% to
 −7.5%** — roughly 37% of the gap closed by one parameter.
 
 Extended (`bench/plan_strict2.yaml`) — **the curve TURNS OVER, so there is a real interior optimum
@@ -360,7 +360,7 @@ independent base runs across two harness invocations). Emitted spectra fall mono
 strictness (1.528M → 1.303M), so past 0.60 real spectra start dropping below `min_fragments` —
 a plausible reason the curve turns.
 
-Against diaTracer's 11,517 on the same acquisition this narrows the peptide gap from **−12.0% to
+Against the reference implementation's 11,517 on the same acquisition this narrows the peptide gap from **−12.0% to
 −5.3%** — ~56% of the gap closed by one parameter, while PSMs FALL 90,214 → 84,288.
 
 ### RETRACTED: the +7.7% is an FDR RECALIBRATION ARTEFACT, not a sensitivity gain
@@ -396,10 +396,10 @@ Compounding methodological faults the reviewers caught, all valid:
 * **Winner's curse.** Seven swept points, optimum chosen on the same sample used to evaluate it, and
   the 0.60/0.70/0.80 pre-registration was written *after* watching 0.12→0.50 rise. Only `base` has
   replicates (n=4); every swept arm is n=1.
-* **Wrong engine for the headline.** `docs/S30-BASELINE.md` already records the MSFragger gap as
+* **Wrong engine for the headline.** `docs/dataset D-BASELINE.md` already records the MSFragger gap as
   **−19.5%** (10,470 vs 13,014), not the −12% I quoted from Sage. Project policy says Sage flatters
   SpeXtract; I published the flattered number.
-* **`rp_max=1` re-tested a closed lever.** `S30-BASELINE.md` lists `competitive` and `rp_max` 2/4/8
+* **`rp_max=1` re-tested a closed lever.** `dataset D-BASELINE.md` lists `competitive` and `rp_max` 2/4/8
   as already falsified. ~1.5 h spent re-deriving a known result.
 
 ### MS1 sensitivity arm: BLOCKED BY IMPLEMENTATION, not answered
@@ -427,7 +427,7 @@ reviewers demanded. Entrapment search (20,416 human + 16,343 Arabidopsis `ENTRAP
 | base | 9,502 | 91 | 0.96% | **2.39%** |
 | corr040 | 9,811 | 89 | 0.91% | 2.27% |
 | **corr060** | **10,342** | **86** | 0.83% | **2.08%** |
-| diaTracer | 10,729 | 81 | 0.75% | **1.89%** |
+| the reference implementation | 10,729 | 81 | 0.75% | **1.89%** |
 
 Poisson test — if the EXTRA peptides an arm accepts were as error-prone as base's, entrapment hits
 would grow in proportion:
@@ -436,7 +436,7 @@ would grow in proportion:
 |---|---|---|---|---|
 | corr040 | **+309** | 89 | 94 | −0.5σ |
 | **corr060** | **+840** | **86** | **99** | **−1.3σ** |
-| diaTracer | +1,227 | 81 | 103 | −2.1σ |
+| the reference implementation | +1,227 | 81 | 103 | −2.1σ |
 
 **corr060 accepts 840 more peptides with NO measurable increase in errors** (86 observed against 99
 expected). That is the signature of real signal, not recalibration — an artefact would have shown
@@ -451,18 +451,18 @@ errors directly)**. `bench/fdrcheck.py` is kept for the decoy/threshold diagnost
 its cross-arm delta must not be read as evidence.
 
 **The finding that outranks all of this: nominal 1% FDR is really ~1.9–2.4%.** Every "1% FDR"
-number in this project's history — ours and diaTracer's — is roughly **2× optimistic**. This is the
+number in this project's history — ours and the reference implementation's — is roughly **2× optimistic**. This is the
 first time the project has measured its own error rate rather than modelling it.
 
-**And the gap to diaTracer is much smaller than reported**: 10,342 vs 10,729 under one
+**And the gap to the reference implementation is much smaller than reported**: 10,342 vs 10,729 under one
 entrapment-controlled search = **−3.6%**, against the −12.0% (Sage) and −19.5% (MSFragger) nominal
-figures. diaTracer is also the cleanest arm (1.89%), so part of its lead is a stricter effective
+figures. the reference implementation is also the cleanest arm (1.89%), so part of its lead is a stricter effective
 threshold, not extra signal.
 
 Caveat, stated because the counts are small: entrapment hits are 81–91, so Poisson noise is ±9–10
 and the FDR *differences between arms* are NOT individually significant. The defensible claim is
 "+840 peptides at no measurable error cost", not "corr060 has a significantly lower error rate".
-Replication on S23/S08 and under MSFragger is still required before the default moves.
+Replication on dataset B/dataset A and under MSFragger is still required before the default moves.
 
 ## The four literature-motivated changes, benchmarked — three fail, and the failures are informative
 
@@ -486,10 +486,10 @@ its current setting.** The MS1 sensitivity direction is falsified; the paralleli
 the test possible is kept (it is correct and free at default thresholds).
 
 **rankint — falsified, against the literature's own logic.** Ranking the 500-fragment cap by
-intensity (as diaTracer does) LOST 2.5%. The reasoning "the engine re-ranks by intensity, so keep
+intensity (as the reference implementation does) LOST 2.5%. The reasoning "the engine re-ranks by intensity, so keep
 intense peaks" was incomplete: our correlation-ranked cut is already a *quality* filter, and
 replacing it with raw intensity lets co-eluting-neighbour peaks into the kept set. The correlation
-ranking is doing real de-noising work that diaTracer gets from its smoothed-XIC feature detection
+ranking is doing real de-noising work that the reference implementation gets from its smoothed-XIC feature detection
 instead. Closed.
 
 **wavelet — a clean flat null.** Smoothing engaged correctly (`0.5 × 3.61 s = 1.81 s`, confirmed in
@@ -505,36 +505,36 @@ there first. Not adopted; not worth an entrapment run on a flat count.
 one is a measured null (wavelet), two are falsified (intensity ranking, MS1 sensitivity). The
 genuine peptide gain this session remains the entrapment-confirmed `min_correlation` tightening.
 
-## Cross-dataset validation of the min_correlation winner (S23 + S08, 2026-07-25)
+## Cross-dataset validation of the min_correlation winner (dataset B + dataset A, 2026-07-25)
 
-The S30 gate result was one sample; policy requires a second before the default moves. Tested
-base/0.5/0.6 on S23 and S08, one binary, one invocation each, then entrapment-scored.
+The dataset D gate result was one sample; policy requires a second before the default moves. Tested
+base/0.5/0.6 on dataset B and dataset A, one binary, one invocation each, then entrapment-scored.
 
 **Nominal peptides (`peptide_q<=0.01`, human-only `sage_deiso`) — replicates on all three, and at
-corr060 reaches near-parity with diaTracer:**
+corr060 reaches near-parity with the reference implementation:**
 
-| sample | base | corr050 | corr060 | Δ @0.60 | diaTracer | corr060 vs dt |
+| sample | base | corr050 | corr060 | Δ @0.60 | the reference implementation | corr060 vs dt |
 |---|---|---|---|---|---|---|
-| S30 | ~10,120 (4 reps) | 10,657 | 10,903 | **+7.7%** | 11,517 | −5.3% |
-| S23 | 8,406 | 8,833 | 8,938 | **+6.3%** | 8,948 | **−0.1%** |
-| S08 | 8,983 | 9,870 | 10,059 | **+12.0%** | 10,242 | −1.8% |
+| dataset D | ~10,120 (4 reps) | 10,657 | 10,903 | **+7.7%** | 11,517 | −5.3% |
+| dataset B | 8,406 | 8,833 | 8,938 | **+6.3%** | 8,948 | **−0.1%** |
+| dataset A | 8,983 | 9,870 | 10,059 | **+12.0%** | 10,242 | −1.8% |
 
 **Entrapment true FDR — the win is unambiguous: peptides UP and error DOWN, on all three:**
 
-| sample | base (acc / FDR) | corr060 (acc / FDR) | diaTracer (acc / FDR) |
+| sample | base (acc / FDR) | corr060 (acc / FDR) | the reference implementation (acc / FDR) |
 |---|---|---|---|
-| S30 | 9,502 / 2.39% | 10,342 / **2.08%** | 10,729 / 1.89% |
-| S23 | 8,016 / 2.40% | 8,459 / **1.95%** | 8,652 / 2.05% |
-| S08 | 8,452 / 1.71% | 9,622 / **1.53%** | 10,037 / 2.09% |
+| dataset D | 9,502 / 2.39% | 10,342 / **2.08%** | 10,729 / 1.89% |
+| dataset B | 8,016 / 2.40% | 8,459 / **1.95%** | 8,652 / 2.05% |
+| dataset A | 8,452 / 1.71% | 9,622 / **1.53%** | 10,037 / 2.09% |
 
 Tightening the gate does not just add error-free peptides — it **lowers the measured error rate
 while adding peptides** on every sample. That is the opposite of the recalibration signature that
 retracted the first reading. The lever is confirmed real and portable.
 
-**Gap to diaTracer, entrapment-matched (corr060):** S30 −3.6%, S23 −2.2%, S08 −4.1% (mean ~−3.3%),
-against the −12% (nominal Sage) and −19.5% (nominal MSFragger) figures. On S23 and S08 our corr060
-error rate is *below* diaTracer's, so at equal FDR the gap narrows further. The true standing vs
-diaTracer is low-single-digit percent, not double digit.
+**Gap to the reference implementation, entrapment-matched (corr060):** dataset D −3.6%, dataset B −2.2%, dataset A −4.1% (mean ~−3.3%),
+against the −12% (nominal Sage) and −19.5% (nominal MSFragger) figures. On dataset B and dataset A our corr060
+error rate is *below* the reference implementation's, so at equal FDR the gap narrows further. The true standing vs
+the reference implementation is low-single-digit percent, not double digit.
 
 ### MSFragger cross-engine (2026-07-25): the peptide GAIN is Sage-specific, the FDR gain is not
 
@@ -567,7 +567,7 @@ was always a range, not a value.
 
 ## Implemented after the review (2026-07-24)
 
-Four changes, each traceable to a review finding or to the diaTracer paper (Nat Commun 16:95),
+Four changes, each traceable to a review finding or to the the reference implementation paper (Nat Commun 16:95),
 none to parameter search — which matters, because parameter search on this file already produced
 one retracted result.
 
@@ -588,18 +588,18 @@ low-abundance species."* That is our miss profile exactly (MISS precursors 3.2×
 
 **2. Wavelet smoothing of the precursor XIC (`trace:wavelet_smooth`, default 0 = off).**
 Stationary (à trous) B3-spline, scale = multiple of the **measured** MS1 FWHM. The literature
-cross-check found we had copied diaTracer's **0.3 correlation threshold without copying its
+cross-check found we had copied the reference implementation's **0.3 correlation threshold without copying its
 smoothing** (2D Gaussian + Savitzky-Golay on the precursor profile). Pearson r between two noisy
 profiles is attenuated toward 0 as S/N falls, so an unsmoothed 0.3 is a systematically weaker
 constraint — and worst at faint precursors. Raising the threshold to compensate was tried and
 produced only the FDR artefact above; this attacks the cause. À trous (undecimated) is required,
 not preferred: output stays sample-aligned, so the touched grid points — and therefore what
-`gate:min_correlation_points` means — are unchanged. Fragment XICs stay RAW, as in diaTracer.
+`gate:min_correlation_points` means — are unchanged. Fragment XICs stay RAW, as in the reference implementation.
 Verified by `-diag:selftest_wavelet` against the SHIPPED functions (DC preservation, noise
 reduction, peak retention, mirror edges, level-vs-sampling): 7/7 pass.
 
 **3. Intensity ranking of the fragment cap (`assembly:rank_by`, default `correlation`).**
-diaTracer keeps the "top N highest intensity peaks"; we keep the top N best-correlating. The
+the reference implementation keeps the "top N highest intensity peaks"; we keep the top N best-correlating. The
 engine re-ranks **by intensity** downstream (Sage `max_peaks=150`), so a correlation-ranked cap can
 discard exactly the peaks that would have been scored. 70–75% of our spectra sit at the cap.
 

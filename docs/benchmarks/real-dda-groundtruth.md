@@ -23,7 +23,7 @@ spectra came from.
 
 ## Reading this honestly
 
-**We miss half of what real DDA finds.** That is a harder number than the 86.9% diaTracer ratio,
+**We miss half of what real DDA finds.** That is a harder number than the 86.9% the reference implementation ratio,
 and it is measured against a reference with no structural blind spot. It should be the headline
 figure for "how good are these pseudo-spectra", not the DIA-NN-anchored ones.
 
@@ -45,7 +45,7 @@ read off this number**, and characterising that set is the obvious next analysis
 ## Operational notes
 
 * MSFragger cannot read Bruker `.d` without the Bruker native libraries on `LD_LIBRARY_PATH`; it
-  reports `Scans = 0` and calls the file corrupt. Same JNA trap that made diaTracer look like a
-  12-hour hang. The libraries ship with diaTracer (`ext/bruker`).
+  reports `Scans = 0` and calls the file corrupt. Same JNA trap that made the reference implementation look like a
+  12-hour hang. The libraries ship with the reference implementation (`ext/bruker`).
 * MSFragger also cannot read OpenMS mzML without `fix_mzml_cvparams.py` — OpenMS writes valueless
   cvParams (legal mzML) and batmass-io calls `.trim()` on the null.

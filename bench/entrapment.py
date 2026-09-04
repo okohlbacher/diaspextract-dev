@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Entrapment FDR across arms -- the measurement this project has never made.
 
-WHY THIS EXISTS. Every "1% FDR" number quoted in this project, ours and diaTracer's, is NOMINAL:
+WHY THIS EXISTS. Every "1% FDR" number quoted in this project, ours and the reference implementation's, is NOMINAL:
 it is Sage's target-decoy estimate computed from ITS OWN decoys, per run. All three adversarial
 reviewers (codex, vibe, kimi) independently made the same point, and `bench/fdrcheck.py` then
 confirmed it on data already on disk: the min_correlation sweep's "+7.7% peptides" was the q<=0.01
@@ -17,8 +17,8 @@ WHAT IT SETTLES. Run over the min_correlation arms it answers, without ambiguity
   * does the observed error rate at nominal 1% RISE as the gate tightens?  -> the gain was
     recalibration, and the nominal axis everyone optimised is not 1%
   * does it stay flat while peptides rise?                                 -> the gain is real
-It equally applies to the diaTracer arm, which bounds how much of the 3,036-peptide "coverage gap"
-is diaTracer's own FDR edge rather than peptides we genuinely lose.
+It equally applies to the the reference implementation arm, which bounds how much of the 3,036-peptide "coverage gap"
+is the reference implementation's own FDR edge rather than peptides we genuinely lose.
 
 ESTIMATOR. A false match distributes over the PEPTIDE search space, so the correction ratio must be
 the ratio of entrapment to target PEPTIDE HYPOTHESES, not proteins (fixed 2026-07-28, codex review
@@ -181,7 +181,7 @@ def main():
         name, d = spec.split("=", 1)
         mzml = Path(d) / "pseudo.mzML"
         if not mzml.exists():
-            # diaTracer and other reference arms are a bare mzML path, not a run directory
+            # the reference implementation and other reference arms are a bare mzML path, not a run directory
             mzml = Path(d)
         if not mzml.exists():
             print("[skip] %s: no mzML at %s" % (name, d)); continue

@@ -14,7 +14,7 @@ a3ce034 Trace-struct redesign, revision 2 after adversarial review: presence sem
 1ed875b Design: the trace struct has one degree of freedom per point and stores three
 9adcfcf Memory analysis of the integer detector: measured per-structure ledger, duplication, repeated passes, and a ranked plan
 4bd81c2 Integer detector, both engines: Sage -1.3%, MSFragger +2.1%, entrapment lower; both A/B attributions were null
-4a22ad7 S08 confirms the integer detector: 140 GB vs 230 GB, peptides +0.3% (the S30 deficit does not reproduce)
+4a22ad7 dataset A confirms the integer detector: 140 GB vs 230 GB, peptides +0.3% (the dataset D deficit does not reproduce)
 d951e48 Instrument per-structure memory: a byte ledger over the window loop's data structures
 1316813 Integer detector: 'closest' measured in m/z again -- the bin metric cost 1.4% of peptides and bought no time
 d77fe0d Integer detector runtime replicated: 6:56 / 105 GB on the emptiness A/B arm
@@ -49,7 +49,7 @@ REVIEW-2026-07-22.md
 ROADMAP-2026-07-23.md
 RUNTIME-PLAN-2026-09-02.md
 RUNTIME-QUALITY-ASSESSMENT-2026-07-27.md
-S30-BASELINE.md
+dataset D-BASELINE.md
 TRACE-STRUCT-REDESIGN.md
 WINDOW-LOOP-AUDIT.md
 benchmarks
@@ -75,13 +75,13 @@ This is a big review task. The file is 3880 lines. I need to read it, plus sever
 
   Plan:
   1. Read src/DIAPseudoSpectra.cpp (3880 lines, ~4 reads).
-  2. Read docs/TRACE-STRUCT-REDESIGN.md, docs/INTEGER-MEMORY-ANALYSIS.md, INTEGER-MEMORY-PLAN.md, INTEGER-TRACING-DESIGN.md, S30-BASELINE.md tail.
+  2. Read docs/TRACE-STRUCT-REDESIGN.md, docs/INTEGER-MEMORY-ANALYSIS.md, INTEGER-MEMORY-PLAN.md, INTEGER-TRACING-DESIGN.md, dataset D-BASELINE.md tail.
   3. Subagent: summarize docs/reviews/* findings relevant to today's work.
   4. Then write the review.
 
-  Let me start reading the file. First chunk.The output was saved to a file. Let me read the saved output file to page through lines 1000-1650.I've now read lines 1-1650. Let me continue reading the file from 1650 onward. Also need to read the docs: TRACE-STRUCT-REDESIGN.md, INTEGER-MEMORY-ANALYSIS.md (mandated), plus INTEGER-MEMORY-PLAN.md and S30-BASELINE.md tail. The background subagent covers reviews + other docs.Now I need the rest of the file: lines 3100-3880. Let me read.I've now read the whole file. Now read the mandated docs: TRACE-STRUCT-REDESIGN.md, INTEGER-MEMORY-ANALYSIS.md, plus INTEGER-MEMORY-PLAN.md and S30-BASELINE tail. The subagent is covering reviews + other docs. Let me read these docs now.
+  Let me start reading the file. First chunk.The output was saved to a file. Let me read the saved output file to page through lines 1000-1650.I've now read lines 1-1650. Let me continue reading the file from 1650 onward. Also need to read the docs: TRACE-STRUCT-REDESIGN.md, INTEGER-MEMORY-ANALYSIS.md (mandated), plus INTEGER-MEMORY-PLAN.md and dataset D-BASELINE.md tail. The background subagent covers reviews + other docs.Now I need the rest of the file: lines 3100-3880. Let me read.I've now read the whole file. Now read the mandated docs: TRACE-STRUCT-REDESIGN.md, INTEGER-MEMORY-ANALYSIS.md, plus INTEGER-MEMORY-PLAN.md and dataset D-BASELINE tail. The subagent is covering reviews + other docs. Let me read these docs now.
 
-• Now let me read INTEGER-MEMORY-PLAN.md and the S30-BASELINE.md tail, plus INTEGER-TRACING-DESIGN.md. The subagent covers reviews. Let me read these.of +5% (the faint precursors are the dt-only ones) while Sage stays >= 12,500; falsifier: the gain tracks the rich
+• Now let me read INTEGER-MEMORY-PLAN.md and the dataset D-BASELINE.md tail, plus INTEGER-TRACING-DESIGN.md. The subagent covers reviews. Let me read these.of +5% (the faint precursors are the dt-only ones) while Sage stays >= 12,500; falsifier: the gain tracks the rich
 spectra regardless of precursor intensity (then MSFragger simply likes more peaks, and the two engines want
 different spectra -- a per-engine output option, not a default).
 
@@ -89,7 +89,7 @@ different spectra -- a per-engine output option, not a default).
 `SPEXTRACT_BACKFILL_EMPTY=1` (a hypothesised precursor with no correlated fragment trace still gets a spectrum built
 from its apex frame's IM-band peaks) + `SPEXTRACT_BACKFILL_RAW=50`. Emission rises 927,813 -> **981,223 (+5.8%)**, so
 the feature does what it says; the identifications do not follow.
-| S30 arm | spectra | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only |
+| dataset D arm | spectra | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only |
 |---|---|---|---|---|
 | empty + K=0 (backfill all) | 981,223 | 12,218 (−2.5%) | 12,600 (+5.6%, 90.4% of dt) | 3,309; some PSM 58% |
 | empty + K=60 (faint tail) | 981,223 | 12,593 (+0.4%) | 11,982 (+0.5%) | 3,892; some PSM 64% |
@@ -99,13 +99,13 @@ Reading: at equal backfill setting the empty arm reproduces the no-empty arm to 
 (12,600 vs 12,539 MSFragger; −2.5% vs −2.6% Sage), and the K-gated empty arm is *worse* than K=150 alone (12,593 vs
 12,724 Sage). The 53k trace-free precursors are not identifiable: the pre-registered falsifier ("counts flat, emission
 up") is met exactly. **Verdict: `SPEXTRACT_BACKFILL_EMPTY` stays off and is not a default candidate.** It also
-confirms the assembly-loss finding from the other side -- the diaTracer-only precursors we never emit are not lost to
+confirms the assembly-loss finding from the other side -- the the reference implementation-only precursors we never emit are not lost to
 a fragment-count threshold, they have no correlated MS2 signal for us to find at all.
 
 ### PRECURSOR-INTENSITY-GATED BACKFILL (2026-09-03, 09:05): prediction held; q=0.5 is the best point on the frontier
 `SPEXTRACT_BACKFILL_RAW=50` applied only to precursors below the window's q-quantile of MS1 intensity. Emission is
 unchanged (927,813 spectra in every arm), so this is purely a content lever.
-| S30 arm | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only | shared w/ dt |
+| dataset D arm | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only | shared w/ dt |
 |---|---|---|---|---|
 | **q=0.5** | 12,442 (−0.8%; only-apex 460 / only-q 365) | **12,492 (+4.7%, 89.7% of dt)** | 2,940 | **12,034** |
 | q=0.25 | 12,504 (−0.3%; 141 / 108) | 12,008 (+0.7%) | 3,913 | 11,061 |
@@ -116,20 +116,20 @@ unconditional MSFragger gain (+4.7 of +5.1 points) while cutting the Sage cost b
 gain does track precursor intensity rather than peak count alone. It is concentrated in the second quartile band:
 q=0.25 (the faintest quarter only) collapses to +0.7%, i.e. the very faintest precursors' apex frames carry nothing
 identifiable -- the same wall the backfill-empty arm hit. Sage degrades monotonically with backfill volume in all
-arms. q=0.5 also gives the highest overlap with diaTracer measured to date (12,034 shared, dt-only down to 2,940),
+arms. q=0.5 also gives the highest overlap with the reference implementation measured to date (12,034 shared, dt-only down to 2,940),
 but the "no PSM at all" residue is 1,406, unmoved from baseline: this is rich-spectrum content, not the deficit
 mechanism.
 **Two candidate defaults now stand, and they are not the same trade:** K=150 is strictly better than baseline on both
 engines but small (+1.5% / +0.6%); q=0.5 is much larger on MSFragger (+4.7%) at a −0.8% Sage cost. Per the both-engines
-rule neither is adopted on one file. **Pre-registered confirmation arm:** both settings on S08 and S23, both engines,
-plus entrapment FDR. Adopt as default only if the S30 sign holds on both files AND entrapment stays <= 1.4%
-(shipping arm: S30 1.37%, S08 0.95%, S23 1.32%); a Sage regression on S08/S23 larger than S30's −0.8% kills q=0.5 and
+rule neither is adopted on one file. **Pre-registered confirmation arm:** both settings on dataset A and dataset B, both engines,
+plus entrapment FDR. Adopt as default only if the dataset D sign holds on both files AND entrapment stays <= 1.4%
+(shipping arm: dataset D 1.37%, dataset A 0.95%, dataset B 1.32%); a Sage regression on dataset A/dataset B larger than dataset D's −0.8% kills q=0.5 and
 leaves K=150 as the only candidate.
 
 ### ISOTOPE DUPLICATION: HYPOTHESIS (a) CONFIRMED, (b) REFUTED (2026-09-03, 09:35)
 Full analysis in [ISOTOPE-DUPLICATION-2026-09-03.md](ISOTOPE-DUPLICATION-2026-09-03.md). 31.4% of
 emitted spectra have a co-eluting same-charge partner 1-3 isotope steps below (decoy offset 3.8%,
-excess 27.7%); removing them leaves 671,270 spectra against diaTracer's 700,434, i.e. isotope-offset
+excess 27.7%); removing them leaves 671,270 spectra against the reference implementation's 700,434, i.e. isotope-offset
 duplication accounts for the entire emission excess. But they are NOT mergeable: content cosine
 0.505 vs 0.446 for an arbitrary co-eluting neighbour (only 6.5% above 0.9), and every id-agnostic
 collapse rule loses 5,011-5,173 of 14,944 peptides (oracle still loses 1,387). "Keep the lightest" is
@@ -139,24 +139,24 @@ consumed run becomes its own monoisotope (heavy members carry fewer isotope part
 Upstream ownership gate pre-registered; downstream merging stays falsified.
 
 ### BACKFILL CONFIRMATION ARM: BOTH CANDIDATES FALSIFIED (2026-09-03, 11:47) -- backfill stays OFF
-Pre-registered arms `q=0.5` and `K=150` re-run on S08 and S23, both engines, plus entrapment.
+Pre-registered arms `q=0.5` and `K=150` re-run on dataset A and dataset B, both engines, plus entrapment.
 | file | arm | Sage @1% | vs apex | MSFragger @1% | vs apex |
 |---|---|---|---|---|---|
-| S30 | apex | 12,537 | -- | 11,927 | -- |
-| S30 | q=0.5 | 12,442 | −0.8% | 12,492 | +4.7% |
-| S30 | K=150 | 12,724 | **+1.5%** | 12,000 | +0.6% |
-| S08 | apex | 10,789 | -- | 11,444 | -- |
-| S08 | q=0.5 | 10,516 | **−2.5%** | 11,620 | +1.5% |
-| S08 | K=150 | 10,618 | **−1.6%** | 11,483 | +0.3% |
-| S23 | apex | 10,156 | -- | 9,738 | -- |
-| S23 | q=0.5 | 10,134 | −0.2% | 10,178 | +4.5% |
-| S23 | K=150 | 10,166 | +0.1% | 9,751 | +0.1% |
-Entrapment is flat everywhere (S08 apex 0.91% / q05 0.91% / K150 0.97%; S23 1.13% / 1.13% / 1.14%),
+| dataset D | apex | 12,537 | -- | 11,927 | -- |
+| dataset D | q=0.5 | 12,442 | −0.8% | 12,492 | +4.7% |
+| dataset D | K=150 | 12,724 | **+1.5%** | 12,000 | +0.6% |
+| dataset A | apex | 10,789 | -- | 11,444 | -- |
+| dataset A | q=0.5 | 10,516 | **−2.5%** | 11,620 | +1.5% |
+| dataset A | K=150 | 10,618 | **−1.6%** | 11,483 | +0.3% |
+| dataset B | apex | 10,156 | -- | 9,738 | -- |
+| dataset B | q=0.5 | 10,134 | −0.2% | 10,178 | +4.5% |
+| dataset B | K=150 | 10,166 | +0.1% | 9,751 | +0.1% |
+Entrapment is flat everywhere (dataset A apex 0.91% / q05 0.91% / K150 0.97%; dataset B 1.13% / 1.13% / 1.14%),
 so neither arm is bought with false positives -- but neither survives its own falsifier:
-* **K=150 dies on the sign rule.** S30 said +1.5% on Sage; S08 says −1.6%. The "strictly better on both
+* **K=150 dies on the sign rule.** dataset D said +1.5% on Sage; dataset A says −1.6%. The "strictly better on both
   engines" claim was a one-file artefact.
-* **q=0.5 dies on the magnitude rule.** The pre-registration killed it if any S08/S23 Sage regression
-  exceeded S30's −0.8%; S08 is −2.5%. The MSFragger gain does replicate (+4.7 / +1.5 / +4.5), so the
+* **q=0.5 dies on the magnitude rule.** The pre-registration killed it if any dataset A/dataset B Sage regression
+  exceeded dataset D's −0.8%; dataset A is −2.5%. The MSFragger gain does replicate (+4.7 / +1.5 / +4.5), so the
   two engines genuinely want different spectra -- but that makes it a per-engine option at best, not a
   default, and nothing in the evidence says which engine to optimise.
 **Verdict: raw apex-frame backfill stays OFF by default in every form tested** (unconditional,
@@ -170,21 +170,21 @@ never 1+ in ESI and `charge:scoring count` breaks ties toward the LOW charge, so
 land there. Dropping them removes their share of the multiple-testing burden too, so peptides go UP.
 | file | spectra | Sage @1% | MSFragger @1% | entrapment |
 |---|---|---|---|---|
-| S30 | 927,813 -> **656,254** (−29.3%) | 12,537 -> **12,642** (+0.8%) | 11,927 -> **12,073** (+1.2%) | 1.28% -> 1.38% |
-| S08 | 1,228,875 -> **863,319** (−29.7%) | 10,789 -> **11,084** (+2.7%) | 11,444 -> **12,061** (+5.4%) | 0.91% -> 0.99% |
-| S23 | 844,755 -> **586,069** (−30.6%) | 10,156 -> **10,294** (+1.4%) | 9,738 -> **9,822** (+0.9%) | 1.13% -> 1.28% |
-S30 wall time 15:21 -> 12:48 (−17%). Every pre-registered adoption condition is met: peptides rise on
+| dataset D | 927,813 -> **656,254** (−29.3%) | 12,537 -> **12,642** (+0.8%) | 11,927 -> **12,073** (+1.2%) | 1.28% -> 1.38% |
+| dataset A | 1,228,875 -> **863,319** (−29.7%) | 10,789 -> **11,084** (+2.7%) | 11,444 -> **12,061** (+5.4%) | 0.91% -> 0.99% |
+| dataset B | 844,755 -> **586,069** (−30.6%) | 10,156 -> **10,294** (+1.4%) | 9,738 -> **9,822** (+0.9%) | 1.13% -> 1.28% |
+dataset D wall time 15:21 -> 12:48 (−17%). Every pre-registered adoption condition is met: peptides rise on
 BOTH engines on ALL THREE files, every entrapment estimate stays inside the corresponding apex 95% CI
-and below the 1.4% bound. Against diaTracer, MSFragger goes 85.6 -> 86.7% (S30), 83.7 -> 88.3% (S08),
-91.8 -> 92.6% (S23); Sage on S30 is 109.8% of diaTracer. This is the first change in the emission line
+and below the 1.4% bound. Against the reference implementation, MSFragger goes 85.6 -> 86.7% (dataset D), 83.7 -> 88.3% (dataset A),
+91.8 -> 92.6% (dataset B); Sage on dataset D is 109.8% of the reference implementation. This is the first change in the emission line
 that improves both engines while cutting emission AND runtime.
 **Adopted as the default.** `charge:min_charge=1` restores the old behaviour; 3+ is catastrophic
-(charge 2 carries 56.9% of peptides: S30 Sage 5,088). The isotope collapse is NOT adopted in any form
+(charge 2 carries 56.9% of peptides: dataset D Sage 5,088). The isotope collapse is NOT adopted in any form
 -- on top of this gate it turns +0.8% into −3.8% (Sage) and +1.2% into −2.5% (MSFragger).
 
 
 ### WINDOW-LOOP PERFORMANCE LINE (2026-09-03, evening) -- one adopted, one held
-| S30, 100 threads | wall | peak RSS | window-loop occupancy | Sage @1% |
+| dataset D, 100 threads | wall | peak RSS | window-loop occupancy | Sage @1% |
 |---|---|---|---|---|
 | morning default (charge gate) | 12:53 | 103 GB | 64.8x | 12,642 |
 | task pool alone | 15:50 | 152 GB | 86.2x | 12,642 (set identical) |
@@ -200,15 +200,15 @@ the reference, with a symmetric ~8% set churn that is the residual of a faithful
 reimplementation. The only semantic difference between its 12,650 and 12,466 versions is whether a
 frame with only sub-noise peaks counts as empty (the OpenMS rule) or as a miss; that A/B, MSFragger,
 and entrapment are running. Adoption needs: peptides within the replicate spread on BOTH engines,
-entrapment inside the charge-gate arm's interval, and S08 replication of the runtime.
-     781 docs/S30-BASELINE.md
+entrapment inside the charge-gate arm's interval, and dataset A replication of the runtime.
+     781 docs/dataset D-BASELINE.md
      135 docs/INTEGER-TRACING-DESIGN.md
      916 total
-The S30-BASELINE.md tail ends at the 2026-09-03 evening window-loop line — it doesn't include today's (2026-09-04) arms? The prompt's table is "measured today" and may not be in S30-BASELINE.md yet. Let me check if there are more lines after. `tail -120` showed up to the window-loop line and the file is 781 lines. So the last entry in the baseline is the 2026-09-03 evening entry which states the adoption rule: "Adoption needs: peptides within the replicate spread on BOTH engines, entrapment inside the charge-gate arm's interval, and S08 replication of the runtime."
+The dataset D-BASELINE.md tail ends at the 2026-09-03 evening window-loop line — it doesn't include today's (2026-09-04) arms? The prompt's table is "measured today" and may not be in dataset D-BASELINE.md yet. Let me check if there are more lines after. `tail -120` showed up to the window-loop line and the file is 781 lines. So the last entry in the baseline is the 2026-09-03 evening entry which states the adoption rule: "Adoption needs: peptides within the replicate spread on BOTH engines, entrapment inside the charge-gate arm's interval, and dataset A replication of the runtime."
 
   Key facts for the review:
 
-  1. The adoption rule stated in the baseline itself: peptides within replicate spread on BOTH engines + entrapment + S08 replication. Today's S30 numbers: Sage 12,475 vs 12,642 = -1.3% (outside replicate spread? What's the replicate spread? Previously noted ~0.7% run-to-run wobble before determinism fix; the gate says "within the replicate spread on BOTH engines"). Sage -1.3% — is that within replicate spread? The baseline previously recorded "12,650 -> 12,466 (−1.4%)" as NOT adopted. Today's integer arm gives 12,475, still ~-1.3%. MSFragger +2.1%. The project rule per the prompt: "both engines plus entrapment plus a second file." S08 was measured pre-span (4a22ad7) but NOT re-run since the span representation landed, and not since integer became default. So the second-file leg is stale: S08 was run against a different detector version (pre-span, pre-6ea4e3f split-child-bin fix). Actually 6ea4e3f fixed a bug costing 3.3% of peptides — the S08 +0.3% measurement in 4a22ad7 predates the span refactor and the bug; the current code's S08 behavior is unmeasured. So the default was flipped on one file, with the second-file evidence describing code that no longer exists. Rule bent.
+  1. The adoption rule stated in the baseline itself: peptides within replicate spread on BOTH engines + entrapment + dataset A replication. Today's dataset D numbers: Sage 12,475 vs 12,642 = -1.3% (outside replicate spread? What's the replicate spread? Previously noted ~0.7% run-to-run wobble before determinism fix; the gate says "within the replicate spread on BOTH engines"). Sage -1.3% — is that within replicate spread? The baseline previously recorded "12,650 -> 12,466 (−1.4%)" as NOT adopted. Today's integer arm gives 12,475, still ~-1.3%. MSFragger +2.1%. The project rule per the prompt: "both engines plus entrapment plus a second file." dataset A was measured pre-span (4a22ad7) but NOT re-run since the span representation landed, and not since integer became default. So the second-file leg is stale: dataset A was run against a different detector version (pre-span, pre-6ea4e3f split-child-bin fix). Actually 6ea4e3f fixed a bug costing 3.3% of peptides — the dataset A +0.3% measurement in 4a22ad7 predates the span refactor and the bug; the current code's dataset A behavior is unmeasured. So the default was flipped on one file, with the second-file evidence describing code that no longer exists. Rule bent.
 
   Also entrapment: integer 1.27% [1.03-1.52] vs openms 1.38% [1.15-1.64] — inside the interval, OK on that leg.
 
@@ -315,11 +315,11 @@ The S30-BASELINE.md tail ends at the 2026-09-03 evening window-loop line — it 
 
   t) **Charge min_charge=2 default**: validated (baseline 2026-09-03 15:05). Fine.
 
-  u) **Occupancy question**: integer 68.5x, OpenMS 81.0x; CPU 14,249 vs 19,440; wall 6:21=381 s vs 6:54=414 s. Occupancy = CPU/wall: 14249/381 = 37.4?? Hmm — that doesn't give 68.5. Wait — the reported "window-loop occupancy" is presumably occupancy of the window-loop phase only, not whole run. CPU 14,249 vs 19,440 — is that window-loop CPU or total? Prompt says "doing 27% less CPU work (14,249 vs 19,440 CPU-s) in 8% less wall time". If 14,249 CPU-s / (381 s × 100 threads)... occupancy 68.5x means 68.5 CPUs busy. If these CPU numbers are window-loop CPU-s: need window-loop wall. Let me do the arithmetic as the plan did: work ratio 14249/19440 = 0.733. Occupancy ratio 68.5/81.0 = 0.846. If wall time of the window loop scales similarly... Occupancy_i = CPU_i / wall_wl_i. Ratio: occ_i/occ_o = (CPU_i/CPU_o) × (wall_o/wall_i). So wall_wl ratio = (14249/19440)/(68.5/81.0) = 0.733/0.846 = 0.867. So the integer window loop is ~13% shorter in wall. Overall wall 381 vs 414 = 0.920 (8% less) — consistent-ish given fixed serial load phases. So the occupancy gap is mostly arithmetic: less work in proportionally less-but-not-fully-proportional wall. Residual: 0.846/0.733 = 1.154 → occupancy falls 15.4% less than... hmm let me redo: if there were no scheduling defect and wall scaled exactly with work, occupancy would be equal. occ_i/occ_o = work_ratio / wall_ratio_wl → wall_ratio_wl = 0.733/0.846 = 0.867, i.e. integer window-loop wall is 13.3% shorter. That's plausible. The residual unexplained: the plan's S08 analysis said residual ~5%. Here: if we attribute, consistency check: does wall_wl ratio 0.867 match overall 0.920? Window loop is ~85% of wall; load etc fixed. If non-loop time T fixed: integer wall = T + 0.867×W_o; 381 = T + 0.867 W_o; 414 = T + W_o → 0.133 W_o = 33 → W_o = 248 s, T = 166 s. Then integer loop = 215 s. Occupancies imply CPU_wl integer = 68.5×215 = 14,728 ≈ 14,249 (close, 3% off); openms = 81.0×248 = 20,088 vs 19,440 (3% off). Remarkably consistent — so the 14,249/19,440 are whole-run CPU? If whole-run CPU: integer total CPU 14,249 over 381 s = 37.4x average whole-run; the 68.5x is window-loop only. Then consistency: CPU_loop = total − CPU_other. Can't fully verify, but the arithmetic closes within ~3% either way. So: the occupancy numbers are consistent with "less work, proportionally shorter loop"; the residual is a few percent, not a 20% scheduling defect. The remaining measurement: thread-state sampler (per plan §5), and a split-stage timer.
+  u) **Occupancy question**: integer 68.5x, OpenMS 81.0x; CPU 14,249 vs 19,440; wall 6:21=381 s vs 6:54=414 s. Occupancy = CPU/wall: 14249/381 = 37.4?? Hmm — that doesn't give 68.5. Wait — the reported "window-loop occupancy" is presumably occupancy of the window-loop phase only, not whole run. CPU 14,249 vs 19,440 — is that window-loop CPU or total? Prompt says "doing 27% less CPU work (14,249 vs 19,440 CPU-s) in 8% less wall time". If 14,249 CPU-s / (381 s × 100 threads)... occupancy 68.5x means 68.5 CPUs busy. If these CPU numbers are window-loop CPU-s: need window-loop wall. Let me do the arithmetic as the plan did: work ratio 14249/19440 = 0.733. Occupancy ratio 68.5/81.0 = 0.846. If wall time of the window loop scales similarly... Occupancy_i = CPU_i / wall_wl_i. Ratio: occ_i/occ_o = (CPU_i/CPU_o) × (wall_o/wall_i). So wall_wl ratio = (14249/19440)/(68.5/81.0) = 0.733/0.846 = 0.867. So the integer window loop is ~13% shorter in wall. Overall wall 381 vs 414 = 0.920 (8% less) — consistent-ish given fixed serial load phases. So the occupancy gap is mostly arithmetic: less work in proportionally less-but-not-fully-proportional wall. Residual: 0.846/0.733 = 1.154 → occupancy falls 15.4% less than... hmm let me redo: if there were no scheduling defect and wall scaled exactly with work, occupancy would be equal. occ_i/occ_o = work_ratio / wall_ratio_wl → wall_ratio_wl = 0.733/0.846 = 0.867, i.e. integer window-loop wall is 13.3% shorter. That's plausible. The residual unexplained: the plan's dataset A analysis said residual ~5%. Here: if we attribute, consistency check: does wall_wl ratio 0.867 match overall 0.920? Window loop is ~85% of wall; load etc fixed. If non-loop time T fixed: integer wall = T + 0.867×W_o; 381 = T + 0.867 W_o; 414 = T + W_o → 0.133 W_o = 33 → W_o = 248 s, T = 166 s. Then integer loop = 215 s. Occupancies imply CPU_wl integer = 68.5×215 = 14,728 ≈ 14,249 (close, 3% off); openms = 81.0×248 = 20,088 vs 19,440 (3% off). Remarkably consistent — so the 14,249/19,440 are whole-run CPU? If whole-run CPU: integer total CPU 14,249 over 381 s = 37.4x average whole-run; the 68.5x is window-loop only. Then consistency: CPU_loop = total − CPU_other. Can't fully verify, but the arithmetic closes within ~3% either way. So: the occupancy numbers are consistent with "less work, proportionally shorter loop"; the residual is a few percent, not a 20% scheduling defect. The remaining measurement: thread-state sampler (per plan §5), and a split-stage timer.
 
   Actually wait — need care: prompt says window-loop occupancy 68.5x vs 81.0x and CPU 14,249 vs 19,440. Let me present the arithmetic: work ratio 0.733; occupancy ratio 0.846; implies window-loop wall ratio 0.867; overall wall ratio 0.920; solving gives T_fixed ≈ 166 s, loop walls 215 vs 248 s; predicted loop CPU 68.5×215=14.7k vs claimed 14.2k (3%). So consistent; residual ~3-5%.
 
-  v) **S30-BASELINE stale**: baseline tail's last entry is 2026-09-03 evening; today's arms (span, integer default) not yet written into S30-BASELINE? The prompt says "docs/S30-BASELINE.md (tail)". The adoption criteria written there: "Adoption needs: peptides within the replicate spread on BOTH engines, entrapment inside the charge-gate arm's interval, and S08 replication of the runtime." Today's default flip: Sage −1.3% (12,475 vs 12,642) — is that "within the replicate spread"? Earlier replicate spread mentioned ~0.7% run-to-run wobble before determinism fix; after the determinism fix the tool is reproducible. Hmm, "12,466 (−1.4%)" was held as NOT ADOPTED on 2026-09-03. Today 12,475 is adopted. What changed? MSFragger +2.1% and entrapment 1.27%, and S08 +0.3% (but measured pre-span on different code). The Sage deficit did NOT shrink (−1.3% vs −1.4%). So the criterion "within replicate spread on BOTH engines" is still failed on Sage — unless they redefined. The rule was bent: the second-file leg cites S08 from 4a22ad7 which tested pre-span code; and the Sage deficit persists.
+  v) **dataset D-BASELINE stale**: baseline tail's last entry is 2026-09-03 evening; today's arms (span, integer default) not yet written into dataset D-BASELINE? The prompt says "docs/dataset D-BASELINE.md (tail)". The adoption criteria written there: "Adoption needs: peptides within the replicate spread on BOTH engines, entrapment inside the charge-gate arm's interval, and dataset A replication of the runtime." Today's default flip: Sage −1.3% (12,475 vs 12,642) — is that "within the replicate spread"? Earlier replicate spread mentioned ~0.7% run-to-run wobble before determinism fix; after the determinism fix the tool is reproducible. Hmm, "12,466 (−1.4%)" was held as NOT ADOPTED on 2026-09-03. Today 12,475 is adopted. What changed? MSFragger +2.1% and entrapment 1.27%, and dataset A +0.3% (but measured pre-span on different code). The Sage deficit did NOT shrink (−1.3% vs −1.4%). So the criterion "within replicate spread on BOTH engines" is still failed on Sage — unless they redefined. The rule was bent: the second-file leg cites dataset A from 4a22ad7 which tested pre-span code; and the Sage deficit persists.
 
   Also note: integer detector default with fallback — mzML users silently get openms. Warning exists + spx:detector meta value. Also the "about 1% of identified peptides" in the warning message (:3137-3140) understates the measured churn: 8% symmetric churn, net −1.3%/+2.1% depending on engine. The warning is quantitatively wrong-ish ("differ by about 1%") — the NET differs by ~1-2%, the SETS differ by 8%.
 
@@ -367,7 +367,7 @@ The S30-BASELINE.md tail ends at the 2026-09-03 evening window-loop line — it 
 
   **Charge:min_charge default 2** — validated, fine.
 
-  Now check git: is 7d6e56f (prep compaction) committed but the S30 table "integer arm" numbers (6:21, 86 GB) measured with or without it? Prompt says "prep compaction built and queued but NOT yet verified" — so the 86 GB integer arm was measured on bbb2121/e3c6eb4 code, and 7d6e56f is HEAD, unverified. So HEAD (the tree as committed) has never been run. The ledger "after" numbers (27.9 GB) predate 7d6e56f.
+  Now check git: is 7d6e56f (prep compaction) committed but the dataset D table "integer arm" numbers (6:21, 86 GB) measured with or without it? Prompt says "prep compaction built and queued but NOT yet verified" — so the 86 GB integer arm was measured on bbb2121/e3c6eb4 code, and 7d6e56f is HEAD, unverified. So HEAD (the tree as committed) has never been run. The ledger "after" numbers (27.9 GB) predate 7d6e56f.
 
   Also note prompt's table: integer arm RSS 86 GB vs doc gate table "105 -> 88 GB". Minor discrepancy (86 vs 88) — different runs, whatever.
 
@@ -504,9 +504,9 @@ index 47bc9c5..c679a63 100644
 +### Changed
 +- **`trace:detector` now defaults to `integer`.** Mass-trace detection runs on the instrument's own
 +  integer axes -- flight-time bin for m/z, frame index for retention time -- following OpenMS
-+  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On S30 it is
++  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On dataset D it is
 +  faster and uses ~40% less memory than the OpenMS path, and the two agree to about 1% of identified
-+  peptides in either direction (Sage -1.3% on S30 but +0.3% on S08; MSFragger +2.1%; entrapment
++  peptides in either direction (Sage -1.3% on dataset D but +0.3% on dataset A; MSFragger +2.1%; entrapment
 +  slightly lower). Without the vendor flight-time calibration the tool **falls back to `openms` and
 +  says so**; the emitted mzML records which detector ran as `spx:detector`.
 +
@@ -514,7 +514,7 @@ index 47bc9c5..c679a63 100644
 +- **A trace's profile is a span, not a point list.** A trace point has one degree of freedom -- its
 +  intensity -- so the three parallel 4-byte arrays (frame, intensity, flight-time bin) and their
 +  three allocations per trace are replaced by an entry frame and a range in a per-window arena, with
-+  zero meaning a missed frame. Verified **byte-identical on both detectors** on S30. The per-window
++  zero meaning a missed frame. Verified **byte-identical on both detectors** on dataset D. The per-window
 +  correlation grid, which was a second copy of every profile, is gone. Window-loop memory falls from
 +  a 68.6 GB simultaneous peak to 27.9 GB (integer) / 32.4 GB (OpenMS); process peak RSS 105 -> 88 GB
 +  and 164 -> 147 GB.
@@ -531,7 +531,7 @@ diff --git a/README.md b/README.md
 index 3f515e4..d4ca9c4 100644
 --- a/README.md
 +++ b/README.md
-@@ -94,9 +94,11 @@ Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **7:17 wall, ~164
+@@ -94,9 +94,11 @@ Runtime (dataset D, 33,553 frames, 100 threads on a 128-core node): **7:17 wall, ~164
  with the current defaults (2026-09-03 evening; peptide set identical to the 12:49 build). The
  scoring gate had been striding 96-byte records to read one field; it now reads a parallel array.
  It was 12:49 that morning after `charge:min_charge` removed ~30% of the emission, 15:21 before
@@ -587,9 +587,9 @@ Confirmed: **the commit that claims to make integer the default never touches li
 
   12. Warning text "differ by about 1%" vs measured 8% symmetric churn — the net is 1.3-2.1% but set churn is 8%. The statement "agree to about 1% in either direction" in the commit message is also questionable: only-openms 1,148 of 12,642 = 9.1%; only-integer 981 of 12,475 = 7.9%. So "agree to about 1%" is wrong by ~8x on Sage set terms; it's only the NET count that differs by 1.3%. That's an overstatement in CHANGELOG/README/commit/warning text.
 
-  13. Also for Q1: "the project rule is both engines plus entrapment plus a second file." Sage −1.3% fails "within replicate spread on both engines" (replicate spread after determinism fix should be ~0; and earlier the same deficit was grounds for holding). MSFragger +2.1% passes. Entrapment 1.27% within interval passes. Second file: S08 +0.3% but pre-span code — for the CURRENT binary the second-file leg is absent. Rule bent, not met.
+  13. Also for Q1: "the project rule is both engines plus entrapment plus a second file." Sage −1.3% fails "within replicate spread on both engines" (replicate spread after determinism fix should be ~0; and earlier the same deficit was grounds for holding). MSFragger +2.1% passes. Entrapment 1.27% within interval passes. Second file: dataset A +0.3% but pre-span code — for the CURRENT binary the second-file leg is absent. Rule bent, not met.
 
-  Also note: is −1.3% "within replicate spread"? S30 replicates: 12,466 vs 12,475 across two integer versions (different code). Replicate spread of the same build measured earlier "d77fe0d replicated 6:56/105 GB". Peptide counts across replicate runs after determinism fix should be identical (deterministic). So −1.3% is a real deficit, not noise. And the engines disagree in sign — the exact signature that killed backfill q=0.5 as a default ("the two engines genuinely want different spectra — but that makes it a per-engine option at best, not a default"). Strong point: the project's own precedent from 2026-09-03 says a Sage-negative/MSFragger-positive trade is "a per-engine option at best, not a default". The integer detector has exactly that signature and was made default (in intent) the next morning.
+  Also note: is −1.3% "within replicate spread"? dataset D replicates: 12,466 vs 12,475 across two integer versions (different code). Replicate spread of the same build measured earlier "d77fe0d replicated 6:56/105 GB". Peptide counts across replicate runs after determinism fix should be identical (deterministic). So −1.3% is a real deficit, not noise. And the engines disagree in sign — the exact signature that killed backfill q=0.5 as a default ("the two engines genuinely want different spectra — but that makes it a per-engine option at best, not a default"). Strong point: the project's own precedent from 2026-09-03 says a Sage-negative/MSFragger-positive trade is "a per-engine option at best, not a default". The integer detector has exactly that signature and was made default (in intent) the next morning.
 
   14. What about the claim that the default flip actually shipped? Finding: registerStringOption_ still defaults "openms" at :1485. So the day's headline — "integer made DEFAULT" — is not in the code. Only CHANGELOG/README say it. The fallback at :3130-3142 only fires when a user explicitly passes `-trace:detector integer` without calibration. Also the warning text "Pass -trace:detector openms to silence this" is backwards in a world where openms is default... it's moot.
 
@@ -648,10 +648,10 @@ vibe.md
 
   **Section 1 — default defensibility: NO, rule bent, and the default isn't even in the code.**
   - Kill shot: e3c6eb4 never changes registerStringOption_ default at src/DIAPseudoSpectra.cpp:1485 — still "openms". `git show e3c6eb4` touches only :3115 (const→bool), the fallback, and spx:detector meta. CHANGELOG/README claim "now defaults to integer". A user running default today gets OpenMS. The measured "NEW DEFAULT" arm must have been run with an explicit flag. So the day shipped documentation claiming a default that does not exist, and the fallback path it adds is dead by default.
-  - Rule check: adoption criteria written 2026-09-03 evening (S30-BASELINE tail): "peptides within the replicate spread on BOTH engines, entrapment inside the charge-gate arm's interval, and S08 replication of the runtime." Sage 12,475 vs 12,642 = -167 = -1.3%: outside replicate spread (post-determinism-fix the tool is reproducible; the same -1.4% was the stated reason for NOT adopting on 09-03). MSFragger passes (+2.1%). Entrapment passes (1.27% [1.03-1.52] inside charge-gate arm's [1.15-1.64]). Second file: S08 +0.3% is from 4a22ad7, predates the span representation AND the 6ea4e3f split-child-bin fix — it describes a detector that no longer exists. Two of four legs fail/absent → rule bent, not met.
+  - Rule check: adoption criteria written 2026-09-03 evening (dataset D-BASELINE tail): "peptides within the replicate spread on BOTH engines, entrapment inside the charge-gate arm's interval, and dataset A replication of the runtime." Sage 12,475 vs 12,642 = -167 = -1.3%: outside replicate spread (post-determinism-fix the tool is reproducible; the same -1.4% was the stated reason for NOT adopting on 09-03). MSFragger passes (+2.1%). Entrapment passes (1.27% [1.03-1.52] inside charge-gate arm's [1.15-1.64]). Second file: dataset A +0.3% is from 4a22ad7, predates the span representation AND the 6ea4e3f split-child-bin fix — it describes a detector that no longer exists. Two of four legs fail/absent → rule bent, not met.
   - Precedent: on 2026-09-03 the backfill q=0.5 arm was rejected as a default with the exact same signature (Sage negative, MSFragger positive, entrapment flat): "the two engines genuinely want different spectra — but that makes it a per-engine option at best, not a default". The integer detector has that signature and was declared default ~15 hours later.
   - The "agree to about 1% in either direction" claim (commit message, CHANGELOG, README, fallback warning :3137-3140): wrong by ~8x in set terms. only-openms 1,148/12,642 = 9.1%, only-integer 981/12,475 = 7.9%. The NET differs by 1.3%; the SETS differ by ~8%. A user reading "about 1%" expects 99% agreement; they get 92%. The warning is not enough for the mzML-vs-.d divergence anyway: a warning in a log file is not visible in pipeline contexts; spx:detector meta value is good, but the honest statement is "your output depends on input format in a way that changes ~8% of peptide membership".
-  - Honest statement of evidence: on S30 the integer detector is faster (6:21 vs 6:54), 43% lighter (86 vs 150 GB span arms), loses 1.3% Sage peptides, gains 2.1% MSFragger, entrapment flat-to-better, with 8% membership churn; on S08 an earlier version was +0.3% Sage at 140 vs 230 GB; the current binary has never been run on S08.
+  - Honest statement of evidence: on dataset D the integer detector is faster (6:21 vs 6:54), 43% lighter (86 vs 150 GB span arms), loses 1.3% Sage peptides, gains 2.1% MSFragger, entrapment flat-to-better, with 8% membership churn; on dataset A an earlier version was +0.3% Sage at 140 vs 230 GB; the current binary has never been run on dataset A.
 
   **Section 2 — unverified/overstated.**
   - Span gate digest identity: VERIFIED by run, recorded TRACE-STRUCT-REDESIGN.md:230-235; but (a) it passed on the second attempt after 6ea4e3f fixed a refactor bug that cost 3.3% — commit bbb2121's message omits the first failure; (b) staged falsifiers R7 (pre-EPD tuples, child boundaries, G/mean/invnorm) are not recorded as run — only the final spectrum digest; (c) one run per detector on one file at default settings; (d) identity holds at wl_scale_=0 defaults with revision-2's kept scalars — the reviewers' caveat.
@@ -678,8 +678,8 @@ vibe.md
 
   **Section 5 — next/stop.**
   Do next, ranked:
-  1. Re-run S08 with the CURRENT binary (span + integer + 7d6e56f), both engines + entrapment — the missing leg for the default decision and for 7d6e56f's unrun digest gate. This is the single cheapest way to either justify or revert the default claim.
-  2. Fix or revert the default: either change :1485 to "integer" (making the CHANGELOG true and taking the rule violation head-on) or revert the docs. And fix the "about 1%" language to "8% membership churn, net −1.3% Sage / +2.1% MSFragger on S30".
+  1. Re-run dataset A with the CURRENT binary (span + integer + 7d6e56f), both engines + entrapment — the missing leg for the default decision and for 7d6e56f's unrun digest gate. This is the single cheapest way to either justify or revert the default claim.
+  2. Fix or revert the default: either change :1485 to "integer" (making the CHANGELOG true and taking the rule violation head-on) or revert the docs. And fix the "about 1%" language to "8% membership churn, net −1.3% Sage / +2.1% MSFragger on dataset D".
   3. Run the 7d6e56f digest gate (SPEXTRACT_DET=1 frag-trace digests vs bbb2121) — HEAD is currently unrun code; also fixes that the [det] compact digest is dead on the integer path (:3227).
   4. Release blockers (v0.3.0): public-dataset replication, dependency SHAs, resource-requirements doc, worked example — these gate any external credibility and are older than every perf item; the day added a new default the outside world cannot reproduce at all.
   5. Occupancy residual: free thread-state sampler + split-stage timer.

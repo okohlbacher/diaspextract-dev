@@ -1,4 +1,4 @@
-# The within-cycle repeats are SPLIT SPECTRA, not duplicates (S23)
+# The within-cycle repeats are SPLIT SPECTRA, not duplicates (dataset B)
 
 **Hypothesis (user, 2026-07-22):** either our spectra are misannotated (precursor mass, charge),
 or *"the peaks of one spectrum split across two or more spectra — the opposite of chimaeras."*

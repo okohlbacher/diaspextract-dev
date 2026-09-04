@@ -114,7 +114,7 @@ The change: replace the two-phase chunk body with a per-trace loop calling the s
 
 ### 3d. What makes a spectrum FINAL, and what enforces order
 
-**Content** is final the moment `assembleOne_` returns (:3441) — peaks, precursor m/z, charge, both isolation offsets, drift time, `spx_guessed`, `spx_n_isotopes`. After that only `merge:rt_window` (:3642) and `consolidate:delta_rt` (:3771) can mutate it; both default to 0 = OFF and both are documented FALSIFIED on S30 in their own option text.
+**Content** is final the moment `assembleOne_` returns (:3441) — peaks, precursor m/z, charge, both isolation offsets, drift time, `spx_guessed`, `spx_n_isotopes`. After that only `merge:rt_window` (:3642) and `consolidate:delta_rt` (:3771) can mutate it; both default to 0 = OFF and both are documented FALSIFIED on dataset D in their own option text.
 
 **Identity is NOT final until the total order is known.** `assembleFromList_` never calls `setNativeID`, so OpenMS's `MzMLHandler` sets `renew_native_ids = true` and writes `id="spectrum=<index>"` — **every spectrum is named by its rank in the canonical sort**.
 
@@ -141,7 +141,7 @@ The two free fixes here: `out.reserve(frags.size())` before the emplace loop (**
 **Three hard blockers, any one fatal:**
 1. `<spectrumList count="N">` is written from `spectra_expected_` at the **first** `consumeSpectrum`. N is unknown until the last window finishes. The harness enforces this (`hash_and_validate_mzml` fails with G-B11 when the count attribute disagrees with the spectrum count).
 2. `renew_native_ids` is hardcoded `false` in `MSDataWritingConsumer`, and our spectra carry no nativeID → `id=""` on every spectrum. Same class as the recorded MSFragger `Scans=0` blocker.
-3. `merge:rt_window` and `consolidate:delta_rt` both random-access a fully materialised `all_out`; streaming silently turns them into no-ops. They default off, so the S30 gate would not catch it.
+3. `merge:rt_window` and `consolidate:delta_rt` both random-access a fully materialised `all_out`; streaming silently turns them into no-ops. They default off, so the dataset D gate would not catch it.
 
 **The ordering constraint, stated exactly:** a spectrum's file position is `rank(RT, precursor m/z, charge, size, fragment sequence)` over the *whole run*, and its nativeID is that rank. No per-window blocking scheme can compute it, because every window emits across the entire RT range. Streaming would require either abandoning canonical order (which changes every nativeID and is an output change requiring the both-engines gate) or a spill-and-merge design — 150 lines of temp-file machinery, a serialisation format and a k-way merge — to relocate ~1 GB in a 105 GB process.
 
@@ -149,13 +149,13 @@ The two free fixes here: `out.reserve(frags.size())` before the emplace loop (**
 
 ## 5. The occupancy gap
 
-**Leading hypothesis: there is no gap.** Occupancy is CPU-seconds ÷ wall-seconds by definition. On S08: integer 31,033 CPU-s at 66×, OpenMS 41,530 CPU-s at 84×. Work ratio 31,033/41,530 = **0.747**; occupancy ratio 66/84 = **0.786**. They agree to within 5 %. A path that does 25 % less work in comparable wall time *must* show ~25 % lower occupancy. The unexplained residual is ~5 %, not 20 %.
+**Leading hypothesis: there is no gap.** Occupancy is CPU-seconds ÷ wall-seconds by definition. On dataset A: integer 31,033 CPU-s at 66×, OpenMS 41,530 CPU-s at 84×. Work ratio 31,033/41,530 = **0.747**; occupancy ratio 66/84 = **0.786**. They agree to within 5 %. A path that does 25 % less work in comparable wall time *must* show ~25 % lower occupancy. The unexplained residual is ~5 %, not 20 %.
 
 The direction also argues against every bandwidth explanation offered: a thread stalled on a cache miss is still in `R` and still counts as occupied, so memory pressure *inflates* CPU-seconds. The integer path has fewer.
 
 Three candidate mechanisms were sized and all fail by two to four orders of magnitude against the ~7,850 thread-seconds the residual would represent: `visited` first-touch (15.1 GB → 3.69e6 minor faults ≈ 5–10 CPU-s), `visited` mmap/munmap churn (288 events for the whole run), and the `b_of_rt`-class per-point lookups (~6–20 CPU-s). The one mechanism with a *measured* per-call cost — `SavitzkyGolayFilter` coefficient reconstruction inside `ElutionPeakDetection::smoothData`, measured on a Release OpenMS build at 16.8 µs against 18.0 µs for a whole 12-point `detectPeaks` — is real but is paid by **both** detector paths, so it cannot be the differential either.
 
-**The one measurement that settles it costs nothing and needs no rebuild.** Attach a 1 Hz thread-state sampler to the next scheduled S30 run of each arm:
+**The one measurement that settles it costs nothing and needs no rebuild.** Attach a 1 Hz thread-state sampler to the next scheduled dataset D run of each arm:
 
 ```
 while :; do date +%s; awk '{print $3}' /proc/$PID/task/*/stat | sort | uniq -c; sleep 1; done
@@ -175,7 +175,7 @@ Ordered by (measured or well-bounded saving) ÷ (risk × code added). **B** = ou
 
 | # | change | GB saved | runtime | output | experiment |
 |---|---|---|---|---|---|
-| 0 | **Verify the landed trace redesign** (no code) | re-takes the ledger | — | **B** | S08, HEAD vs `4bd81c2`, `SPEXTRACT_DET=1` + `SPEXTRACT_MEM_LEDGER=1`. Falsifier: any per-window digest differs, **or** `traces` does not fall 35.6 → < 12 GB. |
+| 0 | **Verify the landed trace redesign** (no code) | re-takes the ledger | — | **B** | dataset A, HEAD vs `4bd81c2`, `SPEXTRACT_DET=1` + `SPEXTRACT_MEM_LEDGER=1`. Falsifier: any per-window digest differs, **or** `traces` does not fall 35.6 → < 12 GB. |
 | 1 | **Free slab + prep before `splitIntegerTraces`** — move :3300-3303 above :3296; scope `tprep`+`g_prep` to a block ending :3292 | ceiling 22.8; realistic **3–8** (× fraction of windows in EPD at the peak) | neutral / mildly positive (gate reads real free RAM) | **B** — `splitIntegerTraces` cannot name either object | ledger delta on `MEM_SLAB` / `MEM_PREP` + process peak RSS. Falsifier: RSS and the simultaneous-peak line both unmoved ⇒ no window is ever in EPD while another peaks. |
 | 2 | **`visited` → bitset** (:894, 4 lines) | **4.29** (both skeptics exact) | neutral | **B** | same run as #1 (different ledger line). Falsifier: any digest difference = indexing bug. |
 | 3 | **Ledger fix** (~10 lines) | 0 | neutral | **B** | prerequisite for every byte claim below — see §7 E1. |
@@ -189,13 +189,13 @@ Ordered by (measured or well-bounded saving) ÷ (risk × code added). **B** = ou
 | 11 | **`out.reserve(frags.size())`** | **0.15 – 0.2** | negligible | **B** | ledger only, once #3 reports capacity as well as size. |
 | 12 | **Derive `Trace::intensity`** (and possibly `b`) | **1.6** (3.2 with `b`) | neutral | **B** for `intensity`; `b` needs its own check (OpenMS path stores 0.0) | only after E0 gives the real trace count. |
 
-Nothing in this table requires the both-engines rule as written. **That is the point of the ordering:** every item is either a lifetime move, a representation change, or a deletion, and each is falsifiable by a digest comparison that costs one S08 run rather than a Sage + MSFragger + entrapment cycle. Item 8 is the single item that can slip into **E** if its raw-edge invariant is not held, which is why it is gated behind a cheap measurement of *m*.
+Nothing in this table requires the both-engines rule as written. **That is the point of the ordering:** every item is either a lifetime move, a representation change, or a deletion, and each is falsifiable by a digest comparison that costs one dataset A run rather than a Sage + MSFragger + entrapment cycle. Item 8 is the single item that can slip into **E** if its raw-edge invariant is not held, which is why it is gated behind a cheap measurement of *m*.
 
 ---
 
 ## 7. Experiment schedule
 
-Runs are S08 unless stated. Builds that share a run are ones whose effects land on **different ledger lines**, so the ledger attributes them even though process RSS does not.
+Runs are dataset A unless stated. Builds that share a run are ones whose effects land on **different ledger lines**, so the ledger attributes them even though process RSS does not.
 
 **E0 — the baseline nobody has (isolated, must be first).**
 Two runs of the *unmodified* HEAD plus one of `4bd81c2`, with `SPEXTRACT_DET=1` and `SPEXTRACT_MEM_LEDGER=1`. The two HEAD runs establish whether the per-window `[det]` digest is reproducible at fixed threads — the project record says the tool is **not** digest-reproducible end-to-end (~1e-4 factor; the standing gate is peptide-set overlap), and the `[det]` line is emitted upstream of that. If it is stable, digests gate everything below; if not, every **B** item falls back to peptide sets and the plan gets three times more expensive. Attach the §5 thread-state sampler; it is free.
@@ -220,9 +220,9 @@ It moves `MEM_EPD_LIST` and `MEM_EPD_MT` wholesale, so it cannot share a run wit
 *Falsifier:* the split stage is under 3 % of loop CPU ⇒ the whole item buys < 3 % of wall and is not worth a carried OpenMS patch.
 
 **E7 — hygiene bundle (one build): `setSpectra` move + `out.reserve`.** Read the `[perf]` phase table only; no search engine.
-*Falsifier:* the ASSEMBLE row does not vanish, or WRITE's `rss_end_mb` does not drop by ~1.3 GiB scaled to S08.
+*Falsifier:* the ASSEMBLE row does not vanish, or WRITE's `rss_end_mb` does not drop by ~1.3 GiB scaled to dataset A.
 
-**Final gate.** One S30 run of the accumulated build against the S30 baseline, on **both** engines plus entrapment — not because any single item requires it, but because the project rule is that the baseline is refreshed with both engines at the end of a cycle, and because the combined build has never been measured on S30.
+**Final gate.** One dataset D run of the accumulated build against the dataset D baseline, on **both** engines plus entrapment — not because any single item requires it, but because the project rule is that the baseline is refreshed with both engines at the end of a cycle, and because the combined build has never been measured on dataset D.
 
 ---
 

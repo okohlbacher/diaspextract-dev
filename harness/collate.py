@@ -22,7 +22,7 @@ D_RT, D_IM = 0.30, 0.05
 
 
 def rt_minutes(scan) -> float:
-    """FAILURE 8: our mzML writes RT in SECONDS, diaTracer's in MINUTES, DIA-NN reports
+    """FAILURE 8: our mzML writes RT in SECONDS, the reference implementation's in MINUTES, DIA-NN reports
     minutes. Trusting the bare number matched 31 of ~300,000 spectra. Always read the CV unit."""
     v = scan["scan start time"]
     unit = getattr(v, "unit_info", "minute")
@@ -30,9 +30,9 @@ def rt_minutes(scan) -> float:
 
 
 def precursor_of(spec) -> tuple[float, int, float]:
-    """FAILURE 8b: diaTracer omits 'selected ion m/z' and writes the PRECURSOR as its isolation
+    """FAILURE 8b: the reference implementation omits 'selected ion m/z' and writes the PRECURSOR as its isolation
     window (+-0.01 Da); we write the real acquisition window. Reading either file's window
-    naively makes diaTracer look perfectly pure, because its co-isolation set is empty by
+    naively makes the reference implementation look perfectly pure, because its co-isolation set is empty by
     construction. Fall back explicitly and never derive co-isolation from the file's window."""
     pre = spec["precursorList"]["precursor"][0]
     ion = pre["selectedIonList"]["selectedIon"][0]
@@ -121,7 +121,7 @@ def truth_metrics(mzml_path: Path, report: Path, lib: Path, windows: list[tuple[
         ol = [frags[p["Precursor.Id"]] for p in co
               if p["Precursor.Id"] != best["Precursor.Id"] and p["Precursor.Id"] in frags]
         others = np.sort(np.concatenate(ol)) if ol else np.array([])
-        k = np.argsort(ints)[-20:]                     # equal depth: diaTracer emits 500, we ~228
+        k = np.argsort(ints)[-20:]                     # equal depth: the reference implementation emits 500, we ~228
         m2, i2 = mzs[k], ints[k]
         tot = i2.sum() or 1.0
         io = ib = iod = idc = 0.0
@@ -196,7 +196,7 @@ def cmd_truth(args) -> None:
 
 def cmd_collate(args) -> None:
     """Write one vault report per plan. Every row carries its sample, and no ratio is computed
-    across samples -- FAILURE 1 was a published number that divided S30 by S08's reference."""
+    across samples -- FAILURE 1 was a published number that divided dataset D by dataset A's reference."""
     reg = yaml.safe_load((HERE / "samples.yaml").read_text())
     plan = yaml.safe_load(Path(args.plan).read_text())
     root = Path(args.out or f"/scratch/kohlbach/harness/{Path(args.plan).stem}")

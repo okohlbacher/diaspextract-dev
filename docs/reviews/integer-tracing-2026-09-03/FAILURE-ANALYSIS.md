@@ -1,6 +1,6 @@
 # Why the first integer trace detector failed, and what the corrected one does
 
-Measured on S30, same binary family, OpenMS detector as reference (656,254 spectra, 12,642 Sage
+Measured on dataset D, same binary family, OpenMS detector as reference (656,254 spectra, 12,642 Sage
 peptides):
 
 | version | spectra | peptides | wall | peak RSS |
@@ -95,22 +95,22 @@ a twelfth of the work. The corrected detector is judged on peptides first; only 
 wall time a result.
 
 
-## S08: the second file (2026-09-03, 23:09)
+## dataset A: the second file (2026-09-03, 23:09)
 
-| S08, 100 threads | wall | peak RSS | Sage @1% |
+| dataset A, 100 threads | wall | peak RSS | Sage @1% |
 |---|---|---|---|
 | integer detector | **11:51** | **140 GB** | **11,121** |
 | OpenMS detector, same binary | 11:42 | 230 GB | 11,084 |
-| diaTracer, same node | 9:46 | 163 GB | 10,242 |
+| the reference implementation, same node | 9:46 | 163 GB | 10,242 |
 
-**The S30 peptide deficit does not reproduce.** On S08 the integer detector finds slightly MORE
-peptides than the OpenMS path (11,121 vs 11,084, +0.3%) where on S30 it found 1.4% fewer -- which is
+**The dataset D peptide deficit does not reproduce.** On dataset A the integer detector finds slightly MORE
+peptides than the OpenMS path (11,121 vs 11,084, +0.3%) where on dataset D it found 1.4% fewer -- which is
 what a faithful-but-not-identical reimplementation looks like: a small per-file wobble of either
 sign, not a systematic loss.
 
 **Memory is the bigger and more consistent result: 140 GB against 230 GB, a 39% cut**, matching the
-36% seen on S30 (105 vs 164 GB). It also puts speXtract BELOW diaTracer's 163 GB on this file for
-the first time. Wall time is a wash here (11:51 vs 11:42) although it won on S30 (6:53 vs 7:17);
+36% seen on dataset D (105 vs 164 GB). It also puts speXtract BELOW the reference implementation's 163 GB on this file for
+the first time. Wall time is a wash here (11:51 vs 11:42) although it won on dataset D (6:53 vs 7:17);
 window-loop CPU is 31,033 s against 41,530 s, i.e. the integer path does 25% less work but fills
 fewer threads (64x vs 87x), so on the larger file the two effects cancel.
 
@@ -120,13 +120,13 @@ the occupancy gap -- 64x vs 87x is the last unexplained number in this line of w
 
 ## Both engines and entrapment (2026-09-03, 23:41)
 
-| S30 | Sage @1% | MSFragger @1% | entrapment FDR |
+| dataset D | Sage @1% | MSFragger @1% | entrapment FDR |
 |---|---|---|---|
 | OpenMS detector (shipping default) | 12,642 | 12,073 | 1.38% [1.15-1.64] |
 | integer detector | 12,466-12,475 (−1.3%) | **12,328 (+2.1%)** | 1.24% [1.01-1.50] |
 
 **The two engines disagree in sign.** Sage loses 1.3%, MSFragger gains 2.1%, on the same spectra --
-and on S08 Sage itself gained 0.3%. So there is no evidence of a systematic loss; there is evidence
+and on dataset A Sage itself gained 0.3%. So there is no evidence of a systematic loss; there is evidence
 of a per-engine, per-file wobble of about a percent either way, which is what a faithful-but-not-
 identical reimplementation produces. Entrapment is slightly LOWER (1.24% vs 1.38%), so nothing here
 is bought with false positives.
@@ -140,7 +140,7 @@ sensitivity in a greedy consume-and-mark algorithm, not a semantic difference. T
 is the reason this project gates on peptide SETS rather than counts.
 
 **Status: the adoption conditions are met on everything except a reason to prefer it.** Both engines
-within ~2% either way, entrapment no worse, S08 replicated on memory (−39%) and peptides (+0.3%).
-The case for it is memory (−36 to −39%, and below diaTracer for the first time) and CPU (−25%); the
+within ~2% either way, entrapment no worse, dataset A replicated on memory (−39%) and peptides (+0.3%).
+The case for it is memory (−36 to −39%, and below the reference implementation for the first time) and CPU (−25%); the
 case against is a 64x vs 87x occupancy gap that is still unexplained, and that gap is what makes the
 wall-time win vanish on the larger file.

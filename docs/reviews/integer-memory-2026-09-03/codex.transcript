@@ -22,7 +22,7 @@ OpenMP task pool: up to 24 isolation windows in flight at once, and inside each 
 experimental detector, `trace:detector=integer`, replaces OpenMS `MassTraceDetection` on a
 `PeakMap` with the code below, working on integer arrays.
 
-## Measured, S30, 100 threads, 128-core node
+## Measured, dataset D, 100 threads, 128-core node
 
 | path | wall | peak RSS |
 |---|---|---|

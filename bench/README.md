@@ -13,7 +13,7 @@ cannot score the failure mode this tool exists to avoid.**
 ## `open_bench.py` — entrapment-controlled open search
 
 Built because the closed benchmark rewards the opposite of the goal: we emit 4.6 PSMs/peptide
-against diaTracer's 1.46, so redundancy is free score under `peptide_q`. That one fact predicts
+against the reference implementation's 1.46, so redundancy is free score under `peptide_q`. That one fact predicts
 in advance every result observed — each redundancy-reducing lever losing, and `ms1split` winning
 while simultaneously raising co-isolation 52% and dropping charge below baseline. *Six
 falsifications sharing one biased instrument are one falsification.*
@@ -40,7 +40,7 @@ failure it was built to detect.
 
 ### Pre-registered falsification — written before the first run
 
-Closed ratio `split_count/base` on S23 = 8,411/5,817 = **1.446**.
+Closed ratio `split_count/base` on dataset B = 8,411/5,817 = **1.446**.
 
 | modified-peptide ratio | conclusion |
 |---|---|
@@ -68,7 +68,7 @@ is the error class this benchmark exists to eliminate.
 
 ## `joint_bench.py` — the success metric across the three datasets
 
-**3 samples × {diaTracer, SpeXtract} × {Sage, MSFragger}**, reporting the two numbers the
+**3 samples × {the reference implementation, SpeXtract} × {Sage, MSFragger}**, reporting the two numbers the
 project is scored on:
 
 * **PSMs** at ≤1% PSM-level FDR
@@ -88,7 +88,7 @@ byte-identical search spaces.
 
 Peptide-level FDR is "picked": best-scoring PSM per distinct sequence, then target-decoy over
 that reduced list. That axis is the point — SpeXtract emits ~4.6 PSMs/peptide against
-diaTracer's 1.46, so PSM counts reward redundancy and peptide counts do not. **Both are
+the reference implementation's 1.46, so PSM counts reward redundancy and peptide counts do not. **Both are
 reported so the gap is visible rather than hidden.**
 
 Validated before use: null control (targets and decoys from one distribution) collapses to 1
@@ -101,7 +101,7 @@ hyperscore is not, which favours Sage on absolute counts. Adding Percolator to M
 would reintroduce the confound this design removes; adding it to *both* is the correct fix and
 is not done here.
 
-**The tool comparison is unaffected** — diaTracer vs SpeXtract is made *within* an engine, and
+**The tool comparison is unaffected** — the reference implementation vs SpeXtract is made *within* an engine, and
 that is the comparison this harness exists for. The engine axis is a secondary readout.
 
 ### Run

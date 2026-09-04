@@ -2,7 +2,7 @@
 
 ## The profile that replaces every hypothesis
 Per-phase timers added 2026-09-02 (`[perf]` table; CPU from getrusage so the parallel factor is
-real). S30, release binary, 100 threads, 128-core/995 GB node, warm page cache:
+real). dataset D, release binary, 100 threads, 128-core/995 GB node, warm page cache:
 
 | phase | wall s | share | parallel | note |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ markers. Fixed (epoch anchored at main_).
 
 ## Root causes in the loader (verified in source, file:line in the archaeology reports)
 1. **Every MS2 frame is decoded once per isolation window of its group** (window-outside-frame loop,
-   BrukerTimsFile.cpp:1589-1610; `save_to_buffs` does not cache, it `close()`s). S30: 2 windows per
+   BrukerTimsFile.cpp:1589-1610; `save_to_buffs` does not cache, it `close()`s). dataset D: 2 windows per
    group -> **2.0x re-decode of the entire 6.2 GB run**, from SQL: 16,105 physical frames, 32,210 decodes.
 2. **The loop is strictly serial** (`for (fid..) consumer.consumeSpectrum(spec)`), and our consumer
    peak-picks + compacts 1.26e9 peaks inline on that thread.
@@ -87,7 +87,7 @@ Sweep is gated to start only after the concurrent MSFragger run has exited (it w
 (`bench/semantic_digest.py`, pickdet running); (b) baseline vs optimized: same spectrum count, keys,
 RT, precursors, quantized m/z/IM, and a pre-registered intensity envelope with the cause explained;
 (c) both engines: accepted-peptide SET overlap, not count. **Measured for (c) now:** the v0.2.0
-serial-pick S30 run (`final_t100`, 12,200) and the batched-pick run (12,200) accept **exactly the same
+serial-pick dataset D run (`final_t100`, 12,200) and the batched-pick run (12,200) accept **exactly the same
 12,200 peptides (symmetric difference 0)**. For calibration, the same-code run at another thread count
 (`tbl_s30`, 11,976) differs from it by 2,730 peptides (20% of the union) -- the cross-config chaos is
 a 20% membership churn at a 2% count level, so count equality alone is indeed a weak test and set
@@ -114,7 +114,7 @@ RSS column is the measurement; the "ring buffer" prose over-sold a pipeline that
 the per-batch barrier, which chunk 1 minimises.
 
 ## Self-determinism: FAILED, and what the failure looks like (2026-09-02)
-Two same-config runs of the batched-pick binary (100 threads, S30) are not digest-identical. Per-spectrum
+Two same-config runs of the batched-pick binary (100 threads, dataset D) are not digest-identical. Per-spectrum
 diff of the first 85,144 spectra: **2,001+ spectra differ; in each, EVERY peak's intensity differs by a
 common ~1e-4 relative factor, m/z untouched** (e.g. 18.34720 vs 18.34847). That is not a picker race
 (picking is per-spectrum pure: `compactify` and `ensureIMArrayName` hold no shared state, MassTraceDetection
@@ -157,16 +157,16 @@ Remaining sweep: batch 64, batch 1024, MALLOC_ARENA_MAX=4.
 ## mzPeak reconversion (mzpeak-convert v0.9.2, ims-compact integer-TOF) -- 2026-09-02
 | file | vendor `tdf_bin` | old .mzpeak peaks table (Jul) | **v0.9.2 archive peaks table** | container incl. vendor side-files |
 |---|---|---|---|---|
-| S30 | 6.18 GB | 5.68 GB | **6.46 GB** (zstd 3) · 6.44 (zstd 9) · 6.39 (zstd 15) | 9.98 GB (+3.52 GB vendor) |
-| S08 | 8.95 GB | 9.45 GB | **9.45 GB** | 13.69 GB (+4.24 GB vendor) |
+| dataset D | 6.18 GB | 5.68 GB | **6.46 GB** (zstd 3) · 6.44 (zstd 9) · 6.39 (zstd 15) | 9.98 GB (+3.52 GB vendor) |
+| dataset A | 8.95 GB | 9.45 GB | **9.45 GB** | 13.69 GB (+4.24 GB vendor) |
 - Layout: `point` table {spectrum_index u64 delta, intensity i32 BYTE_STREAM_SPLIT, 1/K0 f64 dictionary,
-  tof i32 BYTE_STREAM_SPLIT}, all ZSTD; 2,471,762,904 rows for S30 = exactly the .d peak count;
-  17,448 spectra (1,343 MS1 / 16,105 MS2). Conversion 13 s (S30) / 21 s (S08) on the M-series Mac.
+  tof i32 BYTE_STREAM_SPLIT}, all ZSTD; 2,471,762,904 rows for dataset D = exactly the .d peak count;
+  17,448 spectra (1,343 MS1 / 16,105 MS2). Conversion 13 s (dataset D) / 21 s (dataset A) on the M-series Mac.
 - The archive is 4.5-5.6% larger than the vendor binary; zstd-15 buys 1% for 2.3x the time;
   `--no-tims-recalibration` changes nothing (6.45 GB). The 1/K0 column (ratio 0.57) and tof (0.52)
-  are the bulk; the old S30 file being smaller (5.68) is not reproduced by any v0.9.2 setting.
+  are the bulk; the old dataset D file being smaller (5.68) is not reproduced by any v0.9.2 setting.
 - **Converter bug (v0.9.2): `--ims-chunked` aborts on TDF** -- "layout family mismatch between spectrum
-  facets: spectra_data is 'point' but spectra_peaks would be 'chunk'". Both S30 and S08.
+  facets: spectra_data is 'point' but spectra_peaks would be 'chunk'". Both dataset D and dataset A.
 - The archive still stores raw TOF + the two-point transform (`mzpeak:transform_params`); a reader
   must convert, and the exact ModelType-1 calibration is NOT in the archive (only in the embedded
   `vendor/analysis.tdf.gz`). m/z accuracy from mzPeak therefore = the two-point model unless the
@@ -178,13 +178,13 @@ Remaining sweep: batch 64, batch 1024, MALLOC_ARENA_MAX=4.
   `src/MzPeakStreamLoad.h`: a streaming .mzpeak loader on that library with the same (MS1 first,
   then per-(frame, window)) hand-off contract as the .d loader; build-optional via `-DMZPEAK_ROOT`.
   Cluster build: library against contrib Arrow 23 (pin relaxed from >=24), Boost 1.89 from the
-  OpenDIAlyzer env, libzip 1.11.4 from contrib. Benchmark queued: S30 archive vs .d, same flags.
+  OpenDIAlyzer env, libzip 1.11.4 from contrib. Benchmark queued: dataset D archive vs .d, same flags.
 **Measure #4 (allocator), arena arm, 13:02:** `MALLOC_ARENA_MAX=4` at 100 threads is HARMFUL: the window
 loop ran at ~636% CPU instead of ~6300% (allocator serialised across threads), 16/24 windows after 56 min
 vs 22 min for the whole run; aborted. The July -10.7% was not this setting at this thread count. The
 remaining allocator arm is a real replacement allocator (tcmalloc/jemalloc via LD_PRELOAD), not arena capping.
 **mzPeak reader wiring (13:20):** library built on the cluster (fork trunk, GCC 13 + Arrow 23 with two
-compat patches in `patches/`, recipe `scripts/build_mzpeak_lib.sh`). Reading the v0.9.2 S30 archive:
+compat patches in `patches/`, recipe `scripts/build_mzpeak_lib.sh`). Reading the v0.9.2 dataset D archive:
 17,448 spectra, 32,210 MS2 windows (2 per frame), metadata sweep 0.43 s, 24-frame decode 0.07 s. Two
 archive/reader defects worked around in `MzPeakStreamLoad.h`: the per-window 1/K0 band is stored as
 name-only CV params (typed limits empty), and `precursor_index` is NULL so the reader attaches both ions
@@ -203,7 +203,7 @@ it. Next lever: batch MS1 frames, decode + centroid in parallel (per-thread Fram
 the consumer's parallel flush (buffer MS1 like MS2, keep frame order). Expected LOAD 445 -> ~30 s, total
 22:22 -> ~15:30.
 
-## mzPeak input vs .d input (S30, same binary, same flags, 100 threads) -- 13:55
+## mzPeak input vs .d input (dataset D, same binary, same flags, 100 threads) -- 13:55
 | | `.d` (P256det) | `.mzpeak` v0.9.2 archive (MZP) |
 |---|---|---|
 | LOAD(stream) wall | 444.7 s | **395.8 s** (-11%) |
@@ -236,11 +236,11 @@ identical. The "SPECTRUM DATA DIFFERS" came from `bench/semantic_digest.py` hash
 the trailing `<indexList>` byte offsets, which shift when the header changes length (the OpenMS version stamp
 carries the build date: 4 bytes longer -> every offset +4). The digest now stops at `</spectrumList>`; with it
 the two files hash identically (`ca1ddbbd…`). The 09-01 "differs across thread counts" (B3) was taken with
-the old digest and must be re-measured. **S08 LOAD-only (14:38):** 418 s at 8.0x, MS2 decode 10.1 s,
+the old digest and must be re-measured. **dataset A LOAD-only (14:38):** 418 s at 8.0x, MS2 decode 10.1 s,
 hand-off 25.0 s -> the ~380 s residual is the MS1 path on this file too.
 
 ## A1 LANDED (15:01): the MS1 path parallelised -- LOAD 445 s -> 39 s, total 22:22 -> 15:21
-| S30, 100 threads | before (P256det) | **after (MS1par)** |
+| dataset D, 100 threads | before (P256det) | **after (MS1par)** |
 |---|---|---|
 | LOAD(stream) wall / CPU / parallel | 444.7 s / 1,785 s / 4.0x | **38.8 s / 3,122 s / 80.5x** |
 | of which MS1 decode+sort (parallel region) / hand-off / pick | serial ~429 s | 6.9 s / 15.4 s / 27.2 s (pick incl. MS2 ~11 s) |
@@ -282,11 +282,11 @@ system time); adopt via `LD_PRELOAD` in the benchmark harness, link in CMake onl
 **A3(iv) `perf:ms1_trace_bands=48` (18:31): WORSE and not output-identical.** MS1_TRACE 144 s at 2.9x (vs 61-80 s at
 12 bands, 5.1x) and 922,899 spectra vs 922,902 -- the MS1 band partition is NOT exact (traces near band edges),
 so the knob is quality-affecting (BC-3 was right). Keep 12; drop A3(iv).
-**D1 first attempt (18:32) aborted:** the cluster copy of the S30 archive is the --no-vendor one, so
+**D1 first attempt (18:32) aborted:** the cluster copy of the dataset D archive is the --no-vendor one, so
 `vendor/analysis.tdf.gz` is absent; the loader now accepts `SPEXTRACT_MZPEAK_TDF=<sidecar>`; rerun in flight.
 
 ## D1 ISOLATED (18:58): the two-point transform is 91% of the mzPeak loss; exact calibration recovers it
-| S30 input | Sage @1% | vs `.d` (12,217) | paired precursor / fragment ppm vs the `.d` run |
+| dataset D input | Sage @1% | vs `.d` (12,217) | paired precursor / fragment ppm vs the `.d` run |
 |---|---|---|---|
 | `.mzpeak`, archive two-point transform | 10,785 | −11.7% | (vs dt: +8.60 / +10.05) |
 | **`.mzpeak`, exact calibration recovered** (tof from the inverted transform + MzCalibration and Frames.T1 from the tdf) | **12,082** | **−1.1%** (symdiff 1,186 / 1,051) | **+0.00 / +0.00** — the m/z axis is identical to the `.d` path |

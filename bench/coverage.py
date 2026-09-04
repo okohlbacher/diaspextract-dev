@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""What do we LOSE vs diaTracer? Properties of the coverage gap, on one raw acquisition.
+"""What do we LOSE vs the reference implementation? Properties of the coverage gap, on one raw acquisition.
 
-This is the clean comparison the project has been missing. diaTracer and SpeXtract both extract
-pseudo-spectra from the SAME S30 .d, and both were searched with the SAME sage_deiso.json against
+This is the clean comparison the project has been missing. the reference implementation and SpeXtract both extract
+pseudo-spectra from the SAME dataset D .d, and both were searched with the SAME sage_deiso.json against
 the SAME fasta. So the peptide sets differ ONLY by extraction -- no second injection, no RT drift,
 no DDA-conditioning. Precursor RT / m/z / ion mobility are directly comparable between the two.
 
-  MISS   = diaTracer peptides we do NOT identify   <- the coverage gap being characterised
+  MISS   = the reference implementation peptides we do NOT identify   <- the coverage gap being characterised
   SHARED = identified by both                       <- the reference distribution
 
-For every diaTracer peptide we take its BEST PSM and read properties from two places:
+For every the reference implementation peptide we take its BEST PSM and read properties from two places:
   * Sage      : length, charge, m/z, RT, ion mobility, hyperscore, matched_peaks,
                 matched_intensity_pct, ms2_intensity, missed cleavages, isotope error
-  * diaTracer : the emitting spectrum's PRECURSOR PEAK INTENSITY, TIC and base-peak intensity
+  * the reference implementation : the emitting spectrum's PRECURSOR PEAK INTENSITY, TIC and base-peak intensity
                 -- a direct abundance proxy in the original data, available for MISS and SHARED
-                alike (our own mzML does not write precursor intensity, so diaTracer's is the
+                alike (our own mzML does not write precursor intensity, so the reference implementation's is the
                 only intensity measure defined for BOTH classes; that is why it is used).
 
 Then the class A/B split, which is finally well-posed here (same acquisition => same RT axis):
@@ -30,8 +30,8 @@ import csv, sys, bisect, statistics as st
 
 OURS_MZML = sys.argv[1]     # our base pseudo.mzML
 OURS_TSV  = sys.argv[2]     # our base results.sage.tsv
-DT_MZML   = sys.argv[3]     # diaTracer mzML
-DT_TSV    = sys.argv[4]     # diaTracer results.sage.tsv
+DT_MZML   = sys.argv[3]     # the reference implementation mzML
+DT_TSV    = sys.argv[4]     # the reference implementation results.sage.tsv
 PROTON = 1.00727646
 PPM = 20.0
 
@@ -102,14 +102,14 @@ dt = best_psm_per_peptide(DT_TSV)
 MISS = {p: v for p, v in dt.items() if p not in ours}
 SHARED = {p: v for p, v in dt.items() if p in ours}
 ONLY = {p: v for p, v in ours.items() if p not in dt}
-print("[sets] diaTracer %d, ours %d | SHARED %d, MISS %d, ours-only %d"
+print("[sets] the reference implementation %d, ours %d | SHARED %d, MISS %d, ours-only %d"
       % (len(dt), len(ours), len(SHARED), len(MISS), len(ONLY)), flush=True)
 
-print("[load] diaTracer spectra (precursor intensity) ...", flush=True)
+print("[load] the reference implementation spectra (precursor intensity) ...", flush=True)
 dt_spec = spectrum_index(DT_MZML, 'id="frame=')
-print("[load]   %d diaTracer spectra" % len(dt_spec), flush=True)
+print("[load]   %d the reference implementation spectra" % len(dt_spec), flush=True)
 
-# attach diaTracer-side intensity to every diaTracer peptide
+# attach the reference implementation-side intensity to every the reference implementation peptide
 for d in (MISS, SHARED):
     for p, v in d.items():
         s = dt_spec.get(v["scan"])
@@ -129,12 +129,12 @@ def cmp_prop(label, key, logscale=False):
              (mm / hh) if hh else float("nan")))
 
 
-print("\n=== PROPERTIES: peptides diaTracer finds and we MISS, vs those we SHARE ===")
+print("\n=== PROPERTIES: peptides the reference implementation finds and we MISS, vs those we SHARE ===")
 cmp_prop("precursor intensity", "pint")
 cmp_prop("spectrum TIC", "tic")
 cmp_prop("ms2_intensity (Sage)", "ms2i")
 cmp_prop("matched_intensity_pct", "mip")
-cmp_prop("hyperscore (diaTracer)", "hyper")
+cmp_prop("hyperscore (the reference implementation)", "hyper")
 cmp_prop("matched_peaks", "mp")
 cmp_prop("peptide length", "len")
 cmp_prop("precursor m/z", "mz")
@@ -190,7 +190,7 @@ pmz = [p[0] for p in pop]
 print("[load]   %d emitted spectra of ours" % len(pop), flush=True)
 _prt = [p[1] for p in pop]
 _drt = [v["rt"] for v in dt.values()]
-print("[units] our emitted RT %.2f-%.2f min | diaTracer peptide RT %.2f-%.2f min"
+print("[units] our emitted RT %.2f-%.2f min | the reference implementation peptide RT %.2f-%.2f min"
       % (min(_prt), max(_prt), min(_drt), max(_drt)), flush=True)
 if not (min(_prt) <= max(_drt) and min(_drt) <= max(_prt) and max(_prt) < 5 * max(_drt)):
     sys.exit("ABORT: RT ranges do not overlap -- unit mismatch (FAILURE 8). Refusing to report.")

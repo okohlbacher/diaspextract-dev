@@ -5,7 +5,7 @@ Why this exists
 ---------------
 Every number in README.md comes from a CLOSED Sage search scored by peptide_q against a DIA-NN
 reference whose space is tryptic / z2-4 / <=2 mods -- structurally incapable of containing the
-class of thing this tool exists to find. We emit 4.6 PSMs/peptide against diaTracer's 1.46, so
+class of thing this tool exists to find. We emit 4.6 PSMs/peptide against the reference implementation's 1.46, so
 redundancy is free score under that metric. That single fact predicts, in advance, every result
 observed: each redundancy-reducing lever losing, and ms1split winning while simultaneously
 raising co-isolation 52% and dropping charge agreement below baseline.
@@ -34,7 +34,7 @@ Three measurements, in increasing order of how much they depend on assumptions
 
 Pre-registered falsification (written before the first run)
 -----------------------------------------------------------
-Closed-search ratio split_count/base on S23 = 8411/5817 = 1.446.
+Closed-search ratio split_count/base on dataset B = 8411/5817 = 1.446.
 
   * modified-peptide ratio >= 1.446  -> "the closed benchmark rewards shotgunning" is FALSIFIED.
                                         The defaults are vindicated for BOTH purposes, the six

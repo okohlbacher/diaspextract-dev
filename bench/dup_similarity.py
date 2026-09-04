@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Are within-cycle repeats the SAME SPECTRUM, or different spectra hitting the same peptide?
 
-64.9% of our PSMs are within-cycle repeats (diaTracer 20.3%), and 2.85 PSMs come from each
+64.9% of our PSMs are within-cycle repeats (the reference implementation 20.3%), and 2.85 PSMs come from each
 (peptide, cycle). Sharing a precursor is not the same as being redundant: two spectra can share
 a precursor assignment and still carry different fragment content.
 

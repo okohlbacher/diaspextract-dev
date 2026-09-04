@@ -4,7 +4,7 @@
 OFF, ship blocked on a pre-registered paired measurement.
 
 This supersedes the proposal in `merge_design.md`. It records only what survived four adversarial
-reviews and one direct measurement on S23. Several numbers in `docs/benchmarks/split-spectra.md`
+reviews and one direct measurement on dataset B. Several numbers in `docs/benchmarks/split-spectra.md`
 are corrected here; that file must be amended (§6).
 
 ---
@@ -30,7 +30,7 @@ achieve on peptide count. State it that way; do not re-inflate the richness clai
 
 ### What holds
 
-Direct measurement on S23 (76,119 PSMs at 1% PSM-FDR, 10,053 peptides; pairs filtered by the merge
+Direct measurement on dataset B (76,119 PSMs at 1% PSM-FDR, 10,053 peptides; pairs filtered by the merge
 predicate; four null arms carried) shows the within-cycle population has the strongest co-elution
 signature of anything tested:
 
@@ -103,7 +103,7 @@ Justify it by count collapse, not by richness.
 ## 2. VERDICT — across-cycle merge: **KILL**
 
 Not "kill because it adds interference." **Kill because the claimed mechanism is absent from the
-data.** Measured on S23, all pairs filtered by the proposed merge predicate (same charge, Δm/z ≤ 20
+data.** Measured on dataset B, all pairs filtered by the proposed merge predicate (same charge, Δm/z ≤ 20
 ppm, ΔIM ≤ 0.01), medians:
 
 | | n | Jaccard | union/larger | cosine | bitwise | cap gain (annotated b/y) | % pairs improved |
@@ -238,7 +238,7 @@ IM-sub-range merge it cannot perform. `merge` must read `getPrecursors()[0].getD
 must **decline the merge** when IM is unavailable rather than skipping the check. Fix the
 `consolidate` block the same way in the same commit.
 
-**Same charge is mandatory.** src:955–957 records diaTracer retaining multiple charges when
+**Same charge is mandatory.** src:955–957 records the reference implementation retaining multiple charges when
 ambiguous; merging deletes that hypothesis. `inferPrecursors_` marks partners `used[]` and emits one
 precursor per seed trace, so two charge-disagreeing emissions come from genuinely different seed
 traces — different inferences, not one feature. The ~6.8% charge-discordant within-cycle pairs stay
@@ -363,7 +363,7 @@ Per-precursor quantities:
 
 - **The denominator is fixed externally.** The precursor set comes from the DIA-NN reference, not
   from either arm's own identifications. Merge cannot change the population it is scored over. This
-  is the correction README already applied at run level after the spurious S30 "+4.1%"; the
+  is the correction README already applied at run level after the spurious dataset D "+4.1%"; the
   instrument has not received it.
 - **Equal-depth truncation removes the density advantage.** Merge's most obvious way to look good is
   emitting more peaks; TOP-20 forbids it.
@@ -517,6 +517,6 @@ Stated explicitly so these are not quietly assumed:
   is exactly why it must not be quoted before it is measured.
 - **The false-capture population's ΔIM.** Never measured. `merge:delta_im = 0.01` spends 52% of its
   budget on the target population's control (0.0052) with no measurement of what else it admits.
-- **Whether the across-cycle result generalises.** One sample (S23), one arm (shipped defaults,
+- **Whether the across-cycle result generalises.** One sample (dataset B), one arm (shipped defaults,
   `ms1_split_valleys` on), no replicate. The far control is n = 210. Conclusions §2.1, §2.2 and §2.4
   do not depend on that arm; §2.3 does.

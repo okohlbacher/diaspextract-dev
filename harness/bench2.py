@@ -40,7 +40,7 @@ Tiers, used honestly throughout:
 Commands
 --------
     bench2.py plan-check --plan P            # validate only; no side effects, no dirs created
-    bench2.py pin        --sample S08        # write pinned content digests into samples.yaml
+    bench2.py pin        --sample dataset A        # write pinned content digests into samples.yaml
     bench2.py run        --plan P            # execute; prints the runset id
     bench2.py verify     --runset R [--deep] # rehash sealed artifacts; writes nothing
     bench2.py show       --runset R
@@ -405,9 +405,9 @@ def hash_and_validate_tsv(path, required_columns):
 def raw_identity(raw_dir):
     """G-B13 -- identity of a Bruker .d from its CONTENT, plus inode-level stat pinning.
 
-    v1 asserted that the string "S08-A-3" appeared in the path and in the first 400 KB of the
+    v1 asserted that the string "dataset A-A-3" appeared in the path and in the first 400 KB of the
     produced mzML. A symlink retargeted between preflight and execution defeats both: the
-    converter reads S30 and writes S08's path into the header. That check is DELETED here rather
+    converter reads dataset D and writes dataset A's path into the header. That check is DELETED here rather
     than patched, because its existence produced false assurance.
 
     What this returns instead:
@@ -471,9 +471,9 @@ def _tdf_path(raw_real):
 def acquisition_identity(raw_real):
     """G-B18 -- per-sample acquisition method, read from that sample's own analysis.tdf.
 
-    v1 hardcoded WINDOWS_S23 and applied it to S08 and S30. Nothing recorded that those samples
+    v1 hardcoded WINDOWS_S23 and applied it to dataset A and dataset D. Nothing recorded that those samples
     shared an acquisition method; nothing read DiaFrameMsMsWindows from their raw data. Spectra
-    outside S23's tiles were silently skipped, which shows up as depressed recall rather than as
+    outside dataset B's tiles were silently skipped, which shows up as depressed recall rather than as
     an error. WINDOWS_S23 is deleted. There is no default table.
     """
     tdf = _tdf_path(raw_real)
@@ -554,9 +554,9 @@ def acquisition_identity(raw_real):
 def verify_raw_unchanged(raw_dir, pinned):
     """G-B13 (post-run half) -- the .d must be the same bytes AFTER the 6 h run as before.
 
-    The pre-run digest alone is a TOCTOU hole: the recipe pins S08's digest at construction and
+    The pre-run digest alone is a TOCTOU hole: the recipe pins dataset A's digest at construction and
     the converter opens the .d minutes later and reads it for hours. Retarget the symlink in that
-    window and the recipe says S08 while the tool read S30.
+    window and the recipe says dataset A while the tool read dataset D.
 
     This does NOT prevent the retarget. It DETECTS it, at seal time, and the attempt aborts -- so
     nothing is sealed and nothing can be published. A retarget-and-retarget-back inside the window
@@ -633,9 +633,9 @@ def sample_entry(reg, sample):
 def require_pinned(reg, sample):
     """G-B05 -- a sample must carry pinned content digests before it can be benchmarked.
 
-    Pinning converts every later use from an existence PRINT (v1: "[preflight] S08.diann_report:
+    Pinning converts every later use from an existence PRINT (v1: "[preflight] dataset A.diann_report:
     OK") into a digest COMPARISON. Note the honest limit: pinning makes a reference STABLE, not
-    CORRECT. If S08's diann_report already points at an S30 parquet, pinning freezes that error.
+    CORRECT. If dataset A's diann_report already points at an dataset D parquet, pinning freezes that error.
     The semantic check that actually catches it lives in collate2 (G-C09: the DIA-NN Run column
     must name this sample's raw file).
     """
@@ -800,7 +800,7 @@ def load_plan(path, reg):
         if kind == "reference_mzml":
             if not a.get("source"):
                 die("G-B01", "arm %r is kind reference_mzml and must declare `source` "
-                             "(e.g. references.diatracer_mzml)" % name)
+                             "(e.g. references.reference_mzml)" % name)
             if params:
                 die("G-B01", "arm %r is an external mzML; it has no converter and therefore no "
                              "parameters" % name)
@@ -1455,10 +1455,10 @@ def do_convert(bench, plan, reg, sample, arm, tool_pre, refs, entry, pinned):
 
 
 def do_adopt(bench, plan, reg, sample, arm, refs, entry, pinned):
-    """An external mzML (diaTracer) becomes a first-class arm.
+    """An external mzML (the reference implementation) becomes a first-class arm.
 
-    v1 registered diatracer_mzml, printed its existence in preflight, and never read it -- so
-    every published SpeXtract-vs-diaTracer ratio entered through an unguarded external procedure.
+    v1 registered reference_mzml, printed its existence in preflight, and never read it -- so
+    every published SpeXtract-vs-the reference implementation ratio entered through an unguarded external procedure.
     An adopt stage gives the external file a sealed identity so the SAME search, scoring and
     truth stages run against it.
     """
@@ -2133,10 +2133,10 @@ def _selftest_env(tmp):
     tmp = Path(tmp)
     raws = tmp / "raw"
     raws.mkdir()
-    d08 = st_make_fake_d(raws / "S08.d", mz_centers=(500.0, 600.0), serial="SER-08",
-                         sample_name="S08")
-    d30 = st_make_fake_d(raws / "S30.d", mz_centers=(500.0, 600.0), serial="SER-30",
-                         sample_name="S30")
+    d08 = st_make_fake_d(raws / "dataset A.d", mz_centers=(500.0, 600.0), serial="SER-08",
+                         sample_name="dataset A")
+    d30 = st_make_fake_d(raws / "dataset D.d", mz_centers=(500.0, 600.0), serial="SER-30",
+                         sample_name="dataset D")
     tool = st_write_faketool(tmp / "faketool.py")
     sage = st_write_fakesage(tmp / "fakesage.py")
     fasta = tmp / "human.fasta"
@@ -2144,7 +2144,7 @@ def _selftest_env(tmp):
     sage_cfg = tmp / "sage.json"
     sage_cfg.write_text(json.dumps({"database": {"fasta": str(fasta)}}))
     refs = {}
-    for name, d in (("S08", d08), ("S30", d30)):
+    for name, d in (("dataset A", d08), ("dataset D", d30)):
         rep = tmp / ("%s_report.parquet" % name)
         rep.write_bytes(b"PAR1placeholder")
         lib = tmp / ("%s_lib.parquet" % name)
@@ -2161,11 +2161,11 @@ def _selftest_env(tmp):
             "fasta": {"path": str(fasta), "sha256": sha256_file(fasta)},
         },
         "samples": {
-            "S08": {"raw": str(d08), "references": refs["S08"]},
-            "S30": {"raw": str(d30), "references": refs["S30"]},
+            "dataset A": {"raw": str(d08), "references": refs["dataset A"]},
+            "dataset D": {"raw": str(d30), "references": refs["dataset D"]},
         },
     }
-    for name, d in (("S08", d08), ("S30", d30)):
+    for name, d in (("dataset A", d08), ("dataset D", d30)):
         ident = raw_identity(d)
         reg["samples"][name]["pinned"] = {
             "raw_content_id": ident["content_id"],
@@ -2176,7 +2176,7 @@ def _selftest_env(tmp):
     return {"tmp": tmp, "reg": reg, "tool": tool, "sage": sage, "d08": d08, "d30": d30}
 
 
-def _plan(env, arms, samples=("S08",), sweeps=None, extra=None):
+def _plan(env, arms, samples=("dataset A",), sweeps=None, extra=None):
     p = {"schema": "spextract.plan/2", "title": "selftest", "binary": str(env["tool"]),
          "threads": 2, "tcmalloc": False, "samples": list(samples), "arms": arms}
     if sweeps:
@@ -2218,7 +2218,7 @@ def selftest_bench(env):
 
     # ---- G-B13 post-run stability: the TOCTOU half ---------------------------------------
     # Was UNVERIFIED (mutation: sites 567/581 survived). These are the sites the critical gate
-    # names, because they cover the retarget-during-the-run hole: the recipe pins S08 at
+    # names, because they cover the retarget-during-the-run hole: the recipe pins dataset A at
     # construction and the converter reads the .d for HOURS afterwards. Both call the PRODUCTION
     # verify_raw_unchanged() and are message-pinned, so neither can be satisfied by a sibling.
     def _mk_d(path, iso_mz):
@@ -2290,7 +2290,7 @@ def selftest_bench(env):
                     match="acquisition identity changed")
 
     # ---- G-B05 cross-sample: the PRODUCTION comparison, not a reimplementation -------------
-    # FAILURE 1 -- a published ratio divided an S30 result by S08's diaTracer reference; the
+    # FAILURE 1 -- a published ratio divided an dataset D result by dataset A's the reference implementation reference; the
     # class of error occurred 3x. The existing case for this guard copies the comparison into
     # its own body and calls die() itself, so disabling the production check at :1384 left the
     # suite fully green (mutation-verified). These call do_convert / do_adopt directly. The
@@ -2308,27 +2308,27 @@ def selftest_bench(env):
     def _bad_content():
         bad = json.loads(json.dumps(_pin_ok))
         bad["raw_content_id"] = "0" * 64
-        do_convert(None, None, None, "S08", None, None, None, _entry, bad)
+        do_convert(None, None, None, "dataset A", None, None, None, _entry, bad)
     st.expect_abort("G-B05", "raw content digest mismatch reaches the PRODUCTION check",
                     _bad_content, match="raw content digest")
 
     def _bad_acq():
         bad = json.loads(json.dumps(_pin_ok))
         bad["acquisition_id"] = "0" * 64
-        do_convert(None, None, None, "S08", None, None, None, _entry, bad)
+        do_convert(None, None, None, "dataset A", None, None, None, _entry, bad)
     st.expect_abort("G-B05", "acquisition identity mismatch reaches the PRODUCTION check",
                     _bad_acq, match="acquisition identity")
 
-    # :1478 -- the adopt path (an external mzML such as diaTracer's) is scored against THIS
+    # :1478 -- the adopt path (an external mzML such as the reference implementation's) is scored against THIS
     # sample's acquisition geometry, so it needs the same pin check.
     def _bad_adopt():
         bad = json.loads(json.dumps(_pin_ok))
         bad["acquisition_id"] = "0" * 64
         # arm is a dict whose "source" names the reference; the acquisition-pin check runs
         # after that resolution, so both must be well-formed to reach it
-        do_adopt(None, None, None, "S08",
-                 {"name": "dt", "source": "references.diatracer_mzml"},
-                 {"diatracer_mzml": {"path": "/nonexistent"}}, _entry, bad)
+        do_adopt(None, None, None, "dataset A",
+                 {"name": "dt", "source": "references.reference_mzml"},
+                 {"reference_mzml": {"path": "/nonexistent"}}, _entry, bad)
     st.expect_abort("G-B05", "adopt path checks acquisition pin before using an external mzML",
                     _bad_adopt, match="acquisition identity drifted")
 
@@ -2340,7 +2340,7 @@ def selftest_bench(env):
                                "params": {"trace:ms1_split_valleys": 7.0}}]), reg))
     st.expect_abort("G-B01", "wrong plan schema version", lambda: load_plan(
         _write_plan_raw(env, {"schema": "spextract.plan/1", "title": "x",
-                              "binary": str(env["tool"]), "samples": ["S08"],
+                              "binary": str(env["tool"]), "samples": ["dataset A"],
                               "arms": [BASE_ARM]}), reg))
 
     # ---- G-B02 names -----------------------------------------------------------------------
@@ -2374,14 +2374,14 @@ def selftest_bench(env):
     # ---- G-B05 pinning / raw identity ------------------------------------------------------
     def unpinned():
         r = json.loads(json.dumps(reg))
-        r["samples"]["S08"].pop("pinned")
-        require_pinned(r, "S08")
+        r["samples"]["dataset A"].pop("pinned")
+        require_pinned(r, "dataset A")
     st.expect_abort("G-B05", "unpinned sample refused", unpinned)
 
     def wrong_pin():
         r = json.loads(json.dumps(reg))
-        r["samples"]["S08"]["pinned"]["raw_content_id"] = "0" * 64
-        entry, pinned = require_pinned(r, "S08")
+        r["samples"]["dataset A"]["pinned"]["raw_content_id"] = "0" * 64
+        entry, pinned = require_pinned(r, "dataset A")
         ident = raw_identity(entry["raw"])
         if ident["content_id"] != pinned["raw_content_id"]:
             die("G-B05", "raw content digest mismatch (selftest path)")
@@ -2392,20 +2392,20 @@ def selftest_bench(env):
     # ---- G-B06 references / toolchain ------------------------------------------------------
     def bad_ref():
         r = json.loads(json.dumps(reg))
-        r["samples"]["S08"]["references"]["diann_report"]["sha256"] = "1" * 64
-        verify_pinned_references(r, "S08")
+        r["samples"]["dataset A"]["references"]["diann_report"]["sha256"] = "1" * 64
+        verify_pinned_references(r, "dataset A")
     st.expect_abort("G-B06", "reference digest changed since pinning", bad_ref)
 
     def missing_ref():
         r = json.loads(json.dumps(reg))
-        r["samples"]["S08"]["references"]["diann_report"]["path"] = str(tmp / "nope.parquet")
-        verify_pinned_references(r, "S08")
+        r["samples"]["dataset A"]["references"]["diann_report"]["path"] = str(tmp / "nope.parquet")
+        verify_pinned_references(r, "dataset A")
     st.expect_abort("G-B06", "reference file absent aborts (not 'MISSING' print)", missing_ref)
 
     def bare_path_ref():
         r = json.loads(json.dumps(reg))
-        r["samples"]["S08"]["references"]["diann_lib"] = "/some/path.parquet"
-        verify_pinned_references(r, "S08")
+        r["samples"]["dataset A"]["references"]["diann_lib"] = "/some/path.parquet"
+        verify_pinned_references(r, "dataset A")
     st.expect_abort("G-B06", "bare-path reference (no digest) refused", bare_path_ref)
 
     def wrong_fasta():
@@ -2524,37 +2524,37 @@ def selftest_bench(env):
 
     # ---- G-B14 no-op detection (output-digest equality) -------------------------------------
     st.expect_abort("G-B14", "arm byte-identical to its baseline", lambda: detect_noop_arms([
-        {"sample": "S08", "arm": "base", "baseline_arm": None, "produce_sha256": "aa",
+        {"sample": "dataset A", "arm": "base", "baseline_arm": None, "produce_sha256": "aa",
          "ini_sha256": "i1"},
-        {"sample": "S08", "arm": "split", "baseline_arm": "base", "produce_sha256": "aa",
+        {"sample": "dataset A", "arm": "split", "baseline_arm": "base", "produce_sha256": "aa",
          "ini_sha256": "i2"}]))
     st.expect_abort("G-B14", "arm resolving to its baseline's config", lambda: detect_noop_arms([
-        {"sample": "S08", "arm": "base", "baseline_arm": None, "produce_sha256": "aa",
+        {"sample": "dataset A", "arm": "base", "baseline_arm": None, "produce_sha256": "aa",
          "ini_sha256": "i1"},
-        {"sample": "S08", "arm": "split", "baseline_arm": "base", "produce_sha256": "bb",
+        {"sample": "dataset A", "arm": "split", "baseline_arm": "base", "produce_sha256": "bb",
          "ini_sha256": "i1"}]))
     st.expect_ok("G-B14", "genuinely different arm accepted", lambda: detect_noop_arms([
-        {"sample": "S08", "arm": "base", "baseline_arm": None, "produce_sha256": "aa",
+        {"sample": "dataset A", "arm": "base", "baseline_arm": None, "produce_sha256": "aa",
          "ini_sha256": "i1"},
-        {"sample": "S08", "arm": "split", "baseline_arm": "base", "produce_sha256": "bb",
+        {"sample": "dataset A", "arm": "split", "baseline_arm": "base", "produce_sha256": "bb",
          "ini_sha256": "i2"}]))
 
     # ---- G-B17 plan/runset set equality ----------------------------------------------------
-    def rs(cells, samples=("S08",), arms=("base", "split")):
+    def rs(cells, samples=("dataset A",), arms=("base", "split")):
         return {"plan_samples": list(samples),
                 "plan_arms": [{"name": a} for a in arms], "cells": cells}
     st.expect_abort("G-B17", "missing cell", lambda: assert_cells_match_plan(
-        rs([{"sample": "S08", "arm": "base"}])))
+        rs([{"sample": "dataset A", "arm": "base"}])))
     st.expect_abort("G-B17", "extra undeclared cell", lambda: assert_cells_match_plan(
-        rs([{"sample": "S08", "arm": "base"}, {"sample": "S08", "arm": "split"},
-            {"sample": "S30", "arm": "base"}])))
+        rs([{"sample": "dataset A", "arm": "base"}, {"sample": "dataset A", "arm": "split"},
+            {"sample": "dataset D", "arm": "base"}])))
     st.expect_abort("G-B17", "two completed runs for one plan cell",
                     lambda: assert_cells_match_plan(
-                        rs([{"sample": "S08", "arm": "base"},
-                            {"sample": "S08", "arm": "base"},
-                            {"sample": "S08", "arm": "split"}])))
+                        rs([{"sample": "dataset A", "arm": "base"},
+                            {"sample": "dataset A", "arm": "base"},
+                            {"sample": "dataset A", "arm": "split"}])))
     st.expect_ok("G-B17", "exact match accepted", lambda: assert_cells_match_plan(
-        rs([{"sample": "S08", "arm": "base"}, {"sample": "S08", "arm": "split"}])))
+        rs([{"sample": "dataset A", "arm": "base"}, {"sample": "dataset A", "arm": "split"}])))
 
     # ---- G-B12 seal integrity ---------------------------------------------------------------
     def tampered_seal():
@@ -2584,7 +2584,7 @@ def selftest_bench(env):
     # A different acquisition window table MUST produce a different method_id, or
     # WINDOWS_S23-applied-to-every-sample could recur without anything noticing.
     other_d = st_make_fake_d(tmp / "othermethod.d", mz_centers=(400.0, 700.0),
-                             serial="SER-08", sample_name="S08")
+                             serial="SER-08", sample_name="dataset A")
     mid_a = acquisition_identity(env["d08"])["method_id"]
     mid_b = acquisition_identity(other_d)["method_id"]
     st.results.append(("PASS" if mid_a != mid_b else "FAIL", "G-B18",
@@ -2621,11 +2621,11 @@ def _selftest_end_to_end(st, env):
     plan_path = _plan(env, [BASE_ARM, TREAT_ARM])
     plan = load_plan(plan_path, reg)
     tool_pre = tool_identity(plan["binary"])
-    entry, pinned = require_pinned(reg, "S08")
-    refs = verify_pinned_references(reg, "S08")
+    entry, pinned = require_pinned(reg, "dataset A")
+    refs = verify_pinned_references(reg, "dataset A")
 
     os.environ["FAKETOOL_MODE"] = "ok"
-    stage_id, seal = do_convert(bench, plan, reg, "S08", BASE_ARM, tool_pre, refs, entry, pinned)
+    stage_id, seal = do_convert(bench, plan, reg, "dataset A", BASE_ARM, tool_pre, refs, entry, pinned)
     good_dir = bench.stage_dir("convert", stage_id)
     good_digest = sha256_file(good_dir / "work" / "pseudo.mzML")
     st.results.append(("PASS" if good_dir.is_dir() else "FAIL", "G-B12",
@@ -2636,7 +2636,7 @@ def _selftest_end_to_end(st, env):
     def failing_rerun():
         os.environ["FAKETOOL_MODE"] = "fail"
         try:
-            do_convert(bench, plan, reg, "S08", BASE_ARM, tool_pre, refs, entry, pinned)
+            do_convert(bench, plan, reg, "dataset A", BASE_ARM, tool_pre, refs, entry, pinned)
         finally:
             os.environ["FAKETOOL_MODE"] = "ok"
     st.expect_abort("G-B10", "nonzero converter exit aborts the attempt", failing_rerun)
@@ -2655,7 +2655,7 @@ def _selftest_end_to_end(st, env):
     def truncated_output():
         os.environ["FAKETOOL_MODE"] = "truncate"
         try:
-            do_convert(bench, plan, reg, "S08", TREAT_ARM, tool_pre, refs, entry, pinned)
+            do_convert(bench, plan, reg, "dataset A", TREAT_ARM, tool_pre, refs, entry, pinned)
         finally:
             os.environ["FAKETOOL_MODE"] = "ok"
     st.expect_abort("G-B11", "exit 0 with a truncated mzML still aborts", truncated_output)
@@ -2663,7 +2663,7 @@ def _selftest_end_to_end(st, env):
     def miscounted_output():
         os.environ["FAKETOOL_MODE"] = "partial"
         try:
-            do_convert(bench, plan, reg, "S08", TREAT_ARM, tool_pre, refs, entry, pinned)
+            do_convert(bench, plan, reg, "dataset A", TREAT_ARM, tool_pre, refs, entry, pinned)
         finally:
             os.environ["FAKETOOL_MODE"] = "ok"
     st.expect_abort("G-B11", "exit 0 with a short spectrumList still aborts", miscounted_output)
@@ -2671,7 +2671,7 @@ def _selftest_end_to_end(st, env):
     def binary_mutated():
         os.environ["FAKETOOL_MODE"] = "mutate_self"
         try:
-            do_convert(bench, plan, reg, "S08", TREAT_ARM, tool_pre, refs, entry, pinned)
+            do_convert(bench, plan, reg, "dataset A", TREAT_ARM, tool_pre, refs, entry, pinned)
         finally:
             os.environ["FAKETOOL_MODE"] = "ok"
             st_write_faketool(env["tool"])
@@ -2680,25 +2680,25 @@ def _selftest_end_to_end(st, env):
     def raw_retargeted():
         os.environ["FAKETOOL_MODE"] = "retarget"
         try:
-            do_convert(bench, plan, reg, "S08", TREAT_ARM, tool_pre, refs, entry, pinned)
+            do_convert(bench, plan, reg, "dataset A", TREAT_ARM, tool_pre, refs, entry, pinned)
         finally:
             os.environ["FAKETOOL_MODE"] = "ok"
             st_make_fake_d(env["d08"], mz_centers=(500.0, 600.0), serial="SER-08",
-                           sample_name="S08")
+                           sample_name="dataset A")
     st.expect_abort("G-B13", "raw .d altered during the run (symlink retarget class)",
                     raw_retargeted)
 
-    # Re-pin S08 after the retarget test rewrote its tdf.
+    # Re-pin dataset A after the retarget test rewrote its tdf.
     ident = raw_identity(env["d08"])
-    reg["samples"]["S08"]["pinned"].update({
+    reg["samples"]["dataset A"]["pinned"].update({
         "raw_content_id": ident["content_id"], "acquisition_id": ident["acquisition_id"],
         "method_id": ident["method_id"]})
-    entry, pinned = require_pinned(reg, "S08")
+    entry, pinned = require_pinned(reg, "dataset A")
 
     def sage_fails():
         os.environ["FAKESAGE_MODE"] = "fail"
         try:
-            do_search(bench, reg, "S08", BASE_ARM, "convert", stage_id,
+            do_search(bench, reg, "dataset A", BASE_ARM, "convert", stage_id,
                       verify_search_toolchain(reg))
         finally:
             os.environ["FAKESAGE_MODE"] = "ok"
@@ -2707,7 +2707,7 @@ def _selftest_end_to_end(st, env):
     def sage_drops_column():
         os.environ["FAKESAGE_MODE"] = "drop_peptide_q"
         try:
-            do_search(bench, reg, "S08", BASE_ARM, "convert", stage_id,
+            do_search(bench, reg, "dataset A", BASE_ARM, "convert", stage_id,
                       verify_search_toolchain(reg))
         finally:
             os.environ["FAKESAGE_MODE"] = "ok"
@@ -2715,7 +2715,7 @@ def _selftest_end_to_end(st, env):
                     sage_drops_column)
 
     st.expect_ok("G-B10", "healthy search seals a stage", lambda: do_search(
-        bench, reg, "S08", BASE_ARM, "convert", stage_id, verify_search_toolchain(reg)))
+        bench, reg, "dataset A", BASE_ARM, "convert", stage_id, verify_search_toolchain(reg)))
 
     st.expect_abort("G-B15", "unknown stage id is not reachable",
                     lambda: bench.load_stage("convert", "convert-deadbeef-nope"))

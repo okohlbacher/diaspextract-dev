@@ -1,5 +1,7 @@
+# EXAMPLE driver. Copy without .example and fill in real paths.
+# The working copy is untracked: it names acquisitions and specimens.
 #!/usr/bin/env bash
-# Joint benchmark: 3 samples x {diaTracer, SpeXtract} x {Sage, MSFragger}
+# Joint benchmark: 3 samples x {the reference implementation, SpeXtract} x {Sage, MSFragger}
 # Metrics: FDR-corrected PSMs and FDR-corrected unique peptides, both at 1%, both computed by
 # ONE procedure in joint_bench.py so the engine is the only thing that varies.
 #
@@ -7,11 +9,11 @@
 # OFF), so they see byte-identical search spaces. Search parameters are matched to
 # sage_closed.json -- the config behind every number in the README.
 set -u
-B=/scratch/kohlbach/bench
+B=/path/to/scratch/bench
 cd $B
 SAGE=$B/sage-v0.14.7-x86_64-unknown-linux-gnu/sage
 MSF=/scratch/agxt-liver/work/fp-tools/MSFragger-4.4.1.jar
-DTP=/scratch/agxt-liver/work/mzml-diatracer-patched
+DTP=/scratch/agxt-liver/work/mzml-reference-patched
 L=$B/joint.log
 J=$B/joint_results.json
 echo "=== joint benchmark $(date) ===" > $L
@@ -94,7 +96,7 @@ run_cell () {
     local t1=$SECONDS
     ( cd $M && java -Xmx220G -jar $MSF $B/msfragger.params "$MZ" > $M/engine.log 2>&1 )
     echo "[$TOOL/$SAMPLE] msfragger $((SECONDS-t1))s" >> $L
-    # MSFragger writes next to the INPUT unless told otherwise -- same trap diaTracer set
+    # MSFragger writes next to the INPUT unless told otherwise -- same trap the reference implementation set
     for f in "$(dirname "$MZ")/$(basename "${MZ%.*}").tsv" "$M"/*.tsv; do
       [ -s "$f" ] && TSV="$f" && break
     done
@@ -106,12 +108,12 @@ run_cell () {
 }
 
 mkdir -p $B/joint
-run_cell diatracer S08 "$DTP/FKL4341-S08-A-3_K30454-19-3_QKL29021A9_Slot1-12_1_1305_diatracer.mzML"
-run_cell diatracer S23 "$DTP/FKL4341-S23-A-8_K253-09-2_QKL29026AF_Slot1-17_1_1320_diatracer.mzML"
-run_cell diatracer S30 "$DTP/FKL4341-S30-A-10_K25423-16-1_QKL29028AV_Slot1-19_1_1326_diatracer.mzML"
-run_cell spextract S08 "$B/out/m_S08_treat/pseudo.mzML"
-run_cell spextract S23 "$B/out/open_split_count/pseudo.mzML"
-run_cell spextract S30 "$B/out/m_S30_treat/pseudo.mzML"
+run_cell reference dataset_A "$DTP/<acquisition-A>"
+run_cell reference dataset_B "$DTP/<acquisition-B>"
+run_cell reference dataset_D "$DTP/<acquisition-D>"
+run_cell spextract dataset_A "$B/out/m_S08_treat/pseudo.mzML"
+run_cell spextract dataset_B "$B/out/open_split_count/pseudo.mzML"
+run_cell spextract dataset_D "$B/out/m_S30_treat/pseudo.mzML"
 
 echo "--- TABLE ---" >> $L
 python3 $B/joint_bench.py collate $J >> $L 2>&1

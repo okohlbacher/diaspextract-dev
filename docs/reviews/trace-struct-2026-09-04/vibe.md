@@ -652,7 +652,7 @@ The **worst case padding ratio** is:
 
 ## **7. The falsifier**
 
-**CLAIM (line 111-115):** "the spectrum digest of the integer path on S30 must be IDENTICAL before and after... this is pure representation; any difference is a bug"
+**CLAIM (line 111-115):** "the spectrum digest of the integer path on dataset D must be IDENTICAL before and after... this is pure representation; any difference is a bug"
 
 **FINDING: THE DIGEST CANNOT BE IDENTICAL BY CONSTRUCTION.**
 
@@ -733,7 +733,7 @@ for (size_t k = 0; k < f.np(); ++k)
 **The redesign document's falsifier is TOO STRICT.** It cannot be achieved.
 
 **Recommended gate:**
-- Run both versions on S30
+- Run both versions on dataset D
 - Compare peptide identifications (Sage + MSFragger)
 - Require **identical peptide sets** (or > 99.9% overlap)
 - Require **memory reduction** from 35.6 GB to < 12 GB

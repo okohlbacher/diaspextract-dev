@@ -1,6 +1,6 @@
-# MS1 funnel: where precursors are actually lost (2026-07-21, S08)
+# MS1 funnel: where precursors are actually lost (2026-07-21, dataset A)
 
-Anchored on the DIA-NN S08 reference (43,499 precursors at q<=1%). Our tool dumped its
+Anchored on the DIA-NN dataset A reference (43,499 precursors at q<=1%). Our tool dumped its
 MS1 traces and inferred precursors via `diag:dump_ms1_tsv` (2,521,685 traces →
 1,206,174 hypotheses); each DIA-NN precursor was then attributed to the stage where it
 dies. A precursor counts as "detected" if a trace sits at the mono **or the +1/+2
@@ -66,17 +66,17 @@ at MS1 is bounded above by 2.2%. Stop tuning them.
 
 Charge assignment (15.9%) and monoisotope identification (10.5%). Corroborated
 independently by the truth-set charge measurement: **47.8% charge agreement vs
-diaTracer's 82.6%**, dominant confusion `4→2` (15,734 cases). At m/z 500 a z4→z2 error
+the reference implementation's 82.6%**, dominant confusion `4→2` (15,734 cases). At m/z 500 a z4→z2 error
 fabricates ΔM = (2−4)(500 − 1.0073) ≈ **−998 Da**, which is fatal for open search.
 
 ## Mechanistically consistent with the way-2 result
 
 way-2 **both** (`ms1_split_valleys` + `ms2_split_valleys` = 7.0) gave **+54.3% peptides**
-at peptide-level FDR (5,131 → 7,917 on S23). It is the arm that splits **MS1** traces.
+at peptide-level FDR (5,131 → 7,917 on dataset B). It is the arm that splits **MS1** traces.
 
 Merged MS1 traces → merged precursors → wrong monoisotope and wrong charge — exactly the
 26.5% this funnel localises. Two independent measurements identify the same defect, and
-the fix moves the number the funnel says is broken. See [[S08-results]].
+the fix moves the number the funnel says is broken. See [[dataset A-results]].
 
 ## Caveats
 

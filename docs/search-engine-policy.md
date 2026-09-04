@@ -21,7 +21,7 @@ Sage never ordered two configurations differently from MSFragger.
   ideas cheaply.
 * **Every deep adversarial review of overall status → run BOTH**, and refresh the recorded
   baseline from that pair — the whole status table, not just the changed arm.
-* **Never quote a Sage-only ratio as a headline.** MSFragger puts SpeXtract/diaTracer **6.4
+* **Never quote a Sage-only ratio as a headline.** MSFragger puts SpeXtract/the reference implementation **6.4
   points lower** on all three samples. Sage systematically flatters us.
 
 ## Why the rank agreement is not sufficient on its own

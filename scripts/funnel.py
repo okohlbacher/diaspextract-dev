@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Attribute precursor loss to a stage.
 
-Measured recall is 74.3% vs diaTracer's 84.4%, but that single number cannot say
+Measured recall is 74.3% vs the reference implementation's 84.4%, but that single number cannot say
 WHERE a precursor dies. Three stages, each independently fixable by different code:
 
   A  MS1 TRACE      is there any MS1 trace at the precursor's (m/z, RT, IM)?

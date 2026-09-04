@@ -7,15 +7,15 @@
 **VERDICT: NO. The rule was BENT, not met. The default was not even changed.**
 
 **The honest evidence:**
-- **Sage on S30:** integer **LOSES 1.3%** (12,642 → 12,475), **NOT "about 1% in either direction"** — it is a clear regression on the primary engine
-- **MSFragger on S30:** +2.1% (12,073 → 12,322) — improvement, but **not sufficient to offset Sage loss under the both-engines rule**
+- **Sage on dataset D:** integer **LOSES 1.3%** (12,642 → 12,475), **NOT "about 1% in either direction"** — it is a clear regression on the primary engine
+- **MSFragger on dataset D:** +2.1% (12,073 → 12,322) — improvement, but **not sufficient to offset Sage loss under the both-engines rule**
 - **8% symmetric churn** on ~12.5k peptides is **material**, not "about 1%"
-- **S08 has NOT been re-run since the span representation landed** — the only S08 integer data is from commit `4a22ad7` (pre-span), which showed +0.3% Sage, 140 vs 230 GB. The span refactor changed semantics; that number is stale.
+- **dataset A has NOT been re-run since the span representation landed** — the only dataset A integer data is from commit `4a22ad7` (pre-span), which showed +0.3% Sage, 140 vs 230 GB. The span refactor changed semantics; that number is stale.
 
 **Project rule violation:**
 - Rule: both engines + entrapment + **a second file**
-- Met: Sage and MSFragger on S30 only
-- **NOT met:** S08 not re-run post-span; entrapment numbers not provided for integer arm
+- Met: Sage and MSFragger on dataset D only
+- **NOT met:** dataset A not re-run post-span; entrapment numbers not provided for integer arm
 
 **The default was NOT changed:**
 - `src/DIAPseudoSpectra.cpp:1485`: `registerStringOption_("trace:detector", "<mode>", "openms", ...)` — **default is still "openms"**
@@ -27,7 +27,7 @@
 - Users with `.mzML` files → **openms detector** (fallback)
 - **Same command, different output based on input type.** The warning at `src/DIAPseudoSpectra.cpp:3137-3140` exists but does not prevent silent algorithmic divergence.
 
-**Conclusion:** The default change is **overstated** (never implemented), the evidence is **incomplete** (S08 missing), and the rule is **bent**.
+**Conclusion:** The default change is **overstated** (never implemented), the evidence is **incomplete** (dataset A missing), and the rule is **bent**.
 
 ---
 
@@ -41,7 +41,7 @@
 |---|---|---|
 | Prep compaction | **Committed but NOT verified** | Commit `7d6e56f` ("built and queued but NOT yet verified"); `INTEGER-MEMORY-PLAN.md:59-70` |
 | Ledger correctness | **Multiple known defects** | `INTEGER-MEMORY-PLAN.md:62-63,92-94,127` |
-| S08 post-span results | **Not measured** | User's table only shows pre-span S08 (integer 11,121 vs openms 11,084) |
+| dataset A post-span results | **Not measured** | User's table only shows pre-span dataset A (integer 11,121 vs openms 11,084) |
 
 **Ledger defects in detail:**
 - `MEM_TRACES`: cumulative over run, not peak — `src/DIAPseudoSpectra.cpp:3339` adds, never subtracts (`INTEGER-MEMORY-PLAN.md:92-93`)
@@ -150,16 +150,16 @@
   1. **Measurement error** — occupancy computed differently than CPU-seconds
   2. **Real scheduling defect** — threads are parked or stalled
 
-**From the plan, S08 numbers DO agree:**
+**From the plan, dataset A numbers DO agree:**
 - integer: 31,033 CPU-s at 66× → wall = 31,033/66 ≈ 470 s
 - OpenMS: 41,530 CPU-s at 84× → wall = 41,530/84 ≈ 494 s
 - **Work ratio:** 31,033/41,530 = 0.747
 - **Occupancy ratio:** 66/84 = 0.786
 - **Agree to within 5%** — consistent
 
-**Conclusion for S30:**
+**Conclusion for dataset D:**
 - The occupancy numbers are **INCONSISTENT** with measured CPU-seconds
-- **Residual:** ~25% unexplained (not the 5% from S08)
+- **Residual:** ~25% unexplained (not the 5% from dataset A)
 - **Likely cause:** Measurement artifact or the occupancy metric includes something other than pure CPU time (e.g., time in `R` state including spin-wait)
 
 **What to measure next:**
@@ -180,7 +180,7 @@
 | Item | Reason | Priority |
 |---|---|---|
 | **Claiming integer is the default** | The registration default is still "openms" | **CRITICAL** |
-| **Making integer the default** | Both-engines rule not met; S08 not re-run post-span | **CRITICAL** |
+| **Making integer the default** | Both-engines rule not met; dataset A not re-run post-span | **CRITICAL** |
 | **Trace scalar removal** | Ledger broken; savings estimates unreliable | **HIGH** |
 | **Allocator experiments** | Already falsified; no evidence of benefit | **HIGH** |
 | **Fine-tuning min_sample_rate** | Output impact unmeasured; changes trace validity | **MEDIUM** |
@@ -193,8 +193,8 @@
 | | | `MemGuard::release()`, fix scoping, add `memSub` | | | |
 | **1** | **Actually change the default** | Consistency | **B** | `getStringOption_("trace:detector")` returns "integer" |
 | | | Change registration default at line 1485 to "integer" | | | |
-| **2** | **Run S08 post-span** | Both-engines rule | **E** | Peptides within replicate spread on BOTH engines |
-| | | Full both-engines + entrapment gate on S08 | | | |
+| **2** | **Run dataset A post-span** | Both-engines rule | **E** | Peptides within replicate spread on BOTH engines |
+| | | Full both-engines + entrapment gate on dataset A | | | |
 | **3** | **Verify prep compaction** | ~1.2-2.4 GB | **B** | Digest must be identical |
 | | | Commit `7d6e56f` needs both-engines gate | | | |
 | **4** | **Investigate occupancy** | Clarify metrics | **B** | Thread-state sampler shows <5% unexplained |
@@ -207,7 +207,7 @@
 1. **The ledger is fundamentally broken** — without correct accounting, **no memory claim is trustworthy**
 2. **The both-engines rule is the project's safety net** — bending it undermines reproducibility
 3. **The default was never actually changed** — this is a documentation/commit message bug at minimum
-4. **S08 post-span validation is missing** — the span refactor changed semantics; old S08 numbers are stale
+4. **dataset A post-span validation is missing** — the span refactor changed semantics; old dataset A numbers are stale
 
 ### **💡 SPECIFIC QUANTITATIVE FINDINGS**
 
@@ -229,22 +229,22 @@
 **Today's work claimed progress that is partially real but significantly overstated and unverified:**
 
 1. **The integer detector is NOT the default** — the commit message is misleading; the registration was never updated.
-2. **The both-engines rule is BENT** — S08 has not been re-run since the span representation landed, and the Sage regression on S30 is not offset by MSFragger gains under the stated rule.
+2. **The both-engines rule is BENT** — dataset A has not been re-run since the span representation landed, and the Sage regression on dataset D is not offset by MSFragger gains under the stated rule.
 3. **The ledger is BROKEN** — cumulative counts, phantom lines, and incorrect scoping make memory claims unreliable.
 4. **The occupancy numbers are INCONSISTENT** — suggesting either a measurement error or a real issue that needs investigation.
 5. **The span representation itself IS correct** — the gate passed (commit `bbb2121`), but this was only pre-span vs post-span on the same detector, not cross-detector.
 
 **The honest statement of today's evidence:**
 - The span representation reduces trace memory from ~35.6 GB to ~6.9 GB and IS pure representation (digest-identical on same detector)
-- The integer detector is ~27% faster and ~36% lighter than OpenMS but **loses 1.3% Sage peptides on S30** with 8% symmetric churn
-- **The integer detector should NOT be the default** until S08 is re-run post-span and the both-engines rule is satisfied
+- The integer detector is ~27% faster and ~36% lighter than OpenMS but **loses 1.3% Sage peptides on dataset D** with 8% symmetric churn
+- **The integer detector should NOT be the default** until dataset A is re-run post-span and the both-engines rule is satisfied
 - **The default was not changed** — this must be fixed or the claim retracted
 - **The ledger must be fixed** before any memory claim is credible
 
 **Immediate actions required:**
 1. **Revert the misleading commit message** or **actually change the default** in the registration
 2. **Fix the ledger** — add `memSub`, correct scoping
-3. **Run S08 with span representation** on both detectors, both engines, entrapment
+3. **Run dataset A with span representation** on both detectors, both engines, entrapment
 4. **Do not release v0.3.0** until the packaging blockers are addressed
 
 **The day's work contains real progress (span representation, ledger corrections) but the claims around default status and completeness are not defensible.**

@@ -15,16 +15,16 @@ session id: 01a067d1-7628-7e41-b4e0-7d73e0bd20c8
 user
 You are a hostile performance reviewer. Target: the isolation-window loop of speXtract, an OpenMS
 TOPP tool (single C++ file, `src/DIAPseudoSpectra.cpp`) that converts Bruker timsTOF diaPASEF DIA
-data into pseudo-MS/MS spectra. It is 2.3x SLOWER in wall time than the closed competitor diaTracer
+data into pseudo-MS/MS spectra. It is 2.3x SLOWER in wall time than the closed competitor the reference implementation
 on the same file and machine while burning 3.1x the CPU. Explain exactly where the time, the memory
 and the parallel efficiency go, and propose mitigations ranked by expected gain per unit of risk.
 
-Everything below is MEASURED on one input (S08, a 13 GB .d, 33,553 frames), same 128-core node,
+Everything below is MEASURED on one input (dataset A, a 13 GB .d, 33,553 frames), same 128-core node,
 both tools given 100 threads, each under /usr/bin/time -v. Do not re-derive these; attack them.
 
 ## Head to head
 
-| | diaTracer | speXtract |
+| | the reference implementation | speXtract |
 |---|---|---|
 | wall | 9:46 | 22:39 |
 | peak RSS | 162.6 GB | 151.7 GB |
@@ -94,7 +94,7 @@ both tools given 100 threads, each under /usr/bin/time -v. Do not re-derive thes
    admission estimate defensible? What is the peak-driving allocation?
 3. **Why is `MS1_TRACE` only 5.0x** when it is banded 12 ways, and why is `PRECURSOR_INFER` fully
    serial at 3.7%? Are these worth fixing given their share?
-4. **Why would diaTracer be 3.1x cheaper in CPU** for the same output volume? Name the algorithmic
+4. **Why would the reference implementation be 3.1x cheaper in CPU** for the same output volume? Name the algorithmic
    differences that could account for a 3x work gap in this problem, not just implementation ones.
 5. **Mitigations, ranked by expected gain divided by risk.** For each: the specific change, the
    expected effect with a number, what could go wrong, and how to falsify it cheaply. Be explicit

@@ -10,14 +10,14 @@
 
 | file | spectra | wall | peak RSS | Sage @1% | MSFragger @1% |
 |---|---|---|---|---|---|
-| S08 | 862,716 | 8:26 | 108.7 GB | 10,909 | 11,935 |
-| S23 | 585,503 | 5:37 | 84.6 GB | 10,272 | 9,691 |
-| S26 | 723,314 | 6:27 | 90.3 GB | 12,149 | 12,516 |
-| S30 | 655,776 | 5:21 | 79.0 GB | 12,482 | 12,337 |
-| S33 | 542,533 | 5:38 | 67.9 GB | 11,217 | 10,585 |
-| S36 | 597,267 | 5:59 | 73.8 GB | 11,362 | 11,049 |
+| dataset A | 862,716 | 8:26 | 108.7 GB | 10,909 | 11,935 |
+| dataset B | 585,503 | 5:37 | 84.6 GB | 10,272 | 9,691 |
+| dataset C | 723,314 | 6:27 | 90.3 GB | 12,149 | 12,516 |
+| dataset D | 655,776 | 5:21 | 79.0 GB | 12,482 | 12,337 |
+| dataset E | 542,533 | 5:38 | 67.9 GB | 11,217 | 10,585 |
+| dataset F | 597,267 | 5:59 | 73.8 GB | 11,362 | 11,049 |
 
-S26 and S36 had never been benchmarked before. Peak RSS spans 67.9-108.7 GB across the cohort,
+dataset C and dataset F had never been benchmarked before. Peak RSS spans 67.9-108.7 GB across the cohort,
 which is where the README's stated 80-125 GB requirement comes from.
 
 ### Changed
@@ -25,7 +25,7 @@ which is where the README's stated 80-125 GB requirement comes from.
   `registerFlag_`, so they defaulted to OFF -- while every benchmark figure this project has ever
   published passed them explicitly. The shipped default configuration had therefore never been
   measured. It has now been, and it was **6.9x slower and worse on both engines**: with
-  `require_isotope_support` off, S30 emits 1,255,577 spectra in 36:25 at 6.0x window-loop occupancy
+  `require_isotope_support` off, dataset D emits 1,255,577 spectra in 36:25 at 6.0x window-loop occupancy
   for Sage 12,212 / MSFragger 12,148; on, it emits 655,776 in 5:15 at 65.7x for Sage 12,482 /
   MSFragger 12,337. (An earlier measurement in July had put the gate's cost at −0.78% peptides; the
   sign flipped somewhere behind the charge gate, the apex estimator and the integer detector.)
@@ -62,12 +62,12 @@ which is where the README's stated 80-125 GB requirement comes from.
 ### Changed
 - **`trace:detector` now defaults to `integer`.** Mass-trace detection runs on the instrument's own
   integer axes -- flight-time bin for m/z, frame index for retention time -- following OpenMS
-  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On S30 it is
-  faster and uses ~40% less memory than the OpenMS path (S30 86 vs 150 GB, S08 126 vs 222 GB; wall
+  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On dataset D it is
+  faster and uses ~40% less memory than the OpenMS path (dataset D 86 vs 150 GB, dataset A 126 vs 222 GB; wall
   6:21 vs 6:54 and 10:35 vs 11:14). The peptide effect is **mixed and not consistent in sign**: Sage
-  -1.3% on S30 but +0.2% on S08, MSFragger +2.1% on S30 but -3.5% on S08, entrapment indistinguishable
-  on both (S30 1.27% [1.03-1.52] vs 1.38% [1.14-1.63]). The detectors **agree on only ~85% of the
-  union** of identified peptides -- 1,148 OpenMS-only and 981 integer-only on S30 -- so the memory
+  -1.3% on dataset D but +0.2% on dataset A, MSFragger +2.1% on dataset D but -3.5% on dataset A, entrapment indistinguishable
+  on both (dataset D 1.27% [1.03-1.52] vs 1.38% [1.14-1.63]). The detectors **agree on only ~85% of the
+  union** of identified peptides -- 1,148 OpenMS-only and 981 integer-only on dataset D -- so the memory
   saving, not a peptide gain, is the case for the default. Without the vendor flight-time calibration
   the tool **falls back to `openms` and says so**; the emitted mzML records which detector ran as
   `spx:detector`.
@@ -77,16 +77,16 @@ Measured old-vs-new with both arms on the same host, three files concurrently on
 one binary from a shared install. **Every arm is digest-identical to its base**, so peptides are
 unchanged by construction and no search was run.
 
-| | S30 | S08 | S23 |
+| | dataset D | dataset A | dataset B |
 |---|---|---|---|
 | RSS at end of the window loop | 65.0 -> **48.3 GB** | 85.6 -> **55.1 GB** | 70.0 -> **49.8 GB** |
 | window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
 
 **These are memory changes, not speed changes.** Replicated as interleaved base/clean pairs on
-shared machines with the load recorded before each run -- three pairs on S30, two on S23, every
-digest identical. S30: wall 321.3 -> 312.7 s (−2.7%), window-loop CPU 9,229 -> 9,690 (**+5.0%**),
+shared machines with the load recorded before each run -- three pairs on dataset D, two on dataset B, every
+digest identical. dataset D: wall 321.3 -> 312.7 s (−2.7%), window-loop CPU 9,229 -> 9,690 (**+5.0%**),
 RSS at end of the window loop 63,880 -> 46,922 MB (−26.5%), process peak 81.3 -> 77.9 GB (−4.1%),
-all with non-overlapping ranges. S23: no wall-clock difference at all, same ~4% CPU cost, same
+all with non-overlapping ranges. dataset B: no wall-clock difference at all, same ~4% CPU cost, same
 ~30% memory drop. So the trade is **~27% of the window loop's memory for ~5% more CPU at roughly
 unchanged wall time** -- worth taking because concurrency is bounded by the free-RAM admission
 gate, but it is a memory change. A first pass of single pairs appeared to show 5-6% off wall on
@@ -98,7 +98,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   a time and those lines fall to 0.08 MB. `ElutionPeakDetection` is constructed and parameterised
   once per chunk rather than once per trace.
 - **The fragment RT gate rejects on 2 bytes instead of 8.** The gate discards 99.4% of what it
-  visits -- 867 billion visits, 6.9 TB of traffic per S30 run -- and was reading a `double` to do it.
+  visits -- 867 billion visits, 6.9 TB of traffic per dataset D run -- and was reading a `double` to do it.
   A parallel `uint16` bucket array does the reject; the exact test is unchanged and runs only on
   survivors, so the candidate set and its order are identical (the score-gate counters match to the
   digit between arms).
@@ -114,7 +114,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 - **A trace's profile is a span, not a point list.** A trace point has one degree of freedom -- its
   intensity -- so the three parallel 4-byte arrays (frame, intensity, flight-time bin) and their
   three allocations per trace are replaced by an entry frame and a range in a per-window arena, with
-  zero meaning a missed frame. Verified **byte-identical on both detectors** on S30. The per-window
+  zero meaning a missed frame. Verified **byte-identical on both detectors** on dataset D. The per-window
   correlation grid, which was a second copy of every profile, is gone. Window-loop memory falls from
   a 68.6 GB simultaneous peak to 27.9 GB (integer) / 32.4 GB (OpenMS); process peak RSS 105 -> 88 GB
   and 164 -> 147 GB.
@@ -129,7 +129,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 ### Performance (2026-09-03, window loop)
 - **The scoring gate reads its one field from a parallel array instead of striding the 96-byte
   trace record.** The gate rejects 99.4% of the fragments it visits; the scan was moving ~83 TB per
-  S30 run for 8 bytes of payload per visit. S30 wall 12:53 -> **7:17**, scoring stage 47% -> 4.8% of
+  dataset D run for 8 bytes of payload per visit. dataset D wall 12:53 -> **7:17**, scoring stage 47% -> 4.8% of
   window time, **peptide set identical** on Sage. Replicated three times.
 - **The window loop is one OpenMP task pool over all threads** (master/worker) instead of a rigid
   threads/bands x bands grid; window-loop occupancy 65x -> 81x on 100 threads. The number of windows
@@ -162,13 +162,13 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 ### Removed
 - The raw apex-frame fragment backfill and the pre-extraction isotope collapse, with all their
   environment gates. Both were measured on all three files and falsified in every configuration;
-  the results are in `docs/S30-BASELINE.md` and `docs/ISOTOPE-DUPLICATION-2026-09-03.md`, and the
+  the results are in `docs/dataset D-BASELINE.md` and `docs/ISOTOPE-DUPLICATION-2026-09-03.md`, and the
   implementations are in the git history. 160 lines.
 - An unused per-window band-count heuristic that a comment described as kept for reference.
 
 ### Runtime
 - **MS1 path parallelised** (loader `[SpeXtract ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and
-  `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). S30/100 threads: LOAD 445 s -> 39 s,
+  `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). dataset D/100 threads: LOAD 445 s -> 39 s,
   total 22:22 -> **15:21**; spectrum data byte-identical, Sage peptide set identical.
 - Decode-once frame-major parallel MS2 loader (`[SpeXtract par-load]`), batched parallel MS2 pick; per-phase `[perf]`
   table and `[perf-load]` decode/hand-off/pick timers; `SPEXTRACT_LOAD_ONLY=1` for load-only profiling.
@@ -193,27 +193,27 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   (`weighted_()`); they had silently bypassed `corr_power`/`im_weight`, so every earlier A/B of those flags was
   confounded. First clean apportion run: -3.9% peptides (falsified again; NNLS cut).
 - **Reported m/z of every trace is now the APEX member's m/z** (`SPEXTRACT_MZ_ESTIMATOR=apex`, the new default;
-  `mean` restores the OpenMS intensity-weighted centroid): S30 +2.6% Sage (12,537 vs 12,217) and +4.1% MSFragger
-  (11,927 vs 11,463) with the paired precursor mass error vs diaTracer +1.12 -> +0.78 ppm. Both-engines gate passed;
-  generalises: S08 +4.4% (10,789), S23 +2.7% (10,156); mean ratio vs diaTracer on Sage 105.1% -> 109.2%;
+  `mean` restores the OpenMS intensity-weighted centroid): dataset D +2.6% Sage (12,537 vs 12,217) and +4.1% MSFragger
+  (11,927 vs 11,463) with the paired precursor mass error vs the reference implementation +1.12 -> +0.78 ppm. Both-engines gate passed;
+  generalises: dataset A +4.4% (10,789), dataset B +2.7% (10,156); mean ratio vs the reference implementation on Sage 105.1% -> 109.2%;
   entrapment of the apex arm 1.28% [1.03-1.53] at nominal 1%.
 - Under test (env switches, defaults unchanged): `SPEXTRACT_PICK_MZ_MODE=seed|top3` (pick-level m/z; the -2.4 ppm
-  fragment offset vs diaTracer is upstream of the trace estimator), `SPEXTRACT_DROP_PREC_ISO=1` (drop the precursor's
+  fragment offset vs the reference implementation is upstream of the trace estimator), `SPEXTRACT_DROP_PREC_ISO=1` (drop the precursor's
   M+1..M+3 from fragment lists; 28%/25% of spectra carried them -- FALSIFIED, -2.3%, keep off), `SPEXTRACT_MZPEAK_EXACT` (now the default; `=0` accepts the two-point m/z),
   `SPEXTRACT_MIN_ISOTOPES=k` (precursor gate by envelope depth; k=3 = -39% emission, -23% wall, MSFragger -0.9%, Sage -6.4%),
   `SPEXTRACT_PRECURSOR_LIST=<tsv>` (emit only precursors matching a reference list), `SPEXTRACT_BACKFILL_RAW=N` /
   `SPEXTRACT_BACKFILL_MAXFRAGS=K` (add the N most intense untraced raw peaks of the apex frame inside the IM band:
-  N=50 lifts MSFragger to 90% of diaTracer at -2.6% Sage; faint-tail-only variant under test).
+  N=50 lifts MSFragger to 90% of the reference implementation at -2.6% Sage; faint-tail-only variant under test).
 - Output-identical: band partition by binary search (R3), early skip of fragments below `min_corr_pts` support.
 - Help texts of falsified flags (`rp_max`, `consolidate`, `merge`) now say so; `charge:iso_im_tolerance` help
   no longer contradicts its default.
 
 ### Benchmark findings
-- MSFragger gap is per-precursor CONTENT of the faint tail: same precursor population as diaTracer -> 85.0%; emission -39% -> 84.8%;
+- MSFragger gap is per-precursor CONTENT of the faint tail: same precursor population as the reference implementation -> 85.0%; emission -39% -> 84.8%;
   dt-only peptides are searched but short by ~2 of ~9 matched ions that never become a trace; raw apex-frame peak
-  backfill recovers 1,151 of them (MSFragger 85.6% -> 90.0%). FragPipe rescoring (Percolator, MSBooster off for both) gives 13,211 vs diaTracer
+  backfill recovers 1,151 of them (MSFragger 85.6% -> 90.0%). FragPipe rescoring (Percolator, MSBooster off for both) gives 13,211 vs the reference implementation
   15,947 peptides (82.8%; raw-hyperscore walk 85.6%) -- rescoring lifts both tools and leaves the ratio; ours has
-  8.6 PSMs/peptide vs 2.0. Entrapment of the shipping arm: 1.28% / 0.95% / 1.32% at nominal 1% on S30/S08/S23.
+  8.6 PSMs/peptide vs 2.0. Entrapment of the shipping arm: 1.28% / 0.95% / 1.32% at nominal 1% on dataset D/dataset A/dataset B.
 - Falsified today (kept in docs so they are not re-proposed): apportion (clean, -3.9%), precursor-isotope stripping
   (-2.3%), median/seed/top3 m/z estimators, 48 MS1 trace bands (slower, not output-identical), MALLOC_ARENA_MAX=4.
 
@@ -242,17 +242,17 @@ subtlety, is why the port underperformed. Reported upstream.
 
 Measured on three diaPASEF files, closed search: **+6-11% Sage peptide identifications**, no vendor
 library. This is an identification-YIELD effect, not better spectra (emission moved -0.2%): mass
-error is a feature of Sage's discriminant. Since diaTracer always carried vendor-calibrated masses,
+error is a feature of Sage's discriminant. Since the reference implementation always carried vendor-calibrated masses,
 every earlier head-to-head was biased against the open path -- this removes a self-inflicted
 handicap rather than establishing a lead.
 
 ### Benchmarks (3 files, both engines, identical settings; docs/BENCHMARK-MATRIX-2026-09-01.md)
-| | S30 | S08 | S23 | vs diaTracer |
+| | dataset D | dataset A | dataset B | vs the reference implementation |
 |---|---|---|---|---|
 | Sage peptides @1% FDR | 11,976 | 10,333 | 9,891 | mean 105.1%, 95% CI [93.0, 117.3] -- consistent with PARITY |
 | MSFragger peptidoforms @1% | 11,463 | 11,465 | 9,404 | mean 85.0%, 95% CI [76.7, 93.2] -- a supported DEFICIT |
-| median precursor mass error | +1.5 | +3.2 | +2.3 ppm | diaTracer -1.4 / +0.3 / -0.6 |
-SpeXtract also emits ~1.32x more spectra, so per-spectrum efficiency favours diaTracer. The MSFragger
+| median precursor mass error | +1.5 | +3.2 | +2.3 ppm | the reference implementation -1.4 / +0.3 / -0.6 |
+SpeXtract also emits ~1.32x more spectra, so per-spectrum efficiency favours the reference implementation. The MSFragger
 gap survives perfect masses and is therefore search/detection-side.
 
 ### Safety
@@ -291,6 +291,6 @@ The 0.06% noise floor in the decision rule is a SAME-BINARY figure.
 ### Known limitations
 - Verified on ONE cohort/instrument; the three golden files share ONE MzCalibration vector.
 - Public-data replication not yet done; every claim is single-cohort.
-- A +1.5..+3.2 ppm residual remains, 2-4 ppm above diaTracer on the same files. It survives every
+- A +1.5..+3.2 ppm residual remains, 2-4 ppm above the reference implementation on the same files. It survives every
   calibration path, so it is downstream of the m/z axis (centroiding / monoisotope reporting).
 - Peptide counts are partly a mass-calibration measurement: compare only at similar residual ppm.

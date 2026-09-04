@@ -1,6 +1,6 @@
 # Is our emission inflated by M+1/M+2 precursors, and can those spectra be merged?
 
-**Hypothesis (user, 2026-09-03).** We emit 927,813 pseudo-spectra on S30 where diaTracer emits
+**Hypothesis (user, 2026-09-03).** We emit 927,813 pseudo-spectra on dataset D where the reference implementation emits
 700,434. Two claims to test: (a) the excess comes from selecting M+1/M+2 as precursors in their own
 right instead of the monoisotope; (b) those spectra are basically identical and could be merged.
 
@@ -28,7 +28,7 @@ because at 10^6 spectra in a narrow m/z range, lattice coincidences happen by ch
 | **excess (real)** | **256,543** | **27.7%** |
 
 Steps: k=1 177,689; k=2 62,795; k=3 51,173. Removing every heavier member leaves **671,270 spectra,
-4% BELOW diaTracer's 700,434.** The inflation is isotope-offset duplication, essentially in full.
+4% BELOW the reference implementation's 700,434.** The inflation is isotope-offset duplication, essentially in full.
 
 ## 2. They are NOT near-duplicates in content
 
@@ -98,12 +98,12 @@ systematically FEWER isotope partners than their light partners (`spx_n_isotopes
 
 The excess is not redundancy to be merged away downstream; it is over-generation to be prevented
 upstream, and every downstream collapse tested costs more peptides than it saves spectra. That
-matches the standing finding that only a precursor quality gate can reach diaTracer's count, and it
+matches the standing finding that only a precursor quality gate can reach the reference implementation's count, and it
 sharpens it: the gate must be an OWNERSHIP rule, not an m/z ordering rule.
 
 **Pre-registered next experiment (not yet run).** Replace the `used[]` boolean with owner tracking:
 when a new seed's isotope-lattice neighbour at the same charge is already owned by an emitted
-precursor, suppress the new precursor instead of letting it become a fresh monoisotope. A/B on S30,
+precursor, suppress the new precursor instead of letting it become a fresh monoisotope. A/B on dataset D,
 both engines, plus entrapment. Prediction: emission falls toward ~670-700k with peptides within
 replicate noise. Falsifier: peptides fall by more than the 0.17% replicate spread -- which the 7.2%
 heavy-only-identified population makes a real risk, since suppression discards exactly the member
@@ -128,7 +128,7 @@ consumed run. Intensity is right in both cases, because a spurious peak below th
 the mono outweighs its own M+1 below about 1800 Da. Above that the rule inverts, which is why `light`
 runs as a control rather than as an assumption.
 
-**Pre-registered A/B (S30, queued behind the S08/S23 confirmation chain):** arms `intense` K=3,
+**Pre-registered A/B (dataset D, queued behind the dataset A/dataset B confirmation chain):** arms `intense` K=3,
 `light` K=3, `intense` K=1. Both engines; entrapment on the default arm, since a large emission cut
 changes the FDR denominator. Success = emission near 670-700k with Sage and MSFragger peptides within
 the 0.17% replicate spread and entrapment no worse than the shipping arm's 1.37%. Falsifier = peptides
@@ -137,7 +137,7 @@ the survivor's own extraction does not recover -- and would close the emission q
 
 ## 7. A/B result: the collapse works mechanically and costs peptides at every setting
 
-| S30 arm | precursors removed | spectra | Sage @1% | MSFragger @1% | wall |
+| dataset D arm | precursors removed | spectra | Sage @1% | MSFragger @1% | wall |
 |---|---|---|---|---|---|
 | apex baseline | -- | 927,813 | 12,537 | 11,927 | 15:21 |
 | **intense, K=1** | 166,440 | 786,300 (−15.3%) | **11,965 (−4.6%)** | **11,546 (−3.2%)** | 14:22 |
@@ -223,19 +223,19 @@ Charge 1 removals are nearly free because **the entire z=1 population is nearly 
 A z=1 pseudo-spectrum is identified 36x less often than a z=2 one. Tryptic peptides are essentially
 never singly charged in ESI, and `charge:scoring count` breaks ties toward the LOW charge, so this is
 where the mis-assignments land. **Dropping z=1 outright is -29.3% emission for -1.73% peptides**, and
-lands at 656,254 spectra, below diaTracer's 700,434 -- against -15.3% emission for -4.6% peptides at
+lands at 656,254 spectra, below the reference implementation's 700,434 -- against -15.3% emission for -4.6% peptides at
 the best collapse setting. Five times the efficiency, and one line of code instead of a graph
 algorithm.
 
 `SPEXTRACT_MIN_CHARGE=z` implemented. **Pre-registered arm (running):** z>=2, z>=2 with the k=1
-collapse, and z>=3, on S30 with both engines and entrapment. Prediction: z>=2 loses under 2% of Sage
+collapse, and z>=3, on dataset D with both engines and entrapment. Prediction: z>=2 loses under 2% of Sage
 peptides, and may GAIN, since removing 29% of never-identified spectra also removes their share of
 the multiple-testing burden. Falsifier: peptides fall more than the 1.73% the offline join predicts,
 which would mean the z=1 spectra contribute identifications indirectly through FDR calibration.
 
 ## 11. Result: the charge gate wins, the collapse loses, and they do not combine
 
-| S30 arm | spectra | Sage @1% | MSFragger @1% | wall | entrapment |
+| dataset D arm | spectra | Sage @1% | MSFragger @1% | wall | entrapment |
 |---|---|---|---|---|---|
 | apex baseline | 927,813 | 12,537 | 11,927 | 15:21 | 1.28% [1.03-1.53] |
 | **z >= 2** | **656,254 (−29.3%)** | **12,642 (+0.8%)** | **12,073 (+1.2%)** | **12:48 (−17%)** | 1.38% [1.15-1.64] |
@@ -243,7 +243,7 @@ which would mean the z=1 spectra contribute identifications indirectly through F
 | z >= 3 | 255,664 (−72.4%) | 5,088 (−59%) | 5,060 (−58%) | 08:48 | 0.96% [0.66-1.35] |
 
 **`z >= 2` gains peptides on both engines while cutting emission by 29.3% and runtime by 17%,** and
-lands below diaTracer's spectrum count. The set is near-superset: 310 peptides gained, 205 lost. The
+lands below the reference implementation's spectrum count. The set is near-superset: 310 peptides gained, 205 lost. The
 multiple-testing prediction was right -- 271,559 spectra identified 0.42% of the time were not merely
 useless, they were costing identifications by inflating the search space. z >= 3 confirms the gate is
 not a monotone knob: charge 2 carries 56.9% of peptides, and removing it is catastrophic.
@@ -254,8 +254,8 @@ lattice removal is taken out of real signal. This closes the collapse line: **th
 in every form** (K=1, K=3, intensity rule, lightest rule, with or without the charge gate).
 
 **Caution before adoption.** Entrapment moves 1.28% -> 1.38%, at the pre-registered 1.4% bound. The
-intervals overlap heavily so this is not yet a difference, but S08 and S23 must confirm it.
-**Confirmation arm running:** z >= 2 on S08 and S23, both engines, entrapment against the same apex
+intervals overlap heavily so this is not yet a difference, but dataset A and dataset B must confirm it.
+**Confirmation arm running:** z >= 2 on dataset A and dataset B, both engines, entrapment against the same apex
 baselines. Adopt as default only if peptides do not fall on either engine on either file and
 entrapment stays within the apex interval; a rise past 1.4% on a second file means the gate is buying
 peptides with false positives and must be reconsidered as an option rather than a default.

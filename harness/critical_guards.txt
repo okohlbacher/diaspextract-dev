@@ -5,7 +5,7 @@
 # first gate reported "PASSED (6 entries)" while actually checking two.
 # An entry matching nothing is an ERROR, not a pass.
 
-# FAILURE 1 -- cross-sample comparison (published a ratio dividing an S30 result by S08's
+# FAILURE 1 -- cross-sample comparison (published a ratio dividing an dataset D result by dataset A's
 # reference; occurred 3x). The PRODUCTION checks, not the selftest's reimplementation.
 bench2.py G-B05 raw content digest
 bench2.py G-B05 acquisition identity

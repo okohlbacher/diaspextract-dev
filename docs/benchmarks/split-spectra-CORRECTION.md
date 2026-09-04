@@ -27,9 +27,9 @@ not.
 
 ## 3. Peaks per spectrum: the committed figure was from the wrong file
 
-Reported median 228 (ours) vs 500 (diaTracer). Re-measured on the actual `split_count` S23 file:
+Reported median 228 (ours) vs 500 (the reference implementation). Re-measured on the actual `split_count` dataset B file:
 **median 437, and 46.7% of spectra already at the 500-peak cap.** The 228 came from the older
-S08 `basepin2` output.
+dataset A `basepin2` output.
 
 Consequence for the merge proposal: with ~47% of spectra at the cap, **merging cannot add peaks
 to them.** Much of the union gain is unrealisable without raising `max_fragments`.

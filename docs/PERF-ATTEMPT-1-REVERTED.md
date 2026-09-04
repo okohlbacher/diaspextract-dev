@@ -41,7 +41,7 @@ drops emissions.
 
 * **Both defects are real and verified in the source.** The 43.5% kernel time and the 1,993 s
   single-core tail are measured, not inferred. The *fixes* were wrong, not the diagnosis.
-* The 9.7× decomposes as **3.67× CPU × 2.64× parallelism** against diaTracer (457 s, 38.4 cores,
+* The 9.7× decomposes as **3.67× CPU × 2.64× parallelism** against the reference implementation (457 s, 38.4 cores,
   6.8% system on the same node and `.d`). SpeXtract's *user* CPU alone would finish in ~5 min at
   120 cores — the algorithm is not 10× slow, it runs on a ninth of the machine.
 * Window `[327.52, 468.80)` holds 489,986 of 2,145,053 precursors (**23.7%**), capping the loop
@@ -50,7 +50,7 @@ drops emissions.
 ## Method note
 
 The small file made this cheap: **95 s per arm instead of 74 min**, so a failed attempt cost
-minutes. But its phase split is *inverted* versus S30 — MS1 51% / loop 33% here, versus MS1 7.9%
-/ loop 91.3% on S30 — because loop cost scales with co-eluting precursors and a 6-min gradient
+minutes. But its phase split is *inverted* versus dataset D — MS1 51% / loop 33% here, versus MS1 7.9%
+/ loop 91.3% on dataset D — because loop cost scales with co-eluting precursors and a 6-min gradient
 has far fewer. **It is a valid output-identity gate and an MS1-phase benchmark; it is not a
-window-loop benchmark.** Window-loop timings must still be confirmed on S30.
+window-loop benchmark.** Window-loop timings must still be confirmed on dataset D.

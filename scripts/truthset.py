@@ -2,11 +2,11 @@
 """DIA-NN-anchored truth set for pseudo-spectra (v2).
 
 Fixes vs v1, each of which would have biased the comparison:
-  * diaTracer writes the PRECURSOR as its isolation window (+-0.01 Da), we write
-    the real acquisition window.  Trusting either file's window makes diaTracer
+  * the reference implementation writes the PRECURSOR as its isolation window (+-0.01 Da), we write
+    the real acquisition window.  Trusting either file's window makes the reference implementation
     look artificially pure.  Both tools are now scored against ONE common window
     scheme recovered from the acquisition method.
-  * diaTracer emits 500 peaks/spectrum, we emit ~23.  Intensity fractions over
+  * the reference implementation emits 500 peaks/spectrum, we emit ~23.  Intensity fractions over
     unequal depth are not comparable, so every number is also reported at equal
     depth (top-N by intensity).
   * precursor m/z and ion mobility live under different keys in the two writers.
@@ -98,7 +98,7 @@ for s in mzml.read(SPECTRA):
     if pmz <= 0: continue
     z   = int(ion.get("charge state", 0) or 0)
     sc  = s["scanList"]["scan"][0]
-    # DIA-NN reports minutes; OUR mzML is in seconds and diaTracer's in minutes.
+    # DIA-NN reports minutes; OUR mzML is in seconds and the reference implementation's in minutes.
     # Trust the CV unit, never the bare number.
     _rt = sc["scan start time"]
     rt  = float(_rt) / (60.0 if getattr(_rt, "unit_info", "minute") == "second" else 1.0)

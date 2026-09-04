@@ -1,4 +1,4 @@
-# MS1 feature FWHM vs retention time (S30)
+# MS1 feature FWHM vs retention time (dataset D)
 
 Measured per MS1 trace from its own XIC — apex, then outward to half maximum with linear
 interpolation. Traces that never fall to half max on both sides are reported as −1 and
@@ -46,7 +46,7 @@ That splits the 9.51 PSMs/peptide cleanly:
 is **13× narrower** than the 45.7 s at which an earlier analysis still saw "benefit". Both can be
 true: real structure inside one peak width, artifact beyond it.
 
-**4. diaTracer deliberately under-samples.** 1.29 cycles/peptide against a 2.61-cycle peak — it
+**4. the reference implementation deliberately under-samples.** 1.29 cycles/peptide against a 2.61-cycle peak — it
 takes roughly the apex only, and gets *more* unique peptides. So sampling the full peak is not
 obviously better for identification: the apex has the best S/N, and one clean spectrum can beat
 three noisy ones.

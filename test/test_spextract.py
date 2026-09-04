@@ -118,9 +118,9 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=()):
 
 
 def synth_tdf(path, n_frames):
-    """A minimal analysis.tdf: the real S30 MzCalibration row plus a Frames table.
+    """A minimal analysis.tdf: the real dataset D MzCalibration row plus a Frames table.
 
-    The calibration constants are the measured S30 ones from tests/calibration_golden.json, not
+    The calibration constants are the measured dataset D ones from tests/calibration_golden.json, not
     invented numbers -- an invented row would either fail isSupported() or silently define a
     different mass scale. T1 is given a small per-frame spread so the per-frame factor is actually
     exercised rather than collapsing to the reference.

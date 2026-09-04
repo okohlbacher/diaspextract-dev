@@ -1,10 +1,10 @@
 {
   "_comment": [
-    "CLOSED search, max_fragment_charge=1. This is the config behind the +1.1% S30 / +0.35% small-file",
+    "CLOSED search, max_fragment_charge=1. This is the config behind the +1.1% dataset D / +0.35% small-file",
     "result, and it was previously measured from a TEMP config on the cluster and never committed --",
     "so the win was real but not reproducible by anyone reading this repo.",
     "",
-    "Restricting Sage to singly-charged fragments HELPS us (+1.1%) and HURTS diaTracer (-2.3%). The",
+    "Restricting Sage to singly-charged fragments HELPS us (+1.1%) and HURTS the reference implementation (-2.3%). The",
     "opposite signs mean the gain is ours rather than generic search tuning: what we scored as 2+",
     "fragments was predominantly noise the extra charge hypothesis could fit.",
     "",

@@ -11,7 +11,7 @@ structure plus arithmetic). The distinction is the point of this document: almos
 previously asserted about the inside of the window loop is inferred, and one widely repeated
 "measurement" is not a measurement at all.
 
-Quality constraint: the S30 baseline is **10,072 peptides** (`docs/S30-BASELINE.md:11`), noise
+Quality constraint: the dataset D baseline is **10,072 peptides** (`docs/dataset D-BASELINE.md:11`), noise
 floor 0.06% same-node, "differences below ~0.2% mean nothing". A speedup that costs peptides is
 not a speedup.
 
@@ -21,7 +21,7 @@ not a speedup.
 
 ### 1.1 MEASURED
 
-S30 (9.8 GB, smallest sample), 120 threads, tcmalloc already `LD_PRELOAD`ed:
+dataset D (9.8 GB, smallest sample), 120 threads, tcmalloc already `LD_PRELOAD`ed:
 
 | phase | time | share | source |
 |---|---:|---:|---|
@@ -38,7 +38,7 @@ S30 (9.8 GB, smallest sample), 120 threads, tcmalloc already `LD_PRELOAD`ed:
 | **system** | **28,065 s (07:47:45) = 43.5% of CPU** |
 | effective cores (CPU/wall) | **14.57** of 120 |
 
-diaTracer does the same job in 457 s → we are **9.1×** slower.
+the reference implementation does the same job in 457 s → we are **9.1×** slower.
 
 ### 1.2 The window loop is ONE undivided number — this is the central measurement gap
 
@@ -83,7 +83,7 @@ i.e. below one busy thread per window. The wall sits in code running at ~one thr
 
 **(b) Scoring cannot be the bottleneck.** `scoreCandidates_` is one call per precursor on the
 default path (`:1648` → `:1168`); the apportion (`:1616`/`:1627`) and `rp_max` (`:1663`) paths are
-default-off (`:496-497`) and both are on the falsified list (`docs/S30-BASELINE.md:35-36`). At
+default-off (`:496-497`) and both are on the falsified list (`docs/dataset D-BASELINE.md:35-36`). At
 ~2.2 ms/precursor × ~40 k precursors that is **~90-170 s of a ~3,805 s per-window wall = 2-4%**.
 Independently: the claimed ~22 TB of gate-scan traffic over 3,805 s is 5.8 GB/s aggregate on a
 node that sustains ≥100 GB/s, capping the whole scan at ~12% even in the worst case.
@@ -107,7 +107,7 @@ mechanism, not a budget.
 Six facts, each verified at a cited line, compose into one mechanism:
 
 1. **MS2 valley splitting is ON.** `trace:ms2_split_valleys` registers a default of `0.0`
-   (`:514`), but `bench/run_open.sh:42` and `docs/S30-BASELINE.md:21-22` pass **7.0**. So
+   (`:514`), but `bench/run_open.sh:42` and `docs/dataset D-BASELINE.md:21-22` pass **7.0**. So
    `:684` (`split_valleys > 0.0 && !mts.empty()`) is true on every window and
    `ElutionPeakDetection::detectPeaks` runs *inside* the window body.
 
@@ -228,7 +228,7 @@ MS2 traces are canonically re-sorted at `:1568-1573` before anything reads them.
   and libomp both honour the per-task ICV, but verify).
 - Window-loop wall does not move and kernel share stays ≥ 40% ⇒ §2's mechanism is wrong; the time
   is elsewhere and the phase timers of §1.6 become mandatory.
-- S30 peptides move by more than the 0.06% noise floor ⇒ the order argument above is wrong and the
+- dataset D peptides move by more than the 0.06% noise floor ⇒ the order argument above is wrong and the
   change must be reverted.
 
 ### OI-2 — Give `MassTrace` a move constructor. `OpenMS/.../KERNEL/MassTrace.h:66-72`
@@ -263,7 +263,7 @@ It also repairs three things silently:
 `vector` growth uses it. No numeric path changes. **Bit-identical by construction** — this is the
 only fix on the list with no ordering exposure at all.
 
-**Falsifying measurement.** Rebuild libOpenMS; any change in S30 peptide count at all (not just
+**Falsifying measurement.** Rebuild libOpenMS; any change in dataset D peptide count at all (not just
 beyond noise) falsifies the "identical values" claim. Memory: per-window peak RSS should drop
 visibly from ~5.8 GB.
 
@@ -319,7 +319,7 @@ moves by 30% the model of where time goes is wrong.
 
 **Change.** `g.rt` accumulates **every** XIC RT of every fragment — ~56 M doubles, unreserved
 (`total` is computed at `:447-448`, one line *after* the loop that needed it) — then `sort` +
-`unique` + `erase` reduces it to ≤ ~1,343. `erase` does not release capacity. Measured at S30
+`unique` + `erase` reduces it to ≤ ~1,343. `erase` does not release capacity. Measured at dataset D
 shape: `size=1,341  capacity=67,108,864` = **537 MB still held**, × 24 windows in flight, for the
 whole rest of the window body. One line: `vector<double>(g.rt).swap(g.rt);` after the erase.
 
@@ -352,9 +352,9 @@ caller-owned buffer instead of swapping. Minor.
 
 ---
 
-## 4. BEHAVIOUR-CHANGING FIXES — these need the S30 quality gate
+## 4. BEHAVIOUR-CHANGING FIXES — these need the dataset D quality gate
 
-**None of these may ship without a full S30 benchmark** (`harness/bench.py`, Sage screen then
+**None of these may ship without a full dataset D benchmark** (`harness/bench.py`, Sage screen then
 MSFragger confirm, per `docs/search-engine-policy.md`). Decision rule: progress = peptides
 ≥ 10,072 and PSMs/peptide not worse; regression = peptides fall ≥ 1%.
 
@@ -378,7 +378,7 @@ by Amdahl this phase caps *any* total speedup at 12.7×.
 trace changes the neutral mass fed to `inferPrecursors_` at `:1355`, which changes charge and
 monoisotope assignment. This is the *riskiest* place in the tool to perturb trace boundaries.
 
-**Falsifier / gate.** S30 peptides at 10,072 ± noise with `-perf:trace_bands N` for N ∈ {4, 8}.
+**Falsifier / gate.** dataset D peptides at 10,072 ± noise with `-perf:trace_bands N` for N ∈ {4, 8}.
 Note this option **cannot be tested in isolation** (see BC-3).
 
 ### BC-2 — Fix the halo formula. `src/spextract.cpp:639`
@@ -475,5 +475,5 @@ compares RT, precursor m/z, charge, spectrum size and every fragment but **not**
 3. The six `phase_clock_()` calls of §1.6. Everything after this point should be planned against
    measurements, not against §1.4.
 4. **OI-2** + **OI-6** (libOpenMS rebuild), then **OI-3**, **OI-5**, **OI-4**.
-5. Only then consider §4, each behind a full S30 gate, one axis at a time — and split
+5. Only then consider §4, each behind a full dataset D gate, one axis at a time — and split
    `perf:trace_bands` into MS1 and MS2 options first (BC-3).

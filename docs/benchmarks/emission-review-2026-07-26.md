@@ -1,6 +1,6 @@
-# Why SpeXtract emits 1.53M spectra vs diaTracer's 700k — adversarial review (codex + vibe + kimi)
+# Why SpeXtract emits 1.53M spectra vs the reference implementation's 700k — adversarial review (codex + vibe + kimi)
 
-Deep review reassessing WHEN/WHY emission ballooned to 2.2× diaTracer and whether the merge
+Deep review reassessing WHEN/WHY emission ballooned to 2.2× the reference implementation and whether the merge
 strategies can bring it back to ~700k **at neutral peptides** (a runtime win, not a peptide win).
 Three CLIs (codex full, vibe full, kimi independent-but-stderr-only, see note) plus adjudication
 against the source and the four prior redundancy docs.
@@ -24,7 +24,7 @@ the peptide *sets* were never compared, so how much is pure redundancy is formal
 **A. Trace multiplication from valley-splitting (dominant).** `ms1_split_valleys` runs EPD after
 mass-trace detection and turns one multimodal trace into several; `inferPrecursors_` then seeds a
 precursor from *every* unused trace. Traces 1.76M→4.92M (2.8×) is the multiplier. **It is
-load-bearing** (+36.7% peptides on S23 when measured) — reverting it is off the table.
+load-bearing** (+36.7% peptides on dataset B when measured) — reverting it is off the table.
 
 **B. Isotope-unsupported singletons.** 1.04M of 2.145M hypotheses (48.7%) have no isotope partner
 → charge 0. Emission is ~1:1 with hypotheses. kimi's nuance: count-mode (the other half of 579ad70)
@@ -71,7 +71,7 @@ The runtime/peptide-neutral reframe is **valid**, but **none of the existing mer
 knobs is proven to reach 700k neutrally**, and merge is affirmatively falsified. Two candidate
 levers remain, both **unproven** and pointing upstream (prevent, don't combine):
 
-- **Pre-scoring feature collapse** — the diaTracer "one pseudo-MS/MS per precursor *feature*" model.
+- **Pre-scoring feature collapse** — the the reference implementation "one pseudo-MS/MS per precursor *feature*" model.
   codex's stronger form: cluster coordinate-equivalent hypotheses and build **one joint feature XIC +
   quality score**, then fragment-score once — not the current keep-one-seed dedup. Cuts extraction
   *and* search time. Risk: the split analysis shows within-cycle pairs are mostly overlapping (union
@@ -92,12 +92,12 @@ Do these **before building any reduction**, because they set the ceiling and pic
 2. **The oracle** (codex #12) — cluster the *identified* spectra by (charge, m/z, RT, IM) and count
    the **minimum spectra needed to retain every identified peptide**. If even an ID-aware oracle
    can't approach 700k, no pre-search selector can, and 700k-at-neutral is impossible. Runnable on
-   existing S30 output + a completed search, no re-run.
+   existing dataset D output + a completed search, no re-run.
 3. **Class attribution** — identified-spectrum rate by class; peptides *exclusively* from guessed
    spectra; the same split for modified / nonspecific open-search peptides; peptide counts after
    removing each class and recomputing FDR.
 
-**Pre-registered non-inferiority** for any winner: ≤0.2% peptide loss on deterministic S30, checked
+**Pre-registered non-inferiority** for any winner: ≤0.2% peptide loss on deterministic dataset D, checked
 separately for modified / low-intensity / high-charge / guessed-only, on **both** Sage and MSFragger.
 
 ## Bottom line
@@ -114,7 +114,7 @@ separately for modified / low-intensity / high-charge / guessed-only, on **both*
 
 ---
 
-## ORACLE RESULT (S30 det4: 1,528,113 spectra, 113,130 identified PSMs → 10,036 peptides)
+## ORACLE RESULT (dataset D det4: 1,528,113 spectra, 113,130 identified PSMs → 10,036 peptides)
 
 Ran the oracle on existing data (mzML precursor coords + Sage results, no re-run). **It overturns
 the collapse/merge framing entirely.**
@@ -126,7 +126,7 @@ the collapse/merge framing entirely.**
 | baseline | 1,528,113 | 1.00× | — |
 | same-coordinate (charge, 20 ppm, RT 1.4–7 s, IM 0.02) | 1.21M–1.42M | 1.07–1.26× | **above** |
 | isotope-aware (link M/M+1/M+2 ladders) | 1.45M | 1.05× | **above** |
-| diaTracer | 700,434 | — | — |
+| the reference implementation | 700,434 | — | — |
 | ID-aware oracle (drop everything that never identifies) | **~120k** | 12.7× | below |
 
 The 1.53M emitted spectra are **~1.4M geometrically-distinct precursor coordinates**. Only ~5–20%
@@ -144,9 +144,9 @@ at inference time (require isotope support / envelope quality), i.e. codex's lev
 flagged most-likely-to-lose-peptides. It is now the *only* geometrically possible lever.
 
 **The ID-aware ceiling (~120k) is the headroom signal:** a perfect precursor-quality classifier would
-emit ~120k spectra and keep all 10,036 peptides. diaTracer's isotope-distribution + XIC-correlation
+emit ~120k spectra and keep all 10,036 peptides. the reference implementation's isotope-distribution + XIC-correlation
 gate lands at 700k (conservative — keeps many non-identifying-but-plausible precursors). We keep
-1.53M because we gate nothing. A gate even close to diaTracer's should reach ≤700k; the peptide cost
+1.53M because we gate nothing. A gate even close to the reference implementation's should reach ≤700k; the peptide cost
 is entirely a function of proxy quality.
 
 **Retracted: the geometric gate simulation (oracle2) is confounded.** Simulating "require an emitted
@@ -160,7 +160,7 @@ flag joined to identified peptides, which requires provenance instrumentation + 
 "Oracle first" was meant to find a cheap collapse. The oracle proves no collapse exists — so the
 next step is the instrumented measurement codex called the blocking first move:
 1. Stamp `guessed` / iso-count / `trace_idx` onto each emitted spectrum (small change).
-2. Re-run S30 + search; join identified peptides back to inference class.
+2. Re-run dataset D + search; join identified peptides back to inference class.
 3. Measure peptides supplied *exclusively* by guessed precursors (and by modified / low-intensity /
    high-charge / open-search subsets). That number *is* the isotope-support gate's peptide cost and
    sets where the gate can sit relative to 700k.
@@ -169,7 +169,7 @@ next step is the instrumented measurement codex called the blocking first move:
 
 ## GATE COST MEASURED (provenance re-run, 2026-07-26)
 
-Stamped `spx_guessed` onto every emitted spectrum (`assembleFromList_`), re-extracted S30
+Stamped `spx_guessed` onto every emitted spectrum (`assembleFromList_`), re-extracted dataset D
 (deterministic → byte-identical 1,528,113 spectra, verified), and joined the guessed flag to det4's
 existing Sage results by spectrum index (no re-search needed):
 
@@ -182,7 +182,7 @@ existing Sage results by spectrum index (no re-search needed):
 **Supported precursors identify 8.8× more often than guessed.** Dropping all guessed singletons:
 **emission 1,528,113 → 924,255 (−39.5%) for a projected 78-peptide loss (−0.78%).** That is the
 isotope-support gate (`assembly:require_isotope_support`, added OFF-by-default). Enormously better
-than any merge — but it lands at **924k, not 700k** (still 1.32× diaTracer, down from 2.18×), and
+than any merge — but it lands at **924k, not 700k** (still 1.32× the reference implementation, down from 2.18×), and
 0.78% exceeds the pre-registered ≤0.2% non-inferiority bound. The 78 exclusive peptides are the
 low-abundance / no-envelope species codex flagged.
 
@@ -192,7 +192,7 @@ low-abundance / no-envelope species codex flagged.
 |---|---|---|---|
 | baseline (det4) | 1,528,113 | 10,036 | 27:00 |
 | **gated** | **924,255 (−39.5%)** | **9,989 (−0.47%)** | **19:46 (−27%)** |
-| diaTracer | 700,434 | — | 7:47 |
+| the reference implementation | 700,434 | — | 7:47 |
 
 The real re-run **beats the projection** (−0.47% vs −0.78%): FDR recalibration recovered ~31 peptides
 (9,958 projected → 9,989 actual), because 924k spectra carry a lighter multiple-testing burden
@@ -215,14 +215,14 @@ the JNA/Bruker-lib startup error is non-fatal for mzML input.)
 ## STATUS: gate validated, shippable. Path to 700k remains open.
 The isotope-support gate (`assembly:require_isotope_support`, OFF by default) is a confirmed
 near-neutral −39.5% emission / −27% extraction-time win on both engines. It lands at **924k (1.32×
-diaTracer)**, not 700k. Closing the last 924k→700k (≈−24%) requires a **graded quality gate on the
-supported side** (diaTracer-style isotope-distribution + XIC-correlation score swept to an operating
+the reference implementation)**, not 700k. Closing the last 924k→700k (≈−24%) requires a **graded quality gate on the
+supported side** (the reference implementation-style isotope-distribution + XIC-correlation score swept to an operating
 point), since supported precursors carry 99.2% of peptides and cannot take a blanket cut.
 
 **Implications for the 700k target:** the guessed gate is the first lever and it's near-neutral, but
 reaching 700k needs a *second* cut on the **supported** side (924k → 700k ≈ another −24%). Supported
 precursors carry 99.2% of peptides, so a blanket supported-side cut is dangerous; it needs a graded
-quality gate (diaTracer-style isotope-distribution + XIC-correlation score, swept to an operating
+quality gate (the reference implementation-style isotope-distribution + XIC-correlation score, swept to an operating
 point) rather than a hard drop. Sequence: ship the guessed gate (confirm FDR), then grade the
 supported side toward 700k while holding peptides.
 

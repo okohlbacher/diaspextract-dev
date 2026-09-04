@@ -1,8 +1,8 @@
-# Merging split spectra: works, but the ceiling is zero (S30-family, small file)
+# Merging split spectra: works, but the ceiling is zero (dataset D-family, small file)
 
 ## The question
 
-We emit 9.51 PSMs/peptide against diaTracer's 1.69. Adjacent-cycle spectra of the same peptide
+We emit 9.51 PSMs/peptide against the reference implementation's 1.69. Adjacent-cycle spectra of the same peptide
 have median cosine **0.687** (within-cycle 0.845, unrelated 0.007), so they are similar enough
 to merge in principle. Does merging help?
 

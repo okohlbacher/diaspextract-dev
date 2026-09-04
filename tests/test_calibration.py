@@ -2,7 +2,7 @@
 """Golden test for the TDF MzCalibration (ModelType 1) TOF->m/z model.
 
 Guards the calibration that produced the 2026-09-01 +6-11% closed-search gain. The 60 golden cases
-were produced by Bruker's own timsdata library on three diaPASEF files (S30/S08/S23, 4 frames x 5
+were produced by Bruker's own timsdata library on three diaPASEF files (dataset D/dataset A/dataset B, 4 frames x 5
 TOF positions each) and are stored in tests/calibration_golden.json, so this test needs NO vendor
 library, NO cluster and NO raw data.
 

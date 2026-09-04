@@ -6,7 +6,7 @@ bin -- can ion mobility be indexed the same way, and what does it buy?
 **Short answer: yes, and the mobility index matters less for its own sake than for what it unlocks.
 Indexed on its own it saves ~6 bytes per trace and no measurable time. Combined with the RT index it
 turns the scoring gate from a scan into a lookup, and the gate is currently streaming an estimated
-83 TB of memory per S30 run to discard 99.4% of what it reads.**
+83 TB of memory per dataset D run to discard 99.4% of what it reads.**
 
 ## 1. The mobility axis is discrete, and for the same reason
 
@@ -40,7 +40,7 @@ replacing a double compare in a loop that is memory-bound rather than ALU-bound.
 
 ## 3. What it is worth combined with the RT index: the 158x gate
 
-Measured on S30 (`score gate` instrumentation, 2026-09-03):
+Measured on dataset D (`score gate` instrumentation, 2026-09-03):
 
     710,046 precursors visited 867,449,463,431 fragments  (1,221,680 per precursor)
     5,480,062,634 passed the RT gate                       (158.3x scanned per survivor)
@@ -51,7 +51,7 @@ a LINEAR SCAN of everything inside it. 99.4% of the visits are discarded.
 The cost is memory bandwidth, not arithmetic. `Trace` is 96 bytes, and the scan strides one per
 visit:
 
-| | traffic per S30 run |
+| | traffic per dataset D run |
 |---|---|
 | scanning `Trace` records at 96 B | **~83 TB** |
 | scanning an 8 B parallel array instead | ~6.9 TB |
@@ -82,11 +82,11 @@ gate fix is what pays**, and it should be measured first so the two are not conf
 
 ## 5. Estimated effect, stated as a range
 
-The score stage is 3,853 s of 10,960 s of window-elapsed time on S30 (35%), and the window loop is
+The score stage is 3,853 s of 10,960 s of window-elapsed time on dataset D (35%), and the window loop is
 ~80% of wall. If the gate scan is 60-85% of the score stage -- which the bandwidth arithmetic
 supports but has not been isolated -- then:
 
-| change | window-loop time | expected S30 wall |
+| change | window-loop time | expected dataset D wall |
 |---|---|---|
 | now | -- | 12:53 |
 | (a) parallel arrays | −15 to −25% of the score stage | 12:00 - 12:30 |

@@ -6,18 +6,18 @@ bookkeeping rather than algorithmic. Each guard below exists because a specific 
 happened, and the failure is named in the comment. Guards ABORT rather than warn: a benchmark
 that silently produces a plausible wrong number is worse than one that refuses to run.
 
-  FAILURE 1  cross-sample comparison. Published "S08 best 7,430 -> 66.2%"; 7,430 was S30 and
-             11,218 was S08's reference.
+  FAILURE 1  cross-sample comparison. Published "dataset A best 7,430 -> 66.2%"; 7,430 was dataset D and
+             11,218 was dataset A's reference.
              GUARD: samples are IDs resolved from samples.yaml; a sample fingerprint must
              appear in the raw path AND the produced mzML; references are looked up per
              sample and cannot be crossed.
 
   FAILURE 2  mismatched baselines. "+36.7%/+37.4% confirmed" used three different baseline
-             configs; the resulting S30 "+4.1%" was pure artefact.
+             configs; the resulting dataset D "+4.1%" was pure artefact.
              GUARD: an arm declares `baseline`; the pair runs in ONE invocation, same binary,
              same node, same everything but the varied parameters, and the diff is printed.
 
-  FAILURE 3  wrong FDR metric. spectrum_q inflated every ratio by 9-11 points vs diaTracer.
+  FAILURE 3  wrong FDR metric. spectrum_q inflated every ratio by 9-11 points vs the reference implementation.
              GUARD: peptide_q is THE metric. spectrum_q is reported only alongside fdr_loss.
 
   FAILURE 4  missing controls. The MS1 funnel's "97.8%" had a 91.9% chance floor and was
@@ -41,7 +41,7 @@ that silently produces a plausible wrong number is worse than one that refuses t
   FAILURE 8  unit mismatch. RT in seconds vs minutes matched 31 of ~300k spectra.
              GUARD: RT is read from the CV unit accessor, never the bare number.
 
-  FAILURE 9  asserted absence. "No diaTracer S30" twice; it was on ceph all along.
+  FAILURE 9  asserted absence. "No the reference implementation dataset D" twice; it was on ceph all along.
              GUARD: references are declared in samples.yaml and existence is CHECKED, so
              absence is a fact about the registry rather than about where someone looked.
 
@@ -237,7 +237,7 @@ def preflight(plan: Plan, reg: dict) -> dict:
 
 # ----------------------------------------------------------------------------- execution
 def verify_sample_identity(mzml: Path, fingerprint: str, sample: str) -> None:
-    """FAILURE 1: bestfree/best_25 was an S30 run reported as S08 for a whole day. The sample
+    """FAILURE 1: bestfree/best_25 was an dataset D run reported as dataset A for a whole day. The sample
     is now read back out of the produced file rather than trusted from the invocation."""
     head = mzml.open("rb").read(400_000).decode("utf-8", "ignore")
     if fingerprint not in head:
@@ -301,7 +301,7 @@ def run_search(reg: dict, out: Path) -> None:
 
 def score(out: Path) -> dict:
     """FAILURE 3: peptide_q is THE metric. spectrum_q is kept only to expose fdr_loss, which
-    is itself diagnostic -- ours runs -10% to -23%, diaTracer -5% to -7%, and that gap IS the
+    is itself diagnostic -- ours runs -10% to -23%, the reference implementation -5% to -7%, and that gap IS the
     redundancy signal."""
     import csv
     f = out / "results.sage.tsv"

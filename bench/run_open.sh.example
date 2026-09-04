@@ -1,3 +1,5 @@
+# EXAMPLE driver. Copy without .example and fill in real paths.
+# The working copy is untracked: it names acquisitions and specimens.
 #!/usr/bin/env bash
 # Entrapment-controlled OPEN-search benchmark.
 #
@@ -5,7 +7,7 @@
 # tool exists to avoid: a charge error fabricates dM = (z'-z)(m/z - 1.00728), hundreds of Da, and
 # a +-25 ppm search simply does not report those PSMs. This measures in the mode the tool is for.
 #
-# Arms, all on S23, all from EXISTING mzML (no re-extraction -- the spectra are already produced):
+# Arms, all on dataset_B, all from EXISTING mzML (no re-extraction -- the spectra are already produced):
 #   base         ms1_split_valleys 0,   charge:scoring envelope   (the pre-2026-07-21 default)
 #   split_count  ms1_split_valleys 7.0, charge:scoring count      (the shipped default)
 #   envelope     ms1_split_valleys 7.0, charge:scoring envelope   (POSITIVE CONTROL: 10,199 known
@@ -15,8 +17,8 @@
 # Two windows: -150/+500 Da for the primary metric, -3000/+1000 for the positive control, because
 # a 4->2 error at m/z 500-1400 lands at -1000 to -2800 Da and is NOT REPORTED inside +-500.
 set -u
-cd /scratch/kohlbach/bench
-B=/scratch/kohlbach/bench
+cd /path/to/scratch/bench
+B=/path/to/scratch/bench
 SAGE=$B/sage-v0.14.7-x86_64-unknown-linux-gnu/sage
 L=$B/open_bench.log
 echo "=== entrapment open-search benchmark $(date) ===" > $L
@@ -37,15 +39,15 @@ echo "entrapment: $NT target / $NE foreign, ratio $RATIO" >> $L
 # split_count exists only on spock, from a different binary. Comparing across nodes/binaries is
 # precisely the error class this benchmark was built to eliminate, so it is re-extracted here
 # rather than copied.
-TOOL=/scratch/kohlbach/OpenMS/build/bin/spextract
-DD=/scratch/kohlbach/rawd/FKL4341-S23-A-8_K253-09-2_QKL29026AF_Slot1-17_1_1320.d
+TOOL=/path/to/scratch/OpenMS/build/bin/spextract
+DD=/path/to/scratch/rawd/<acquisition-B>
 COMMON="-trace:ms2_chrom_peak_snr 1.0 -trace:ms2_noise_threshold_int 10 -trace:ms2_min_length_sec 0 -trace:ms2_split_valleys 7.0"
 SC=$B/out/open_split_count
 if [ ! -s "$SC/pseudo.mzML" ]; then
   mkdir -p "$SC"
   echo "extracting split_count on this node (same binary as base/envelope) $(date)" >> $L
   LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 \
-  LD_LIBRARY_PATH=/scratch/kohlbach/OpenMS/build/lib \
+  LD_LIBRARY_PATH=/path/to/scratch/OpenMS/build/lib \
     $TOOL -in "$DD" -out "$SC/pseudo.mzML" -threads 120 $COMMON \
       -trace:ms1_split_valleys 7.0 -charge:scoring count \
       -assembly:open_search_safe > "$SC/run.log" 2>&1

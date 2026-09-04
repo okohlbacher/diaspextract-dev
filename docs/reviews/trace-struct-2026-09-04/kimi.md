@@ -96,7 +96,7 @@
   **The correct gate is two-tier:**
 
   - **Hard gate (the actual representation claim):** a canonical digest over `(frame0, len, tof, b[frame0+apex], arena[off..off+len))` per trace, plus exported-peak m/z/intensity pairs (which come from `tof`/`b` via `exportMz_`, src:2302-2307, and so are representation-invariant on the integer path). This must be **byte-identical**, and it legitimately can be — given the §2 zero-semantics fixes, the `G = |used|` fix, the nearest-used-slot mapping, and the transient per-point bin arena through the split that reproduces `tofOf(mzOf(xt[a+apex], b), b)` exactly.
-  - **Soft gate (the accessor redefinitions):** emitted spectrum *count* identical; precursor RT/IM within stated quanta (half a quantum IM; apex-frame vs centroid RT); and the repo's standing end-to-end gate — identified peptides at fixed FDR within the measured ~0.7% run-to-run wobble (documented at src:2718-2727), on S30, both engines.
+  - **Soft gate (the accessor redefinitions):** emitted spectrum *count* identical; precursor RT/IM within stated quanta (half a quantum IM; apex-frame vs centroid RT); and the repo's standing end-to-end gate — identified peptides at fixed FDR within the measured ~0.7% run-to-run wobble (documented at src:2718-2727), on dataset D, both engines.
 
   The alternative that keeps the doc's byte-identical ambition intact: **keep the three cached doubles (24 B) for gate-facing scalars** and delete only `xi`/`xv`/`xt` and the three mallocs (≈ 250 of the 296 B). That version can be bit-identical; the doc's 18 B version cannot. The honest choice is between "4× smaller, digest-stable within quanta" and "3.2× smaller, byte-identical" — the doc currently promises 4× *and* byte-identical, and it can't have both.
 

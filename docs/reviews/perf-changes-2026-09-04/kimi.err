@@ -721,7 +721,7 @@ index 0b2a812..e47d460 100644
 -      // The first version of this walked the parent list to look the bin up by frame. That was
 -      // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
 -      // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
--      // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
+-      // trace's bin. It cost 3.3% of peptides on dataset D while the OpenMS arm stayed digest-identical,
 -      // which is what localised it here. [2026-09-04]
 -      for (const MassTrace& mt : split)
 -      {
@@ -743,7 +743,7 @@ index 0b2a812..e47d460 100644
 +        // The first version of this walked the parent list to look the bin up by frame. That was
 +        // wrong: parents within a chunk are in IM/m-z order, not frame order, and their frame ranges
 +        // overlap freely, so the walk could attribute a child to the wrong parent and hand it another
-+        // trace's bin. It cost 3.3% of peptides on S30 while the OpenMS arm stayed digest-identical,
++        // trace's bin. It cost 3.3% of peptides on dataset D while the OpenMS arm stayed digest-identical,
 +        // which is what localised it here. [2026-09-04]
 +        for (const MassTrace& cm : split)
 +        {
@@ -778,7 +778,7 @@ index 0b2a812..e47d460 100644
  
 +  /// The fragment RT gate field. 99.4% of scoring visits die on |rt - pc.rt| > delta_rt, and
 +  /// reading an 8-byte double to reject each one is the last large bandwidth term in the scorer:
-+  /// 867e9 visits x 8 B = 6.9 TB per S30 run, against a measured ~150-226 GB/s. `q` is the same RT
++  /// 867e9 visits x 8 B = 6.9 TB per dataset D run, against a measured ~150-226 GB/s. `q` is the same RT
 +  /// quantised into buckets NEVER NARROWER than delta_rt, so two RTs within delta_rt of each other
 +  /// can never be more than one bucket apart; the reject then reads 2 bytes instead of 8 and the
 +  /// exact double test runs only on what survives it. Identical candidates in identical order --
@@ -985,7 +985,7 @@ getAverageMS1CycleTime returns 0.0 for size ≤ 1 → win_size = ceil(chrom_fwhm
   - Widening: width = span/65000 > delta_rt exactly when applied; max fragment bucket ≈ 65000, never near 65535 → clamp only ever binds pc.rt, and clamping is monotone toward the fragment range → safe on both ends. Negative RTs: rt0 = min fragment rt so fragments never negative in x; pc.rt < rt0 → bucket 0 → safe.
   - delta_rt == 0: inv = 0 → every bucket 0 → quantised test passes all → exact test (unchanged) decides → identical.
   - Empty/single-element: covered; scoring loop doesn't execute or works with pq∈{0,1}.
-  - Memory: FragRt keeps rt (8 B) AND q (2 B) = 10 B/fragment vs 8 B before — the change is +2 B/fragment STEADY-STATE (not saved), the win is scan bandwidth (2 B read per reject vs 8 B). The question "does the extra 2 B/fragment cost more memory than the scan saves" — the scan saves TIME/BANDWIDTH, not memory; memory is strictly +25% on this array. On S30-scale fragment counts (~1e7?), that's ~20 MB — trivial against the arena. Build loop is two O(n) passes. ✓ claim O(n) true.
+  - Memory: FragRt keeps rt (8 B) AND q (2 B) = 10 B/fragment vs 8 B before — the change is +2 B/fragment STEADY-STATE (not saved), the win is scan bandwidth (2 B read per reject vs 8 B). The question "does the extra 2 B/fragment cost more memory than the scan saves" — the scan saves TIME/BANDWIDTH, not memory; memory is strictly +25% on this array. On dataset D-scale fragment counts (~1e7?), that's ~20 MB — trivial against the arena. Build loop is two O(n) passes. ✓ claim O(n) true.
 
   Ranking by silent-result-change risk:
   1. None of the three changes silently changes results on reachable inputs.
@@ -1147,7 +1147,7 @@ After reading all requested files and analyzing the three uncommitted changes in
 - **Parameter equivalence**: `width_filtering=off`, `masstrace_snr_filtering=false` are set identically in both old and new code.
 - **Bug fix noted in code** (lines 1156–1160): An earlier version *did* have a bug (3.3% peptide loss) from misattributing bins by walking the parent list in IM/mz order instead of frame order. **The current code fixes this by using `wst.bins[t.off + k]`** — this is output-neutral *now*.
 
-**No silent result change. Memory improvement: ~6 GB on S30 (line 1112–1113 comment).**
+**No silent result change. Memory improvement: ~6 GB on dataset D (line 1112–1113 comment).**
 
 ---
 

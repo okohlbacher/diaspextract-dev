@@ -348,7 +348,7 @@ namespace spx
           {
             const std::size_t c0 = b0 + (std::size_t)c * per, c1 = std::min(b1, c0 + per);
             // one reader per THREAD (not per work item): MzPeak::open re-reads the zip directory and
-            // every parquet footer; ~1,450 opens cost ~1 h of system time on S30 (measured 13:55).
+            // every parquet footer; ~1,450 opens cost ~1 h of system time on dataset D (measured 13:55).
             static thread_local std::unique_ptr<MzPeak::Index> tidx;   // Index is neither movable nor copyable:
             static thread_local std::string tidx_path;                  // construct it from the prvalue (elided)
             if (!tidx || tidx_path != path) { tidx.reset(new MzPeak::Index(MzPeak::open(path))); tidx_path = path; }

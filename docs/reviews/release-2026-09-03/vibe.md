@@ -298,11 +298,11 @@ if (fabs(pcs[j].rt - pcs[i].rt) <= rt_tol && fabs(pcs[j].im - pcs[i].im) <= im_t
 
 ### **2.1 `charge:min_charge` Application Point**
 
-**Claim in docs/S30-BASELINE.md (line 745-749):**
+**Claim in docs/dataset D-BASELINE.md (line 745-749):**
 > `charge:min_charge` = 2, dropping singly-charged precursor hypotheses **before extraction**
 
 **Claim in README.md (line 52-53):**
-> Adopt `charge:min_charge=2` as the default: confirmed on S30/S08/S23, both engines gain...
+> Adopt `charge:min_charge=2` as the default: confirmed on dataset D/dataset A/dataset B, both engines gain...
 
 **Code:** `src/DIAPseudoSpectra.cpp:2051-2058`
 ```cpp
@@ -324,7 +324,7 @@ This is **correct** - emission happens in the window loop, and the filter is app
 
 ### **2.2 `charge:min_charge` and Charge-0/"Guessed" Precursors**
 
-**Claim in docs/S30-BASELINE.md (line 745-749):**
+**Claim in docs/dataset D-BASELINE.md (line 745-749):**
 > Dropping them [singly-charged] GAINS peptides... Set 1 to emit them again
 
 **Code behavior:** At line 2032-2033:
@@ -335,7 +335,7 @@ Then at line 2051-2058, the `charge:min_charge` filter removes precursors with `
 
 **Finding:** Charge-0 (guessed) precursors are **NOT dropped** by `charge:min_charge`. This matches the help string claim: "Minimum precursor charge to EMIT" - charge-0 means "unknown" and is not a numeric charge to compare against `min_charge`.
 
-**BUT** - the docs/S30-BASELINE.md line 742-743 says:
+**BUT** - the docs/dataset D-BASELINE.md line 742-743 says:
 > "charge:min_charge" 2 (2 = most common); 0 = leave charge UNSET
 
 This describes `assembly:default_charge`, not `charge:min_charge`. The help string for `charge:min_charge` is **clear** that it only applies to precursors with a **positive** charge.
@@ -355,7 +355,7 @@ This describes `assembly:default_charge`, not `charge:min_charge`. The help stri
 **Finding:** All falsified parameters **still exist** with the **documented defaults**.
 
 **BUT** - the help string for `assembly:rp_max` at line 773 says:
-> "FALSIFIED on S30 (2026-07, all cross-precursor redistributions lost peptides..."
+> "FALSIFIED on dataset D (2026-07, all cross-precursor redistributions lost peptides..."
 
 This is **explicit**. The parameter exists but is **not recommended**.
 
@@ -365,23 +365,23 @@ This is **explicit**. The parameter exists but is **not recommended**.
 
 **Claim in README.md:** None found.
 
-**Code review:** All parameters mentioned in S30-BASELINE.md appear to exist:
+**Code review:** All parameters mentioned in dataset D-BASELINE.md appear to exist:
 - `trace:ms1_split_valleys` (line 792) - exists, default 7.0
 - `charge:scoring` (line 849) - exists, default "count"
 - `assembly:corr_power` (line 772) - exists, default 2.0
 - `assembly:im_weight_sigma` (line 771) - exists, default 0.0
 
-**BUT** - the S30-BASELINE.md mentions `ms1split` (line 20) as part of the current defaults. The actual parameter is `trace:ms1_split_valleys`. The docs use a **shorthand** that doesn't match the parameter name.
+**BUT** - the dataset D-BASELINE.md mentions `ms1split` (line 20) as part of the current defaults. The actual parameter is `trace:ms1_split_valleys`. The docs use a **shorthand** that doesn't match the parameter name.
 
 **Finding:** **INCONSISTENT** - shorthand in docs doesn't match parameter names.
 
-**FIX:** Update S30-BASELINE.md to use full parameter names.
+**FIX:** Update dataset D-BASELINE.md to use full parameter names.
 
 ### **2.5 Benchmark Numbers the Code Cannot Produce**
 
 **Claim in README.md (line 56-60):**
 > Current arm: apex m/z estimator + `charge:min_charge` 2 (2026-09-03).
-> Sage peptides: S30=12,642, S08=11,084, S23=10,294
+> Sage peptides: dataset D=12,642, dataset A=11,084, dataset B=10,294
 
 **Code:** The current defaults (from CHANGELOG.md line 6-10) are:
 - `charge:min_charge` = 2 (new default)
@@ -390,7 +390,7 @@ This is **explicit**. The parameter exists but is **not recommended**.
 **Finding:** The README numbers **match** the current code defaults.
 
 **BUT** - the README also says at line 51:
-> Runtime (S30, 33,553 frames, 100 threads on a 128-core node): **15:21 wall, 106 GB peak RSS**
+> Runtime (dataset D, 33,553 frames, 100 threads on a 128-core node): **15:21 wall, 106 GB peak RSS**
 
 This is **historical** (from 2026-09-02). The current code has changed since then (e.g., `charge:min_charge` default changed). The number is **not reproducible** with the current defaults.
 
@@ -399,19 +399,19 @@ This is **historical** (from 2026-09-02). The current code has changed since the
 ### **2.6 Parameter Help Strings with Stale Information**
 
 **Finding at line 772 (assembly:corr_power):**
-> "DEFAULT 2.0 since 2026-07-28: validated on S30 (tuning) + S08 + S23 (held out)..."
+> "DEFAULT 2.0 since 2026-07-28: validated on dataset D (tuning) + dataset A + dataset B (held out)..."
 
 This is **still accurate** - the default is 2.0.
 
 **Finding at line 773 (assembly:rp_max):**
-> "FALSIFIED on S30 (2026-07, all cross-precursor redistributions lost peptides..."
+> "FALSIFIED on dataset D (2026-07, all cross-precursor redistributions lost peptides..."
 
 This is **still accurate**.
 
 **Finding at line 849 (charge:scoring):**
 > "'count' is the partner-count heuristic... and it eliminates the catastrophic 4->2 confusion (10,199 cases)"
 
-This refers to **old numbers**. The current S30-BASELINE.md shows the `4->2` confusion is **gone** with the current defaults. The help string is **stale** but **factually correct** about the behavior.
+This refers to **old numbers**. The current dataset D-BASELINE.md shows the `4->2` confusion is **gone** with the current defaults. The help string is **stale** but **factually correct** about the behavior.
 
 **Verdict:** Mostly consistent, with minor staleness that doesn't affect correctness.
 
@@ -419,7 +419,7 @@ This refers to **old numbers**. The current S30-BASELINE.md shows the `4->2` con
 
 | Severity | Location | Issue | Fix |
 |---|---|---|---|
-| **MEDIUM** | S30-BASELINE.md | Uses shorthand `ms1split` instead of `trace:ms1_split_valleys` | Use full parameter names |
+| **MEDIUM** | dataset D-BASELINE.md | Uses shorthand `ms1split` instead of `trace:ms1_split_valleys` | Use full parameter names |
 | **LOW** | README.md | Runtime numbers from 2026-09-02 may not match current defaults | Update or date-stamp |
 | **LOW** | Help strings | Minor staleness in historical references | Acceptable for v0.3.0 |
 | **NONE** | Parameter existence | All documented parameters exist with claimed defaults | **CONSISTENT** |
@@ -596,7 +596,7 @@ The **help strings** for these parameters (lines 767, 773, 805, 813) **should ke
 #### **CUT: Stale Comments**
 | Location | Type | Verdict |
 |---|---|---|
-| Line 844-849 | `[route-1]` charge inference note | **STALE** - says "Only 25.7% of diaTracer's precursors are matched by us" but this is **old** (current is higher) |
+| Line 844-849 | `[route-1]` charge inference note | **STALE** - says "Only 25.7% of the reference implementation's precursors are matched by us" but this is **old** (current is higher) |
 | Line 758 | `[H-3]` "placeholder pending real-data sweep" | **STALE** - real data has been swept |
 | Line 981 | `[merged-trace]` instrumentation comment | **STALE** - the measurement has been done |
 
@@ -629,7 +629,7 @@ These **tag names** are **fine** - they're references to the adversarial review 
 #### **4.2 Parameter Help Strings**
 
 **Current state:** Many help strings contain **experiment history** and **benchmark results**. Examples:
-- Line 772: `assembly:corr_power` - "DEFAULT 2.0 since 2026-07-28: validated on S30..."
+- Line 772: `assembly:corr_power` - "DEFAULT 2.0 since 2026-07-28: validated on dataset D..."
 - Line 837-843: `charge:min_charge` - "DEFAULT 2: singly-charged hypotheses are 29.3% of emission..."
 
 **Verdict:**
@@ -641,7 +641,7 @@ These **tag names** are **fine** - they're references to the adversarial review 
 ```cpp
 // Current (line 837-843):
 "Minimum precursor charge to EMIT. DEFAULT 2: singly-charged hypotheses "
-"are 29.3%% of emission on S30 and 1.73%% of peptides -- a z=1 pseudo-spectrum is identified on 0.42%% of "
+"are 29.3%% of emission on dataset D and 1.73%% of peptides -- a z=1 pseudo-spectrum is identified on 0.42%% of "
 "its own spectra against 15.3%% for z=2. Tryptic peptides are essentially never 1+ in ESI and "
 "charge:scoring breaks ties toward the LOW charge, so the mis-assignments land there. Dropping them GAINS "
 "peptides on both engines on all three files (Sage +0.8/+2.7/+1.4%%, MSFragger +1.2/+5.4/+0.9%%) because "
@@ -678,7 +678,7 @@ These **tag names** are **fine** - they're references to the adversarial review 
 ### **5.1 Current State**
 - **No unit test suite** (confirmed by absence of tests/ directory in file listing)
 - Verification via:
-  - Whole-file benchmark runs on cluster (S30, S08, S23)
+  - Whole-file benchmark runs on cluster (dataset D, dataset A, dataset B)
   - Peptide-set equality gate (Sage and MSFragger counts)
   - Determinism check (byte-identical spectrum data across thread counts)
 

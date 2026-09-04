@@ -28,7 +28,7 @@ Its answer to unexpected PTMs is "predict the PTM into the library, then
 transfer-learn onto it" — you must name the modification up front. It cannot
 find a variant you did not enumerate.
 
-**=> diaTracer's pseudo-MS/MS-for-open-search niche is genuinely unoccupied by
+**=> the reference implementation's pseudo-MS/MS-for-open-search niche is genuinely unoccupied by
 the state of the art. This project is not redundant.**
 
 ### Stage 1 — "feature-free" — is what we should steal
@@ -252,12 +252,12 @@ This is a design problem for the grouping half, not a transcription job.
 
 Both would have silently faked a comparison:
 
-- **diaTracer writes the precursor as its isolation window** (±0.01 Da offsets);
+- **the reference implementation writes the precursor as its isolation window** (±0.01 Da offsets);
   we write the real acquisition window (26 variable-width windows, 19–141 Da).
-  Trusting either file's window empties diaTracer's co-isolation set by
+  Trusting either file's window empties the reference implementation's co-isolation set by
   construction and makes it look perfectly pure.
-- **RT units differ**: our mzML is in seconds, diaTracer's in minutes, DIA-NN
+- **RT units differ**: our mzML is in seconds, the reference implementation's in minutes, DIA-NN
   reports minutes. Read the CV `unit_info`, never the bare number.
-- Precursor m/z key differs: we write `selected ion m/z`; diaTracer omits it and
+- Precursor m/z key differs: we write `selected ion m/z`; the reference implementation omits it and
   only has `isolation window target m/z`. IM is in `selectedIon` for us, in
-  `scan` for diaTracer.
+  `scan` for the reference implementation.

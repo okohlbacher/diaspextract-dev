@@ -19,12 +19,12 @@ on the code that was rewritten for parallelism, and it is the most valuable sing
 | 4 | mzPeak: an unknown `frame_id` silently substituted the reference T1, so masses calibrated at the wrong temperature were stamped exact -- and the provenance record vouched for them. | codex | throws; also rejects non-positive input m/z instead of `llround(NaN)` |
 | 5 | mzPeak: a short `get_spectra_batch` result was clamped with `min()`, leaving empty tail frames and a successful run. | codex | throws on any size mismatch |
 | 6 | mzPeak: m/z and intensity arrays truncated to the shorter; a short IM array became "no IM". | codex | throws on mismatch |
-| 7 | **Shipped defaults could not reproduce any published number**: every figure used `ms2_noise_threshold_int 10` and `ms2_split_valleys 7.0` on the command line while the registered defaults were 100 and 0. | codex, kimi | defaults moved to the benchmarked values; the "Current defaults" block in S30-BASELINE now lists all ten and says it was verified against the code |
+| 7 | **Shipped defaults could not reproduce any published number**: every figure used `ms2_noise_threshold_int 10` and `ms2_split_valleys 7.0` on the command line while the registered defaults were 100 and 0. | codex, kimi | defaults moved to the benchmarked values; the "Current defaults" block in dataset D-BASELINE now lists all ten and says it was verified against the code |
 | 8 | `SPEXTRACT_MZ_ESTIMATOR` set every reported precursor and fragment m/z from an undocumented env var, invisible in `--help`. | kimi | registered as `trace:mz_estimator` (apex/mean/median, default apex) with valid strings |
 | 9 | `trace:split_valleys_fwhm` help claimed it overrides `ms1_split_valleys`; the code modifies `ms2_split` only. | codex | help corrected |
 | 10 | `charge:ambiguity_margin` is unreachable in the default `count` scoring mode. | codex, kimi | help states the mode dependency |
 | 11 | CHANGELOG advertised `SPEXTRACT_ISO_COLLAPSE` and the backfill env vars, which the ponytail pass had just removed. | codex, kimi | changelog rewritten to match the code, with Fixed/Removed sections |
-| 12 | Doxygen header sent readers to `PLAN.md` / `REVIEW.md`, neither of which ships. | codex, kimi | points at `docs/S30-BASELINE.md` and `docs/reviews/` |
+| 12 | Doxygen header sent readers to `PLAN.md` / `REVIEW.md`, neither of which ships. | codex, kimi | points at `docs/dataset D-BASELINE.md` and `docs/reviews/` |
 | 13 | `MzPeakStreamLoad.h` header said the exact calibration is enabled with `=1`; it is default-on and `=0` disables. | codex | comment corrected |
 | 14 | `bands_for`, a per-window band heuristic, was defined, never called, and a comment said it was kept for reference. | codex | removed |
 | 15 | `ponytail:` as a code tag has no meaning outside this project. | codex | reworded to `deliberate:` |
@@ -34,7 +34,7 @@ on the code that was rewritten for parallelism, and it is the most valuable sing
 ## Rejected, with evidence
 
 **"Precursors on a shared window boundary are emitted twice" (codex, HIGH).** Not a bug. Measured
-on the S30 output: all 23 adjacent isolation-window pairs overlap by exactly 1.000 Da, the standard
+on the dataset D output: all 23 adjacent isolation-window pairs overlap by exactly 1.000 Da, the standard
 diaPASEF overlap. A precursor in an overlap band is genuinely isolated by both windows and yields two
 independent measurements, so inclusive bounds on both edges are correct. The signature is visible and
 benign: 27,440 of 927,813 spectra share an exact (m/z, RT, IM, charge) tuple, always with

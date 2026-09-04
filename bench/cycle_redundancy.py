@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Where does the 9.51 PSMs/peptide come from -- within a cycle, or across cycles?
 
-SpeXtract emits 9.51 PSMs per peptide against diaTracer's 1.69. That ratio alone cannot
+SpeXtract emits 9.51 PSMs per peptide against the reference implementation's 1.69. That ratio alone cannot
 distinguish two very different situations:
 
   WITHIN-CYCLE duplication   several pseudo-spectra generated from ONE diaPASEF cycle all match
@@ -9,14 +9,14 @@ distinguish two very different situations:
                              physically contains one elution point for one precursor.
 
   ACROSS-CYCLE spread        the peptide elutes over many cycles and each cycle contributes one
-                             spectrum. That is NORMAL and diaTracer must show it too.
+                             spectrum. That is NORMAL and the reference implementation must show it too.
 
 The total factorises exactly:
 
     PSMs/peptide  =  (PSMs per (peptide,cycle))  x  (cycles per peptide)
                      ^ within-cycle multiplicity    ^ elution spread
 
-Only the first term is a defect. Running it on both tools separates them: if diaTracer's
+Only the first term is a defect. Running it on both tools separates them: if the reference implementation's
 redundancy is nearly all elution spread and ours is not, the excess is ours to fix.
 
 Cycle assignment: diaPASEF cycle period is 1.385 s for these runs (1,342 cycles over

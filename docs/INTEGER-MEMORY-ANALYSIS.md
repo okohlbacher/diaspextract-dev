@@ -3,7 +3,7 @@
 **Method.** A byte ledger over the window loop's data structures (`SPEXTRACT_MEM_LEDGER=1`,
 `MemGuard` RAII around each allocation), recording PEAK CONCURRENT bytes per structure rather than a
 sum over time -- windows and their band tasks run at once, so simultaneity is the whole question.
-Measured on S30, 100 threads, 128-core node, `trace:detector=integer`. Process peak RSS 105 GB.
+Measured on dataset D, 100 threads, 128-core node, `trace:detector=integer`. Process peak RSS 105 GB.
 
 The first ledger run over-reported traces at 63.5 GB because `buildFragGrid` consumes every trace
 profile and nothing subtracted it, making that one counter cumulative. The tell was that it exceeded

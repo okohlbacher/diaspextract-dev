@@ -8,8 +8,8 @@ The science phase succeeded and is over-documented; the product phase has not st
 under-shipped. Highest-leverage week = turning finished, honest science into something a third
 party can build, run, and verify — not another quality lever.
 
-## Scoreboard (S30; engines deterministic sigma=0; diaTracer denominators NOT yet reconciled)
-| metric | SpeXtract | diaTracer | ratio |
+## Scoreboard (dataset D; engines deterministic sigma=0; the reference implementation denominators NOT yet reconciled)
+| metric | SpeXtract | the reference implementation | ratio |
 |---|---|---|---|
 | closed Sage (corr_power=2 default) | 10,802 | 11,517 | 93.8% (+im_weight opt: 11,112 = 96.5%) |
 | closed MSFragger | 11,560 | 13,932 | 83.0% |
@@ -23,10 +23,10 @@ party can build, run, and verify — not another quality lever.
 **The flagship open-search metric has never been measured in the right currency, for either
 tool.** open_bench counts target peptides@FDR, but the raison d'etre is PTM-SITE discovery;
 the -1.003 Da work proved the currencies diverge (a shifted precursor still counts as a target
-while being a wrong PTM assignment), and we carry 2.4x diaTracer's rate of that error. Scored
+while being a wrong PTM assignment), and we carry 2.4x the reference implementation's rate of that error. Scored
 delta-mass-bin-level (known-PTM bins vs artifact bins, entrapment-controlled per bin), the 89%
 could move either direction. One script against existing output; must precede any new open-search
-experiment. Second: two unreconciled diaTracer reference sets (Sage 11,552/11,517; MSFragger
+experiment. Second: two unreconciled the reference implementation reference sets (Sage 11,552/11,517; MSFragger
 13,014/13,932 — 7% apart) + the 9,989-vs-10,072 baseline discrepancy → no ratio is citable yet.
 
 ## Key gaps (judges)
@@ -53,14 +53,14 @@ experiment. Second: two unreconciled diaTracer reference sets (Sage 11,552/11,51
     MSFragger params into git; cmp outputs/logs into git + /ceph tarball; FASTA SHA256s;
     provenance stamping (src sha recorded at deploy/build; harness refuses on mismatch later).
 01. Re-denominate the flagship metric (days, no new runs): delta-mass-bin-level entrapment
-    scoring of BOTH tools' existing open output; reconcile diaTracer denominators + 9,989/10,072.
+    scoring of BOTH tools' existing open output; reconcile the reference implementation denominators + 9,989/10,072.
 02. ONE pre-registered emission-controlled open-search arm (1 week, time-boxed): quality-gate
-    924k→~700k + diaTracer-precursor-matched sub-arm, identical search, full FDR curves, scored
+    924k→~700k + the reference implementation-precursor-matched sub-arm, identical search, full FDR curves, scored
     under the 01 metric. Gap closes → emission competition → principled gate. Flat → faint-tail
     quality → roadmap. Ship regardless.
-03. Public-PXD replication + v0.2.0 as ONE unit (1-2 wks): diaTracer paper's own public
+03. Public-PXD replication + v0.2.0 as ONE unit (1-2 wks): the reference implementation paper's own public
     diaPASEF data end-to-end (both tools, both engines, corrected estimator); then main FF,
-    README rewrite (S30-BASELINE + public numbers), EPD patch + OpenMS pin docs, apportion/
+    README rewrite (dataset D-BASELINE + public numbers), EPD patch + OpenMS pin docs, apportion/
     rp_max guard, falsified-flag help pass, binary rename to SpeXtract, build CI + determinism
     smoke test on public-derived fixture, tag v0.2.0 (v0.1.0 burned) + CHANGELOG + CITATION.cff.
 04. R2+R3+R4 runtime batch (3-5 d, low risk): cull span-0 MS2 traces, two-lower_bound band

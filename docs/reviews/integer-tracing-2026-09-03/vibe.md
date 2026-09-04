@@ -74,7 +74,7 @@ The design **double-counts** savings. The "no PeakMap materialisation" and "no d
 Run trace detection on a window **with materialisation but with the compact store already in contiguous arrays**. If the time **does not drop significantly**, then the cost is in the extension search, not the layout. If it **does drop**, the layout is the bottleneck. This isolates the materialisation cost from the cache effect.
 
 ### Falsifier assessment:
-The 15% floor is **too low**. The materialisation pass alone should account for **at least 10-20%** of the 90.9% trace detection time (since it is a full pass over the same data). A 15% total reduction would mean the materialisation was **<15% of 90.9% ≈ 13.6% of window time**, i.e., **~500s on S30**. If you measure materialisation time directly and it is >600s, the 15% falsifier fires **even if the refactor is successful**. The falsifier should be **25%**, not 15%.
+The 15% floor is **too low**. The materialisation pass alone should account for **at least 10-20%** of the 90.9% trace detection time (since it is a full pass over the same data). A 15% total reduction would mean the materialisation was **<15% of 90.9% ≈ 13.6% of window time**, i.e., **~500s on dataset D**. If you measure materialisation time directly and it is >600s, the 15% falsifier fires **even if the refactor is successful**. The falsifier should be **25%**, not 15%.
 
 ---
 

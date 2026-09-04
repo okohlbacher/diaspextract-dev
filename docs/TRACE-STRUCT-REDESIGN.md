@@ -23,7 +23,7 @@ instructions recompute.
 
 ## 2. "Contiguous" needs one refinement, and it decides the design
 
-Two facts from the data (S30):
+Two facts from the data (dataset D):
 
 * **33,553 frames, 17,343 distinct RTs, 1,343 MS1 frames, 24 windows.** A window's CONSECUTIVE
   frames are ~13 apart on the GLOBAL RT axis, because the MS1 frame and the other windows' frames
@@ -104,11 +104,11 @@ is concatenated per window). The measured 35.6 GB becomes ~9 GB.
 |---|---|---|
 | `len` overflows uint16 | a trace spanning > 65,535 frames: impossible on a 1,400-frame gradient, but assert it | `assert(len < 65536)` at construction, abort not truncate |
 | a consumer relied on per-point bins (`xt`) | export m/z of split traces reverts to a centroid | the apex bin is `tof`; the ONLY consumer of per-point bins was `splitIntegerTraces` giving EPD per-peak m/z, and EPD ignores per-peak m/z (it splits on RT/intensity; SNR filter off) -- so `toTrace()` after a split must take the apex bin from the PARENT's slab lookup, not from the MassTrace |
-| zero-padding changes a statistic | `mean`/`invnorm`/`overlap`/sample-rate differ | zeros contribute nothing to sums; `overlap` tests non-zero; the sample-rate test is done in the detector before the span is built -- verify by digest against the current integer output on S30 (the integer path is not gated on bit-identity, but THIS change should be, because it is meant to be pure representation) |
+| zero-padding changes a statistic | `mean`/`invnorm`/`overlap`/sample-rate differ | zeros contribute nothing to sums; `overlap` tests non-zero; the sample-rate test is done in the detector before the span is built -- verify by digest against the current integer output on dataset D (the integer path is not gated on bit-identity, but THIS change should be, because it is meant to be pure representation) |
 | MS1 traces need the MS1 map's frame sequence, not a window's | wrong `rt` for precursors | one `PeakSlab`-like frame table for the MS1 map (`rt_index` only) |
 | arena growth reallocates while tasks hold offsets | offsets stay valid (they are indices, not pointers) but concurrent appends race | each BAND task appends to its OWN arena; the window concatenates them after the band tasks join, rebasing `off` -- one add per trace |
 
-**Falsifier for the whole redesign:** the spectrum digest of the integer path on S30 must be
+**Falsifier for the whole redesign:** the spectrum digest of the integer path on dataset D must be
 IDENTICAL before and after (this is pure representation; any difference is a bug), AND the
 `traces` ledger line must fall from 35.6 GB to under 12 GB. A digest match with no memory drop
 means the arithmetic in section 3 is wrong; a memory drop with a digest change means a consumer
@@ -206,7 +206,7 @@ every sort/gate/emit); `imq` for MS2 (already the compact form of a quantity tha
 
 ## R7. The falsifier, staged
 
-The spectrum-list SHA-256 of the integer path on S30 must be identical before and after -- this IS
+The spectrum-list SHA-256 of the integer path on dataset D must be identical before and after -- this IS
 a pure representation change once R1-R3 hold, and codex confirms the arena concatenation does not
 by itself alter floating-point order. Because the existing `[det]` trace digest hashes only
 `mz`/`rt`/`intensity` and is order-insensitive, three staged checks precede it so a mismatch can be
@@ -223,13 +223,13 @@ Implemented in commit `3a1d91e` on `coverage-analysis-2026-07-24`, exactly as re
 map (`rt_index`, `b`, `frame_rt`, `inten` arena, `bins` arena until valley splitting);
 `makeSpan()`/`packReal()`; `FragStats` replaces `FragGrid`; band and chunk tasks append to private
 stores absorbed after each join with offsets rebased; the MS1 release compacts the arena. Compiles
-clean. **The gate is running:** the 8-check suite, then the S30 spectrum digest of BOTH detectors
+clean. **The gate is running:** the 8-check suite, then the dataset D spectrum digest of BOTH detectors
 against the pre-refactor outputs, then the memory ledger's `traces` line.
 
 
 ## Gate result (2026-09-04, 06:41) — PASSED on both detectors
 
-| S30 | digest vs pre-span | ledger simultaneous peak | visited | traces | process RSS |
+| dataset D | digest vs pre-span | ledger simultaneous peak | visited | traces | process RSS |
 |---|---|---|---|---|---|
 | OpenMS detector | **IDENTICAL** (656,254 spectra) | 68.6 -> 32.4 GB | -- | 35.6 -> 7.3 GB | 164 -> 147 GB |
 | integer detector | **IDENTICAL** (656,256 spectra) | 68.6 -> 27.9 GB | 4.87 -> 0.61 GB | 35.6 -> 6.9 GB | 105 -> 88 GB |

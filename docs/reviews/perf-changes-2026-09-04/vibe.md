@@ -39,7 +39,7 @@ After reading all requested files and analyzing the three uncommitted changes in
 - **Parameter equivalence**: `width_filtering=off`, `masstrace_snr_filtering=false` are set identically in both old and new code.
 - **Bug fix noted in code** (lines 1156–1160): An earlier version *did* have a bug (3.3% peptide loss) from misattributing bins by walking the parent list in IM/mz order instead of frame order. **The current code fixes this by using `wst.bins[t.off + k]`** — this is output-neutral *now*.
 
-**No silent result change. Memory improvement: ~6 GB on S30 (line 1112–1113 comment).**
+**No silent result change. Memory improvement: ~6 GB on dataset D (line 1112–1113 comment).**
 
 ---
 
@@ -76,7 +76,7 @@ For any fragment passing the exact test (`|frag_rt - pc.rt| ≤ delta_rt`):
 - The widening threshold (65000.0 vs. 65535.0) is **suboptimal**: it widens ~0.82% earlier than necessary, causing slightly wider buckets and ~0.3% more fragments to pass the quantised test. However, this **does not affect correctness** — it only reduces the filtering efficiency.
 - The ±2 range is **conservative** (±1 would suffice mathematically), costing ~0.3% extra exact tests. Again, **no correctness impact**.
 
-**No silent result change. Net win: 6.9 TB → 2×`F` bytes of I/O per S30 run.**
+**No silent result change. Net win: 6.9 TB → 2×`F` bytes of I/O per dataset D run.**
 
 ---
 ---

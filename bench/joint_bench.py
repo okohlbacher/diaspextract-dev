@@ -26,7 +26,7 @@ Peptide-level FDR
 -----------------
 Best-scoring PSM per distinct peptide sequence, then target-decoy over that reduced list --
 the standard "picked" approach. This is the axis that matters here: we emit ~4.6 PSMs/peptide
-against diaTracer's 1.46, so PSM-level counts reward redundancy and peptide-level counts do not.
+against the reference implementation's 1.46, so PSM-level counts reward redundancy and peptide-level counts do not.
 Both are reported precisely so the gap is visible rather than hidden.
 """
 import argparse, csv, json, math, os, re, subprocess, sys
@@ -243,7 +243,7 @@ if __name__ == "__main__":
 # * NO RESCORING. Sage's reported score is already discriminant-rescored; MSFragger's hyperscore
 #   is not. Sage is therefore favoured on absolute counts. Adding Percolator to MSFragger alone
 #   would reintroduce the confound this design removes; adding it to both is the correct fix and
-#   is not done here. The TOOL comparison (diaTracer vs SpeXtract) is unaffected, because it is
+#   is not done here. The TOOL comparison (the reference implementation vs SpeXtract) is unaffected, because it is
 #   made WITHIN an engine -- that is the comparison this harness exists for.
 # * Peptide-level FDR is "picked" (best PSM per sequence). Modified forms of one sequence collapse
 #   together; a peptidoform-level count would be larger for both.

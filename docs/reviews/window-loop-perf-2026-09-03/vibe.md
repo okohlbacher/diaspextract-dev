@@ -32,7 +32,7 @@ Based on the code and your measurements, here is the hostile performance review.
 
   4. **Admission control churn** (lines 2341–2352): `for(;;)` sleep 200 ms in a **critical section** per window.
      At 8 concurrent windows, the critical path is **~200 ms × 24 windows / 8 slots ≈ 600 ms** added latency, negligible in wall time but **blocks threads** during memory pressure.
-     → **<1% wall time, but visible in CPU under-utilization** (60/128 cores busy vs 45/128 for diaTracer).
+     → **<1% wall time, but visible in CPU under-utilization** (60/128 cores busy vs 45/128 for the reference implementation).
 
 **Binding constraint: the 8-window concurrency cap (n_conc = 8) compounded by the **serial fraggrid** and **imbalanced score work**.**
 The 67.9× measured speedup on a 96-thread intended grid is **71% of ideal** because:
@@ -119,11 +119,11 @@ If the compact store were **not** 20.8 GB, or if the 8.5 M fragments/window were
 
 ---
 
-## 4. Why diaTracer is 3.1× cheaper in CPU for the same output volume
+## 4. Why the reference implementation is 3.1× cheaper in CPU for the same output volume
 
 **Algorithmic differences, not implementation:**
 
-| Aspect | speXtract | diaTracer | CPU Impact |
+| Aspect | speXtract | the reference implementation | CPU Impact |
 |---|---|---|---|
 | **Correlation method** | Pearson over **full RT grid G (~1300 points)** with **zero-padding** (`scoreCandidates_` line 1572) | Pearson over **shared support only** (Nat Commun 16:95) | **~2.5–3×** |
 | **Precursor XIC smoothing** | **Off by default** (wl_scale_ = 0.0 unless set) | **2D Gaussian + Savitzky-Golay** on precursor XIC (Nat Commun 16:95 Methods) | **N/A (smoothing is cheap)** |
@@ -140,15 +140,15 @@ If the compact store were **not** 20.8 GB, or if the 8.5 M fragments/window were
   With **P ≈ 100k precursors/window** and **F ≈ 8.5 M fragments/window**, **pairs ≈ 8.5e6 × 100k = 8.5e11** (but gated by IM/RT to **~1–2%**, so ~8.5e9–1.7e10 pairs).
   Each pair: **1300 multiply-adds** → **1.1e13–2.2e13 FLOP**.
 
-- diaTracer: **Pearson over support intersection only** (shared RT points between precursor and fragment):
+- the reference implementation: **Pearson over support intersection only** (shared RT points between precursor and fragment):
   For each pair: **O(|p_support ∩ f_support|)** ≈ **median 5–10 points** (sparse fragments).
   Same pair count, but **100–200× fewer FLOP per pair**.
 
-**Result: diaTracer’s correlation kernel does 100–200× less work per pair, and the pair count is similar after gating.**
+**Result: the reference implementation’s correlation kernel does 100–200× less work per pair, and the pair count is similar after gating.**
 Even with speXtract’s [Q1] variance_support (line 1534–1547), the union support is still **~10× larger** than the intersection for sparse fragments.
 
 **The 3.1× CPU gap is **almost entirely explained by the correlation kernel’s O(G) vs O(|support|) work**.
-SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **replaced an O(P log F) search with O(1) per point**, but it **introduced O(G) zero-padding** that diaTracer avoids.
+SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **replaced an O(P log F) search with O(1) per point**, but it **introduced O(G) zero-padding** that the reference implementation avoids.
 
 ---
 
@@ -161,10 +161,10 @@ SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **repla
 | | |
 |---|---|
 | **Change** | Set `gate:variance_support=true` (line 836). Uses **union support** for Pearson, not full grid G. |
-| **Expected effect** | **~40% reduction in score CPU** (measured on S30: score 28.81 s CPU → ~17 s CPU; **~11 s wall saved**). |
+| **Expected effect** | **~40% reduction in score CPU** (measured on dataset D: score 28.81 s CPU → ~17 s CPU; **~11 s wall saved**). |
 | **Why it works** | Removes the **O(G) zero-padding** from Pearson. Fragments with 5–10 support points now correlate in **O(10)** not **O(1300)**. |
 | **Risk** | **Changes output**: correlation scores **increase** for sparse fragments (no longer penalized by implicit zeros). **Retune `gate:min_correlation`** (e.g., from 0.3 to ~0.45). **Peptide count must be re-validated**. |
-| **Falsify cheaply** | Run with `gate:variance_support=true gate:min_correlation=0.3` vs `=0.45` on S08; compare peptide count. **1 hour**. |
+| **Falsify cheaply** | Run with `gate:variance_support=true gate:min_correlation=0.3` vs `=0.45` on dataset A; compare peptide count. **1 hour**. |
 | **Gain/risk** | **Highest**: **~10% total wall time saved** for a **parameter-only change**. |
 
 ---
@@ -175,9 +175,9 @@ SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **repla
 |---|---|
 | **Change** | Override the **n_conc = min(windows, max(1, n_threads / n_bands))** formula (line 2297). Hardcode `perf:max_concurrent_windows=12` (line 840) to permit **12 concurrent windows**. |
 | **Expected effect** | **8 → 12 windows in flight** = **12/8 = 1.5× more parallelism on the outer loop**. The widest window (23.7% of work) now overlaps with **4 more windows**, reducing Amdahl loss. **~15–20% wall time saved** (1139 s × (1 - 8/12×0.237) ≈ **140 s**). Memory: 12 GB/window × 12 = 144 GB **within the 151.7 GB peak** (your RSS headroom). |
-| **Why it works** | The **binding constraint is the 8-window cap** (60 cores busy vs 45 for diaTracer). 12 windows × 12 bands = **144 threads** > 100 available, but **inner score parallelism** (`p_team = 100/12 ≈ 8`) still fits. |
+| **Why it works** | The **binding constraint is the 8-window cap** (60 cores busy vs 45 for the reference implementation). 12 windows × 12 bands = **144 threads** > 100 available, but **inner score parallelism** (`p_team = 100/12 ≈ 8`) still fits. |
 | **Risk** | **Memory**: 12 × 12 GB = **144 GB** vs **151.7 GB peak** — **7.7 GB headroom** on your run. **Fragile on smaller nodes**. **No output change**. |
-| **Falsify cheaply** | Run with `perf:max_concurrent_windows=12` on S08; check RSS peak. **1 hour**. |
+| **Falsify cheaply** | Run with `perf:max_concurrent_windows=12` on dataset A; check RSS peak. **1 hour**. |
 | **Gain/risk** | **Very high**: **~15% wall time** / **low risk** (parameter). |
 
 ---
@@ -213,7 +213,7 @@ SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **repla
 | **Expected effect** | **Removes the grid entirely**. Correlation becomes **O(|p_support| + |f_support|)** per pair. **~2× faster than `var_support_`**. **~20–25% wall time saved** (score drops from 46% to ~25%). |
 | **Why it works** | `logoverlap` sums `min(log(p_i), log(f_i))` **only over precursor support** (lines 1549–1570). No grid, no zero-padding. |
 | **Risk** | **Changes output significantly**: `logoverlap` is **not Pearson** — different scale, different gates. **Requires full retune** of `min_correlation`. **Peptide count validation mandatory**. |
-| **Falsify cheaply** | Sweep `min_correlation` 0.3/0.5/0.7 with `coelution=logoverlap` on S08; compare peptide count vs baseline. **2 hours**. |
+| **Falsify cheaply** | Sweep `min_correlation` 0.3/0.5/0.7 with `coelution=logoverlap` on dataset A; compare peptide count vs baseline. **2 hours**. |
 | **Gain/risk** | **Medium**: **~20% wall time** / **high validation cost**. |
 
 ---
@@ -234,7 +234,7 @@ SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **repla
 | | |
 |---|---|
 | **Change** | Lower `trace:ms2_noise_threshold_int` from **10.0 to 5.0** (line 806) + **disable `trace:ms2_min_length_sec`** (set to 0). |
-| **Expected effect** | **~2× more fragment traces** → **more pairs**, but **diaTracer uses lower thresholds** and still beats us. **This likely hurts, not helps**. **Avoid**. |
+| **Expected effect** | **~2× more fragment traces** → **more pairs**, but **the reference implementation uses lower thresholds** and still beats us. **This likely hurts, not helps**. **Avoid**. |
 | **Risk** | **Changes output** (more spectra, more noise). **Falsified in prior sweeps**. |
 | **Gain/risk** | **Negative**: **Loses peptides**. |
 
@@ -254,10 +254,10 @@ SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **repla
 | 6 | Release XICs in `buildFragGrid` | **~2–3%** | Minor | No | None | 30 min |
 
 **Bottom line:**
-- **The algorithm does ~3× more work in the correlation kernel** (O(G) vs O(|support|)) and **no amount of tuning closes that gap entirely** — diaTracer’s design is fundamentally more efficient for sparse fragments.
+- **The algorithm does ~3× more work in the correlation kernel** (O(G) vs O(|support|)) and **no amount of tuning closes that gap entirely** — the reference implementation’s design is fundamentally more efficient for sparse fragments.
 - **The single biggest lever is lifting the 8-window cap (Rank 2)**, which is **low-risk and saves ~15% wall time** on your hardware.
 - **`var_support_` (Rank 1) is the only output-changing fix that pays off at 3:1 gain/risk** — it directly attacks the zero-padding defect.
 - **Parallelising `fraggrid` (Rank 3) and fixing the score scheduler (Rank 4) are **low-risk, high-reward micro-optimizations** that compound.
-- **`logoverlap` (Rank 5) is the nuclear option** — it would close **>50%** of the CPU gap to diaTracer, but **requires a full retune and peptide validation**.
+- **`logoverlap` (Rank 5) is the nuclear option** — it would close **>50%** of the CPU gap to the reference implementation, but **requires a full retune and peptide validation**.
 
-**The 3.1× CPU gap to diaTracer is real and **primarily algorithmic**: the Pearson-over-grid design is the root cause. The mitigations above can recover **~30–40% of that gap**, but **not all of it** without switching correlation statistics entirely.
+**The 3.1× CPU gap to the reference implementation is real and **primarily algorithmic**: the Pearson-over-grid design is the root cause. The mitigations above can recover **~30–40% of that gap**, but **not all of it** without switching correlation statistics entirely.

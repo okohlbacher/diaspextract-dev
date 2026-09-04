@@ -119,7 +119,7 @@ One measurement already separates materialisation from detector layout: `t_mat` 
 2. EPD;
 3. `MassTrace`→`Trace` conversion/instrumentation.
 
-Run that on S30 with the current baseline. If MTD proper is not at least about two-thirds of the 3,869 seconds, a 30–50% reduction of the whole trace stage is not credible without also optimizing EPD. If MTD proper dominates, an exact-semantics array prototype is justified.
+Run that on dataset D with the current baseline. If MTD proper is not at least about two-thirds of the 3,869 seconds, a 30–50% reduction of the whole trace stage is not credible without also optimizing EPD. If MTD proper dominates, an exact-semantics array prototype is justified.
 
 ## 4. What will this break?
 
@@ -166,7 +166,7 @@ Do not combine layout, native TOF, reconstructed scan IDs, new termination and n
 
 8. **Then add bands/tasks.** Partition once using density/quantile edges; do not rescan and allocate full-slab state per band. Test `bands=1, 2, 12, 24` for trace-set stability. Keep the existing OpenMS path available as the A/B reference.
 
-9. **Run S30 and S08 with both engines and entrapment/FDR.** Report MTD, EPD, materialisation, RSS, critical-path wall time, emitted spectrum count and trace-level deltas separately.
+9. **Run dataset D and dataset A with both engines and entrapment/FDR.** Report MTD, EPD, materialisation, RSS, critical-path wall time, emitted spectrum count and trace-level deltas separately.
 
 10. **Only after layout pays, try native TOF as a separate scientific A/B.** First make `loadTofAxis()` actually executable in the production build and reject unknown frame mappings. Do not describe this step as data-structure-only.
 

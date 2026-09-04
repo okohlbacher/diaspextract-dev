@@ -171,7 +171,7 @@ evidence/   frozen run records with checksums
 
 ## Documentation
 
-- [docs/S30-BASELINE.md](docs/S30-BASELINE.md) — the decision record: every default, what was
+- [docs/dataset D-BASELINE.md](docs/dataset D-BASELINE.md) — the decision record: every default, what was
   measured to justify it, and what was falsified
 - [docs/MZ-AXIS-DESIGN.md](docs/MZ-AXIS-DESIGN.md) — the flight-time index and the integer detector
 - [docs/charge-inference.md](docs/charge-inference.md) — charge assignment, its coupling to MS1

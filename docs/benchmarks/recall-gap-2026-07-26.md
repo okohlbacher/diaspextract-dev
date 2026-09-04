@@ -1,10 +1,10 @@
-# The recall gap is low-abundance peptides we EMIT but fail to IDENTIFY (S30, matched Sage)
+# The recall gap is low-abundance peptides we EMIT but fail to IDENTIFY (dataset D, matched Sage)
 
-Direct matched comparison (same S30 .d, both searched with sage_deiso.json / human.fasta / ±25 ppm):
+Direct matched comparison (same dataset D .d, both searched with sage_deiso.json / human.fasta / ±25 ppm):
 
-- diaTracer **11,517** peptides, ours **10,036**. **SHARED 8,485, MISS 3,032, ours-only 1,551.**
-- Not a subset: we find 1,551 peptides diaTracer misses (our cleaner spectra win the high-abundance
-  end); we miss 3,032 it finds. Net diaTracer +1,481 (~87% recall vs diaTracer on S30).
+- the reference implementation **11,517** peptides, ours **10,036**. **SHARED 8,485, MISS 3,032, ours-only 1,551.**
+- Not a subset: we find 1,551 peptides the reference implementation misses (our cleaner spectra win the high-abundance
+  end); we miss 3,032 it finds. Net the reference implementation +1,481 (~87% recall vs the reference implementation on dataset D).
 
 ## What distinguishes the peptides we MISS — abundance, and nothing else
 
@@ -43,14 +43,14 @@ emitted. The SHARED positive control (0.9% A) validates the method.
 
 **The recall gap is an IDENTIFICATION-quality problem on low-abundance precursors we already emit,
 NOT an extraction/sensitivity problem.** We emit a spectrum for ~87% of the low-abundance peptides
-diaTracer identifies; ours just don't cross the 1% FDR line. Since abundance is the only
+the reference implementation identifies; ours just don't cross the 1% FDR line. Since abundance is the only
 discriminator, the fix must make our emitted spectra for FAINT precursors more identifiable —
 candidates to test:
 1. **Precursor annotation on faint precursors** — wrong charge/monoisotope → Sage searches the wrong
-   mass → no ID even though a spectrum exists there (charge is 74.6% vs diaTracer 82.6%). The A/B
+   mass → no ID even though a spectrum exists there (charge is 74.6% vs the reference implementation 82.6%). The A/B
    test matched on m/z only, so a right-m/z / wrong-mass spectrum still counts as "emitted".
 2. **Fragment richness/cleanliness at low abundance** — do our faint-precursor spectra carry fewer
-   of the true fragments (MS2 trace sensitivity) or more co-isolation dilution than diaTracer's?
+   of the true fragments (MS2 trace sensitivity) or more co-isolation dilution than the reference implementation's?
 3. **Per-spectrum FDR burden** — we emit 1.53M spectra (924k gated); more spectra = heavier
    multiple-testing at a per-spectrum threshold, which pushes borderline low-abundance IDs under q.
    The gate (924k) should already help this; worth re-measuring recall on the gated arm.
@@ -60,33 +60,33 @@ they carry the right precursor mass and enough correct fragments — separating 
 
 ---
 
-## CAUSE SEPARATION (decode our vs diaTracer spectra at the missed coordinates)
+## CAUSE SEPARATION (decode our vs the reference implementation spectra at the missed coordinates)
 
 `recall_cause2.py` — for each missed peptide, locate OUR emitted spectrum (right precursor mass) and
-diaTracer's, compute b/y ladder coverage the SAME way, with a SHARED positive control and a
-decoy-ladder (+13 Da) chance floor. diaTracer's patched.mzML has stale byte offsets (patched after
+the reference implementation's, compute b/y ladder coverage the SAME way, with a SHARED positive control and a
+decoy-ladder (+13 Da) chance floor. the reference implementation's patched.mzML has stale byte offsets (patched after
 indexing) so its spectra are decoded by a sequential pass; our mzML index is valid.
 
-**Positive control (SHARED, both identify):** our ladder cov 0.401, diaTracer 0.462 — both high,
+**Positive control (SHARED, both identify):** our ladder cov 0.401, the reference implementation 0.462 — both high,
 method validated.
 
 **Missed peptides (n=2,837 with our right-mass spectrum):**
 
-| signal | ours | diaTracer | chance | verdict |
+| signal | ours | the reference implementation | chance | verdict |
 |---|---|---|---|---|
 | precursor mass+charge right | **95.7%** | — | — | **NOT charge/mono** (4.3% wrong-charge) |
 | peak count (median) | **500** | **500** | — | **NOT peak count** (both at the cap) |
 | b/y ladder coverage (median) | **0.083** | **0.278** | 0.039 | **fragment PURITY** — 3.3× fewer true ions |
 | ladder cov on SHARED | 0.401 | 0.462 | — | our quality COLLAPSES at low abundance |
 | missing-ion recovery from our ±2-cycle neighbours | 0.095 | — | — | modest per-spectrum |
-| misses liftable to ≥diaTracer cov by completion | **990 (~35%)** | — | — | adjacent completion is a real lever |
+| misses liftable to ≥the reference implementation cov by completion | **990 (~35%)** | — | — | adjacent completion is a real lever |
 
 **Verdict.** The recall gap is NOT precursor annotation (charge is right 95.7%) and NOT peak count
 (both capped at 500). It is **fragment purity/selectivity**: at low abundance our 500 emitted peaks
 are diluted with noise / co-isolation fragments, matching only 8.3% of the true b/y ladder vs
-diaTracer's 27.8% — barely above the 3.9% chance floor, so below Sage's min-matched-fragments. Our
-per-spectrum quality collapses from 0.401 (shared) to 0.083 (missed) while diaTracer degrades
-gracefully (0.462→0.278). Separately, ~35% of missed peptides could reach diaTracer-level ladder
+the reference implementation's 27.8% — barely above the 3.9% chance floor, so below Sage's min-matched-fragments. Our
+per-spectrum quality collapses from 0.401 (shared) to 0.083 (missed) while the reference implementation degrades
+gracefully (0.462→0.278). Separately, ~35% of missed peptides could reach the reference implementation-level ladder
 coverage by completing the ladder from our OWN adjacent-cycle spectra — a completion lever, distinct
 from the falsified coordinate-merge (that fused unrelated spectra; this gathers the SAME precursor's
 fragments across cycles to fill ladder gaps).
@@ -98,11 +98,11 @@ fragments across cycles to fill ladder gaps).
 **The diagnosis DIRECTION survives, the MAGNITUDE is soft.** The SHARED positive control (both high,
 same method) rules out a pure artifact, but the 3.3× "purity collapse" is confounded three ways
 (all three reviewers):
-- **Asymmetric spectrum selection** (codex, kimi): diaTracer's side uses its exact identified scan;
+- **Asymmetric spectrum selection** (codex, kimi): the reference implementation's side uses its exact identified scan;
   our side uses `near()`+first-match — not the best member of our multi-spectrum family — deflating
   our number. Fix: peptide-blind best-member selector + an oracle upper bound; also run the reciprocal
   ours-only set.
-- **dt decoy floor never computed** (kimi): the 0.039 chance floor is ours only; if diaTracer's 500
+- **dt decoy floor never computed** (kimi): the 0.039 chance floor is ours only; if the reference implementation's 500
   peaks are denser (it pre-deisotopes), its floor is ~0.10 and the gap shrinks to ~1.8×.
 - **Coverage over 500, not Sage's top-150-by-intensity** (kimi, codex): our correlation-ranked cap
   keeps faint true fragments Sage never scores, so 0.083 over-states our identifiability — the
@@ -116,7 +116,7 @@ below `min_correlation=0.3`; (ii) the zero-padded full-grid Pearson (`gate:coelu
 default) + tiny overlap counts (3–6 points) let noise/co-isolated fragments pass by chance (|r|≥0.3
 at ~1/3 rate for n=4). The 500-slot cap then fills with lottery winners / co-isolated interferents,
 not the true ladder. This is the ONLY mechanism inherently abundance-dependent in the right
-direction, and it predicts the observed 0.401→0.083 collapse (diaTracer smooths its precursor and
+direction, and it predicts the observed 0.401→0.083 collapse (the reference implementation smooths its precursor and
 deisotopes → degrades gracefully 0.462→0.278). NOT charge, NOT peak count, NOT threshold strictness.
 
 **Wavelet smoothing is NOT the fix** (codex + kimi refute vibe's "enable it"): at 2.6 samples/FWHM,
@@ -130,7 +130,7 @@ intensity curve before spending here.
    monoisotope (sum intensity), THEN cap. Composition-only: zero new peaks/spectra, **FDR-neutral by
    construction**, frees ~150–200 slots (isotopes are ~30–40% of the cap, preferentially from
    abundant interferents at low S/N). NEW feature (none exists). Validate OFFLINE first: envelope
-   count + envelope-coverage ours vs diaTracer on the MISS set (no re-search); if ours rises to ≥70%
+   count + envelope-coverage ours vs the reference implementation on the MISS set (no re-search); if ours rises to ≥70%
    of dt's, implement. **Highest confidence-to-effort; do first.**
 2. **Fix the gate STATISTIC, not the threshold** — enable/retune the already-implemented
    `gate:coelution=logoverlap` (AlphaDIA-style, summed only over precursor support), and/or add a
@@ -184,14 +184,14 @@ fragments (deisotoping / a cleaner gate), not subtracting shared ones.
 
 ---
 
-## Fix benchmark: MS2 deisotoping FALSIFIED as a recall lever (S30, Sage)
+## Fix benchmark: MS2 deisotoping FALSIFIED as a recall lever (dataset D, Sage)
 
 | arm | spectra | peptides | vs gated baseline |
 |---|---|---|---|
 | gated baseline | 924,255 | 9,989 | — |
 | + `assembly:ms2_deisotope` | 924,233 | **9,856** | **−1.3%** |
 | + deisotope + `rank_by=intensity` | 924,233 | 9,852 | −1.4% |
-| diaTracer | 700,434 | 11,517 | — |
+| the reference implementation | 700,434 | 11,517 | — |
 
 Deisotoping (the review's #1, "FDR-neutral") did **not** recover recall — it slightly hurt. This
 CONFIRMS the mechanism and falsifies the isotope-dilution hypothesis: freeing the ~22% isotope cap
@@ -230,14 +230,14 @@ benchmark (competitive-family knobs have lost peptides before, keyed on correlat
 
 ---
 
-## Apex-competitive assignment FALSIFIED (S30, Sage) — and the robust lesson
+## Apex-competitive assignment FALSIFIED (dataset D, Sage) — and the robust lesson
 
 | arm | spectra | peptides | vs gated baseline |
 |---|---|---|---|
 | gated baseline | 924,255 | 9,989 | — |
 | apex-competitive rp=1 (pure apex-winner) | 634,963 | 3,416 | **−66%** |
 | apex-competitive rp=3 | 828,958 | 6,597 | **−34%** |
-| diaTracer | 700,434 | 11,517 | — |
+| the reference implementation | 700,434 | 11,517 | — |
 
 The author's apex-assignment idea (assign each fragment to the precursor at its own elution apex,
 drop off-apex bleed) is sound in principle but the removal cure is worse than the disease. The
@@ -266,7 +266,7 @@ falls. That is the next (and last untried) lever.
 | logoverlap mc=0.10 / 0.20 / 0.30 | 9,071 / 8,937 / 8,962 | −9 to −11% |
 | apex-competitive rp=3 / rp=1 | 6,597 / 3,416 | −34 / −66% |
 | greedy peel-bright-first deconvolution | 6,505 | −35% |
-| diaTracer | 11,517 | +15% |
+| the reference implementation | 11,517 | +15% |
 
 **Seven independent approaches now falsified** (deisotope, adjacent completion, sharing-subtraction,
 correlation-competitive, apex-competitive, logoverlap gate-statistic, greedy deconvolution). They all
@@ -280,10 +280,10 @@ each correlated (even weakly) have already claimed most of it. **Share-all at fu
 robustly optimal**; every attempt to be cleverer about assignment loses the low-abundance tail it was
 meant to save.
 
-**Conclusion.** The recall gap (~1,500 peptides, the low-abundance tail, ~87% of diaTracer on S30) is
+**Conclusion.** The recall gap (~1,500 peptides, the low-abundance tail, ~87% of the reference implementation on dataset D) is
 NOT closable at the fragment-assignment / co-elution-scoring / intensity-deconvolution level. It is
 structural to a wide-isolation-window pseudo-spectrum built by per-precursor fragment correlation.
-Closing it would require what diaTracer does UPSTREAM — cleaner MS1 feature/precursor definition and
+Closing it would require what the reference implementation does UPSTREAM — cleaner MS1 feature/precursor definition and
 precursor-profile smoothing (2D Gaussian + Savitzky-Golay) so faint precursors are defined and scored
 more sensitively BEFORE fragment assignment — a feature-detection re-engineering effort, not a
 scoring tweak. The committed isotope-support gate (9,989 peptides, near-neutral, both engines) stands
@@ -291,7 +291,7 @@ as the recall/quality operating point.
 
 ---
 
-## FIRST RECALL GAIN: IM continuous weighting (+4.1%, S30/Sage)
+## FIRST RECALL GAIN: IM continuous weighting (+4.1%, dataset D/Sage)
 
 The adversarial review's untried lever WORKS. `assembly:im_weight_sigma` down-weights each emitted
 fragment's intensity by exp(-(fragIM-precIM)^2 / 2 sigma^2). TIMS precedes fragmentation so a true
@@ -303,28 +303,28 @@ across precursors) -> escapes the fan-out depletion that falsified all 7 prior l
 |---|---|---|---|
 | IM weight sigma=0.005 | 924,255 | **10,394** | **+4.1% (+405)** |
 | IM weight sigma=0.003 | 924,255 | 10,013 | +0.2% (too aggressive) |
-| diaTracer | 700,434 | 11,517 | — |
+| the reference implementation | 700,434 | 11,517 | — |
 
-Closes ~27% of the diaTracer gap at ZERO emission cost (same 924k spectra; only intensities
+Closes ~27% of the the reference implementation gap at ZERO emission cost (same 924k spectra; only intensities
 reweighted). sigma=0.005 optimal so far. Validation pending: entrapment FDR (is it real?), MSFragger
 (both-engines), finer sigma. Also refutes the search-side hypothesis for OUR benchmark (chimera
--2.2%/-11.7%; and we searched diaTracer's spectra through the SAME bare Sage, so the 9,989 vs 11,517
+-2.2%/-11.7%; and we searched the reference implementation's spectra through the SAME bare Sage, so the 9,989 vs 11,517
 gap is extraction, not a FragPipe/rescoring confound).
 
 ---
 
-## FULL diaTracer COMPARISON, BOTH ENGINES (S30) — IM-weighting is Sage-specific
+## FULL the reference implementation COMPARISON, BOTH ENGINES (dataset D) — IM-weighting is Sage-specific
 
 | | Sage (peptide_q<=0.01) | MSFragger (TD 1% FDR) |
 |---|---|---|
 | baseline-gate | 9,989 | 11,033 |
 | ours-best (IM sigma=0.005) | 10,394 (+4.1%) | 11,060 (+0.2%) |
-| diaTracer | 11,517 | 13,932 |
-| ours / diaTracer | 90% | 79% |
+| the reference implementation | 11,517 | 13,932 |
+| ours / the reference implementation | 90% | 79% |
 
 Entrapment (Sage): baseline target=9,304 @2.33% -> imw005 target=9,798 @2.26% (+5.3% target at LOWER
 true FDR -> the Sage gain is genuine signal). BUT the +4.1% is SAGE-SPECIFIC: flat (+0.2%) on MSFragger
 (Sage keeps top-150 by intensity so the IM reweight rescues faint fragments; MSFragger's scoring is
-already robust to them). And the diaTracer gap is WIDER on MSFragger (79%) than Sage (90%) -- diaTracer's
+already robust to them). And the the reference implementation gap is WIDER on MSFragger (79%) than Sage (90%) -- the reference implementation's
 spectra carry structure MSFragger exploits that ours lack. So IM-weighting is a real but engine-specific
-partial win; the core spectrum-content gap persists and is worse on diaTracer's native engine.
+partial win; the core spectrum-content gap persists and is worse on the reference implementation's native engine.

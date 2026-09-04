@@ -37,7 +37,7 @@ version and subsumes it. `assembly:apportion` is currently **untested**, so meas
 heuristic already captures most of the gain, NNLS is not worth the complexity.
 
 **Why it should help, in terms of measured defects.**
-- Redundancy: we lose 14-16% of peptides at peptide-level FDR against diaTracer's 5-7%, because we
+- Redundancy: we lose 14-16% of peptides at peptide-level FDR against the reference implementation's 5-7%, because we
   emit ~4.6 PSMs/peptide. Fragments landing in one precursor instead of six attacks that directly.
 - Purity: only 5.79% (decoy-corrected, equal depth) of an emitted spectrum's intensity belongs to
   its own precursor; co-isolation contributes +7.50%.
@@ -81,7 +81,7 @@ the cycle (e.g. SVD/NNLS) to decompose everything"* — framed as **data cleanup
 **The hook that makes this different from the blind decomposition already rejected.** Today's
 cycle analysis ([benchmarks/cycle-redundancy.md](benchmarks/cycle-redundancy.md)) measured
 within-cycle multiplicity of **2.85** — we emit ~3 pseudo-spectra per (peptide, cycle), where
-diaTracer emits 1.25. Those have been treated purely as a defect. But they are also **~3
+the reference implementation emits 1.25. Those have been treated purely as a defect. But they are also **~3
 independent noisy views of the same underlying cycle content**, and that is exactly the regime
 where joint decomposition has something to work with. The redundancy stops being only a bug and
 becomes the input.
@@ -150,7 +150,7 @@ based predictor including these features."*
    to predict.
 
 **Labels exist.** DIA-NN references give true charge and monoisotope for ~43,499 precursors on
-S08, plus S23 and S30 — ~130k labelled precursors. Small for a transformer (DIA-BERT needed
+dataset A, plus dataset B and dataset D — ~130k labelled precursors. Small for a transformer (DIA-BERT needed
 276M) but ample for the model class the review actually recommends.
 
 **Model class, per the 2026-07-22 review.** AlphaDIA — state of the art in this exact data type —
@@ -174,8 +174,8 @@ one joint class.
 **Falsification, pre-registered.** The model must beat **both** baselines:
 * the 69.6% majority-class constant, and
 * the 74.6% shipped `count` heuristic,
-by more than the 0.17% replicate spread, on a **held-out sample** — train on S08+S30, test on
-S23. Training and testing on one sample would measure memorisation, and this project's
+by more than the 0.17% replicate spread, on a **held-out sample** — train on dataset A+dataset D, test on
+dataset B. Training and testing on one sample would measure memorisation, and this project's
 characteristic failure is exactly a metric that cannot tell the two apart.
 
 **What would kill it.** Held-out charge accuracy does not beat 74.6%; or it does, but the peptide
