@@ -14,6 +14,21 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# The tool itself cannot be built without a PATCHED OpenMS: it includes
+# <OpenMS/FORMAT/TdfMzCalibration.h>, which scripts/apply_openms_patches.sh installs into the
+# OpenMS tree, and calls BrukerTimsFile::lastMzCalibration, which the same patch adds. No released
+# OpenMS package contains either. The calibration model, however, is a self-contained header, so
+# it can be compiled and tested anywhere -- which is what CI does on every platform.
+option(SPEXTRACT_TESTS_ONLY "Build only the OpenMS-independent tests (portability CI)" OFF)
+if(SPEXTRACT_TESTS_ONLY)
+  add_executable(test_calibration_cpp tests/test_calibration_cpp.cpp)
+  target_include_directories(test_calibration_cpp PRIVATE src)
+  enable_testing()
+  add_test(NAME calibration_golden
+           COMMAND test_calibration_cpp ${CMAKE_CURRENT_SOURCE_DIR}/tests/calibration_golden.json)
+  return()
+endif()
+
 find_package(OpenMS REQUIRED)
 find_package(OpenMP)
 
