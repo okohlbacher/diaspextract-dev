@@ -855,9 +855,10 @@ namespace
   /// largest span puts every candidate in the peak's own bucket or its two neighbours.
   ///
   /// This is a DIFFERENT ALGORITHM, not a reimplementation: it will not reproduce the OpenMS
-  /// detector peak for peak. It is therefore gated behind `trace:detector=integer` (default
-  /// `openms`) and must be judged on identified peptides with both search engines, never on a
-  /// spectrum digest.
+  /// detector peak for peak. It is the default (`trace:detector=integer`), and must be judged on
+  /// identified peptides with both search engines, never on a spectrum digest. On S30 and S08 the
+  /// two detectors agree on ~85% of the union of identified peptides, and which one identifies more
+  /// flips with both the search engine and the file; the case for it is ~40% less memory.
   ///
   /// Mobility is part of the identity, as in the IM-aware OpenMS path: a candidate must also be
   /// within `im_tol` of the trace's mobility. Valley splitting is NOT done here -- the existing
@@ -1536,13 +1537,14 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (diaTracer-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
-    registerStringOption_("trace:detector", "<mode>", "openms", "Mass-trace detector. 'openms' "
-                          "(default) is OpenMS MassTraceDetection on a materialised PeakMap. 'integer' is the "
-                          "detector on the global integer m/z axis: it finds a peak's candidate traces by "
+    registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' "
+                          "(default) works on the global integer m/z axis: it finds a peak's candidate traces by "
                           "arithmetic instead of a tolerance search, and never converts the compact store back "
-                          "to double m/z. It is a DIFFERENT algorithm, not a reimplementation -- judge it on "
-                          "identified peptides with both search engines, not on a spectrum digest. See "
-                          "docs/MZ-AXIS-DESIGN.md.", false);
+                          "to double m/z. It needs the vendor flight-time calibration and falls back to 'openms' "
+                          "without it. 'openms' is OpenMS MassTraceDetection on a materialised PeakMap. These are "
+                          "DIFFERENT algorithms, not reimplementations: they agree on about 85% of the union of "
+                          "identified peptides, and which one identifies more depends on the search engine AND the "
+                          "file. Integer costs ~40% less memory. See docs/MZ-AXIS-DESIGN.md.", false);
     setValidStrings_("trace:detector", {"openms", "integer"});
     registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace. "
                           "'apex' (default) uses the most intense peak's m/z; 'mean' the OpenMS intensity-weighted "
@@ -3214,8 +3216,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // spx:detector, so a file is always attributable.
       writeLogWarn_("trace:detector=integer needs the vendor flight-time calibration (MzCalibration "
                     "+ Frames.T1 from analysis.tdf) and it was not available for this input ("
-                    + why + "). Falling back to trace:detector=openms; the two detectors differ by "
-                    "about 1% of identified peptides. Pass -trace:detector openms to silence this.");
+                    + why + "). Falling back to trace:detector=openms; the two detectors agree on about "
+                    "85% of the union of identified peptides, so this file is NOT comparable peptide-for-peptide "
+                    "with one traced on the integer axis. Pass -trace:detector openms to silence this.");
       integer_detector = false;
     }
     const double mem_frac = getDoubleOption_("perf:mem_fraction");

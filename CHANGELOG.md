@@ -27,10 +27,14 @@
 - **`trace:detector` now defaults to `integer`.** Mass-trace detection runs on the instrument's own
   integer axes -- flight-time bin for m/z, frame index for retention time -- following OpenMS
   MassTraceDetection step for step, and never materialises a PeakMap of doubles. On S30 it is
-  faster and uses ~40% less memory than the OpenMS path, and the two agree to about 1% of identified
-  peptides in either direction (Sage -1.3% on S30 but +0.3% on S08; MSFragger +2.1%; entrapment
-  slightly lower). Without the vendor flight-time calibration the tool **falls back to `openms` and
-  says so**; the emitted mzML records which detector ran as `spx:detector`.
+  faster and uses ~40% less memory than the OpenMS path (S30 86 vs 150 GB, S08 126 vs 222 GB; wall
+  6:21 vs 6:54 and 10:35 vs 11:14). The peptide effect is **mixed and not consistent in sign**: Sage
+  -1.3% on S30 but +0.2% on S08, MSFragger +2.1% on S30 but -3.5% on S08, entrapment indistinguishable
+  on both (S30 1.27% [1.03-1.52] vs 1.38% [1.14-1.63]). The detectors **agree on only ~85% of the
+  union** of identified peptides -- 1,148 OpenMS-only and 981 integer-only on S30 -- so the memory
+  saving, not a peptide gain, is the case for the default. Without the vendor flight-time calibration
+  the tool **falls back to `openms` and says so**; the emitted mzML records which detector ran as
+  `spx:detector`.
 
 ### Performance (2026-09-04, trace representation)
 - **A trace's profile is a span, not a point list.** A trace point has one degree of freedom -- its
@@ -58,11 +62,11 @@
 - **The retention-time axis is a global frame index.** A trace point is (frame index, intensity),
   8 B instead of 16, and aligning two profiles is integer equality instead of a binary search per
   point; the per-window correlation grid is built without collecting or sorting ~10^8 RT values.
-- `trace:detector=integer` (EXPERIMENTAL, default `openms`): mass-trace detection on integer arrays
-  with the instrument's flight-time bin as the m/z axis, following OpenMS MassTraceDetection step
-  for step, calibration re-applied only at export. S30: 6:53 wall and 105 GB peak against 7:17 and
-  164 GB for the OpenMS path, at −1.4% Sage peptides pending attribution and the both-engines rule.
-  Not a default. See docs/INTEGER-TRACING-DESIGN.md and docs/reviews/integer-tracing-2026-09-03/.
+- `trace:detector=integer`: mass-trace detection on integer arrays with the instrument's flight-time
+  bin as the m/z axis, following OpenMS MassTraceDetection step for step, calibration re-applied only
+  at export. Introduced here behind the flag at 6:53 wall / 105 GB against 7:17 / 164 GB for the
+  OpenMS path; it became the default later the same day, on the numbers under "Changed" above.
+  See docs/INTEGER-TRACING-DESIGN.md and docs/reviews/integer-tracing-2026-09-03/.
 - Band-count sensitivity measured: 4/6/12/25 bands move the peptide set by −0.02% to +0.10% and
   differ in ~2% of spectra's content. Banding is an approximation, not exact as the help had
   claimed; the halo is now sized per edge.

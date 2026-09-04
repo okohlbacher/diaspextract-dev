@@ -96,9 +96,12 @@ scoring gate had been striding 96-byte records to read one field; it now reads a
 It was 12:49 that morning after `charge:min_charge` removed ~30% of the emission, 15:21 before
 that, and 33:05 on 09-01 before the MS1 path was parallelised. Mass-trace detection runs on the
 instrument's own integer axes by default (`trace:detector=integer`), which is faster and uses ~40%
-less memory than the OpenMS detector; the two agree to about 1% of identified peptides in either
-direction. Without the vendor flight-time calibration the tool falls back to the OpenMS detector and
-records which one ran in the output. The loader is
+less memory than the OpenMS detector (86 vs 150 GB on S30, 126 vs 222 GB on S08). The two are
+different algorithms and agree on only ~85% of the union of identified peptides; which one identifies
+more flips with the search engine and with the file (Sage -1.3% on S30, +0.2% on S08; MSFragger
++2.1% on S30, -3.5% on S08), so the memory is the reason for the default, not a peptide gain. Use
+`-trace:detector openms` for the other one. Without the vendor flight-time calibration the tool falls
+back to the OpenMS detector and records which one ran in the output. The loader is
 4% of the run; the window loop is 83%. Reading from `.mzpeak` instead of `.d` is supported
 (build-optional, mzPeak C++ library) but slower (17:04); the archive's two-point TOF transform costs
 12% of identifications, so the loader recovers the exact TDF calibration from the embedded
