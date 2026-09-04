@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Changed
+- **`assembly:require_isotope_support` and `perf:stream_load` now default to TRUE.** Both were
+  `registerFlag_`, so they defaulted to OFF -- while every benchmark figure this project has ever
+  published passed them explicitly. The shipped default configuration had therefore never been
+  measured. It has now been, and it was **6.9x slower and worse on both engines**: with
+  `require_isotope_support` off, S30 emits 1,255,577 spectra in 36:25 at 6.0x window-loop occupancy
+  for Sage 12,212 / MSFragger 12,148; on, it emits 655,776 in 5:15 at 65.7x for Sage 12,482 /
+  MSFragger 12,337. (An earlier measurement in July had put the gate's cost at −0.78% peptides; the
+  sign flipped somewhere behind the charge gate, the apex estimator and the integer detector.)
+  Without `stream_load` the loader holds the entire run at a measured 90.3 GB floor, which by itself
+  exceeds the tool's current total peak. Both are now `<true/false>` options, since a flag cannot
+  default to true; pass `false` to restore the old behaviour. This is the same class of defect as
+  the `ms2_noise_threshold_int` / `ms2_split_valleys` mismatch fixed on 2026-09-03 -- that sweep
+  checked value-bearing options and missed the flags.
+
 - **`charge:min_charge` now defaults to 2**, dropping singly-charged precursor hypotheses before
   extraction. They are ~30% of emission and ~1.7% of peptides, and removing them GAINS peptides on
   both search engines on all three benchmark files (Sage +0.8/+2.7/+1.4%, MSFragger +1.2/+5.4/+0.9%)

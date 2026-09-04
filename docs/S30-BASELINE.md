@@ -23,7 +23,30 @@ registered defaults were still 100 and 0, so a default run could not reproduce a
 file; the defaults were moved to the benchmarked values): `trace:ms1_split_valleys 7.0`,
 `trace:ms2_split_valleys 7.0`, `trace:ms2_noise_threshold_int 10`, `trace:ms2_chrom_peak_snr 1.0`,
 `trace:ms2_min_length_sec 0`, `trace:mz_estimator apex`, `charge:scoring count`,
-`charge:min_charge 2`, `assembly:corr_power 2`, `perf:trace_bands 12`.
+`charge:min_charge 2`, `assembly:corr_power 2`, `perf:trace_bands 12`,
+`assembly:require_isotope_support true`, `perf:stream_load true`, `trace:detector integer`.
+
+**The 2026-09-03 defaults sweep only checked VALUE-BEARING options, not FLAGS, and two flags that
+every benchmark passes were left defaulting OFF** -- found 2026-09-04 and fixed the same day. Both
+are now `<true/false>` options defaulting to `true`, because `registerFlag_` cannot default to true.
+
+`assembly:require_isotope_support` measured on S30 for the first time in either direction:
+
+| | spectra | wall | window-loop occupancy | Sage | MSFragger |
+|---|---|---|---|---|---|
+| **true** (every benchmark on record) | 655,776 | **5:15** | 65.7x | **12,482** | **12,337** |
+| false (what the shipped default did) | 1,255,577 | **36:25** | **6.0x** | 12,212 | 12,148 |
+
+**The shipped default was 6.9x slower AND worse on both engines.** The only prior measurement
+(2026-07-26) put the flag's cost at −0.78% peptides; today it GAINS 2.2% Sage and 1.6% MSFragger.
+The sign flipped somewhere between the charge gate, the apex estimator and the integer detector,
+which is why it was re-measured rather than inherited. Note the occupancy collapse to 6.0x with the
+gate off: 2.15 M precursor hypotheses instead of 1.10 M puts the window loop at 91.8% of the run
+and it barely parallelises -- so the guessed singletons cost far more than their share of the work.
+
+`perf:stream_load` is the frame-by-frame reader; with it off, `loadExperiment()` holds the whole run
+at a MEASURED 90.3 GB floor at t=0, which alone exceeds the tool's entire current peak (80 GB).
+Every figure in this file was taken with it on.
 
 ## Measurement methodology (2026-07-28) — variance model + estimator fix
 

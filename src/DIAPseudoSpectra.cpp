@@ -1553,7 +1553,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerDoubleOption_("consolidate:delta_im", "<1/K0>", 0.02, "Precursor IM tolerance for feature consolidation. Set larger than the 12 m/z x 2 IM sub-range split to merge a feature emitted from BOTH IM sub-ranges.", false, true);
     registerFlag_("consolidate:same_charge_only", "Only merge spectra that also agree in charge (safer; leaves genuine multi-charge observations intact).");
 
-    registerFlag_("perf:stream_load", "[stream] Read the .d frame-by-frame via BrukerTimsFile::loadDIAStreaming, peak-picking and compacting each frame on arrival, instead of loadExperiment() which holds the entire run (MEASURED 90.3 GB RSS at t=0s - that one-shot read IS the memory floor and no downstream compaction can lower it). Bruker .d only.");
+    registerStringOption_("perf:stream_load", "<true/false>", "true",
+                          "[stream] Read the .d frame-by-frame via BrukerTimsFile::loadDIAStreaming, "
+                          "peak-picking and compacting each frame on arrival, instead of loadExperiment() "
+                          "which holds the entire run (MEASURED 90.3 GB RSS at t=0s -- that one-shot read IS "
+                          "the memory floor and no downstream compaction can lower it, so with this off the "
+                          "floor alone exceeds the whole tool's current peak). ON BY DEFAULT since 2026-09-04; "
+                          "every benchmark figure on record was taken with it on. Bruker .d only -- ignored "
+                          "for other inputs, which fall back to the one-shot reader.", false);
+    setValidStrings_("perf:stream_load", {"true", "false"});
     registerIntOption_("trace:native_ms2_neighbors", "<n>", 0, "[stream] NATIVE cross-frame aggregation in the READER (BrukerTimsFile Config dia_ms2_n_neighbors): adjacent frames each side, 0=off, 1=3-frame sum, 2=5-frame sum. This sums RAW frames BEFORE centroiding, which is what diaTracer does; the tool-level frame_aggregation_n sums AFTER centroiding and lost 26% of peptides. Requires perf:stream_load.", false);
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "[stream] Same, for MS1 frames (BrukerTimsFile Config ms1_n_neighbors). Requires perf:stream_load.", false);
 
@@ -1589,7 +1597,16 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     setValidStrings_("charge:scoring", {"envelope", "count"});
     registerDoubleOption_("charge:ambiguity_margin", "<x>", 0.0, "If a different-charge hypothesis scores within this margin of the best, emit it too (diaTracer retains multiple charges when ambiguous). 0 = single charge per precursor. ONLY EFFECTIVE with charge:scoring=envelope -- the default 'count' mode returns before this is consulted, so the value is ignored there.", false);
     registerFlag_("assembly:dedup_precursors", "[route-4] Collapse precursor hypotheses that are the same species (same charge, m/z within ppm, co-eluting RT, co-located IM). Measured redundancy: 4.6 identified spectra per unique peptide vs diaTracer's 1.46.");
-    registerFlag_("assembly:require_isotope_support", "[emission] Drop precursor hypotheses with NO isotope partner (the 'guessed' singletons, ~40% of emission) instead of assigning them a default charge. Emission is over-GENERATION of distinct low-quality precursors, not redundancy, so merge/dedup cannot cut it (oracle: same-coordinate collapse only 1.1-1.3x); this gate can. Measured on S30 (2026-07-26): drops 603,858 of 1,528,113 spectra (-39.5%) for 78 of 10,036 peptides (-0.78%) -- guessed spectra identify at 1.30%% vs 11.39%% for supported (8.8x). The 0.78%% are low-abundance/no-envelope species (the open-search caveat), so keep this OFF by default and confirm FDR-recalibrated peptides on any run that enables it.");
+    registerStringOption_("assembly:require_isotope_support", "<true/false>", "true",
+                          "[emission] Drop precursor hypotheses with NO isotope partner -- the 'guessed' "
+                          "singletons. ON BY DEFAULT since 2026-09-04, when the shipped default (off) was "
+                          "measured for the first time and found to be 6.9x SLOWER and worse on both engines: "
+                          "S30 off = 1,255,577 spectra, 36:25 wall, 6.0x occupancy, Sage 12,212 / MSFragger "
+                          "12,148; on = 655,776 spectra, 5:15, 65.7x, Sage 12,482 / MSFragger 12,337. An "
+                          "earlier measurement (2026-07-26, at 10,036 peptides, before the charge gate, the "
+                          "apex estimator and the integer detector) had put the cost at -0.78% peptides; the "
+                          "sign has since flipped. Set false to keep the guessed singletons.", false);
+    setValidStrings_("assembly:require_isotope_support", {"true", "false"});
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "[mono-guard] Reject a leftward isotope step (the walk that defines the MONOISOTOPE in charge:scoring=count) when the candidate peak is too weak to be a real lighter isotope under averagine. The partner search matches m/z, RT and IM but NEVER intensity, so it can latch onto a noise peak or a co-eluting species one isotope spacing below the true monoisotope -- making the reported precursor mass ~1.00335 Da TOO LIGHT. Closed search hides this (the engine enumerates isotope_errors and corrects it for free); OPEN/blind search turns it into a phantom -1.003 Da modification, and it is our single largest open-search delta-mass artefact on S30 (8.20%% isotope-shifted PSMs vs diaTracer's 3.46%%). The bound is averagine's LOOSEST: stepping from isotope m+1 to m the lighter peak is >= (m+1)/lambda times the heavier one, minimised at m=0 -> 1/lambda (lambda = 0.000594*neutral mass), so a value of 1.0 enforces exactly that minimum and never rejects a legitimate envelope; smaller values add slack for noise. 0 = off (old behaviour). [bench]", false);
     registerFlag_("charge:mono_averagine_select", "[mono-select] Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves. [bench]");
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. Default 0.05 (= 5x the fragment gate). A reviewer argued 0.01 (isotopes of one species share mobility, so 0.05 can admit cross-species partners), but 0.01 has NOT been measured on S30; change only behind the S30 set gate.", false);
@@ -2586,7 +2603,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     auto winKey = [](double lo, double hi) {
       return make_pair((int)llround(lo * 100.0), (int)llround(hi * 100.0));
     };
-    const bool stream_load = getFlag_("perf:stream_load");
+    const bool stream_load = (getStringOption_("perf:stream_load") == "true");
     bool streamed = false;
 
     if (stream_load)
@@ -2949,7 +2966,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // [emission] Isotope-support gate: drop the guessed singletons rather than emit them. They are
     // coordinate-distinct (merge/dedup cannot cut them) and identify 8.8x less often; dropping all
     // guessed cost 0.78% peptides for -39.5% emission on S30. OFF by default (open-search caveat).
-    if (getFlag_("assembly:require_isotope_support"))
+    if (getStringOption_("assembly:require_isotope_support") == "true")
     {
       const size_t before = precursors.size();
       precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
@@ -3924,7 +3941,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
-    out_exp.setMetaValue("spx:require_isotope_support", (int)getFlag_("assembly:require_isotope_support"));
+    out_exp.setMetaValue("spx:require_isotope_support",
+                         (int)(getStringOption_("assembly:require_isotope_support") == "true"));
     { Phase _ph("WRITE(mzML)");
       FileHandler().storeExperiment(out, out_exp, {FileTypes::MZML}, log_type_); }
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out);
