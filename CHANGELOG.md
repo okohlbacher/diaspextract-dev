@@ -36,6 +36,36 @@
   the tool **falls back to `openms` and says so**; the emitted mzML records which detector ran as
   `spx:detector`.
 
+### Performance (2026-09-04, round 2: three output-neutral changes)
+Measured old-vs-new with both arms on the same host, three files concurrently on three machines,
+one binary from a shared install. **Every arm is digest-identical to its base**, so peptides are
+unchanged by construction and no search was run.
+
+| | S30 | S08 | S23 |
+|---|---|---|---|
+| wall | 6:31 -> **6:07** | 8:36 -> **8:09** | 5:40 -> **5:22** |
+| RSS at end of the window loop | 65.0 -> **48.3 GB** | 85.6 -> **55.1 GB** | 70.0 -> **49.8 GB** |
+| window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
+| system time | −32% | −30% | −27% |
+
+- **Valley splitting is streamed.** It used to build every trace of a chunk as an OpenMS `MassTrace`
+  and then split the whole chunk, so the input payload and the entire split output were alive at
+  once -- the two largest structures after the peak slab, 7.5-10.6 GB. One trace is now in flight at
+  a time and those lines fall to 0.08 MB. `ElutionPeakDetection` is constructed and parameterised
+  once per chunk rather than once per trace.
+- **The fragment RT gate rejects on 2 bytes instead of 8.** The gate discards 99.4% of what it
+  visits -- 867 billion visits, 6.9 TB of traffic per S30 run -- and was reading a `double` to do it.
+  A parallel `uint16` bucket array does the reject; the exact test is unchanged and runs only on
+  survivors, so the candidate set and its order are identical (the score-gate counters match to the
+  digit between arms).
+- **Trace arenas are reserved before merging.** `absorb()` appended without reserving into a
+  just-emptied destination, so 12 band merges and 48 chunk merges regrew geometrically.
+- Process peak RSS falls only 2-5 GB because the peak is set outside the window loop; CPU-seconds
+  rise slightly on two of three files while wall falls on all three, because occupancy rose.
+- Rejected on evidence: compacting the peak slab to above-noise peaks (the seeds line reads 100.0%
+  -- there are no sub-noise peaks, so the slab is irreducible), and moving the seed sort into the
+  band tasks (<1% of CPU, and it re-partitions seeds across bands, which cost 3.3% of peptides once).
+
 ### Performance (2026-09-04, trace representation)
 - **A trace's profile is a span, not a point list.** A trace point has one degree of freedom -- its
   intensity -- so the three parallel 4-byte arrays (frame, intensity, flight-time bin) and their
@@ -44,11 +74,13 @@
   correlation grid, which was a second copy of every profile, is gone. Window-loop memory falls from
   a 68.6 GB simultaneous peak to 27.9 GB (integer) / 32.4 GB (OpenMS); process peak RSS 105 -> 88 GB
   and 164 -> 147 GB.
-- **Memory ledger corrections** (`SPEXTRACT_MEM_LEDGER=1`): the trace line was cumulative rather
-  than a peak, and a 6.0 GB `list<Peak2D>` line was a phantom (that list is per trace and dies each
-  iteration) now replaced by the two `MassTrace` payloads that really coexist. The visited flags are
-  a bitset (4.87 -> 0.61 GB), and the slab and per-window preparation arrays are released before
-  valley splitting instead of being held across it.
+- **The `SPEXTRACT_MEM_LEDGER` byte ledger has been REMOVED** (it was temporary scaffolding for the
+  memory work above and is gone as of the round-2 changes; ~86 lines). While it existed it was
+  corrected twice: the trace line had been cumulative rather than a peak, and a 6.0 GB
+  `list<Peak2D>` line was a phantom (that list is per trace and dies each iteration). The structural
+  wins it was built to find are permanent: the visited flags are a bitset (4.87 -> 0.61 GB), and the
+  slab and per-window preparation arrays are released before valley splitting rather than held
+  across it.
 
 ### Performance (2026-09-03, window loop)
 - **The scoring gate reads its one field from a parallel array instead of striding the 96-byte

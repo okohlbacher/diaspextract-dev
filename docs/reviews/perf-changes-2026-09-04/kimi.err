@@ -1027,4 +1027,217 @@ getAverageMS1CycleTime returns 0.0 for size ≤ 1 → win_size = ceil(chrom_fwhm
   - single overload (ElutionPeakDetection.cpp:312-318) = clear + detectElutionPeaks_; does nothing the vector overload doesn't; clear() is exactly what reuse needs.
   - No global noise/SNR across mt_vec anywhere in detectPeaks(vector) (:320-346) — it's literally clear/progress/loop. filterByPeakWidth (:348) is a separate public method never called by detectPeaks. The SNR and width checks are inside detectElutionPeaks_ and are pe So indeed max computed dq = 2, and by symmetry min = −2. The ±2 is PROVABLY sufficient even with independent two-sided rounding errors of < 1 in floor crossing, PROVIDED each floor can cross at most one boundary (err < 1 absolute, i.e., |x|·2.3e-16 < 1 → |x| < 4e15 ✓ always).
 
-  So my earlier ±3 fear was wrong — the co-occurrence constraint kills it. ±2 is provably tight: the worst case (computed dq = ±2) REQUIRES the adverse double-crossing, and ±2 exactly absorbs it. The author's "insurance" comment is precisely correct, and even necessary: with ±1 the double-cross case (true dq
+  So my earlier ±3 fear was wrong — the co-occurrence constraint kills it. ±2 is provably tight: the worst case (computed dq = ±2) REQUIRES the adverse do new code same order; and window loop is parallel (DIAPseudoSpectra.cpp:3318) so nested path is what old code took. Downstream canonical sort at :3485 makes  0 → computed 2... wait true dq 0 → computed up to 2? From above: k−j=1 case gave true 0 → computed 2. So with a ±1 gate, an exact-passing fragment COULD be rejected: x_pc = j+δ₁ (δ₁<err, rounds to floor j−1), x_fi = j+1−δ₂ (δ₂<err, rounds to floor j+1), computed dq = 2 → rejected by ±1 gate, exact passes since diff = 1−δ₁−δ₂ < 1·W... need ≤ delta: diff·... x diff = 1 − (δ₁+δ₂) → rt diff = (1−tiny)/inv = W(1−tiny) ≥ delta(1−tiny) — passes exact only if W == delta exactly (not widened) and rt diff ≤ delta ✓ (1−tiny)·delta ≤ delta ✓. So ±1 would be a REAL bug; ±2 is exactly the right choice. Nice — the author got it right, and the digest A/B would likely never have caught ±1 either. Good story for the review: the insurance bucket is load-bearing.
+
+  Remaining strictness: floor-crossing error < 1 requires |x| ≤ ~4e15 ✓; Sterbenz not needed. Also (v − rt0) for v < rt0 (pc below range): x ≤ 0 → clamp 0 ✓ exact enough.
+
+  One more subtle: delta_rt itself — is inv computed from the SAME delta_rt used in the exact test? build(frag_traces, delta_rt) at 3493 and scoreCandidates_(..., delta_rt, ...) at 3534 — same variable ✓.
+
+  And the q-buiTo resume this session: kimi -r session_75805770-0f49-49c6-a49e-6c35800911f0
+o `bucketOf` uses `x <= 0.0` → 0: x = 0 exactly (v == rt0) → 0 ✓ floor(0) = 0 ✓.
+
+  Negative zero, fine.
+
+  Now, CHANGE 3 verdict: OUTPUT-NEUTRAL (provably, given finite RTs — which the upstream filter enforces for fragments; pc.rt NaN remains a theoretical UB path but pc.rt NaN would produce garbage either way... actually would it differ? Old: fabs(rt[fi] − NaN) > delta = false → all IM-slice fragments pass the RT gate. New: pq = (int)NaN = UB — on x86-64 cvttsd2si gives INT_MIN → dq = q − INT_MIN → overflow UB again... (int)q[fi] − pq with pq = INT_MIN: q − INT_MIN overflows int → UB. Practically q − INT_MIN wraps negative huge → dq < −2 → reject all → DIFFERENT from old. So NaN pc.rt breaks output neutrality — but can pc.rt be NaN? pc.rt comes from precursor detection over ms1_traces — Trace.rt = mt.getCentroidRT() for OpenMS-path MS1 traces; a MassTrace with points has finite centroid unless intensities are NaN/inf or all-zero weights... updateWeightedMeanRT divides by intensity sum; all-zero intensities → 0/0 = NaN. MS1 traces with all-zero intensity points? Peak-picked data — intensity could be 0? Possible in principle. Is there an isfinite filter on precursors? Fragments get filtered (3480); precursors — not that I saw. So the NaN-pc.rt path is a genuine (if exotic) divergence: old code admits the whole IM slice to scoring; new code rejects it all (or UB). Worth flagging as the one concrete NOT-proven-neutral input, though arguably garbage-in. Also note both paths then likely produce nothing useful (pvar etc.) — actually with all-zero precursor intensities pvar=0 → pinv=0 → early exit before the RT gate! pinv > 0 required to enter the loop. If pc.rt is NaN but intensities fine (centroid RT NaN requires RT-weighted sum NaN — RTs finite, weights positive → can't be NaN unless intensity inf/NaN). So pc.rt NaN needs inf/NaN intensities upstream — deep garbage. I'll flag it as latent-UB-only.
+
+  So final verdicts:
+  1. OUTPUT-NEUTRAL. Notes: nb==1 path missed; any_bins dead in splitIntegerTraces; sizing never too small; reserve doesn't raise committed peak (untouched pages non-resident; exact final size).
+  2. OUTPUT-NEUTRAL — verified line-by-line against local OpenMS source; stronger than claimed (equivalence holds for ANY width/snr settings since all filters are per-trace; filterByPeakWidth never called by detectPeaks). list→vector identical. clear() makes reuse safe. Order identical (nested patch path = serial ordered loop; single overload = same per-trace emission).
+  3. OUTPUT-NEUTRAL — and the ±2 is not just insurance, it's the exact tight bound (±1 would have a constructible double-boundary-crossing bug). Edge cases check out: widening only enlarges buckets; clamps safe on both ends (fragments can never reach the 65535 clamp: q ≤ 65001; low clamp only makes the gate more permissive); delta_rt ≤ 0 → gate inert → neutral; empty/single fine; negative RTs fine; span*inv rounding capped at 65001 < 65535. Latent: (int)NaN UB if pc.rt or a fragment RT were ever NaN — fragments filtered at 3480, pc.rt unguarded (needs inf/NaN intensities upstream; unreachable in sane data). Memory: +2 B/fragment/window vs 6.9 TB/run of avoided reads — the cost claim is backwards-compatible... fine. Build O(n) once per window ✓.
+
+  Ranking by silent-result-change vs slower: nothing found that silently changes results on reachable inputs. The items to report, ranked:
+  1. (Change 3, latent) NaN/UB path in bucketOf — not output-neutral IF pc.rt NaN (old admits all, new rejects/UB) — but requires garbage upstream; call it UNPROVEN edge, not a real defect. Also note FragRt relies on the 3480 isfinite filter; if build() is ever called from another site without it, UB.
+  2. (Change 1, perf) nb==1/degenerate path at 3436 got no reserve — the geometric-regrowth defect survives there.
+  3. (Change 1, note) any_bins in splitIntegerTraces is provably always false (dead) — harmless; at the banded merge it's exact because detectTracesInteger_ maintains bins.size()==inten.size().
+  4. (Change 2, perf note) the ledger mt_live measures sizes not capacities — bookkeeping only. Also: hoisted epd per chunk = 48 Param setups vs old 48 (one per splitValleys call per chunk) — same count actually! Old: splitValleys called once per chunk → one epd construction per chunk. New: one per chunk. Same. The comment says "moving that inside a per-trace loop would be ~4e4 Param round-trips" — they didn't; fine.
+  5. Wait — one more perf check on change 2: the OLD code built mts vector for whole chunk THEN split all THEN converted all. New: per trace. Peak memory: parent + children of one trace + growing out spans. Truly lower ✓. CPU: same number of detectElutionPeaks_ calls, same smoothing. Extra: pk reused vector vs per-trace list — vector faster ✓. The single overload avoids the vector overload's startProgress/endProgress (trivial). Not slower. ✓
+
+  Hmm, also should I double-check `toTrace` unchanged and apex-bin logic unchanged — yes, diff shows identical child-conversion code moved inside the loop.
+
+  One more check for CHANGE 2 claim "identical order": within a chunk, old order = children(trace_lo), children(trace_lo+1), ... New: same. Across chunks: parts[ci] concatenated in chunk order both ways (merge loop at 1185 unchanged). ✓ And `out.reserve(hi-lo)` vs old `out.reserve(split.size())` — reserve only, no output effect.
+
+  Also CHANGE 1: "Two merge loops (12 band stores ...; 48 chunk stores ...)" ✓ both covered, plus the uncovered nb==1 path.
+
+  Now — also the user's specific Q for change 1: "Can reserving bins to the inten total ever be too small?" — Answer: No, given absorb semantics + bins ≤ inten per source; final bins ≤ final inten = arena. Proof: bins grows only inside absorb when other.bins non-empty: resize to base (= inten size at that moment) then extend by other.bins.size() ≤ other.inten.size(). So after each absorb bins ≤ inten ≤ arena. But CAREFUL: if a source had bins LARGER than its inten, reserve could be too small — can't happen with current producers (bins either empty or exactly inten-sized). Also the reserve never SHRINKS... reserve(arena) when wst.bins already has content? At both sites wst.bins is empty. ✓
+
+  "Can the reserve itself raise peak memory rather than lower it?" — reserve allocates exact final size up front: VIRTUAL up-front, RSS only as written; never exceeds geometric's peak (which overshoots capacity up to 2× and holds old+new during realloc). Only pathological case: if the merge were ABANDONED before absorbing (exception mid-merge), reserved memory... same as any allocation. And in splitIntegerTraces, if any_bins were true with tiny actual bins (unreachable), bins.reserve(arena) would over-allocate 4 B × arena. Also: reserve on wst.inten at 3428 — wst fresh. OK.
+
+  Now, does anything about CHANGE 1 change OUTPUT? reserve never changes values/order. ✓
+
+  For CHANGE 2, the user asked specifically: "does the single-trace detectPeaks overload do anything the vector overload does not (it calls single_mtraces.clear() first — is that safe given I reuse the buffer)?" — Vector overload ALSO clears (line 323). Single overload does NOT call startProgress/endProgress — the only difference; with setLogType(NONE) and no output effect. Safe. ✓ "Does chrom_fwhm/noise estimation depend on the OTHER traces?" — No: win_size from mt.getAverageMS1CycleTime() (own first/last RT), smoothing per trace, noise (computeMassTraceNoise) per trace and only under mt_snr_filtering_. "Is findLocalExtrema or the smoothing affected by neighbours?" — No, purely the trace's own smoothed intensities; num_neighboring_peaks = win_size/2 refers to points within the SAME trace. "Does MassTrace(vector) differ from MassTrace(list)?" — No: both copy in order into trace_peaks_ (vector internally); neither computes centroids; ordering identical (insertion order). getAverageMS1CycleTime uses trace_peaks_.rbegin()/begin() — same sequence.
+
+  One caveat to state: the local OpenMS checkout is UNPATCHED; the patch modifies only the vector overload's loop + removes the two criticals; the single overload is byte-identical. The patched nested path is exactly the serial ordered loop the author claims (patch lines 45-47 region). Verified.
+
+  Also should verify the patched nested path appends in order — from patch: nested path `for (SignedSize i...) { detectElutionPeaks_(mt_vec[i], single_mtraces); }` — wait, the patch shows line 353 `for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)` replacing the `++progress;` — and kept `{` ... `detectElutionPeaks_(mt_vec[i], single_mtraces);` (original 340, inside) — yes serial ordered. ✓ And the top-level path merges per-thread buffers in thread order which under libgomp's default static schedule preserves global order — but that path is irrelevant here (splitIntegerTraces runs nested).
+
+  Everything's verified. Should I also glance at the earlier review artifacts (codex.md, vibe.md) to cross-check I didn't miss something they caught? That could be valuable — a hostile review should be exhaustive. Quick grep of their verdicts.
+
+- **1 — Critical, silent-results/UB: CHANGE 3 is NOT OUTPUT-NEUTRAL without a stronger parameter guard.** With `delta_rt = std::numeric_limits<double>::denorm_min()`, one fragment at RT `1.0`, and a precursor at RT `1.0`, the original exact gate passes. The new code computes `inv = inf`, then `(1.0 - 1.0) * inf = NaN`; `bucketOf()` reaches `(int)NaN`, which is undefined behavior. It may reject the fragment, overflow while calculating `dq`, or crash. Positive subnormal values are not excluded by the current `delta_rt >= 0` validation. See [FragRt::bucketOf/build](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2239).
+
+- **2 — Critical, silent-results/UB: finite RTs can create the same CHANGE 3 failure.** For fragment RTs `{-DBL_MAX, +DBL_MAX}` and an ordinary positive `delta_rt`, `hi - lo` becomes infinity. Widening sets `inv` to zero, after which the high fragment computes `inf * 0 = NaN` and again casts NaN to `int`. Both fragment RTs survive the current `isfinite` filter. This is pathological acquisition data, but it disproves the unconditional neutrality claim. Disable the quantized rejection whenever `delta_rt`, `inv`, `span`, or the computed bucket coordinate is non-finite.
+
+- **3 — CHANGE 3 is otherwise mathematically safe for normal finite inputs.** If `delta_rt > 0`, all arithmetic remains finite, and `span * inv` is bounded, the effective bucket width is at least `delta_rt`. Exact-passing pairs therefore differ by at most one mathematical bucket; allowing two covers boundary rounding. Widening cannot make buckets narrower.
+
+- **4 — The CHANGE 3 clamps are safe on both ends within that finite domain.** A precursor below `rt0` that is within `delta_rt` of a fragment can only be within approximately one bucket of bucket zero. At the upper end, real fragment buckets are limited to approximately 65000, and an exact-passing precursor can lie less than one effective bucket beyond the maximum. It therefore cannot reach the 65535 clamp while its fragment remains over two buckets away. The 535-bucket margin also prevents ordinary rounding from overflowing `uint16_t`.
+
+- **5 — NaN/inf RTs do not reach CHANGE 3 through the current caller.** Fragment RTs are removed at [the finiteness filter](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3480), and every precursor scoring path checks finite RT/IM. Negative finite RTs are safe. `delta_rt == 0` is also neutral: all buckets become zero and the exact equality gate remains authoritative. Negative tolerances are rejected by configuration; if invoked directly, the unchanged exact test rejects every finite pair. Empty fragment sets return earlier, and a normal single-element set is safe.
+
+- **6 — CHANGE 3 always increases resident storage.** It retains the original 8-byte RT array and adds roughly `2N` bytes plus vector metadata for `q`; nothing is removed. That cost is absent from the memory ledger. It is a bandwidth optimization, not a memory optimization. Against the stated 867-billion visits it is plausibly worthwhile, but sparse windows or runs with few precursors can be slower because they pay two construction passes and an extra branch without enough repeated scans to amortize them.
+
+- **7 — The CHANGE 3 build is O(n), as claimed, but it is an additional full O(n) pass.** The first pass copies RTs and finds extrema; the second writes quantized buckets. The prior code populated `frag_im` and `frag_rt` together in one pass. Complexity is unchanged, constant work is not.
+
+- **8 — CHANGE 1 is OUTPUT-NEUTRAL in the two actual merge sites.** Reserving capacity cannot alter elements, offsets, source order, or trace order. No successful-run input was found that changes spectra. In the band merge, every nonempty integer-detector store has `bins.size() == inten.size()` because detection resizes `bins` after each appended span. In the post-split chunk merge, every chunk store has empty `bins`. Thus `any_bins` is correct here.
+
+- **9 — Reserving `bins` to the summed `inten` size cannot be too small under the existing invariant.** `absorb()` can pad only to the current intensity base and then append at most `other.inten.size()` bins, so its required size never exceeds total intensity size. In the band merge it is exactly the required size; after valley splitting `any_bins` is false. See [TraceStore::absorb](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:297).
+
+- **10 — CHANGE 1 does not guarantee a lower peak.** Both `reserve()` calls allocate the complete destination while every source vector is still live; the old loop grew the destination while freeing each source immediately after absorption. For example, with 48 equal sources whose capacities are near twice their sizes, upfront reserve can have all source capacity plus the full destination live simultaneously, whereas incremental growth may free enough sources before its largest allocation. RSS depends on allocator lazy commitment, but allocator capacity and `bad_alloc` risk can rise. The comments claiming the reserve necessarily eliminates a “2x” transient are too strong; only HWM measurements can establish the result.
+
+- **11 — `TraceStore::absorb()` itself is unsafe for arbitrary mixed binful/binless sources, although neither current merge triggers it.** Absorb a binful source followed by a nonempty binless source: `inten` grows but `bins` does not. A later `!bins.empty()` test followed by indexing the second trace’s offset reads beyond `bins`. The reserve condition does not repair that latent invariant. Either require all nonempty sources to agree about bins or resize `bins` through every binless source once bin storage has begun.
+
+- **12 — CHANGE 2 is OUTPUT-NEUTRAL in the current execution context.** The single overload clears its result and immediately calls the same `detectElutionPeaks_` routine used by the vector overload. Clearing is safe because children are converted before the next call. The surrounding task executes inside the outer OpenMP region, so the patched old vector path was the serial nested loop shown in [the lock-free patch](/Users/kohlbach/Claude/speXtract/patches/openms-epd-lockfree.patch:7), preserving parent and child order.
+
+- **13 — OpenMS confirms there is no cross-trace numerical state in CHANGE 2.** `scan_time`, smoothing window, Savitzky–Golay filtering, extrema, FWHM, and optional noise/SNR are computed from the current trace only in [ElutionPeakDetection.cpp](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp:380). SNR filtering is disabled. The only collection-wide operation is the separately invoked `filterByPeakWidth()`, which this path never calls. Hoisting the EPD object is safe because detection does not accumulate mutable per-call state.
+
+- **14 — `MassTrace(vector)` and `MassTrace(list)` are output-equivalent.** Both copy the same `Peak2D` sequence into the internal vector without sorting or centroid calculation; the vector constructor merely performs the copy directly. Centroid fields retain identical defaults, and IM is explicitly set afterward. See [MassTrace.cpp](/Users/kohlbach/Claude/OpenMS/src/openms/source/KERNEL/MassTrace.cpp:28).
+
+- **15 — CHANGE 2 has a definite reallocation regression for highly split inputs.** The old conversion reserved `split.size()` output `Trace` records after EPD. The streamed version reserves only the parent count, `hi - lo`. A chunk where every parent produces three or more children forces geometric reallocations and moves of `Trace` records. Streaming still likely wins overall memory, but this part is strictly slower and transiently heavier. Tracking child counts or reserving additional capacity would avoid it.
+
+- **16 — CHANGE 2’s new memory accounting is invalid.** `MemGuard g_mt` is constructed only after the entire trace loop, when almost all measured parent/child lifetimes have ended. Its byte calculation also omits the reused `pk` buffer, vector capacities, smoothing buffers, and EPD temporaries. `MassTrace mt(pk)` copies `pk`, so both parent representations coexist throughout detection. Consequently the ledger cannot substantiate the claimed peak reduction and materially undercounts the live streamed payload at [lines 1132–1172](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1132).
+
+Strict verdicts: **Change 1 — OUTPUT-NEUTRAL, memory improvement unproven. Change 2 — OUTPUT-NEUTRAL, with measurable allocation/accounting defects. Change 3 — NOT OUTPUT-NEUTRAL until non-finite/intermediate-overflow cases fall back to the exact gate.**
+====
+After reading all requested files and analyzing the three uncommitted changes in `src/DIAPseudoSpectra.cpp` against the OpenMS source and lock-free patch, here are the hostile review findings:
+
+---
+
+## **CHANGE 1: Arena Reserves (lines 3426–3428, 1177–1183)**
+
+**Claim:** Output-neutral because reserving the prefix-summed source arena sizes avoids geometric reallocation during `absorb()` merges.
+
+**Verdict:** **OUTPUT-NEUTRAL**
+
+- The reserve size `arena = Σ stores[ci].inten.size()` exactly equals the total data to be absorbed.
+- For integer traces, `bins.size() == inten.size()` per store (see `detectTracesInteger_` lines 1072–1073), so `any_bins` correctly reflects whether any source has bins, and reserving `arena` for `bins` is exact.
+- The `absorb()` method (line 303) does `bins.resize(base, 0u)` before inserting, but this only pads to the current size; it doesn’t affect the final size, which equals the sum of source sizes.
+- **Peak memory:** The reserve happens when `wst` is empty (just swapped at lines 1176, 3436), so peak = reserved capacity + remaining source data. For N sources, this equals `arena + max(source_i)`, which is **lower** than geometric growth’s worst-case 2×`arena`. No increase in peak memory.
+
+**No silent result change. No performance regression.**
+
+---
+
+---
+
+## **CHANGE 2: Streamed Valley Splitting (lines 1084–1173)**
+
+**Claim:** Output-neutral because the single-trace `epd.detectPeaks(mt, split)` is equivalent to the old `splitValleys(mts)` → `epd.detectPeaks(mt_vec, split)` vector path, given the lock-free patch and disabled cross-trace filters.
+
+**Verdict:** **OUTPUT-NEUTRAL**
+
+| Checkpoint | Old (`splitValleys`) | New (streamed) | Equivalent? |
+|-----------|----------------------|----------------|------------|
+| **Order of processing** | `for (i) detectElutionPeaks_(mt_vec[i], out)` | `for (q) detectElutionPeaks_(mt, split)` | ✅ Same iteration order |
+| **Per-trace vs vector** | Vector overload calls `detectElutionPeaks_` per trace | Single-trace overload calls `detectElutionPeaks_` | ✅ Same core logic |
+| **Cross-trace dependencies** | `smoothData`, `findLocalExtrema`, SNR/width filtering all operate on individual `MassTrace` | Same; `scan_time = mt.getAverageMS1CycleTime()` is per-trace | ✅ None |
+| **`MassTrace` construction** | `MassTrace(list<Peak2D>)` | `MassTrace(vector<Peak2D>)` | ✅ Both copy points into `trace_peaks_` identically (OpenMS source lines 28–48) |
+| **Output order** | Children appended in trace order | Children appended in trace order | ✅ Identical |
+| **`split` reuse** | N/A | `detectPeaks` **clears** `split` first (line 315) | ✅ Safe despite reuse |
+| **`epd` reuse** | Constructed per-call | Hoisted to chunk scope | ✅ `detectElutionPeaks_` only reads params, doesn’t mutate `epd` state |
+
+- **Lock-free patch verification** (lines 18–45): The nested path in the patch is literally `for (i) detectElutionPeaks_(mt_vec[i], out)`, matching the per-trace behavior.
+- **Parameter equivalence**: `width_filtering=off`, `masstrace_snr_filtering=false` are set identically in both old and new code.
+- **Bug fix noted in code** (lines 1156–1160): An earlier version *did* have a bug (3.3% peptide loss) from misattributing bins by walking the parent list in IM/mz order instead of frame order. **The current code fixes this by using `wst.bins[t.off + k]`** — this is output-neutral *now*.
+
+**No silent result change. Memory improvement: ~6 GB on S30 (line 1112–1113 comment).**
+
+---
+
+---
+
+## **CHANGE 3: Quantised Fragment RT Gate (lines 2225–2262, 2318–2329)**
+
+**Claim:** Output-neutral because the ±2 bucket gate is placed *before* the exact `fabs(frag_rt[fi] - pc.rt) > delta_rt` test and only rejects fragments that would also fail the exact test.
+
+**Verdict:** **OUTPUT-NEUTRAL**
+
+### **Mathematical Proof of Safety**
+For any fragment passing the exact test (`|frag_rt - pc.rt| ≤ delta_rt`):
+
+- **Normal case** (`inv = 1/delta_rt`):
+  `|dq| ≤ |frag_rt - pc.rt| · inv + 1 ≤ 1 + 1 = 2` → `|dq| ≤ 1` (since `dq` is integer).
+  **Actual bound: |dq| ≤ 1.**
+
+• The codex.md review raises additional points worth verifying:
+
+  1. **delta_rt subnormal → inv = inf**: delta_rt > 0 check passes for denorm_min; inv = 1/denorm_min = inf. Then x = (v−rt0)*inf = ±inf or NaN (0*inf=NaN for v==rt0). (int)NaN / (int)inf UB. Also span*inf = inf > 65000 → widening: inv = 65000/span — wait, if span > 0: inv = 65000/span, finite → recovers! If span == 0 (single fragment or all equal RTs): no widening (span>0 false) → inv stays inf → x = 0*inf = NaN for the fragment at rt0 → UB. And is delta_rt validated anywhere? Codex claims "delta_rt >= 0 validation" doesn't exclude subnormals. Where is delta_rt validated? Let me check. If a user can set assembly:delta_rt (or whatever) to a denormal... extremely pathological but a real guard hole. Also delta_rt so small that 1/delta_rt overflows to inf: delta_rt < ~5.6e-309 (min normal 2.2e-308; 1/2.2e-308 = 4.5e307 finite; 1/denorm_min = inf). Actually 1/x overflows to inf for x < ~5.56e-309 (subnormals below 2^-1021?). 1/4.9e-324 = inf. So delta_rt denormal → inv inf.
+
+  2. **span = hi − lo = inf** (fragment RTs ±DBL_MAX — but wait, ±DBL_MAX RTs would fail... the isfinite filter at 3480 keeps ±DBL_MAX since they're finite!). span = inf → span*inv = inf > 65000 → inv = 65000/inf = 0.0. Then x = (v−rt0)*0 = inf*0 = NaN for the +DBL_MAX fragment → (int)NaN UB. Meanwhile old code: fabs(DBL_MAX − pc.rt) — could overflow to inf → inf > delta → rejected; but for pc.rt also huge... e.g. pc.rt = DBL_MAX, frag = DBL_MAX: old passes exact. New: UB cast. Real guard hole, pathological input.
+
+  Hmm wait — can fragment rt be ±DBL_MAX? Trace.rt = mt.getCentroidRT() — computed from actual frame RTs; a frame RT of DBL_MAX is absurd. But "pathological acquisition data" — mzML with insane RT. These are guard-strength criticisms, valid for a hostile review.
+
+  3. **codex point 15**: new code reserves `out.reserve(hi - lo)` (parent count) vs old `out.reserve(split.size())` (child count). If splitting produces MORE children than parents (that's the whole point of valley splitting!), `parts[ci]` grows geometrically from hi-lo to actual child count. Realloc moves of Trace records (Trace is ~40 bytes? has pointers — trivially movable). This is a REAL perf regression vs old: old reserved split.size() exactly. Trace is a small POD-ish struct (st pointer + few uints + doubles mz,rt,im,intensity,tof,b ≈ 60 B), moves cheap. Minor but real — and easy to fix (reserve hi-lo is a lower bound; could reserve e.g. hi-lo + something, or just accept). Actually is it slower than the OLD code? Old: out.reserve(split.size()) exact. New: geometric growth from hi-lo to N_children: log2(N/(hi-lo)) reallocs, each moving Trace records. For heavy splitting (2-3 children/parent), that's 1-2 reallocs of up to a chunk's worth of 60 B records — a chunk is maybe 1e4-1e5 traces → ~MB-scale moves. Trivial in absolute terms but strictly heavier than what it replaced. Valid finding.
+
+  4. **codex point 16**: MemGuard g_mt constructed AFTER the loop → measures nothing at peak; and mt_live computed per trace but the guard is created after all traces processed. Actually mt_live tracks max over iterations — computed during the loop, guard created after — the VALUE is the max, so the ledger number is right-ish (peak of one parent + its children), but it omits pk buffer, MassTrace internal capacity (smoothed_intensities_ doubles the child's footprint? children carry smoothed intensities too — m.getSize()*sizeof(Peak2D) omits the smoothed vector of equal length, 8B/point!), and the fact that `MassTrace mt(pk)` COPIES pk (pk and mt coexist). Ledger undercounting — accounting defect, not output. Valid.
+
+  Wait, actually on smoothed intensities: children pushed in the single-max case are the input mt WITH smoothed_intensities_ attached (a vector<double> same length) — so each child MassTrace actually carries peaks + smoothed doubles = ~2x the accounted bytes. And split-branch children get smoothed too (setSmoothedIntensities). So live bytes undercounted ~2x. Ledger-only issue.
+
+  5. **codex point 10**: reserve upfront while all sources live — my analysis: reserved-but-untouched pages not RSS-resident on Linux (overcommit), so RSS fine; but if the allocator commits (e.g., transparent hugepages? still lazy) — mostly fine. Their counter-example: source CAPACITIES near 2× sizes (geometric growth left them over-allocated — true: chunk stores grew geometrically, capacity up to 2× size, all live at merge time; that bloat exists regardless of the reserve). The reserve neither adds nor removes source capacity. Fine — I'll note peak claims need HWM measurement but the reserve itself is not the risk; untouched reserved pages don't commit RSS on Linux.
+
+  6. **codex point 11**: absorb() mixed bins invariant — I covered this; latent, unreachable from current producers.
+
+  7. **vibe.md point (visible portion)**: agrees: all three output-neutral, with CHANGE 3 proof sketch.
+
+  Now let me verify the delta_rt validation claim: where does delta_rt come from and is it validated? Grep for delta_rt assignment and its registered option.
+
+• `setMinFloat_("gate:delta_rt", 0.0)` — allows 0.0 and any positive double including denorm_min. So:
+
+  - delta_rt = denorm_min (4.94e-324): passes validation (> 0). inv = 1/denorm_min = +inf. If span > 0: span*inv = inf > 65000 → inv = 65000/span (finite) → recovers, buckets huge → gate very permissive → exact test decides → NEUTRAL. If span == 0 (single fragment, or all fragments same RT): no widening → inv = inf → x = (rt0−rt0)*inf = 0*inf = NaN → `NaN <= 0.0` false, `NaN >= 65535.0` false → `(int)NaN` = UB. Old code: exact test with delta_rt = denorm_min rejects everything except |diff| == 0 exactly... fabs(0) > denorm_min false → passes exact. New code: UB cast — on x86-64, (int)NaN → INT_MIN (0x80000000); q[i] = (uint16_t)INT_MIN = 0; pq = same computation → also 0 if pc.rt == rt0... wait pc.rt may differ: x_pc = (pc.rt − rt0)*inf = ±inf or NaN. (int)(+inf) → UB → INT_MIN → pq = ... bucketOf returns int: `x >= 65535.0 ? 65535 : (int)x` — x = +inf → +inf >= 65535 → returns 65535, no UB cast! For x = NaN: both comparisons false → (int)NaN = UB. So the UB requires (v−rt0)*inv = NaN, i.e., v == rt0 exactly (0*inf) — v = the min fragment RT. So: single fragment at rt == pc.rt, delta_rt = denorm_min → old passes exact (0 > denorm_min false), new: q[fi] = (int)NaN UB, pq = (int)NaN UB, dq = UB − UB. On x86: q=0, pq=0 → dq=0 → passes → same result BY LUCK of the UB's common manifestation. Not guaranteed. Concrete breaking input confirmed: `delta_rt = 4.94e-324`, one fragment at RT 100.0, precursor at RT 100.0. Verdict: there EXISTS an input where the claim is formally false (UB), though on the actual toolchain it happens to stay neutral. Since UB means the binary could do anything, strictly NOT OUTPUT-NEUTRAL as stated — needs `delta_rt > min_normal` guard or `isfinite(inv)` fallback.
+
+  - delta_rt = 0.0: allowed by setMinFloat(0.0). inv = 0 → all buckets 0 → gate inert → exact test `fabs(diff) > 0` rejects all non-equal → neutral ✓ (v finite: (v−rt0)*0 = 0 even for huge v, as long as finite... (±DBL_MAX − ∓DBL_MAX) = inf → inf*0 = NaN → UB again — but that needs fragment RTs spanning > 1.8e308, absurd).
+
+  - span = inf: fragment RTs {−DBL_MAX, +DBL_MAX} both finite → survive the isfinite filter at 3480. span = inf → span*inv = inf > 65000 → inv = 65000/inf = 0.0 → x = (−2·DBL_MAX... (v − rt0) = inf)*0 = NaN → UB cast. Old code neutral (exact test: fabs(DBL_MAX − pc.rt) fine, finite unless pc.rt also extreme). So another formal break with absurd-but-finite data. Realistically impossible (RT in seconds from an mzML), but the hostile verdict: the gate needs an isfinite(inv)/span guard to be PROVABLY neutral.
+
+  So CHANGE 3 final verdict: OUTPUT-NEUTRAL for all finite RTs with delta_rt normal-or-zero and finite span — i.e., every input the tool can realistically produce; formally NOT OUTPUT-NEUTRAL (UB) for delta_rt subnormal with span==0, or span=inf. Given the digest A/B on real files: will pass. I'll rank this as: provable on the reachable domain; two latent UB paths that need a one-line guard (`if (!(inv > 0.0) || !std::isfinite(inv)) → skip quantised reject`, or clamp delta_rt with setMinFloat to something like 1e-6... actually simplest: in build, after computing inv, `if (!std::isfinite(inv)) inv = 0.0;` — makes gate inert → neutral always. That one line closes both holes).
+
+  Wait — does `inv = 0` when delta_rt subnormal and span==0 lose anything? Gate inert → exact decides → neutral. And for span=inf: inv=0 via isfinite check... inv = 65000/inf = 0 already; the problem is x = inf*0. With isfinite(inv) check — inv = 0 IS finite → doesn't help. Need: disable the quantised reject unless inv > 0 && isfinite(span*inv)... For span=inf: any inv makes some x = NaN/inf... x = (v−rt0)*inv with inv>0: inf*inv = +inf → x >= 65535 → clamp 65535, NO UB! UB only from NaN = 0*inf or inf*0. With inv = 0 (span inf path): NaN. With inv > 0: clamp handles inf safely. So the correct guard: if span or inv is non-finite, OR inv == 0... hmm inv == 0 happens legitimately at delta_rt ≤ 0 where x = (finite)*0 = 0, safe — but with delta_rt ≤ 0 AND (v−rt0) = ±inf → NaN. Simplest robust guard: make bucketOf NaN-safe: `if (!(x > 0.0)) return 0; if (x >= 65535.0) return 65535; return (int)x;` — `!(x > 0.0)` is true for NaN → returns 0 → no UB cast ever. For NaN pc.rt → pq = 0 → gate maximally permissive → falls back to exact test = old behavior (NaN pc.rt: old exact test passes everything; new: q[fi] − 0 ≤ 2? q up to 65000 → dq > 2 → REJECTED — still differs from old for NaN pc.rt! To be fully NaN-pc.rt-neutral, pq NaN should disable the gate. Meh — that's deep-garbage territory; I'll recommend the `!(x>0)` form to kill the UB, and note NaN pc.rt remains a formal divergence).
+
+  Also note the asymmetry `x <= 0.0` vs `!(x > 0.0)`: current code `x <= 0.0 ? 0 : ...` — NaN fails this → falls to (int)NaN. The one-char-class fix.
+
+  Now CHANGE 2 — verify codex point 15 (out.reserve(hi-lo) vs split.size()) from the diff: old `out.reserve(split.size())` — yes, diff shows old had `vector<Trace>& out = parts[ci]; out.reserve(split.size());` and new has `out.reserve(hi - lo)`. Confirmed regression for split-heavy chunks: geometric regrowth of parts[ci] from parent count to child count. Real but small.
+
+  And codex point 16 (MemGuard after loop, undercounts): confirmed — g_mt at line 1172 is after the per-trace loop; mt_live tracks max of (parent + children sizes) but omits pk, smoothed_intensities_ (~doubles each MassTrace's per-point footprint: Peak2D is 96 B? plus smoothed 8 B/pt — the accounting uses sizeof(Peak2D) only), and the MassTrace copy of pk coexisting with pk. Ledger-only.
+
+  Also confirm Peak2D sizeof ~ 96 B? Peak2D has position (2 doubles), intensity float + ... doesn't matter.
+
+  One more verification for CHANGE 2 ordering: `parts[ci]` child order per parent: detectElutionPeaks_ emits single-max child OR split children in mins order — identical function both paths ✓.
+
+  CHANGE 1 — verify codex's point about band stores bins invariant: line 1072-1073 confirmed. And the nb==1 path at 3436 missing reserve — confirmed from my read (vibe/codex didn't mention it — codex point 10 discusses peak claims). Actually wait, for nb==1: 3410 `if (thi <= tlo || nb == 1) frag_traces = detectTracesInteger_(...)` then 3436 absorb without reserve. Yes.
+
+  Also CHANGE 1: is `wst.inten` guaranteed empty at 3428? wst is per-window (declared where? "TraceStore wst" per window iteration — I saw wst used throughout the window body; assume window-local). At 3436 absorb base=0 assumed for rebase (t.off += base) — fine either way.
+
+  Now also sanity-check codex point 5 claim "every precursor scoring path checks finite RT/IM" — I didn't verify; not critical.
+
+  I think I'm ready to write the review. Structure: verdict per change, ranked findings.
+
+  Verdicts:
+  - CHANGE 1: OUTPUT-NEUTRAL. Reserve cannot alter output. Sizing provably sufficient. Perf: helps at both sites; gaps: (a) nb==1 path at 3436 unreserved; (b) peak-memory-lowering claim is plausible on Linux (lazy commit) but unproven without HWM — and the up-front reserve coincides with all source arenas (with their geometric capacities) still live.
+  - CHANGE 2: OUTPUT-NEUTRAL — strongest of the three; verified against actual OpenMS source; equivalence holds under ALL param settings, not just off/false, because there are no cross-trace routines in detectPeaks at all (filterByPeakWidth is external; pw/snr checks are per-trace inside detectElutionPeaks_). Defects found are perf/accounting only: out.reserve(hi-lo) under-reserves vs old split.size() (geometric Trace moves on split-heavy chunks); ledger g_mt undercounts (placed after loop, omits pk, smoothed ints, capacities).
+  - CHANGE 3: OUTPUT-NEUTRAL on the reachable domain — and ±2 is provably the TIGHT bound (±1 would be a real bug: double boundary crossing gives computed dq=±2 for exact-passing pairs). Formal NOT-PROVEN / UB on: (1) delta_rt subnormal + span==0 → inv=inf → 0*inf=NaN → (int)NaN UB; (2) span=inf (finite ±DBL_MAX RTs pass the 3480 filter) → inv=0 → inf*0=NaN → UB; (3) NaN pc.rt → old admits whole slice, new rejects/UB. Concrete breaking inputs given. One-line fix: bucketOf with `if (!(x > 0.0)) return 0;` kills the UB cast; guarding build with isfinite(inv) makes it fully neutral.
+
+  Ranking (silent results first):
+  1. CHANGE 3 UB paths — silent result change possible in principle (UB), needs absurd-but-legal inputs; will NOT show in the 3-file digest A/B.
+  2. CHANGE 2 out.reserve under-reserve — perf only, strictly heavier than what it replaced on split-heavy chunks.
+  3. CHANGE 2 ledger undercount — accounting only.
+  4. CHANGE 1 nb==1 gap — incomplete, not a regression.
+  5. absorb() mixed-bins latent invariant — unreachable today.
+
+  Also answer the specific questions posed:
+  - CHANGE 1 Q1: any_bins condition right? Yes for both sites; in splitIntegerTraces it's provably always false (dead but harmless); at banded merge exact. absorb's resize(base,0u) pads only backward, so mixed binful-then-binless leaves bins short — latent, unreachable (producers are all-or-nothing).
+  - Q2: can bins reserve to inten total be too small? No — per-store bins ≤ inten, absorb pads to inten base then appends ≤ source inten → bins ≤ inten ≤ arena always.
+  - Q3: can reserve raise peak? Virtual yes, resident no (lazy commit); the up-front full-size allocation coexists with all 48 source arenas — but geometric growth's last realloc also coexists with remaining sources plus old+new buffers. Roughly a wash in the worst theoretical case, better in practice; only HWM proves it.
+  - CHANGE 2 Qs: single overload = clear + detectElutionPeaks_ (lines 312-318), nothing more; vector overload also clears and adds only start/endProgress. clear() makes reuse safe. No cross-trace noise/SNR (computeMassTraceNoise is per-trace, only under mt_snr_filtering_). findLocalExtrema "num_neighboring_peaks" = points within the SAME trace, not other traces. win_size from the trace's own getAverageMS1CycleTime. MassTrace(vector) vs (list): both copy in order into internal vector<Peak2D>, no sort, no centroid computation (MassTrace.cpp:28-48).
+  - CHANGE 3 Qs: ±2 sufficient — yes, provably tight (show the double-crossing construction). Clamps safe both ends (fragments can never hit 65535: q ≤ 65001; low clamp only widens admission). Edge cases: enumerated. Memory: +2 B/frag vs 6 B/visit saved over 867e9 visits — the cost claim holds; build O(n) once per window (but an extra pass: old built frag_im+frag_rt in one loop, new does frag_im loop + two passes in build — constant-factor, same complexity).
+
+  Write the final answer.
+
+To resume this session: kimi -r session_23d5c296-f31e-446e-ac00-5631ba7b4415
+exit=0

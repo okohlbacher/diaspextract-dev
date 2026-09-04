@@ -779,3 +779,65 @@ reimplementation. The only semantic difference between its 12,650 and 12,466 ver
 frame with only sub-noise peaks counts as empty (the OpenMS rule) or as a miss; that A/B, MSFragger,
 and entrapment are running. Adoption needs: peptides within the replicate spread on BOTH engines,
 entrapment inside the charge-gate arm's interval, and S08 replication of the runtime.
+
+
+### WINDOW-LOOP PERFORMANCE, ROUND 2 (2026-09-04) -- three output-neutral changes, THREE files
+
+Measured old-vs-new with both arms on the SAME host, three files concurrently on three machines,
+all running one binary from the shared ceph install (`/ceph/ibmi/abi/oliver/spextract`) so the
+arms cannot differ by build. **Every arm is digest-identical to its base**, which is the gate:
+these changes are output-neutral by construction, so peptides are identical by definition and no
+search was run.
+
+| | S30 (ibminode05, 128c) | S08 (spock, 224c) | S23 (data, 224c) |
+|---|---|---|---|
+| wall base -> perf | 6:31 -> **6:07** (−6.1%) | 8:36 -> **8:09** (−5.2%) | 5:40 -> **5:22** (−5.3%) |
+| process peak RSS | 85.7 -> 83.3 GB (−2.8%) | 119.6 -> 114.2 GB (−4.5%) | 91.3 -> 88.6 GB (−2.9%) |
+| **RSS at end of window loop** | 65.0 -> **48.3 GB** (−25.8%) | 85.6 -> **55.1 GB** (−35.6%) | 70.0 -> **49.8 GB** (−28.9%) |
+| window loop wall | 209.5 -> 192.7 s (−8.0%) | 317.6 -> 303.5 s (−4.4%) | 175.6 -> 162.7 s (−7.3%) |
+| window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
+| system time | 7:12 -> 4:55 (−32%) | 11:34 -> 8:08 (−30%) | 8:17 -> 6:05 (−27%) |
+| EPD MassTrace (ledger) | 7,502 -> 0.08 MB | 10,578 -> 0.08 MB | 9,192 -> 0.08 MB |
+| sum of per-structure peaks | 36.2 -> 28.3 GB | 58.5 -> 46.9 GB | 41.3 -> 31.2 GB |
+| digest vs base | **IDENTICAL** | **IDENTICAL** | **IDENTICAL** |
+
+**Read the memory row that matters.** Process peak RSS barely moves (2-5 GB) because the peak is
+set outside the window loop; the window loop itself now ENDS 26-36% lighter. That is the number
+that governs how many windows can be in flight, not the process peak.
+
+**CPU-seconds RISE slightly on two of three files** (S08 5:40:40 -> 5:51:55, S23 3:21:01 ->
+3:23:16) while wall falls everywhere. That is not a contradiction and it is not free: occupancy
+rose 2-6x, so the tool is using more of the machine for less elapsed time. Do not quote the CPU
+column as an improvement.
+
+The three changes:
+1. **Arena reserves.** `TraceStore::absorb` appended without reserving into a destination that had
+   just been swapped empty, so 12 band merges and 48 chunk merges regrew geometrically.
+2. **Streamed valley splitting.** Was: build every trace of a chunk as an OpenMS `MassTrace`, then
+   split the whole chunk, so the input payload and the entire split output were alive together.
+   Now one trace is in flight at a time. `ElutionPeakDetection` is hoisted to chunk scope -- doing
+   its four `setValue` calls per trace would have been ~4e4 `Param` round-trips per chunk and would
+   have turned this into a slowdown.
+3. **Quantised fragment RT gate.** The gate rejects 99.4% of what it visits and was reading an 8 B
+   double to do it: 867e9 visits = 6.9 TB per S30 run. A `uint16` bucket array makes the reject
+   2 B; the exact test is unchanged and only runs on survivors. The score-gate counters are
+   byte-identical between arms (862,781,140,969 visits, 5,467,207,106 survivors), which is the
+   gate-level proof the candidate set did not move.
+
+**Adversarial review (codex/kimi/vibe) — all three verdicts OUTPUT-NEUTRAL, with two real defects
+found in change 3 that the safety proof had missed.** vibe's proof assumed finite intermediates;
+codex and kimi independently found that a denormal `delta_rt` gives `1/delta_rt = inf`, fragment
+RTs spanning +/-DBL_MAX give an infinite span, and a NaN `pc.rt` reaches `(int)NaN` -- undefined
+behaviour that on x86 rejects every fragment where the old test passed all of them. Fixed by making
+`bucketOf` NaN-safe and degrading the whole field to disabled (`inv = 0` => every bucket 0 => every
+`dq` 0 => the exact test alone decides), which costs no branch in the scan. Also fixed: the
+`MEM_EPD_MT` guard was constructed after the loop and measured an already-destroyed payload, and
+`absorb()` left `bins` short if a binless source followed a binful one.
+
+**REJECTED on evidence, not opinion:**
+* **Slab compaction to above-noise peaks** (was the largest proposed memory item). The existing
+  `[mem] window ... seeds N of P peaks` line reads **100.0%** -- every peak is above noise, so
+  there is nothing to drop and the slab's ~12 GB is irreducible. Killed for free, from a number the
+  binary already printed.
+* **Moving the seed sort into the band tasks.** Priced by its own supporting evidence at <1% of CPU,
+  and it re-partitions seeds across bands -- the exact failure mode that cost 3.3% of peptides once.

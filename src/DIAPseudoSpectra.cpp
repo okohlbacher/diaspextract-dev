@@ -751,48 +751,6 @@ namespace
   /// One window's peaks in INDEX SPACE, frame-major. This is what the compact store already holds;
   /// the point is that it is never converted back to Peak1D doubles. Replaces the materialised
   /// PeakMap for the integer detector. See docs/MZ-AXIS-DESIGN.md.
-  /// PER-STRUCTURE BYTE ACCOUNTING for the window loop. RSS tells you the total and nothing about
-  /// who owns it; windows run concurrently, so the interesting quantity is the PEAK CONCURRENT
-  /// bytes per structure, which is what this records. One atomic add per structure (never per
-  /// element), so the measurement cost is unmeasurable against stages that run for minutes.
-  /// Enabled with SPEXTRACT_MEM_LEDGER=1.
-  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_MT,
-                MEM_GRID, MEM_PDENSE, MEM_SPECTRA, MEM_WMAP, MEM_N };
-  inline const char* memName(int c)
-  {
-    static const char* n[MEM_N] = {"slab (peaks)", "prep (frame_live/order)", "visited flags",
-                                   "traces (spans)", "EPD MassTrace (parent+children, streamed)",
-                                   "FragGrid", "pdense scratch", "emitted spectra", "PeakMap (openms path)"};
-    return n[c];
-  }
-  inline std::array<std::atomic<long long>, MEM_N>& memCur()
-  { static std::array<std::atomic<long long>, MEM_N> v{}; return v; }
-  inline std::array<std::atomic<long long>, MEM_N>& memPeak()
-  { static std::array<std::atomic<long long>, MEM_N> v{}; return v; }
-  inline std::atomic<long long>& memTotalPeak() { static std::atomic<long long> v{0}; return v; }
-  inline bool memOn() { static const bool on = std::getenv("SPEXTRACT_MEM_LEDGER") != nullptr; return on; }
-  inline void memAdd(int c, long long bytes)
-  {
-    if (!memOn() || bytes <= 0) return;
-    const long long now = memCur()[c].fetch_add(bytes) + bytes;
-    long long p = memPeak()[c].load();
-    while (now > p && !memPeak()[c].compare_exchange_weak(p, now)) {}
-    long long tot = 0; for (int i = 0; i < MEM_N; ++i) tot += memCur()[i].load();
-    long long tp = memTotalPeak().load();
-    while (tot > tp && !memTotalPeak().compare_exchange_weak(tp, tot)) {}
-  }
-  inline void memSub(int c, long long bytes) { if (memOn() && bytes > 0) memCur()[c].fetch_sub(bytes); }
-  /// Adds on construction, subtracts on destruction: the lifetime IS the scope.
-  struct MemGuard
-  {
-    int c; long long b;
-    MemGuard(int cat, long long bytes) : c(cat), b(bytes) { memAdd(c, b); }
-    void grow(long long extra) { memAdd(c, extra); b += extra; }
-    void release() { memSub(c, b); b = 0; }          ///< free early, when the structure dies early
-    ~MemGuard() { memSub(c, b); }
-  };
-  template <class V> long long vbytes(const V& v) { return (long long)v.capacity() * sizeof(typename V::value_type); }
-
   struct PeakSlab
   {
     vector<uint32_t> frame_off;    ///< size F+1: frame f owns [frame_off[f], frame_off[f+1])
@@ -944,7 +902,6 @@ namespace
     vector<uint64_t> visited((P + 63) / 64, 0);   // one BIT per peak: 8x less than the char array
     auto seen = [&](size_t k) { return (visited[k >> 6] >> (k & 63)) & 1u; };
     auto mark = [&](size_t k) { visited[k >> 6] |= (uint64_t)1 << (k & 63); };
-    MemGuard g_vis(MEM_VISITED, vbytes(visited));  // x n_bands concurrently: the thing to watch
     auto mzAt = [&](uint32_t k, size_t f) { return ax.mzOf(sl.tof[k], sl.b[f]); };
     auto iwm = [](double v, double w, double& c, double& cnt, double& den) {   // updateIterativeWeightedMean_
       const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
@@ -1150,13 +1107,6 @@ namespace
         MassTrace mt(pk);
         mt.setCentroidIM(t.im);
         epd.detectPeaks(mt, split);
-        long long live = (long long)t.np() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
-        for (const auto& m : split) live += (long long)m.getSize() * (long long)sizeof(Peak2D) + (long long)sizeof(MassTrace);
-        // Charged for the life of THIS iteration, while mt, pk and split are all still alive. The
-        // first version constructed the guard after the loop, when the payload it named was already
-        // destroyed, so it measured nothing. It still undercounts: pk is copied into mt, and the
-        // smoother's own temporaries are inside OpenMS and invisible here.
-        MemGuard g_mt(MEM_EPD_MT, live);
         // Each child carries its own measured m/z: the parent's per-frame bin was written into
         // every Peak2D above, so the child's APEX PEAK m/z is that bin's m/z and the bin comes back
         // by inverting the calibration -- which is what the pre-span code did.
@@ -1820,7 +1770,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // determinism bug, now fixed.
     if (split_valleys > 0.0 && mts.size() > 1)
     {
-      const int nthreads = std::max(1, bands);
       const int nchunk = std::max(1, bands * 4);      // 4x chunks vs threads -> dynamic load balance
       const size_t n_in = mts.size();
       vector<vector<MassTrace>> parts(nchunk);
@@ -2849,7 +2798,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     for (auto& t : ms1_traces) t.st = &ms1_store;          // the store is immutable from here
     { const double cap = getDoubleOption_("trace:max_span_sec");
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(t, cap); }
-    memAdd(MEM_TRACES, vbytes(ms1_store.inten) + (long long)ms1_traces.size() * (long long)sizeof(Trace));
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_traces)));
     { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
       st.wall += phase_clock_() - _t_ms1; st.cpu += cpu_seconds_() - _c_ms1; st.rss_end_mb = rss_mb_(); }
@@ -3139,7 +3087,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // to a LOWER offset, so the copy never overlaps forward. A second arena here would have
       // doubled the MS1 arena at exactly the moment it is largest.
       Size freed = 0;
-      const long long before_bytes = vbytes(ms1_store.inten);
       size_t w = 0;
       for (size_t i = 0; i < ms1_traces.size(); ++i)
       {
@@ -3150,7 +3097,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         t.off = (uint32_t)w; w += t.len;
       }
       ms1_store.inten.resize(w); ms1_store.inten.shrink_to_fit();
-      memSub(MEM_TRACES, before_bytes - vbytes(ms1_store.inten));
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_());
     }
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
@@ -3352,21 +3298,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // peaks converted back into Peak1D doubles, which is the largest per-window allocation.
         PeakMap wmap;
         PeakSlab wslab;
-        MemGuard g_slab(MEM_SLAB, 0), g_wmap(MEM_WMAP, 0), g_prep(MEM_PREP, 0);
         if (integer_detector)
         {
           wslab = toSlab(*window_list[wi].second);
-          g_slab.grow(vbytes(wslab.tof) + vbytes(wslab.inten) + vbytes(wslab.imq)
-                      + vbytes(wslab.frame_off) + vbytes(wslab.rt_index) + vbytes(wslab.b));
         }
         else
         {
           wmap = materializeWindow(*window_list[wi].second);
-          long long wb = 0;
-          for (const auto& sp : wmap)
-          { wb += (long long)sp.size() * (long long)sizeof(Peak1D) + (long long)sizeof(MSSpectrum);
-            for (const auto& fa : sp.getFloatDataArrays()) wb += (long long)fa.size() * 4; }
-          g_wmap.grow(wb);
         }
         if (detOn_())   // [det] compact store digest BEFORE tracing: splits "pick" from "trace+assemble"
         {
@@ -3422,7 +3360,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           const int nb = std::max(1, w_bands);
           {
           const TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);   // once per window
-          g_prep.grow(vbytes(tprep.frame_live) + vbytes(tprep.order));
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(tprep.order.size())
                         + " of " + String(wslab.peaks()) + " peaks (" + String((int)(1000.0 * tprep.order.size() / std::max<size_t>(wslab.peaks(), 1)) / 10.0) + "%)");
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
@@ -3457,7 +3394,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (thi <= tlo || nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
           for (auto& t : frag_traces) t.st = &wst;
           }                                                  // tprep dies here
-          g_prep.release();
           // The slab is dead too: valley splitting reads only the window store (which copied the
           // frame table) and the spans. Holding 12 GB of peaks plus the prep across the stage where
           // the MassTrace payloads peak was the largest lifetime defect the plan found.
@@ -3465,7 +3401,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
           vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
           vector<uint16_t>().swap(wslab.imq);
-          g_slab.release();
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
           // defects behind the first version's 92% peptide loss. It rebuilds the arena, so the
           // store pointers are set again afterwards; the per-frame bins are dead after it.
@@ -3485,7 +3420,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         }
         // the window's spans and records, released with the window (the old add-only line was
         // cumulative over the run, not a peak)
-        MemGuard g_tr(MEM_TRACES, vbytes(wst.inten) + (long long)frag_traces.size() * (long long)sizeof(Trace));
         if (detOn_())
         {
           #pragma omp critical
@@ -3518,11 +3452,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         auto _t3 = std::chrono::steady_clock::now();
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt);
-        MemGuard g_grid(MEM_GRID, vbytes(fg.mean) + vbytes(fg.invnorm) + vbytes(fg.nearest_local) + vbytes(fg.used));
         auto _t4 = std::chrono::steady_clock::now();
         t_grid += std::chrono::duration_cast<std::chrono::nanoseconds>(_t4 - _t3).count();
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
-        MemGuard g_pd(MEM_PDENSE, vbytes(pdense));
 
         vector<MSSpectrum>& bucket = win_out[wi];
         // only this window's precursors (by mono m/z); NaN mono_mz sorts to the end, excluded.
@@ -3620,9 +3552,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           auto _t6 = std::chrono::steady_clock::now();
           t_score += std::chrono::duration_cast<std::chrono::nanoseconds>(_t6 - _t5).count();
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
-        { long long sb = 0;
-          for (const auto& sp : bucket) sb += (long long)sp.size() * (long long)sizeof(Peak1D) + (long long)sizeof(MSSpectrum);
-          memAdd(MEM_SPECTRA, sb); }
           t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now() - _t6).count();
         }
@@ -3730,22 +3659,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       writeLogInfo_("  fraggrid    " + String(S * t_grid)  + " s (" + String(pct(t_grid))  + "%)");
       writeLogInfo_("  score       " + String(S * t_score) + " s (" + String(pct(t_score)) + "%)");
       writeLogInfo_("  emit        " + String(S * t_emit)  + " s (" + String(pct(t_emit))  + "%)");
-      if (memOn())
-      {
-        writeLogInfo_("Window-loop memory ledger (PEAK CONCURRENT bytes per structure; windows run "
-                      "at once, so these are simultaneous, not summed over time):");
-        long long tot = 0;
-        for (int c = 0; c < MEM_N; ++c)
-        {
-          const long long pk = memPeak()[c].load();
-          if (pk <= 0) continue;
-          tot += pk;
-          writeLogInfo_("  " + String(memName(c)) + std::string(std::max<int>(1, 30 - (int)strlen(memName(c))), ' ')
-                        + String((double)pk / (1024.0 * 1024.0)) + " MB");
-        }
-        writeLogInfo_("  (sum of per-structure peaks) " + String((double)tot / (1024.0 * 1024.0))
-                      + " MB; simultaneous peak of the total " + String((double)memTotalPeak().load() / (1024.0 * 1024.0)) + " MB");
-      }
       // Is the score stage doing arithmetic, or walking fragments the RT gate then discards?
       // One atomic add per precursor, so this costs nothing against a 10^11-iteration loop.
       const long long np = stat_prec_.load(), sl = stat_slice_.load(), rp = stat_rtpass_.load();
@@ -3917,7 +3830,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // that are never re-ranked. ~47% of spectra sit AT the cap, so merged spectra routinely
         // land at 2-3x it -- far more random-match opportunities, diluting the score. Keep the
         // top max_frags by intensity, then restore m/z order (mzML requires ascending m/z).
-        if (max_frags > 0 && (int)out.size() > max_frags)
+        if (max_frags > 0 && out.size() > max_frags)
         {
           vector<Peak1D> v(out.begin(), out.end());
           std::nth_element(v.begin(), v.begin() + max_frags, v.end(),
