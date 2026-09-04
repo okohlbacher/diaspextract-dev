@@ -938,3 +938,36 @@ behaviour that on x86 rejects every fragment where the old test passed all of th
   binary already printed.
 * **Moving the seed sort into the band tasks.** Priced by its own supporting evidence at <1% of CPU,
   and it re-partitions seeds across bands -- the exact failure mode that cost 3.3% of peptides once.
+
+
+## v0.3.0 FINAL BENCHMARK — six datasets, shipped defaults (2026-09-04)
+
+Every dataset in the cohort, run with `spextract -in <file>.d -out pseudo.mzML -threads 100` and
+**nothing else**. If a figure below needed a flag, the defaults would be wrong; that is now a test.
+Three nodes in parallel, both engines, `spx:detector=integer` and
+`spx:require_isotope_support=1` recorded in every output.
+
+| file | spectra | wall | peak RSS | window-loop occupancy | Sage @1% | MSFragger @1% |
+|---|---|---|---|---|---|---|
+| S08 | 862,716 | 8:26 | 108.7 GB | 62.8x | 10,909 | 11,935 |
+| S23 | 585,503 | 5:37 | 84.6 GB | 61.3x | 10,272 | 9,691 |
+| S26 | 723,314 | 6:27 | 90.3 GB | 65.5x | 12,149 | 12,516 |
+| S30 | 655,776 | 5:21 | 79.0 GB | 60.7x | 12,482 | 12,337 |
+| S33 | 542,533 | 5:38 | 67.9 GB | 61.4x | 11,217 | 10,585 |
+| S36 | 597,267 | 5:59 | 73.8 GB | 66.7x | 11,362 | 11,049 |
+
+**S26 and S36 had never been benchmarked before**; the cohort had only ever been exercised on
+S08/S23/S30. Both behave like the rest, which is the first evidence that the defaults generalise
+beyond the three files every decision in this file was made on.
+
+Ranges across the cohort: wall 5:21-8:26, peak RSS 67.9-108.7 GB, occupancy 60.7-66.7x, emission
+0.54-0.86 M spectra. Memory tracks acquisition size, and 108.7 GB on S08 is what sets the
+"80-125 GB" requirement now stated in the README.
+
+**Read the two engines separately, as always.** Sage and MSFragger disagree on which files are
+easy: S26 is MSFragger's best (12,516) and Sage's second (12,149), while S23 is the weakest on
+both. Do not average them, and do not quote one as "the" peptide count.
+
+Timings are NOT comparable between rows: the three nodes differ (128 vs 224 cores) and are shared
+with other users, whose load is recorded in each run's own output file. The numbers that ARE
+comparable across rows are spectra, peptides and peak RSS.

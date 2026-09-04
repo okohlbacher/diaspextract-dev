@@ -4,6 +4,22 @@
 
 ## v0.3.0 — 2026-09-04
 
+### Benchmark, all six datasets, shipped defaults only
+
+`spextract -in <file>.d -out pseudo.mzML -threads 100` and nothing else:
+
+| file | spectra | wall | peak RSS | Sage @1% | MSFragger @1% |
+|---|---|---|---|---|---|
+| S08 | 862,716 | 8:26 | 108.7 GB | 10,909 | 11,935 |
+| S23 | 585,503 | 5:37 | 84.6 GB | 10,272 | 9,691 |
+| S26 | 723,314 | 6:27 | 90.3 GB | 12,149 | 12,516 |
+| S30 | 655,776 | 5:21 | 79.0 GB | 12,482 | 12,337 |
+| S33 | 542,533 | 5:38 | 67.9 GB | 11,217 | 10,585 |
+| S36 | 597,267 | 5:59 | 73.8 GB | 11,362 | 11,049 |
+
+S26 and S36 had never been benchmarked before. Peak RSS spans 67.9-108.7 GB across the cohort,
+which is where the README's stated 80-125 GB requirement comes from.
+
 ### Changed
 - **`assembly:require_isotope_support` and `perf:stream_load` now default to TRUE.** Both were
   `registerFlag_`, so they defaulted to OFF -- while every benchmark figure this project has ever
