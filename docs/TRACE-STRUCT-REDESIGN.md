@@ -215,3 +215,13 @@ localised rather than debugged from the output: (1) exact trace count and the ex
 scalar bits after it; (3) exact used-frame mask, `G`, `mean` and `invnorm`. A digest match with no
 drop in the `traces` ledger line means R5's arithmetic is wrong; a memory drop with a digest change
 means a consumer still walks the span.
+
+## Implementation status (2026-09-04, 06:15)
+
+Implemented in commit `3a1d91e` on `coverage-analysis-2026-07-24`, exactly as revision 2 specifies:
+`Trace` = scalars + `(st, frame0, off, len, npts, apex)`; `TraceStore` per window and for the MS1
+map (`rt_index`, `b`, `frame_rt`, `inten` arena, `bins` arena until valley splitting);
+`makeSpan()`/`packReal()`; `FragStats` replaces `FragGrid`; band and chunk tasks append to private
+stores absorbed after each join with offsets rebased; the MS1 release compacts the arena. Compiles
+clean. **The gate is running:** the 8-check suite, then the S30 spectrum digest of BOTH detectors
+against the pre-refactor outputs, then the memory ledger's `traces` line.
