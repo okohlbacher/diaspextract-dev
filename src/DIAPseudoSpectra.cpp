@@ -1370,7 +1370,7 @@ namespace
     return std::max(0, std::min(j, 4));                // level 5 spans ~64 samples, wider than any peak here
   }
 
-  /// Build the per-window FragGrid from IM-sorted fragment traces.
+  /// Per-window scoring statistics from IM-sorted fragment traces (see FragStats).
   /// What the scorer needs per window, now that a fragment's profile is a span in the window's
   /// own frame sequence: the Pearson denominator G (distinct frames carrying a REAL fragment
   /// point -- not the window's frame count), per-fragment mean and 1/norm over real points, and
