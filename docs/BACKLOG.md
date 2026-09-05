@@ -186,3 +186,66 @@ is elsewhere.
 engine* is already repairing our monoisotope errors. If Sage's correction fully absorbs them, a
 predictor buys little for closed search and its value is confined to open search — which is the
 stated purpose, but changes the cost/benefit.
+
+## N+2. Adjudicate charge head-to-head on co-identified spectra: who is actually right?
+
+**The question.** For every spectrum the reference tool has confidently identified, find our
+spectrum for the same precursor and compare the two charge calls. Where they disagree, decide from
+the spectra themselves which call is correct — rather than assuming either tool is the oracle.
+
+**Why this beats what we have.** Every charge number on record is scored against a DIA-NN report,
+and that reference has three problems established on 2026-09-05: it is stale (it predates
+`charge:min_charge=2`, `require_isotope_support=true`, the apex estimator, the integer detector and
+`perf:stream_load`, so the measured population is disjoint from the shipped one); it is
+structurally blind (tryptic, <=2 mods, z2-4 — exactly the space this tool exists to look outside);
+and the confusion table it produced belongs to a retired algorithm whose tie-break is the opposite
+of the shipped one. This experiment replaces a library-shaped oracle with **identification as
+truth**, on the population that actually matters — spectra good enough to be identified.
+
+**THE TRAP THAT WOULD SILENTLY INVALIDATE IT.** Both engines *trust the charge we declare*:
+`msfragger.params` has `override_charge = 0`, and Sage's `precursor_charge: [2,4]` is the
+enumeration range for spectra with NO declared charge — a declared one is used as given (verify
+this against the Sage version in use before relying on it). So a confident PSM does **not**
+independently confirm a charge: it confirms that the declared charge produced a match. Scoring
+agreement this way would just echo our own annotation back at us.
+
+The experiment is therefore only meaningful if the adjudicating search **re-derives** charge:
+run both tools' outputs with `override_charge = 1, z = 1..5` (MSFragger) and the equivalent
+Sage configuration, so the winning charge is chosen by spectral evidence. That arm already exists
+for MSFragger — `docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`, where it moved SpeXtract +4.5%.
+
+**Design.**
+1. Extract the same acquisition with both tools. Use the public HeLa benchmark (PXD017703) so the
+   result is reproducible outside the group.
+2. Search both outputs with charge **enumerated**, not trusted, at a strict threshold (q <= 0.001,
+   not the usual 0.01 — this is an adjudication, not a yield measurement).
+3. Pair spectra by precursor **coordinates**, never by neutral mass: if the charge calls differ the
+   masses differ by construction, so mass-matching would drop exactly the disagreements the
+   experiment is about. Match on (mono m/z within ~10 ppm, RT within ~10 s, 1/K0 within ~0.02).
+4. Allow, and separately count, a **+-1.00335/z isotope offset** in the m/z match. Our monoisotope
+   call is a known artefact class; if it is not admitted the pairing silently loses those cases,
+   and if it is not counted separately the two defect classes get conflated.
+5. Tabulate the joint distribution (ours, theirs) — not just an agreement rate.
+
+**Adjudication, where the two disagree.** Rank the evidence, and report each line separately:
+* the re-derived charge from the engine, on each tool's own spectrum, at q <= 0.001;
+* whether the identified peptide is tryptic and its mass consistent with the precursor at each
+  candidate charge (a wrong z gives a mass off by (z'-z)(m/z - 1.00728), which for real peptides is
+  usually not a peptide mass at all);
+* fragment-side consistency — a z=2 precursor cannot carry a fragment heavier than itself;
+* the MS1 isotope envelope spacing at the precursor coordinate, read from the raw data rather than
+  from either tool's summary, which is the only fully independent arbiter.
+
+**What would make it inconclusive**, and must be reported if it happens: if the great majority of
+pairs agree, the disagreement set may be too small to characterise; if the disagreements
+concentrate in spectra that neither tool identifies at q <= 0.001, then charge is not the thing
+limiting identification and the result argues for **deprioritising** this line entirely. Both are
+useful answers.
+
+**Cost.** Two extractions plus four searches on one acquisition, roughly half a day, plus the
+pairing script. No new tooling beyond the pairing; the enumerated-charge search arm already exists.
+
+**What it decides.** Whether our charge calls are worse, equal or merely *different*; the true
+direction of the error on the shipped algorithm (currently unknown — see the note at the head of
+`docs/charge-inference.md`); and whether the ~10% of the MSFragger deficit attributed to charge
+labels is recoverable by fixing the call, or only by not declaring one.

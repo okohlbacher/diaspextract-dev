@@ -61,6 +61,12 @@ help: on a chance match our z is independent of truth, so chance agreement is
 `sum_z p_ours(z) p_truth(z) <= max_z p_truth(z)` -- chance matches drag the score toward or below
 the constant baseline, so the honest margin over "always answer z=2" is **wider** than +5.0 points.
 
+**THE ADJUDICATION EXPERIMENT** that would settle the direction question empirically -- pair our
+spectra with the reference tool's on co-identified precursors and decide from the spectra who is
+right -- is specified in `docs/BACKLOG.md` under "N+2". Note its central trap: both engines TRUST
+the declared charge, so the adjudicating search must re-derive it or the test merely echoes our own
+annotation back at us.
+
 **WHAT TO DO, in order.** (a) Fix the z=1 ownership defect -- start the walk at `min_charge` -- and
 gate it on both engines plus entrapment, since it changes what is emitted. (b) Re-measure the
 confusion table on the SHIPPED arm before designing anything else; the direction of the error is
