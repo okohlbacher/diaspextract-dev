@@ -249,3 +249,14 @@ pairing script. No new tooling beyond the pairing; the enumerated-charge search 
 direction of the error on the shipped algorithm (currently unknown — see the note at the head of
 `docs/charge-inference.md`); and whether the ~10% of the MSFragger deficit attributed to charge
 labels is recoverable by fixing the call, or only by not declaring one.
+
+## From the public HeLa table (2026-09-05, docs/HELA-TABLE.md)
+
+- **Low-load A/B on public data.** At 10 ng SpeXtract loses on both engines and both 2019 schemes
+  (py3: Sage 4.8k vs 9.2k). The isotope-support gate and the z>=2 floor were adopted at 200 ng
+  in-house; re-measure both on the six 10 ng files (1.5-5 min per extraction, both engines already
+  wired) and on one 100 ng file as the control. Both-engines + entrapment gate applies before any
+  default moves.
+- **MSFragger content gap on py3.** MSFragger gets 1.9x more peptides from the reference's py3
+  spectra than from ours while Sage is at 0.85. Same content-candidate machinery as before
+  (matched fragment ions per co-identified precursor), now on public data where the gap is widest.
