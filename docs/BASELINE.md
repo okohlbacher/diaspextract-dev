@@ -1185,3 +1185,10 @@ What it says, in order of weight:
 
 The diaTracer paper reports no HeLa numbers; its headline dataset is TNBC (PXD047793), staging
 now (7 of 16 by 18:20). That is the like-for-like paper comparison.
+
+**Resolution of point 5 (19:00):** an isolated re-search of the 2732 reference file reproduces
+Sage's own count exactly (10,302 target peptides both times; the table's 10,394 is the raw-table
+recount, a definitional difference). Sage is deterministic; the replicate spread is in the
+reference extractor's output for that acquisition, whose MSFragger count is nonetheless in line
+with its siblings. The reference Sage totals therefore carry extraction noise the MSFragger totals
+do not, which is one more reason the MSFragger column is the one to close.
