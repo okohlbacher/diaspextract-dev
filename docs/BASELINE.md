@@ -971,3 +971,55 @@ both. Do not average them, and do not quote one as "the" peptide count.
 Timings are NOT comparable between rows: the three nodes differ (128 vs 224 cores) and are shared
 with other users, whose load is recorded in each run's own output file. The numbers that ARE
 comparable across rows are spectra, peptides and peak RSS.
+
+
+## THE READER QUESTION, SETTLED (2026-09-05)
+
+`perf:stream_load` true/false disagree on ~0.09% of spectra and neither arm had ever been searched.
+Both arms, both engines, two datasets, one node each, back to back -- plus entrapment on both.
+
+| | dataset D (S30) | | dataset A (S08) | |
+|---|---|---|---|---|
+| | stream=true | stream=false | stream=true | stream=false |
+| spectra | 655,776 | 656,371 | 862,716 | 865,119 |
+| wall | 4:58 | 9:59 | 8:33 | 13:57 |
+| peak RSS | 80.0 GB | 122.2 GB | 108.1 GB | 188.8 GB |
+| Sage @1% | 12,482 | 12,485 | **10,909** | **11,132** |
+| MSFragger @1% | 12,337 | 12,335 | 11,935 | 11,953 |
+| peptide-set symmetric difference | 0.25% of union | | 4.24% of union | |
+| **entrapment FDR** | **1.26% [1.01-1.51]** | **1.26% [1.02-1.49]** | **1.13% [0.89-1.40]** | **1.15% [0.93-1.40]** |
+
+**Verdict: the one-shot reader is slightly BETTER, and its extra peptides are real.** On dataset D
+the two are equivalent (3 peptides on Sage, 2 on MSFragger, 0.25% set churn -- noise). On dataset A,
+the larger file, the one-shot reader finds **+223 Sage peptides (+2.0%)** and +18 MSFragger, and
+**entrapment FDR is unchanged** (1.13% vs 1.15%, intervals essentially identical). The gain is not
+manufactured false discovery; it is signal the streaming path loses.
+
+Mechanism (inferred, not yet tested): the streaming reader peak-picks each frame on arrival, so it
+has less context than a picker running over the whole loaded run. Dataset A is the largest
+acquisition in the cohort, and it is where the loss appears -- consistent with something being lost
+at frame-batch boundaries.
+
+**The default stays `true`, but as an explicit TRADE, not a free choice**: streaming costs up to ~2%
+of Sage peptides on a large file and buys 1.6-1.75x less memory (108 vs 189 GB on dataset A) and
+~1.7x less wall time. On a machine that can hold it, `-perf:stream_load false` is the more sensitive
+setting. That is now a documented user choice rather than an unexamined default.
+
+## ENTRAPMENT ON THE SHIPPING CONFIGURATION, ALL SIX DATASETS (2026-09-05)
+
+Every peptide count in this file rests on the engines' own 1% FDR; this is the check on it.
+Sage entrapment search (human targets + Arabidopsis entrapment, peptide-hypothesis ratio 0.6805).
+
+| dataset | target | entrapment hits | raw% | **FDR%** | 95% CI |
+|---|---|---|---|---|---|
+| A | 10,273 | 79 | 0.76% | **1.13%** | 0.89-1.40 |
+| B | 9,859 | 86 | 0.86% | **1.28%** | 1.03-1.58 |
+| C | 11,781 | 93 | 0.78% | **1.16%** | 0.92-1.42 |
+| D | 11,927 | 102 | 0.85% | **1.26%** | 1.01-1.51 |
+| E | 10,710 | 90 | 0.83% | **1.23%** | 1.00-1.48 |
+| F | 10,869 | 97 | 0.88% | **1.31%** | 1.04-1.57 |
+
+**True FDR is 1.13-1.31% at a nominal 1%** -- a mild, CONSISTENT under-estimate by the engine, with
+every interval overlapping every other. Nothing anomalous, no dataset out of family, and the two
+never-before-benchmarked datasets (C and F) sit inside the same band. The peptide counts in this
+file are therefore honest to within roughly a quarter of a percentage point of FDR.

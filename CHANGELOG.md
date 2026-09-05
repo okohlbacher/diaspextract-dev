@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Measured
+- **`perf:stream_load` is a sensitivity/resource trade, not a free default.** Both readers searched
+  with both engines on two datasets plus entrapment: equivalent on the smaller file, but on the
+  larger one the one-shot reader finds +223 Sage peptides (+2.0%) at unchanged entrapment FDR
+  (1.13% vs 1.15%) -- real signal the streaming path loses, for 1.75x the memory and 1.6x the wall.
+  The default stays `true`; `false` is now documented as the more sensitive setting.
+- **Entrapment FDR on all six datasets, shipping configuration: 1.13-1.31% at a nominal 1%**, every
+  interval overlapping. The peptide counts on record are honest to about a quarter point of FDR.
+
+
 ## v0.3.0 — 2026-09-04
 
 ### Benchmark, all six datasets, shipped defaults only
@@ -34,8 +44,10 @@ which is where the README's stated 80-125 GB requirement comes from.
   default to true; pass `false` to restore the old behaviour. **`perf:stream_load` also CHANGES
   OUTPUT** -- checked rather than assumed, and the assumption was wrong: true gives 655,776 spectra
   in 5:11 at 78.4 GB, false gives 656,371 in 10:30 at 121.8 GB, and the spectrum lists are not
-  identical. The two readers pick peaks on different frame groupings; which is closer to the truth
-  is unmeasured. Every figure this project has published used `true`. This is the same class of defect as
+  identical. The two readers pick peaks on different frame groupings. (Which one is closer to the
+  truth was settled on 2026-09-05 -- see "Measured" at the top of this file: the one-shot reader is
+  slightly better on a large file, at unchanged entrapment FDR, for 1.75x the memory.) Every figure
+  this project has published used `true`. This is the same class of defect as
   the `ms2_noise_threshold_int` / `ms2_split_valleys` mismatch fixed on 2026-09-03 -- that sweep
   checked value-bearing options and missed the flags.
 
