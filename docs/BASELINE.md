@@ -1069,3 +1069,45 @@ paper" is a test on TNBC, being staged now (`benchmark/PXD047793`, ~306 GB; arch
 rest). Their own converted mzMLs and FragPipe results (MassIVE MSV000094803) would allow a
 like-for-like comparison; MassIVE was unreachable from this network on every route tried
 (FTP timed out on both hosts, PROXI file listing 404) -- retry later or via the web UI.
+
+### 2026-09-05, 15:30 -- calibration port is output-neutral; the C4 term is modelled; first public-data numbers
+
+**Digest arm (spock, back-to-back with the shipping build):** the calibration-row selection
+(`Frames.MzCalibration`, not "exactly one row") plus the sqlite3 C-API port produce a
+**byte-identical spectrum digest** on the in-house 30-min file: `ca609dc4…` for both
+`final_S30/pseudo.mzML` and `digest_port/pseudo.mzML`, 655,776 spectra, 05:30 wall, 81.8 GB peak.
+Output-neutral by construction and by measurement.
+
+**C4 (18 of 27 public HeLa acquisitions refused as "C3/C4 != 0").** The 2019 timsTOF Pro set
+(firmware 6.0.110) stores `C4 = -0.0905`, every frame referencing that row. No open implementation
+models even C2 (timsrust and opentims are linear-in-sqrt), so the term was identified against the
+vendor library as a local oracle: 6,000 TOF indices through `tims_index_to_mz`, C0/b/C2 held fixed,
+residual regressed on one candidate correction at a time. Only `1/sqrt(m)` closes it (11.8 ns ->
+0.004 ns; every other candidate stays at 5-12 ns), with coefficient `C4*b/2` -- the first-order image
+of an **additive offset on the quadratic root, `m = u^2 - C4`**. Closed form vs vendor: +0.0723 ppm
+constant on frame 1 without the temperature term, **0.0000 ppm with it** (the constant IS that frame's
+`dC1*dT/1e6 = -7.2e-8`), 0.0000 ppm on the last frame. Dropping the term: **-53 .. -938 ppm**, worst
+at low mass (0.0905 Da / 96 = 943 ppm, matches). `C4 == 0` is bit-identical to the old code
+(`u*u - 0.0`), so nothing measured above changes. `C3` stays refused: never observed non-zero.
+Pinned in both golden tests (10 vendor probes, 2 frames, ablation guard > 50 ppm). Cluster build
+pending; the 18 files are then extracted by the idempotent HeLa driver.
+
+**Public HeLa (PXD017703), 2020 Evosep sets, shipped defaults, 100 threads, one node each, Sage 1%
+peptides / MSFragger PSM rows (not peptides -- the driver counts rows; peptide/protein counts come with
+the reference comparison):**
+
+| acquisition | spectra | wall | RSS | Sage peptides | MSFragger PSM rows |
+|---|---|---|---|---|---|
+| 100SPD 100 ng S2-C1 (2731) | 136,818 | 0:42 | 16.2 GB | 12,861 | 115,396 |
+| 100SPD 100 ng S2-C5 (2735) | 130,459 | 0:41 | 15.3 GB | 12,520 | 109,406 |
+| 200SPD 200 ng S3-A1 (2737) | 75,462 | 0:30 | 10.8 GB | 6,154 | 63,161 |
+| 200SPD 200 ng S3-A2 (2738) | 74,874 | 0:31 | 10.7 GB | 5,701 | 61,750 |
+| 200SPD 200 ng S3-A4 (2740) | 72,238 | 0:27 | 10.2 GB | 6,364 | 60,366 |
+
+2732 was lost to a SIGBUS at the minute the shared install was republished (see the memory note);
+re-extracted by hand: 131,773 spectra, 0:43. The reference extractor ran on all 27 (exit 0,
+0.4-4.9 GB mzML each, 1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the
+2019 files) but the driver tested the output size in the same second the JVM exited and CephFS had
+not surfaced it: every line says NO OUTPUT and no reference search ran. Driver is now idempotent
+(skips extraction whose output exists, polls the size, skips completed searches); the rerun is queued
+behind each node's chain and will fill the reference column.
