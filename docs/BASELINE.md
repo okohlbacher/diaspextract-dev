@@ -1132,3 +1132,17 @@ digest cannot move. e2e check 11 synthesises the scheme. **py3 10 ng file 22: 16
 Operational: the HeLa driver is now idempotent and runs on three nodes (ibminode05 9 files, spock
 11, data 7 heavy 2019 files); spock's first pass ended without its completion marker because the
 driver was edited in place while it ran (see memory), which is why the reruns are process-gated.
+
+### 2026-09-05, 18:25 -- reference-side Sage was silently zero on every public file
+
+Every reference line of the HeLa driver reported `Sage: 0` while MSFragger returned 250-350k PSM
+rows. Cause: the reference extractor's mzML omits the standard "selected ion m/z" cvParam
+(MS:1000744) and writes only the isolation-window target; Sage 0.14.6 then resolves the precursor
+through `spectrumRef`, finds no MS1 spectrum in the file, and panics ("missing MS1 precursor for
+frame=…"), leaving an empty peptide list that the driver counted as zero. The in-house head-to-head
+had the same problem and patched it (`tools/patch_diatracer_precursor.py`: one streaming pass
+injecting the value from the isolation window; 425,061 precursors on a 100 ng file). A separate
+reference-Sage pass with that patch ran all 27 files on `data` in 30 min. Reference Sage peptides at
+1%: 100SPD 100 ng 15,786 / 10,302 / 14,995; 200SPD 200 ng 7,130 / 4,882 / 7,323; 60SPD 200 ng
+22,745 / 22,521 / 15,693; 25pc 100 ng 13,591 / 13,050 / 13,283; py3 100 ng 20,106 / 28,078 / 20,329.
+The MSFragger column is PSM rows until the target-decoy scorer is run over the copied tables.
