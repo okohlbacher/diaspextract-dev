@@ -45,7 +45,22 @@ def tof_to_mz(tof, p, t1_frame, use_c2=True, use_temp=True):
 def ppm(a, b):
     return abs(a - b) / b * 1e6
 
+def check_linear_c2_zero():
+    """C2 == 0 stored in the file (PXD017703, 2020 timsTOF Pro) is a real, purely linear-in-sqrt
+    calibration and must be accepted; the quadratic collapses to sqrt(m) = (t - C0) / b."""
+    p = {"timebase": 0.2, "delay": 25131.0, "C0": 315.70325869866065,
+         "C1": 154272.1271422364, "C2": 0.0, "T1": 25.63315397685876, "dC1": -0.2}
+    import math
+    for tof in (60000.0, 120000.0, 240000.0, 400000.0):
+        got = tof_to_mz(tof, p, p["T1"])
+        t = tof * p["timebase"] + p["delay"]
+        b = 1e6 / math.sqrt(p["C1"])
+        expect = ((t - p["C0"]) / b) ** 2
+        assert abs(got - expect) / expect < 1e-12, f"C2==0 closed form: tof {tof} got {got} want {expect}"
+    print("OK  C2 == 0 (linear law, PXD017703 row) accepted and matches the closed form")
+
 def main():
+    check_linear_c2_zero()
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration_golden.json")
     files = json.load(open(path))
     n = 0

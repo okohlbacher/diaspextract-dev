@@ -1023,3 +1023,49 @@ Sage entrapment search (human targets + Arabidopsis entrapment, peptide-hypothes
 every interval overlapping every other. Nothing anomalous, no dataset out of family, and the two
 never-before-benchmarked datasets (C and F) sit inside the same band. The peptide counts in this
 file are therefore honest to within roughly a quarter of a percentage point of FDR.
+
+
+## PUBLIC BENCHMARK: PXD017703 (HeLa diaPASEF) RUNS END TO END (2026-09-05)
+
+The standard public diaPASEF reference (Meier et al., Nat Methods 2020) is staged on ceph under
+`benchmark/PXD017703/raw`: 9 Evosep acquisitions (60/100/200 SPD, 200 ng HeLa) and 18 "highsens"
+acquisitions, 27 in all. PRIDE's advertised byte sizes were wrong for BOTH archives; `unzip -t`
+CRC is the arbiter, size is only a hint, and a failed CRC resumes rather than unzips.
+
+Making the tool run on it exposed three defects the in-house cohort could never show:
+
+1. **"exactly one MzCalibration row" refused valid data.** These files carry two rows; every frame
+   references Id 1. Three places (the OpenMS patch's converter, `loadTofAxis`, the mzPeak loader)
+   now select the row `Frames.MzCalibration` references and refuse only if frames reference more
+   than one. The OpenMS patch is regenerated and re-verified byte for byte against the pinned base.
+2. **`C2 == 0` was rejected as "missing".** The 2020 timsTOF Pro firmware behind these files ships a
+   purely linear-in-sqrt calibration with no quadratic term, stored as a real 0.0. The guard existed
+   because a NULL C2 reads as 0.0 through the C API and would silently select the wrong law -- so
+   the loader now converts NULL to NaN (refused with its own reason) and a stored 0.0 is accepted.
+   The cancellation-free root already collapses to (t - C0)/b at C2 = 0; the golden tests pin it.
+3. **The shipped detector never ran in a public build.** `loadTofAxis` sat behind
+   `#if __has_include(<SQLiteCpp/SQLiteCpp.h>)`, false for an OpenMS INSTALLATION, so the integer
+   detector silently fell back to `openms` and only one log line said so. Caught by the tenth
+   end-to-end check on the stock-OpenMS CI. Both readers now use the sqlite3 C API through one
+   helper; a missing SQLite is a compile error. Same class as the two default-flag findings.
+
+First extraction, 100SPD 100 ng, shipped defaults: **136,818 pseudo-MS2 spectra, 57 s wall, 28 CPU-min,
+16 GB peak**, `spx:mz_calibration=tdf_table_modeltype1`, `spx:detector=integer`.
+
+Two operational lessons, recorded because each cost an hour: the ceph install carries its own
+`lib/libOpenMS.so`, so a converter fix in the OpenMS patch is invisible until the LIBRARY is
+republished, not just the executable; and diaTracer's JVM aborts with
+`locale::facet::_S_create_c_locale name not valid` under a non-interactive environment -- run it
+with `LC_ALL=C`.
+
+**On reproducing the diaTracer paper.** The paper (Nat Commun 2025, PMC11696033) contains NO HeLa
+and no PXD017703. Its headline dataset is TNBC, PXD047793: 16 diaPASEF runs on timsTOF Pro,
+FragPipe + diaTracer direct DIA, **9,296 proteins per run on average, 10,341 total** (DIA-NN
+quantification, 1% FDR at global protein, global precursor and run-specific precursor). Its
+diaTracer parameters -- Delta Apex IM 0.01, Delta Apex RT 3, RF max 500, Corr threshold 0.3 -- are
+exactly the ones this project's reference chain has always passed. So "numbers similar to the
+paper" is a test on TNBC, being staged now (`benchmark/PXD047793`, ~306 GB; archive #001's
+`analysis.tdf_bin` arrived with a bad CRC at full length and is re-fetched from scratch after the
+rest). Their own converted mzMLs and FragPipe results (MassIVE MSV000094803) would allow a
+like-for-like comparison; MassIVE was unreachable from this network on every route tried
+(FTP timed out on both hosts, PROXI file listing 404) -- retry later or via the web UI.

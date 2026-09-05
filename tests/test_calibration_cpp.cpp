@@ -104,8 +104,27 @@ int main(int argc, char** argv)
   if (bad.isSupported()) { std::fprintf(stderr, "C4 != 0 must be rejected\n"); return 1; }
   bad.C4 = 0.0; bad.C2 = -1e-6;
   if (bad.isSupported()) { std::fprintf(stderr, "C2 < 0 must be rejected\n"); return 1; }
-  bad.C2 = 0.0;   // a NULL/text C2 arrives as 0.0 and selects the known-bad pure-sqrt law
-  if (bad.isSupported()) { std::fprintf(stderr, "C2 == 0 must be rejected\n"); return 1; }
+  // C2 == 0.0 STORED in the file is a real calibration -- the 2020 timsTOF Pro firmware behind
+  // PXD017703 ships t = C0 + C1_eff*sqrt(m) with no quadratic term, every frame referencing it --
+  // and must be ACCEPTED. A NULL C2 is what must be refused; the loader converts NULL to NaN, which
+  // the "NaN must be rejected" case below covers. Pin the linear law in closed form and round trip.
+  {
+    spextract::TdfMzCalibration lin;
+    lin.model_type = 1; lin.digitizer_timebase = 0.2; lin.digitizer_delay = 25131.0;
+    lin.C0 = 315.70325869866065; lin.C1 = 154272.1271422364; lin.C2 = 0.0;
+    lin.T1_ref = 25.63315397685876; lin.dC1 = -0.2;               // the PXD017703 row 1 values
+    if (!lin.isSupported()) { std::fprintf(stderr, "C2 == 0 stored must be ACCEPTED: %s\n", lin.unsupportedReason().c_str()); return 1; }
+    const double b = lin.frameFactor(lin.T1_ref);
+    for (double tof : {60000.0, 120000.0, 240000.0, 400000.0})
+    {
+      const double t = tof * lin.digitizer_timebase + lin.digitizer_delay;
+      const double u = (t - lin.C0) / b;                            // the quadratic collapses to this
+      const double expect = u * u, got = lin.tofToMz(tof, b);
+      if (!(std::fabs(got - expect) / expect < 1e-12)) { std::fprintf(stderr, "C2==0 closed form: tof %.0f got %.9f want %.9f\n", tof, got, expect); return 1; }
+      const double back = lin.mzToTof(got, b);
+      if (std::fabs(back - tof) > 1e-6) { std::fprintf(stderr, "C2==0 round trip: %.4f -> %.4f\n", tof, back); return 1; }
+    }
+  }
   bad.C2 = 1e-3; bad.C1 = 1e-300;   // positive but implausible: b*b overflows -> silent m/z 0
   if (bad.isSupported()) { std::fprintf(stderr, "implausible C1 must be rejected\n"); return 1; }
   bad.C1 = 155279.0; bad.C0 = std::nan("");
