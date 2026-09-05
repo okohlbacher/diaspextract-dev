@@ -1146,3 +1146,42 @@ reference-Sage pass with that patch ran all 27 files on `data` in 30 min. Refere
 1%: 100SPD 100 ng 15,786 / 10,302 / 14,995; 200SPD 200 ng 7,130 / 4,882 / 7,323; 60SPD 200 ng
 22,745 / 22,521 / 15,693; 25pc 100 ng 13,591 / 13,050 / 13,283; py3 100 ng 20,106 / 28,078 / 20,329.
 The MSFragger column is PSM rows until the target-decoy scorer is run over the copied tables.
+
+### 2026-09-05, 18:45 -- PUBLIC HeLa (PXD017703), all 27 acquisitions, both extractors, both engines
+
+Full table in `docs/HELA-TABLE.md` (regenerate with `tools/hela_table.py` on the cluster). Shipped
+defaults, `-threads 100`, one node per chain; Sage peptides at 1% (rank 1, peptide q); MSFragger
+peptides at 1% by peptide-level target-decoy on the raw tables (best hyperscore per peptide+mods,
+decoy = all proteins `rev_`). The reference extractor's Sage column comes from the patched pass.
+
+| scheme | n | Sage SpeX | Sage ref | ratio | MSFragger SpeX | MSFragger ref | ratio |
+|---|---|---|---|---|---|---|---|
+| 2019 25pc | 9 | 110,211 | 90,807 | **1.21** | 83,189 | 101,837 | 0.82 |
+| 2019 py3 | 9 | 135,107 | 159,105 | 0.85 | 98,956 | 184,824 | **0.54** |
+| 2020 100SPD | 3 | 38,213 | 41,473 | 0.92 | 34,964 | 51,143 | 0.68 |
+| 2020 200SPD | 3 | 18,394 | 19,513 | 0.94 | 17,389 | 26,894 | 0.65 |
+| 2020 60SPD | 3 | 62,678 | 61,551 | 1.02 | 58,345 | 75,034 | 0.78 |
+
+What it says, in order of weight:
+1. **The MSFragger deficit is real and larger on public data than in-house** (0.54-0.82 vs the
+   in-house 0.85-0.90). It is worst on py3 and at 10 ng. Sage is at parity or better on three of
+   five schemes; the engine disagreement is therefore NOT "natural variance" here -- MSFragger
+   consistently gets ~1.4-1.9x more out of the reference spectra than out of ours, which points at
+   spectrum CONTENT (fragment completeness per spectrum), the same conclusion as content candidate 2.
+2. **Load dependence.** At 10 ng SpeXtract loses on both engines and both schemes (py3 10 ng: Sage
+   4.8k vs 9.2k, MSFragger 2.7k vs 8.1k); at 50-100 ng on 25pc it wins with Sage by 21%. The
+   isotope-support gate and the z>=2 floor, both wins in-house at 200 ng, are the obvious suspects
+   at low load: on file 22 the gate dropped 2.09 M guessed precursors and kept 466 k.
+3. **Emission** is 1.7-2.6x the reference's spectrum count at 50-100 ng 2019 (1.1-1.2 M vs the
+   reference's ~425 k precursors), consistent with the over-generation finding; at 10 ng py3 it is
+   160 k vs 63 k.
+4. **Cost.** SpeXtract runs in 1/3 to 1/6 of the reference's RSS on every file (2019 100 ng:
+   66-114 GB vs 168-197 GB; 10 ng: 27 GB vs 99-147 GB) and is faster on the 2020 files and py3;
+   the 25pc 100 ng walls of 33-47 min are from `data` running three jobs (spock: 13:38).
+5. **Reference-side Sage replicates disagree by up to 35%** (2732: 10,394 vs 15,939/15,140; 2738:
+   4,928 vs 7,194/7,391; 35: 28,359 vs 20,302/20,520) while its MSFragger replicates agree within
+   5%. A deterministic re-search of 2732 is running; if it reproduces, the variance is in the
+   reference extraction, not in Sage, and the reference totals carry that noise.
+
+The diaTracer paper reports no HeLa numbers; its headline dataset is TNBC (PXD047793), staging
+now (7 of 16 by 18:20). That is the like-for-like paper comparison.
