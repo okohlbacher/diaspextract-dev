@@ -1111,3 +1111,24 @@ re-extracted by hand: 131,773 spectra, 0:43. The reference extractor ran on all 
 not surfaced it: every line says NO OUTPUT and no reference search ran. Driver is now idempotent
 (skips extraction whose output exists, polls the size, skips completed searches); the rerun is queued
 behind each node's chain and will fill the reference column.
+
+### 2026-09-05, 15:45 -- the 2019 acquisitions extract: two defects, one per diaPASEF scheme
+
+With C4 modelled, the 18 refused files split by scheme. **25pc** (4 window groups x 4 windows, each
+group acquired four frames in a row, 16 distinct m/z): extracts on the C4 build as is -- 10 ng file
+19: **220,291 spectra, 6:49 wall, 51 GB** (68,469 frames, a full 2-h gradient at 10 ng). **py3** (16
+groups x 4 windows, **32 distinct m/z for 64 window rows**): every m/z window is acquired in TWO groups
+with shifted, overlapping scan ranges (412.5: scans 649-918 in group 1, 770-918 in group 9) ~1.7 s
+apart in the cycle. Keyed by isolation m/z alone the two slices landed in one window as all of
+group A then all of group B; the retention-time order guard fired at frame index 4150 =
+66,394 / 16 = frames per group -- the guard did its job. Merging by RT would be wrong: outside the
+overlap a precursor sees every other frame empty. The window key is now (lo, hi, WindowGroup)
+from the vendor native ID; ScanNumBegin was tried first and collapsed the eight highest windows,
+whose two slices both start at scan 0 (56 windows, guard fired at window 48 -- predicted, observed).
+For every other scheme each m/z sits in one group, so partition and order are unchanged; the S30
+digest cannot move. e2e check 11 synthesises the scheme. **py3 10 ng file 22: 160,416 spectra,
+1:44 wall, 26 GB, 64 windows.** Published 15:42 under the no-running-spextract gate.
+
+Operational: the HeLa driver is now idempotent and runs on three nodes (ibminode05 9 files, spock
+11, data 7 heavy 2019 files); spock's first pass ended without its completion marker because the
+driver was edited in place while it ran (see memory), which is why the reruns are process-gated.
