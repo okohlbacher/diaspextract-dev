@@ -31,9 +31,10 @@ endif()
 
 find_package(OpenMS REQUIRED)
 find_package(OpenMP)
+find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLite is a build error, not a fallback
 
 add_executable(spextract src/spextract.cpp)
-target_link_libraries(spextract PRIVATE OpenMS)
+target_link_libraries(spextract PRIVATE OpenMS SQLite::SQLite3)
 
 if(OpenMP_CXX_FOUND)
   # The window/band loop is OpenMP-parallel; without it the tool still builds and runs,
