@@ -8,6 +8,9 @@
 # the answer in the spx:mz_calibration userParam.
 #
 # Usage: scripts/apply_openms_patches.sh /path/to/OpenMS
+#
+# The patches are cut against the exact public OpenMS commit named in patches/openms.lock. Check
+# that commit out first; against anything else they may fail, or worse, apply with fuzz.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TREE=${1:?usage: apply_openms_patches.sh /path/to/OpenMS-source-tree}
@@ -19,9 +22,9 @@ install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/T
 echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
 
 for p in patches/*.patch; do
-  if patch -p0 -N --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then
-    patch -p0 -N -d "$TREE" < "$p"; echo "applied  $p"
-  elif patch -p0 -R --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then
+  if patch -p1 -N --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then
+    patch -p1 -N -d "$TREE" < "$p"; echo "applied  $p"
+  elif patch -p1 -R --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then
     echo "already applied, skipping  $p"
   else
     echo "FAILED to apply $p -- the tree may be a different OpenMS version" >&2; exit 1
