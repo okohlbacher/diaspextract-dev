@@ -210,8 +210,13 @@ namespace
   /// [dyn-mem] Bytes we may still allocate. MemAvailable is the kernel's own estimate of what
   /// can be handed out without swapping (it accounts for reclaimable page cache), which is the
   /// right quantity on a SHARED node -- MemFree would ignore cache and MemTotal would ignore
-  /// the other users. Add our own RSS back: memory we already hold is part of our budget, not
-  /// somebody else's. Returns 0 if unreadable, which the caller treats as "admit one at a time".
+  /// the other users. Returns 0 if unreadable, which the caller treats as "admit one at a time".
+  ///
+  /// It does NOT add our own RSS back any more. That was defensible when most of our resident set
+  /// was allocator memory we would reuse; with perf:malloc_trim returning it at the phase boundary
+  /// (measured 92 GB of 138 at the loop start), what remains resident during the loop is the
+  /// windows actually in flight -- memory that is spoken for, not budget. Counting it as available
+  /// double-booked exactly the bytes the gate exists to bound. [2026-09-06]
   static size_t availableBytes_()
   {
     std::ifstream mi("/proc/meminfo");
@@ -222,12 +227,8 @@ namespace
       if (line.rfind("MemAvailable:", 0) == 0)
       { avail_kb = strtoull(line.c_str() + 13, nullptr, 10); break; }
     if (!avail_kb) return 0;
-    std::ifstream st("/proc/self/status");
-    size_t rss_kb = 0;
-    while (st && std::getline(st, line))
-      if (line.rfind("VmRSS:", 0) == 0)
-      { rss_kb = strtoull(line.c_str() + 6, nullptr, 10); break; }
-    return (avail_kb + rss_kb) * 1024ull;
+
+    return avail_kb * 1024ull;
   }
 
   /// THE RT AXIS IS GLOBAL AND DISCRETE. Every acquired frame has one retention time, and every
@@ -3481,14 +3482,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
     std::atomic<size_t> inflight{0};
+    std::atomic<int> adm_hwm{0};   // high-water mark of admitted windows, for the log and the e2e
     // Projected footprint per window, from its own compact size. RE-CALIBRATED 2026-09-03: the
     // 10x multiplier booked the average dataset A window at 8.9 GB against a measured 12-14 GB, i.e. it
     // under-booked by 35-55% in the UNSAFE direction -- it admitted more windows than fit. That was
     // survivable while the thread grid capped concurrency at 8 anyway; with the task pool, memory
     // is the only bound, so the estimate has to be honest. [adv-review kimi 2026-09-03]
+    // RE-CALIBRATED AGAIN 2026-09-06, this time against the per-window [mem] lines rather than a
+    // multiplier: over 28 windows of a 2-h acquisition the SUSTAINED footprint of a window is
+    // ~44 B per compact peak (slab 10 + seed order 3.8 + band/visited ~6 + trace records 51 at
+    // 0.21 parents + 0.28 children per peak x 56 B + span arena 4.4 + scoring copies 12.9, minus
+    // the stages that do not coexist). The old 16x of the COMPACT BYTES booked 160 B/peak, i.e.
+    // 3.6x the sustained figure, which is why the gate never throttled anything.
     auto project = [&](const vector<CompactFrame>& fr) {
-      size_t b = 0; for (const auto& f : fr) b += f.bytes();
-      return (size_t)(b * 16.0) + (size_t)256 * 1024 * 1024;
+      size_t peaks = 0; for (const auto& f : fr) peaks += f.mzq.size();
+      return peaks * (size_t)44 + (size_t)256 * 1024 * 1024;
     };
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
@@ -3511,10 +3519,28 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // steal across window boundaries, so the tail of one window is filled by another's bands.
     // Output is unaffected: every result is written to an index-addressed slot (win_out[wi],
     // pslot[pi-plo], per[b]), never appended in completion order.
+    // [admit] The master admits BEFORE spawning: the byte budget and the window cap are both
+    // enforced by construction, and no worker thread sits in a spin loop holding a slot it cannot
+    // use. `perf:max_concurrent_windows` was computed and logged but never actually checked --
+    // the only bound was the byte gate, which over-booked by 3.6x, so nothing ever throttled.
+    std::atomic<int> active{0};
     #pragma omp parallel num_threads(n_threads)
     #pragma omp single
     for (long wi = 0; wi < (long)window_list.size(); ++wi)
     {
+      {
+        const size_t need = project(*window_list[wi].second);
+        for (;;)
+        {
+          const size_t budget = (size_t)(availableBytes_() * mem_frac);
+          // "at least one": an empty pipeline always admits, however large the window
+          if ((active.load() == 0) || (active.load() < n_conc && inflight.load() + need <= budget)) break;
+          #pragma omp taskyield
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        inflight += need; ++active;
+        if (active.load() > adm_hwm.load()) adm_hwm.store(active.load());
+      }
       #pragma omp task default(shared) firstprivate(wi)
       {
       // A lambda, because `continue` is not a legal exit from a task's structured block and the
@@ -3524,24 +3550,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       {
         const double win_lo = window_list[wi].first[0] / 100.0;
         const double win_hi = window_list[wi].first[1] / 100.0;
-        // [dyn-mem] wait for room before materialising anything
+        // admitted by the master before this task existed; release both charges however we leave
         const size_t need = project(*window_list[wi].second);
-        for (;;)
-        {
-          bool go = false;
-          #pragma omp critical(admit)
-          {
-            const size_t budget = (size_t)(availableBytes_() * mem_frac);
-            // "at least one": an empty pipeline always admits, however large the window
-            if (inflight.load() == 0 || inflight.load() + need <= budget) { inflight += need; go = true; }
-          }
-          if (go) break;
-          // The master is one of the workers: run queued tasks while waiting for memory rather
-          // than sleeping on a thread the pool could be using.
-          #pragma omp taskyield
-          std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        struct Release { std::atomic<size_t>& c; size_t n; ~Release() { c -= n; } } rel{inflight, need};
+        struct Release { std::atomic<size_t>& b; std::atomic<int>& a; size_t n;
+                         ~Release() { b -= n; --a; } } rel{inflight, active, need};
         // Per-window stage seconds and the completion line, printed on EVERY exit of the body
         // (empty window, any assembly arm, exception): what the profile could only infer. [mem]
         double w_prep = 0, w_trace = 0, w_split = 0, w_score = 0, w_emit = 0;
@@ -3929,7 +3941,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
-    writeLogInfo_("All windows done." + clk_() + rss_() + mem_()); // parallel-phase peak? [mem]
+    writeLogInfo_("All windows done (admission high-water " + String(adm_hwm.load()) + " of "
+                  + String(n_conc) + " allowed concurrent windows)." + clk_() + rss_() + mem_()); // [mem]
 #ifdef __GLIBC__
     if (trim_on)
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
