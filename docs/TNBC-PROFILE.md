@@ -1,0 +1,92 @@
+# SpeXtract on TNBC (PXD047793): runtime and memory by phase and data structure
+
+Sixteen 130-min diaPASEF runs, shipped defaults, `-threads 100`, medians unless noted. Sources: the
+tool's own `[perf]` phase table and RSS milestones in every `extract.log`, `/usr/bin/time -v`, the
+code (`src/spextract.cpp`), and a three-agent reconciliation (two independent analyses, one refuter)
+whose accounting closes each RSS milestone within ~10%. Basis is marked: **measured** (in a log),
+**predicted** (from a struct + a logged count), **inferred** (from a fit to the milestones).
+
+Per run: 139,311 frames (4,804 MS1), 28 isolation windows, 4.27e9 picked MS2 peaks, 21.4 M MS1
+traces, 8.7 M isotope seeds -> 3.0 M precursor hypotheses, 2.30 M pseudo-spectra, 19-20 GB mzML.
+
+## Runtime: 30.3 min wall, 10.3 h CPU, 34 cores busy on average
+
+| phase | wall s | % | CPU s | parallel | what the time is |
+|---|---|---|---|---|---|
+| LOAD(stream) | 75 | 4 | 5,581 | 77x | parallel peak picking (pick 42 of 61 s); serial reader hand-off |
+| MS1_TRACE | 250 | 14 | 1,207 | 4.8x | 35-45% single-threaded: the band-partition copy of the whole picked MS1 map (40-70 s), toTrace/makeSpan over 21.4 M traces (30-45 s); 12-band MassTraceDetection at 6-9x (bands are peak-count quantiles, not apex-cost quantiles) |
+| unattributed | 29 | 2 | 29 | 1.0x | serial FWHM pass + serial canonical sort of 21.4 M traces |
+| PRECURSOR_INFER | 450 | 25 | 450 | **1.0x** | single-threaded greedy isotope walk: 8.7 M seeds x <=5 charges x <=10 partner searches, each two binary searches plus a linear scan of ~400 contiguous 72-B trace records; serial because `used[]` marking makes seed order a dependency; ~quadratic in trace count (31-63 s on the in-house files, 364-518 s here) |
+| WINDOW_LOOP | 978 | 54 | 34,463 | 37x | CPU-bound tracing (78% of stage time) and scoring (19%); occupancy 35-43 of 100 threads because every window has single-threaded sections (the seed sort of 145-215 M elements through an indirect comparator, absorb, the 30-50 M-record fragment-trace sort) and the tof bands are uniform-width, not balanced. All 28 windows are admitted in the first ~90 s; the mean number active is 9.4, i.e. the last ~500-600 s run at ~10 threads |
+| SORT + ASSEMBLE | 8 | 0 | 8 | 1.0x | sort of 2.3 M spectra, move into the PeakMap |
+| WRITE(mzML) | 53 | 3 | 52 | 1.0x | single-threaded XML/base64 at ~400 MiB/s for 19-20 GB |
+
+Kernel time is 1.8-2.9% of CPU-seconds (1,150 s of 62,900) and is NOT a wall lever: the on-record
+tcmalloc A/B on the in-house file (d8_R3 vs d9_libtcmalloc_minimal) cut minor faults 137 M -> 48 M
+and system time 616 -> 320 s for +1% wall. (An earlier note in the session compared system
+CPU-seconds with wall-clock and called it 64%; that comparison is invalid for a 100-thread process.)
+Host matters: ibminode05 (64 cores / 128 threads) runs the loop in 1,123-1,264 s, the 224-thread
+nodes in 805-1,085 s.
+
+## Memory: 264 GB peak (range 204-287), of which ~43 GB is live data at the loop start
+
+| component | GB | basis | lifetime |
+|---|---|---|---|
+| Compact MS2 store `map<WinKey, vector<CompactFrame>>` (uint32 mzq + float inten + uint16 imq = 10 B/peak x 4.27e9) | 39.8 | measured | load -> window admission; consumed frame by frame by `toSlab`, chunks go back to per-thread arenas, not the OS |
+| `ms1_map` picked MS1 PeakMap (Peak1D 16 B + IM float 4 B = 20 B/peak; N_ms1 ~1.4-2.1e9, **not logged**) | 28-41 | inferred | load -> start of MS1_TRACE (destroyed at the band partition) |
+| LOAD-phase allocator retention (freed frame chunks below the mmap threshold, held in ~100 worker arenas) | ~15 | inferred | never trimmed |
+| MS1 traces `vector<Trace>` (72 B x 21.4 M) | 1.4 | predicted | to the end |
+| MS1 XIC arena (4 B x ~12 spanned frames x 21.4 M; compacted to the 25% a precursor references) | 1.1 | predicted | to the end |
+| Serial band-partition COPY of the MS1 map (20 B x N_ms1), allocated in the main arena while the just-freed spectra sit in the worker arenas -> every byte new | 28-41 | inferred | MS1_TRACE only, then retained |
+| MassTraceDetection work copies, apex lists, MassTrace parents + EPD children | ~16 | inferred | MS1_TRACE only, then retained |
+| Precursor hypotheses (64 B x 8.7 M touched, 3.0 M kept) | 0.5 | predicted | to the end |
+| Loop in flight: 28 PeakSlabs (10 B/peak, fresh mmaps replacing the compact chunks) | 39.8 | predicted | one window each |
+| Loop in flight: 28 seed-order arrays (4 B x 0.95 x peaks) | 15 | predicted | one window each |
+| Loop in flight: per-window band trace vectors/arenas, absorb targets, split parents + children, scoring set (~35-50 M fragment traces per window, **not logged**) | ~67 | inferred | one window each |
+| Emitted spectra in `win_out` (2.30 M x ~7.5 KB: 752-B object + 208-B precursor + 8-KB peak array at the 500-peak cap without reserve) | 16 | inferred | loop -> write; lands in recycled arena holes, invisible in RSS |
+| ASSEMBLE: out PeakMap, touched slots only | 1.7 | measured | write |
+
+How the milestones add up: after load 90 = 39.8 + 28-41 + ~15 (+1 baseline); after MS1 142 = the
+same pages plus the 52 GB partition copy and transients, of which only ~43 GB is live; loop peak
+264 = 142 + 122 in flight (all 28 windows concurrent: 39.8 + 15 + ~67); loop end 139 (12 runs) or
+~105 (4 runs where glibc happened to return whole heaps). The figure "2,598 B per MS1 trace" that
+the milestone arithmetic suggests is a mis-normalisation: the term is 20 B per picked MS1 PEAK
+(the map copy), not per trace.
+
+## What this says
+
+1. **Half the wall is the window loop at a third of the machine.** The loop is not memory- or
+   kernel-bound; it is serial sections inside each window plus band imbalance, leaving a long tail
+   at ~10 threads.
+2. **A quarter is a single-threaded phase whose cost grows ~quadratically with trace count.**
+   PRECURSOR_INFER is 31-63 s on 30-min in-house files and 364-518 s here; at 2.5x the traces it
+   is 8x the time.
+3. **The peak RSS is ~2.5x the live data.** Of 264 GB, ~43 GB is live at the loop start, ~100 GB
+   is freed-but-retained (glibc never trims per-thread arenas; the map copy cannot reuse memory
+   freed by other threads), and ~120 GB is 28 windows in flight. RAM, not CPU, sets concurrency;
+   the admission gate over-books each window ~2x at its momentary peak.
+4. **On the 2020 HeLa and in-house files none of this shows** (5 min, 80 GB): the serial phases
+   are small there. It is the 2-h, 4e9-peak class where SpeXtract is 1.4-2.3x slower than the
+   reference extractor, and the three items above are the whole explanation.
+
+## Levers, ranked by expected wall gain on this file class (all inference until run)
+
+1. **PRECURSOR_INFER on a structure-of-arrays gate** (float rt, float im in m/z order: 8 B per
+   candidate instead of the 72-B record; same candidate order, same first match -> output
+   identical): the scan is ~75% of the 450 s -> **-200..-300 s (-11..-17%)**. One run settles it.
+2. **Window-loop critical path**: per-band seed order lists (12 parallel sorts of ~12 M instead of
+   one serial sort of 145-215 M) and a parallel fragment-trace sort (output-identical); seed-count-
+   balanced tof band edges (changes double-claims at band edges, ~0.1% of peptides, needs the set
+   gate): **-150..-300 s (-8..-16%)** IF the tail is what the stage-elapsed arithmetic implies.
+   First add per-window stage timestamps to the `window k/28` lines to measure that tail.
+3. **MS1_TRACE**: partition the map into bands in parallel on the worker threads (so the copies
+   land in the arenas that hold the freed spectra) and convert to spans per band: -60..-100 s
+   (-3..-5%), output-identical, and removes 25-40 GB of the +52 GB step.
+4. **WRITE**: mzPeak or a parallel mzML encoder: -40..-50 s (-2.5%), measured.
+5. **Allocator / hugepages / NUMA / thread count** (tcmalloc preload, `glibc.malloc.hugetlb=1`,
+   `-threads 64` on the 128-thread node): bounded by the 2-3% kernel share; adopt tcmalloc for the
+   -7% RSS headroom, not for wall.
+6. Not a wall lever: `perf:max_concurrent_windows` and the admission projection only cap RAM.
+
+Two log lines would remove the two inferred quantities: the picked-MS1 peak count at "Split into",
+and the fragment-trace count per window. Both are one `String(...)` each.
