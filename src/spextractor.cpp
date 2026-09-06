@@ -798,13 +798,18 @@ namespace
   static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
   static uint64_t traceDigest_(const TraceStore& st, const vector<Trace>& ts)
   {
-    vector<uint64_t> b; b.reserve(ts.size() * 3);
+    // im and tof are hashed too. im is the PRIMARY key of the fragment sort and the axis of the only
+    // binary search in scoring, and tof decides the exported m/z -- a digest blind to them would
+    // report "identical" across a change that moved every candidate slice. [2026-09-06]
+    vector<uint64_t> b; b.reserve(ts.size() * 5);
     for (const auto& t : ts)
     {
       uint64_t u; double v;
       v = t.mz; std::memcpy(&u, &v, 8); b.push_back(u);
       v = t.rt; std::memcpy(&u, &v, 8); b.push_back(u);
+      v = t.im; std::memcpy(&u, &v, 8); b.push_back(u);
       v = intensityOf(st, t); std::memcpy(&u, &v, 8); b.push_back(u);
+      b.push_back((uint64_t)t.tof);
     }
     return detDigest_(std::move(b));
   }
@@ -1166,7 +1171,8 @@ namespace
         epd.setParameters(ep);
       }
       vector<Trace>& out = parts[ci];
-      out.reserve(hi - lo);   // ponytail: parents, not children -- a heavily split chunk regrows it.
+      out.reserve((hi - lo) + (hi - lo) / 3);   // measured 1.316 children per parent over 28 windows:
+      // reserving the PARENT count made every chunk cross exactly one doubling. [2026-09-06]
                               // Measured no regression (dataset D got faster and lighter); revisit only if it shows up.
       vector<Peak2D> pk;                                      // reused: a vector, not a per-point list
       vector<MassTrace> split;                                // reused: detectPeaks clears it itself
@@ -1958,7 +1964,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
     vector<Trace> out;
     out.reserve(mts.size());
-    for (const auto& mt : mts) out.push_back(toTrace(mt, store));
+    // toTrace only reads, so each MassTrace is dead the moment it is converted. Releasing it here
+    // keeps the peak at one MassTrace instead of the whole vector plus the whole Trace vector; the
+    // same discipline is already applied to the band and chunk vectors above.
+    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); MassTrace().swap(mts[i]); }
     return out;
   }
 
@@ -3737,7 +3746,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         }), frag_traces.end());
         if (frag_traces.empty()) return;   // nothing traceable in this window
 
-        sort(frag_traces.begin(), frag_traces.end(), [](const Trace& a, const Trace& b) {
+        sort(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& a, const Trace& b) {
           if (a.im != b.im) return a.im < b.im;
           if (a.mz != b.mz) return a.mz < b.mz;
           if (a.rt != b.rt) return a.rt < b.rt;
