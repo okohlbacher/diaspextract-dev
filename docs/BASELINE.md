@@ -1327,3 +1327,20 @@ buys is the peak: the sort, the optional merge and consolidate passes and the wr
 memory instead of growing on top of it, which is where the 0.9 GB comes from. That is the retention
 mechanism seen from the other side, and it is why "free earlier" and "return to the OS" are two
 different levers.
+
+#### Step 8: the trace record 72 -> 56 bytes (output-identical, dataset D digest == B1)
+
+| build | peak RSS on dataset D |
+|---|---|
+| v13 (step 2, instrumentation) | 83.11 GB |
+| v15 (step 4) | 81.73 GB |
+| **v17 (step 8, 56-byte record)** | **78.99 GB** |
+
+-2.74 GB from the record alone on this file, -4.12 GB (-5.0%) cumulative. The record is the largest
+structure in the tool at scale (925 M parent + 1,217 M child traces on a 2-h acquisition = 143.6 GiB
+at 72 bytes if simultaneous), so the same change is worth several times more there; that measurement
+is running. The store is now an explicit argument to every span accessor, asserted in a debug build,
+and the calibration factor is a store-local frame index -- kept explicit rather than derived from
+frame0 + apex, because the unsplit integer path picks its calibration frame in `got` order while
+makeSpan resolves equal-intensity apex ties in frame order, and the two disagree on exact ties.
+A static_assert pins sizeof(Trace) == 56.
