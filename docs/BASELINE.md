@@ -1192,3 +1192,25 @@ recount, a definitional difference). Sage is deterministic; the replicate spread
 reference extractor's output for that acquisition, whose MSFragger count is nonetheless in line
 with its siblings. The reference Sage totals therefore carry extraction noise the MSFragger totals
 do not, which is one more reason the MSFragger column is the one to close.
+
+## PUBLIC BENCHMARK 2: TNBC (PXD047793), the diaTracer paper's headline data (2026-09-06, 07:10)
+
+All 16 single-shot TNBC diaPASEF runs (72k frames, 130-min gradients, 630 GB staged) through both
+extractors and both engines overnight on three nodes (16 h wall, ~30-38 min per file per extractor,
+230-300 GB RSS on both sides at 100 threads). Reference-side Sage patched inline (selected ion m/z).
+Driver-log numbers, Sage peptides at 1% (the MSFragger column is PSM rows until the peptide-level
+table lands -- `tools/bench_table.py PXD047793 TNBC-TABLE.md` is running):
+
+| | reference | SpeXtract |
+|---|---|---|
+| Sage peptides, 16 runs | 293,065 | **318,252** (ratio 1.086) |
+| per run, mean | 18,317 | 19,891 |
+| spectra per run | ~1.3-2.4 M PSM rows | 2.06-2.41 M pseudo-spectra |
+| wall per run | 18-30 min | 26-38 min |
+| RSS per run | 238-307 GB | 204-287 GB |
+
+SpeXtract is ahead on Sage on 16 of 16 runs (smallest margin 001: 15,468 vs 14,633; largest
+010: 20,352 vs 16,308). The paper's headline is proteins: FragPipe + diaTracer quantified an
+average of **9,296 proteins per run** (Spectronaut directDIA 8,997, DIA-NN library-free 9,520; all
+with quantification/MBR, tryptic). Our comparable figure is Sage protein groups at 1% protein q per
+run, pending in the table; identified-only, so expect it below a quantified-with-MBR count.
