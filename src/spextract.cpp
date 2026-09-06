@@ -42,6 +42,9 @@
 #include <vector>
 #include <cstdlib>     // getenv
 #include <cstring>     // memcpy
+#ifdef __GLIBC__
+#include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
+#endif
 #include <exception>   // exception_ptr
 #ifdef _OPENMP
 #include <omp.h>
@@ -166,6 +169,18 @@ namespace
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
   bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
 
+  /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
+  /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
+  static std::string mem_()
+  {
+#ifdef __GLIBC__
+    const struct mallinfo2 mi = mallinfo2();
+    return " [malloc arena=" + std::to_string(mi.arena >> 20) + " MB mmap=" + std::to_string(mi.hblkhd >> 20)
+         + " MB free=" + std::to_string(mi.fordblks >> 20) + " MB]";
+#else
+    return "";
+#endif
+  }
   static std::string rss_()
   {
     std::ifstream st("/proc/self/status");
@@ -783,6 +798,24 @@ namespace
     size_t frames() const { return rt_index.size(); }
     size_t peaks()  const { return tof.size(); }
   };
+
+  /// Ordered, incremental digest of a window's slab: frame table (rt index, factor bits, count) then
+  /// every (tof, intensity bits, imq) tuple in frame order. Unlike detDigest_ it is NOT sorted, so a
+  /// reordered equal-intensity peak or a tuple swapped between frames changes it -- which is what a
+  /// representation change of the store must not do. [det]
+  static uint64_t slabDigest_(const PeakSlab& sl)
+  {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+    for (size_t f = 0; f < sl.frames(); ++f)
+    {
+      uint64_t bb; std::memcpy(&bb, &sl.b[f], 8);
+      mix(sl.rt_index[f]); mix(bb); mix(sl.frame_off[f + 1] - sl.frame_off[f]);
+      for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
+      { uint32_t ib; std::memcpy(&ib, &sl.inten[k], 4); mix(sl.tof[k]); mix(ib); mix(sl.imq[k]); }
+    }
+    return h;
+  }
 
   /// Move a window's compact frames into a slab, consuming them as it goes (the compact store has
   /// to shrink in step, exactly as materializeWindow does, or the two representations coexist).
@@ -2788,7 +2821,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + " (native ms2_neighbors="
-                      + String(cfg.dia_ms2_n_neighbors) + ")" + clk_() + rss_());
+                      + String(cfg.dia_ms2_n_neighbors) + ")" + clk_() + rss_() + mem_());
       }
       catch (const Exception::BaseException& e)
       {
@@ -2895,9 +2928,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                       + " bad_im=" + String(cstat.bad_im) + " (kept " + String(cstat.kept) + ") -- if this is"
                       + " nonzero the compact store is NOT lossless and results differ from the old path.");
       }
+      size_t ms1_pk = 0; for (const auto& sp : ms1_map) ms1_pk += sp.size();
       writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
-                    + String(cp ? (double)cb / cp : 0.0) + " B/peak)." + clk_() + rss_()); // [mem]
+                    + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
+                    + String(ms1_pk) + " peaks (" + String(ms1_pk * 20 / (1024ULL * 1024ULL)) + " MB as PeakMap)." + clk_() + rss_() + mem_()); // [mem]
     }
 
     if (ms1_map.empty())
@@ -3255,7 +3290,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // would double the MS1 arena at exactly the moment it is largest) and in OFFSET order -- see
       // compactUnreferenced() for why container order corrupted ~1% of the kept spans.
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
-      writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_());
+      writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
     }
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
                   + " precursor hypotheses (" + String(n_default) + " assigned default charge)." + rss_());
@@ -3419,7 +3454,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     };
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
-                  + "% of free RAM)..." + rss_());
+                  + "% of free RAM)..." + rss_() + mem_());
 
     // [timers] phase_clock_ is never called between the start of this loop and its end, so
     // EVERYTHING said about where the loop's 85.9% goes has been inference. Two performance
@@ -3427,6 +3462,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // are atomic nanosecond accumulators -- one add per stage per window, so the measurement
     // cost is unmeasurable against stages that run for minutes.
     std::atomic<long long> t_mat{0}, t_trace{0}, t_grid{0}, t_score{0}, t_emit{0};
+    std::atomic<bool> span_logged{false};
     // [master/worker, 2026-09-03] The loop used to be `parallel for num_threads(n_conc)` with
     // nested `parallel for num_threads(n_bands)` inside, i.e. a RIGID n_conc x n_bands grid
     // (8 x 12 = 96 of 100 threads). Two costs followed from the rigidity: the grid never fills the
@@ -3468,6 +3504,16 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         struct Release { std::atomic<size_t>& c; size_t n; ~Release() { c -= n; } } rel{inflight, need};
+        // Per-window stage seconds and the completion line, printed on EVERY exit of the body
+        // (empty window, any assembly arm, exception): what the profile could only infer. [mem]
+        double w_prep = 0, w_trace = 0, w_split = 0, w_score = 0, w_emit = 0;
+        auto secs = [](auto d) { return std::chrono::duration<double>(d).count(); };
+        struct WinDone { std::function<void()> f; ~WinDone() { f(); } } win_done_guard{[&]() {
+          #pragma omp critical(winlog)
+          writeLogInfo_("  window " + String(++win_done) + "/" + String(window_list.size()) + " " + String(win_lo) + "-" + String(win_hi)
+                        + ": prep " + String(w_prep) + " s | trace " + String(w_trace) + " s | split " + String(w_split)
+                        + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_());
+        }};
         // [compact] materialise ONLY this window, and free its compact frames as we go
         auto _t0 = std::chrono::steady_clock::now();
         // The integer detector reads the compact store directly; only the OpenMS path needs the
@@ -3477,6 +3523,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (integer_detector)
         {
           wslab = toSlab(*window_list[wi].second);
+          if (detOn_())
+          {
+            #pragma omp critical
+            writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " slab n=" + String(wslab.peaks()) + " digest=" + String(slabDigest_(wslab)));
+          }
         }
         else
         {
@@ -3534,10 +3585,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
           const int nb = std::max(1, w_bands);
+          size_t n_seeds = 0, n_parents = 0;
+          const size_t n_peaks = wslab.peaks();
           {
+          auto _tp = std::chrono::steady_clock::now();
           const TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);   // once per window
-          writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(tprep.order.size())
-                        + " of " + String(wslab.peaks()) + " peaks (" + String((int)(1000.0 * tprep.order.size() / std::max<size_t>(wslab.peaks(), 1)) / 10.0) + "%)");
+          w_prep = secs(std::chrono::steady_clock::now() - _tp);
+          n_seeds = tprep.order.size();
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
           // store absorbs them in band order and every offset is rebased (R4 sequencing).
           vector<TraceStore> bst(std::max(1, nb));
@@ -3560,6 +3614,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             { tot += per[b].size(); arena += bst[b].inten.size(); any_bins |= !bst[b].bins.empty(); }
             frag_traces.reserve(tot);
             wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);   // as in splitIntegerTraces
+            writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + " merge: " + String(nb) + " band arenas, "
+                          + String(arena) + " floats (" + String(arena * (any_bins ? 8 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
             for (int b = 0; b < nb; ++b)
             {
               const uint32_t base = wst.absorb(bst[b]);
@@ -3580,10 +3636,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
           // defects behind the first version's 92% peptide loss. It rebuilds the arena, so the
           // store pointers are set again afterwards; the per-frame bins are dead after it.
+          n_parents = frag_traces.size();
+          auto _ts = std::chrono::steady_clock::now();
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4);
+          w_split = secs(std::chrono::steady_clock::now() - _ts);
           for (auto& t : frag_traces) t.st = &wst;
           if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(t, max_span);
           vector<uint32_t>().swap(wst.bins);
+          writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
+                        + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
+                        + " -> " + String(frag_traces.size()) + " (cap " + String(frag_traces.capacity()) + ", "
+                        + String(frag_traces.capacity() * sizeof(Trace) / (1024ULL * 1024ULL)) + " MB); arena " + String(wst.inten.size()) + "/"
+                        + String(wst.inten.capacity()) + " floats (" + String(wst.inten.capacity() * 4 / (1024ULL * 1024ULL)) + " MB)" + rss_());
         }
         else
         {
@@ -3602,10 +3666,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " frag traces n=" + String(frag_traces.size()) + " digest=" + String(traceDigest_(frag_traces)));
         }
         // (compact frames already released inside materializeWindow) [par-Crit-3]
-        #pragma omp critical
-        {
-          if (win_done == 0) writeLogInfo_("MS2 " + ms2_span); // [merged-trace]
-          writeLogInfo_("  window " + String(++win_done) + "/" + String(window_list.size()));
+        if (!span_logged.exchange(true)) { // [merged-trace] one window's span statistics, once
+          #pragma omp critical
+          writeLogInfo_("MS2 " + ms2_span);
         }
 
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
@@ -3627,6 +3690,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // window's precursors (this window runs on one thread). [perf]
         auto _t3 = std::chrono::steady_clock::now();
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
+        w_trace = secs(_t3 - _t2) - w_prep - w_split;
         FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt);
         auto _t4 = std::chrono::steady_clock::now();
         t_grid += std::chrono::duration_cast<std::chrono::nanoseconds>(_t4 - _t3).count();
@@ -3727,9 +3791,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           }
           auto _t6 = std::chrono::steady_clock::now();
           t_score += std::chrono::duration_cast<std::chrono::nanoseconds>(_t6 - _t5).count();
+          w_score = secs(_t6 - _t5);
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
-          t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      std::chrono::steady_clock::now() - _t6).count();
+          const auto _t7 = std::chrono::steady_clock::now();
+          t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(_t7 - _t6).count();
+          w_emit = secs(_t7 - _t6);
         }
         else
         {
@@ -3819,7 +3885,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
-    writeLogInfo_("All windows done." + clk_() + rss_()); // parallel-phase peak? [mem]
+    writeLogInfo_("All windows done." + clk_() + rss_() + mem_()); // parallel-phase peak? [mem]
     {
       // These are CPU-seconds summed across threads, not wall time -- a stage that runs on 20
       // threads contributes 20x its wall. That is the right denominator for "where does the work
