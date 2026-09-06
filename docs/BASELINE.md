@@ -1344,3 +1344,19 @@ and the calibration factor is a store-local frame index -- kept explicit rather 
 frame0 + apex, because the unsplit integer path picks its calibration frame in `got` order while
 makeSpan resolves equal-intensity apex ties in frame order, and the two disagree on exact ties.
 A static_assert pins sizeof(Trace) == 56.
+
+#### TNBC run 009: every step measured on the file class the work exists for
+
+| build | peak RSS | vs step 2 | digest |
+|---|---|---|---|
+| v13 step 2 (instrumentation) | 281.52 GB | -- | == T1 |
+| v14 step 3 (MassTrace moves) | 279.23 GB | -2.29 | == T1 |
+| v17 steps 4 + 8 (lifetimes, 56-byte record) | 270.26 GB | **-11.26** | == T1 |
+| v16 + `malloc_trim` (experiment) | 206.66 GB | **-74.86** | == T1 |
+| v18 steps 4 + 8 + trim as default | running | | |
+
+Every arm is byte-identical to the step-1 baseline. The structural steps together are worth 11.3 GB
+here; the allocator trim alone is worth 74.9 GB, which is the honest ranking and the reason it
+shipped first. The record change measured -10.7 GB of that 11.3 rather than the 16-24 GB predicted
+from the record count: not every window's records are resident at once, so the concurrency factor
+applies to the saving as well as to the footprint.
