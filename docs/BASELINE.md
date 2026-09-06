@@ -1257,3 +1257,25 @@ GB, mmapped 345 MB). Two thirds of RSS at that point is memory nobody is using.
 **Not quotable from these runs:** wall-clock deltas. Two heavy jobs shared the node (the gate arms
 ran alongside), so only digests and memory milestones are comparable. The step-3 wall effect is
 measured on TNBC, where the MassTrace payloads are 8x larger.
+
+#### GATE A RESULT, dataset D (primary), 2026-09-06 14:10 — the compaction fix PASSES
+
+v11 (pre-fix) vs v12 (fix + selftest), one node, arms back to back, immutable arm directories,
+binary/library/config/FASTA digests recorded. v11 reproduced the historical digest `ca609dc4…`
+exactly, which is the control that the arms are wired correctly.
+
+| | v11 | v12 | ratio |
+|---|---|---|---|
+| spectra | 655,776 | 656,257 | 1.0007 |
+| Sage peptides @1% | 12,605 | 12,594 | **0.9991** |
+| MSFragger peptides @1% | 11,642 | 11,640 | **0.9998** |
+| entrapment FDR | 1.26% [1.01-1.51] | 1.26% [1.03-1.51] | unchanged |
+
+Set overlap: Sage 12,575 common, 30 only-v11, 19 only-v12 (99.61% of the union); MSFragger 11,630
+common, 12 and 10 (99.81%). Decision rule (>= 1% loss in either engine on D, or A contradicting D,
+or entrapment more than 0.3 points above the base estimate): **none triggered**.
+
+Read honestly: correcting 1.4% of the spectra costs 11 Sage peptides and 2 MSFragger peptides, and
+gains 19 and 10 respectively. The corrupted XICs were producing spectra that scored about as well as
+the correct ones -- the fix is justified by correctness, not by yield, and nothing downstream was
+silently depending on the corruption. Dataset A is still running; its role is to contradict D or not.
