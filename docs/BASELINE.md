@@ -1224,3 +1224,36 @@ reproduces exactly on the paper's own data, so the engine split is a property of
 a dataset. Runtime on these 130-min files: SpeXtractor 26-38 min vs 18-30 min (median 1.4x slower),
 RSS 204-287 vs 238-307 GB (0.9x). The paper's 9,296 proteins/run is a quantified-with-MBR FragPipe
 figure over the cohort and is not the same statistic as identified protein groups at 1% in one run.
+
+### 2026-09-06: memory work, steps 1-4 (see the plan in .claude/plans, and docs/TNBC-PROFILE.md)
+
+**Step 1 (output-changing, the reason for a new baseline).** The MS1 arena compaction walked the
+trace vector in CONTAINER order with a monotone write cursor, but the vector is sorted by m/z
+(`ms1_traces` canonical sort) AFTER its spans were appended in detection order. Kept spans visited
+after the cursor had passed their offset were overwritten before they were copied. Deterministic, so
+no thread-count digest ever saw it. `compactUnreferenced()` now sorts the kept spans by offset,
+validates bounds and disjointness before moving a byte, and memmoves down; `-diag:selftest_arena`
+(e2e check 12) fails on the old algorithm. Measured effect on dataset D: **9,040 of 655,776 spectra
+changed (1.4%), every one of them below precursor m/z 500** -- the lowest m/z band, where detection
+order and m/z order disagree most, which is the mechanism's own prediction. New baselines: dataset D
+digest `79f2a733…` (B1), TNBC 009 (T1). The old dataset D digest `ca609dc4…` reproduces exactly on
+the pre-fix binary, which is the control that the gate arms are wired correctly.
+
+**Steps 2-4 (output-identical, dataset D digest == B1 on each).**
+
+| step | what | measured on dataset D |
+|---|---|---|
+| 2 | instrumentation only | identical; see below |
+| 3 | OpenMS `MassTrace` move operations (third patch) | identical; peak RSS 83.1 -> 82.7 GB, after-MS1 48.5 -> 48.1 GB |
+| 4 | MS1 state released at the window-loop join; RT-axis reserve; per-frame release on the non-streaming path | building |
+
+**What the instrumentation measures that the profile could only infer** (dataset D; TNBC is 2-3x
+on every count): picked MS1 725,116,915 peaks in 1,343 frames = 13.8 GB as a PeakMap; compact store
+11,975 MB for 1.256e9 peaks; per window at the band merge 12 arenas of ~330 MB held twice, ~6 M
+traces. And the retention mechanism, as a number rather than an assertion: at the MS1 -> window-loop
+boundary **33.4 GB of the 48.5 GB resident set is free-but-retained allocator memory** (arena 47.3
+GB, mmapped 345 MB). Two thirds of RSS at that point is memory nobody is using.
+
+**Not quotable from these runs:** wall-clock deltas. Two heavy jobs shared the node (the gate arms
+ran alongside), so only digests and memory milestones are comparable. The step-3 wall effect is
+measured on TNBC, where the MassTrace payloads are 8x larger.
