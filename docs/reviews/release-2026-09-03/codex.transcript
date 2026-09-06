@@ -6473,7 +6473,7 @@ exec
      5	authors:
      6	  - family-names: Kohlbacher
      7	    given-names: Oliver
-     8	repository-code: "https://github.com/okohlbacher/speXtractor"
+     8	repository-code: "https://github.com/okohlbacher/spextractor"
      9	abstract: >-
     10	  An open (BSD-3) extractor of pseudo-MS/MS spectra from Bruker timsTOF diaPASEF data, built on
     11	  OpenMS, including an exact license-free TOF-to-m/z calibration derived from the acquisition's own
