@@ -3662,14 +3662,28 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           const size_t n_peaks = wslab.peaks();
           {
           auto _tp = std::chrono::steady_clock::now();
-          const TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);   // once per window
+          TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);         // once per window
           w_prep = secs(std::chrono::steady_clock::now() - _tp);
           n_seeds = tprep.order.size();
+          // The slab and the seed order are dead the moment the detector returns: the merge below
+          // reads only the band stores, and valley splitting reads only the window store. Releasing
+          // them HERE rather than after the merge matters because the merge is the peak allocation
+          // of the window -- it reserves the whole merged arena while every band arena is still
+          // live -- so the slab used to be resident across exactly the worst moment. [2026-09-06]
+          auto release_input = [&]() {
+            vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
+            vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
+            vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
+            vector<uint32_t>().swap(tprep.order); vector<char>().swap(tprep.frame_live);
+          };
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
           // store absorbs them in band order and every offset is rebased (R4 sequencing).
           vector<TraceStore> bst(std::max(1, nb));
           if (thi <= tlo || nb == 1)
+          {
             frag_traces = detectTracesInteger_(wslab, tprep, bst[0], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr, max_trace_len, max_span);
+            release_input();
+          }
           else
           {
             vector<vector<Trace>> per(nb);
@@ -3682,6 +3696,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
                                             max_trace_len, max_span, blo, bhi);
             }
+            release_input();                       // before the merge, not after it
             size_t tot = 0, arena = 0; bool any_bins = false;
             for (int b = 0; b < nb; ++b)
             { tot += per[b].size(); arena += bst[b].inten.size(); any_bins |= !bst[b].bins.empty(); }
@@ -3698,13 +3713,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           }
           if (thi <= tlo || nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
           }                                                  // tprep dies here
-          // The slab is dead too: valley splitting reads only the window store (which copied the
-          // frame table) and the spans. Holding 12 GB of peaks plus the prep across the stage where
-          // the MassTrace payloads peak was the largest lifetime defect the plan found.
-          PeakSlab().frame_off.swap(wslab.frame_off);
-          vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
-          vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
-          vector<uint16_t>().swap(wslab.imq);
+          // (the slab and the seed order were released above, before the band-arena merge)
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
           // defects behind the first version's 92% peptide loss. It rebuilds the arena, so the
           // store pointers are set again afterwards; the per-frame bins are dead after it.
