@@ -86,8 +86,8 @@ spectra regardless of precursor intensity (then MSFragger simply likes more peak
 different spectra -- a per-engine output option, not a default).
 
 ### BACKFILL-EMPTY FALSIFIED (2026-09-03, 08:35): 53,410 extra spectra buy nothing on either engine
-`SPEXTRACT_BACKFILL_EMPTY=1` (a hypothesised precursor with no correlated fragment trace still gets a spectrum built
-from its apex frame's IM-band peaks) + `SPEXTRACT_BACKFILL_RAW=50`. Emission rises 927,813 -> **981,223 (+5.8%)**, so
+`SPEXTRACTOR_BACKFILL_EMPTY=1` (a hypothesised precursor with no correlated fragment trace still gets a spectrum built
+from its apex frame's IM-band peaks) + `SPEXTRACTOR_BACKFILL_RAW=50`. Emission rises 927,813 -> **981,223 (+5.8%)**, so
 the feature does what it says; the identifications do not follow.
 | dataset D arm | spectra | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only |
 |---|---|---|---|---|
@@ -98,12 +98,12 @@ the feature does what it says; the identifications do not follow.
 Reading: at equal backfill setting the empty arm reproduces the no-empty arm to within replicate noise on both engines
 (12,600 vs 12,539 MSFragger; −2.5% vs −2.6% Sage), and the K-gated empty arm is *worse* than K=150 alone (12,593 vs
 12,724 Sage). The 53k trace-free precursors are not identifiable: the pre-registered falsifier ("counts flat, emission
-up") is met exactly. **Verdict: `SPEXTRACT_BACKFILL_EMPTY` stays off and is not a default candidate.** It also
+up") is met exactly. **Verdict: `SPEXTRACTOR_BACKFILL_EMPTY` stays off and is not a default candidate.** It also
 confirms the assembly-loss finding from the other side -- the the reference implementation-only precursors we never emit are not lost to
 a fragment-count threshold, they have no correlated MS2 signal for us to find at all.
 
 ### PRECURSOR-INTENSITY-GATED BACKFILL (2026-09-03, 09:05): prediction held; q=0.5 is the best point on the frontier
-`SPEXTRACT_BACKFILL_RAW=50` applied only to precursors below the window's q-quantile of MS1 intensity. Emission is
+`SPEXTRACTOR_BACKFILL_RAW=50` applied only to precursors below the window's q-quantile of MS1 intensity. Emission is
 unchanged (927,813 spectra in every arm), so this is purely a content lever.
 | dataset D arm | Sage @1% (apex 12,537) | MSFragger @1% (apex 11,927; dt 13,932) | dt-only | shared w/ dt |
 |---|---|---|---|---|
@@ -518,7 +518,7 @@ index 47bc9c5..c679a63 100644
 +  correlation grid, which was a second copy of every profile, is gone. Window-loop memory falls from
 +  a 68.6 GB simultaneous peak to 27.9 GB (integer) / 32.4 GB (OpenMS); process peak RSS 105 -> 88 GB
 +  and 164 -> 147 GB.
-+- **Memory ledger corrections** (`SPEXTRACT_MEM_LEDGER=1`): the trace line was cumulative rather
++- **Memory ledger corrections** (`SPEXTRACTOR_MEM_LEDGER=1`): the trace line was cumulative rather
 +  than a peak, and a 6.0 GB `list<Peak2D>` line was a phantom (that list is per trace and dies each
 +  iteration) now replaced by the two `MassTrace` payloads that really coexist. The visited flags are
 +  a bitset (4.87 -> 0.61 GB), and the slab and per-window preparation arrays are released before
@@ -560,13 +560,13 @@ Confirmed: **the commit that claims to make integer the default never touches li
 
   4. The occupancy arithmetic — done.
 
-  5. Check test/ tests exist? test/test_spextract.py, tests/test_calibration.py, tests/test_entrapment.py. Is there a span test? 55461eb "Test: trace extension across gaps". Let me quickly check what tests exist and whether they ran. Maybe skip — the hostile review focuses on claims.
+  5. Check test/ tests exist? test/test_spextractor.py, tests/test_calibration.py, tests/test_entrapment.py. Is there a span test? 55461eb "Test: trace extension across gaps". Let me quickly check what tests exist and whether they ran. Maybe skip — the hostile review focuses on claims.
 
   Let me read the subagent output now.
 
 • Now I have nearly everything. A few more checks I want to do myself (quick greps) to solidify findings:
 
-  1. Confirm no test exercises the integer detector / span path (test/test_spextract.py).
+  1. Confirm no test exercises the integer detector / span path (test/test_spextractor.py).
   2. Confirm the `registerStringOption_` default issue is the real one — TOPPBase `getStringOption_` returns registered default "openms" unless user passes. Yes.
   3. Check `mz` semantics divergence with split_valleys=0 — noted.
   4. Double-check the `fwhm_of` dump bug (line ~2929-2953): `double lo = prt[0], hi = prt[pv.size()-1];` then if no crossing found returns hi-lo = full span. Comment says -1 should be reported. Confirmed bug in the code I read (lines 2935-2953 region: after loops, `return hi - lo;` — if loops never break, lo=prt[0], hi=last → full span, not -1). Yes.
@@ -577,7 +577,7 @@ Confirmed: **the commit that claims to make integer the default never touches li
 
   7. Confirm the "27.9 GB simultaneous peak" ledger correctness caveat: memTotalPeak is updated inside memAdd only — never recomputed on memSub. Fine (peak).
 
-  8. Check bbb2121 commit for the claim "RSS 105 -> 88" and that digest-identity was measured with SPEXTRACT_DET? The doc records spectrum digests. Fine.
+  8. Check bbb2121 commit for the claim "RSS 105 -> 88" and that digest-identity was measured with SPEXTRACTOR_DET? The doc records spectrum digests. Fine.
 
   9. One more correctness item to verify: `splitIntegerTraces` early return `if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);` — returns with parent spans intact and wst.bins NOT freed by caller? Caller at :3327 frees wst.bins after. Fine. But early return happens when in.size() < 2 even if split on — "OpenMS branch: EPD needs > 1" comment — matches detectTraces_ behavior? OpenMS path splits when `mts.size() > 1`. Consistent.
 
@@ -609,7 +609,7 @@ Confirmed: **the commit that claims to make integer the default never touches li
 
   19. Check test files quickly for integer coverage.
 
-  Let me do the remaining greps quickly: check test_spextract.py for integer/span; check sizeof(Peak2D) not needed precisely — I'll hedge with ~24 B.
+  Let me do the remaining greps quickly: check test_spextractor.py for integer/span; check sizeof(Peak2D) not needed precisely — I'll hedge with ~24 B.
 
   Also quickly verify there is no second place where default gets set (e.g., an INI in test). Grep for "detector" in test files.
 
@@ -630,7 +630,7 @@ vibe.err
 vibe.md
 • bbb2121 is a docs-only commit (25 lines added to TRACE-STRUCT-REDESIGN.md). So the "gate PASSED" commit contains no code — the code was 3a1d91e + 6ea4e3f. Fine.
 
-  test_spextract.py line 19: "These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run..." — confirms tests don't exercise the integer detector (or spans, since spans landed after; need to check whether tests exercise spans on the OpenMS path — the OpenMS path does use spans now via toTrace/makeSpan, so yes spans get exercised there if tests run on current build).
+  test_spextractor.py line 19: "These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run..." — confirms tests don't exercise the integer detector (or spans, since spans landed after; need to check whether tests exercise spans on the OpenMS path — the OpenMS path does use spans now via toTrace/makeSpan, so yes spans get exercised there if tests run on current build).
 
   Now I have everything I need. Let me also do the occupancy arithmetic cleanly:
 
@@ -680,7 +680,7 @@ vibe.md
   Do next, ranked:
   1. Re-run dataset A with the CURRENT binary (span + integer + 7d6e56f), both engines + entrapment — the missing leg for the default decision and for 7d6e56f's unrun digest gate. This is the single cheapest way to either justify or revert the default claim.
   2. Fix or revert the default: either change :1485 to "integer" (making the CHANGELOG true and taking the rule violation head-on) or revert the docs. And fix the "about 1%" language to "8% membership churn, net −1.3% Sage / +2.1% MSFragger on dataset D".
-  3. Run the 7d6e56f digest gate (SPEXTRACT_DET=1 frag-trace digests vs bbb2121) — HEAD is currently unrun code; also fixes that the [det] compact digest is dead on the integer path (:3227).
+  3. Run the 7d6e56f digest gate (SPEXTRACTOR_DET=1 frag-trace digests vs bbb2121) — HEAD is currently unrun code; also fixes that the [det] compact digest is dead on the integer path (:3227).
   4. Release blockers (v0.3.0): public-dataset replication, dependency SHAs, resource-requirements doc, worked example — these gate any external credibility and are older than every perf item; the day added a new default the outside world cannot reproduce at all.
   5. Occupancy residual: free thread-state sampler + split-stage timer.
   Stop / deprioritize:

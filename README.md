@@ -1,8 +1,8 @@
-# SpeXtract
+# SpeXtractor
 
 Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data.
 
-SpeXtract turns a data-independent acquisition into a set of pseudo-tandem spectra that any
+SpeXtractor turns a data-independent acquisition into a set of pseudo-tandem spectra that any
 ordinary DDA search engine can read. Each emitted spectrum pairs one precursor hypothesis with the
 fragment traces that co-elute with it in both retention time and ion mobility. The output is plain
 mzML, so it feeds Sage, MSFragger, Comet or anything else that reads mzML — no library, no
@@ -12,7 +12,7 @@ That last point is the reason the tool exists: because the search space is not e
 the search runs, an **open or blind search** over the output can report variants and unexpected
 modifications that a library-based DIA workflow cannot represent.
 
-SpeXtract is BSD-3-Clause and is a standalone application. **OpenMS is a prerequisite, not a
+SpeXtractor is BSD-3-Clause and is a standalone application. **OpenMS is a prerequisite, not a
 host** — the tool links against an OpenMS installation but lives outside the OpenMS source tree.
 
 ## Requirements
@@ -33,14 +33,14 @@ run, so you can size a node from your own data.
 ## Install
 
 ```bash
-git clone https://github.com/okohlbacher/spextract.git
-cd spextract
+git clone https://github.com/okohlbacher/spextractor.git
+cd spextractor
 scripts/apply_openms_patches.sh /path/to/OpenMS    # see "OpenMS patches" below
 cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
 cmake --build build -j
 ```
 
-The binary is `build/spextract`. `cmake --install build` puts it in `bin/`.
+The binary is `build/spextractor`. `cmake --install build` puts it in `bin/`.
 
 ### OpenMS patches
 
@@ -54,7 +54,7 @@ two patches. **Both matter, and the build will not tell you if they are missing:
   (`tdf_table_modeltype1` | `bruker_sdk` | `legacy_chord_APPROXIMATE`). An unsupported calibration
   table **fails closed** rather than silently producing biased masses.
 - **Lock-free elution-peak detection.** OpenMS guards a shared vector with a program-global critical
-  section. Called from inside SpeXtract's parallel window loop, that one lock serialises the tool.
+  section. Called from inside SpeXtractor's parallel window loop, that one lock serialises the tool.
 
 Optionally, `OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library for the
 conversion instead. It is an independent cross-check, not a requirement, and is not redistributed.
@@ -68,7 +68,7 @@ primary input and is faster.
 ## Run
 
 ```bash
-spextract -in sample.d -out pseudo.mzML -threads 64
+spextractor -in sample.d -out pseudo.mzML -threads 64
 ```
 
 That is the complete command. Every default is the configuration the project benchmarks; a run that
@@ -92,7 +92,7 @@ sage sage.json -o results pseudo.mzML
 | `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output** |
 | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
 
-`spextract --help` lists every option with the measurement behind each default.
+`spextractor --help` lists every option with the measurement behind each default.
 
 ### Reading the output
 
@@ -147,7 +147,7 @@ by raw counts. The two statements are about different things and both have been 
 ## Tests
 
 ```bash
-python3 test/test_spextract.py build/spextract
+python3 test/test_spextractor.py build/spextractor
 ```
 
 Twelve end-to-end checks against a synthetic acquisition: isotope ownership, the charge floor,

@@ -1,4 +1,4 @@
-## Hostile Review: speXtract v0.3.0 (approaching)
+## Hostile Review: speXtractor v0.3.0 (approaching)
 
 ---
 
@@ -385,7 +385,7 @@ This is **explicit**. The parameter exists but is **not recommended**.
 
 **Code:** The current defaults (from CHANGELOG.md line 6-10) are:
 - `charge:min_charge` = 2 (new default)
-- `SPEXTRACT_MZ_ESTIMATOR=apex` (line 46-49: default is apex)
+- `SPEXTRACTOR_MZ_ESTIMATOR=apex` (line 46-49: default is apex)
 
 **Finding:** The README numbers **match** the current code defaults.
 
@@ -603,7 +603,7 @@ The **help strings** for these parameters (lines 767, 773, 805, 813) **should ke
 #### **CUT: Internal Lab-Notebook Residue**
 | Location | Type | Verdict |
 |---|---|---|
-| Line 530-534 | `[pick-det]` SPEXTRACT_PICK_SERIAL | **CUT** - environment variable documentation belongs in docs |
+| Line 530-534 | `[pick-det]` SPEXTRACTOR_PICK_SERIAL | **CUT** - environment variable documentation belongs in docs |
 | Line 619-621 | `[stream]` ponytail comment | **CUT** - overly detailed |
 | Line 918-920 | `[bands]` peak density rationale | **KEEP** - legitimate design |
 | Line 1990-1996 | `[determinism]` canonical sort rationale | **KEEP** - critical for reproducibility |

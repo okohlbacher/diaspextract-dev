@@ -3,7 +3,7 @@ kimi version 0.40.1
   - `Trace` struct definition and `toTrace`, `toTrace` under `trace:mz_estimator`
   - How bands are constructed (around line 2990-3060)
   - The OpenMS path `detectTraces_` for comparison
-  - test/test_spextract.py
+  - test/test_spextractor.py
 
   Let me grep for Trace struct and toTrace, and read the banding code around line 2960-3080.
 

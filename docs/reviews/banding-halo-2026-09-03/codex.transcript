@@ -1,7 +1,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -11,7 +11,7 @@ reasoning summaries: none
 session id: 01a06806-4c9e-7b13-b8b4-b38164a87a95
 --------
 user
-You are a hostile reviewer of ONE mechanism in speXtract, an OpenMS TOPP tool (single C++ file,
+You are a hostile reviewer of ONE mechanism in speXtractor, an OpenMS TOPP tool (single C++ file,
 `src/DIAPseudoSpectra.cpp`) that extracts pseudo-MS/MS spectra from Bruker timsTOF diaPASEF data.
 The mechanism is the m/z BANDING of mass-trace detection, and the question is whether it is exact.
 
@@ -94,13 +94,13 @@ Read these files before answering:
 codex
 I’ll perform a hostile, code-grounded review focused only on trace m/z banding. I’ll first inspect the repository instructions and the complete relevant implementation, then verify any claims against the OpenMS APIs available in the tree before constructing counterexamples and recommendations.
 exec
-/bin/bash -lc "pwd && rg --files -g 'AGENTS.md' -g 'SKILL.md' -g 'src/DIAPseudoSpectra.cpp' -g '*MassTraceDetection*' -g '*ElutionPeakDetection*'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "pwd && rg --files -g 'AGENTS.md' -g 'SKILL.md' -g 'src/DIAPseudoSpectra.cpp' -g '*MassTraceDetection*' -g '*ElutionPeakDetection*'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
-/Users/kohlbach/Claude/speXtract
+/Users/kohlbach/Claude/speXtractor
 src/DIAPseudoSpectra.cpp
 
 exec
-/bin/bash -lc "rg --files -uu .. | rg '("'^|/)AGENTS'"\\.md"'$|/bmad-review-adversarial-general/SKILL'"\\.md"'$'"' && sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg --files -uu .. | rg '("'^|/)AGENTS'"\\.md"'$|/bmad-review-adversarial-general/SKILL'"\\.md"'$'"' && sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md" in /Users/kohlbach/Claude/speXtractor
  succeeded in 2175ms:
 ../cli-printing-press/AGENTS.md
 ../genomDE/DNPM-dip/helm/AGENTS.md
@@ -163,7 +163,7 @@ Output findings as a Markdown list (descriptions only).
 codex
 I’m using the adversarial-review skill because the request explicitly calls for a hostile assessment. Its lens is useful here: treat “exact” as a theorem that needs stated invariants and proof, and actively search for counterexamples and hidden sources of nondeterminism.
 exec
-/bin/bash -lc 'wc -l src/DIAPseudoSpectra.cpp && rg -n "detectTraces_|trace_bands|MassTraceDetection|ElutionPeakDetection|mass_error_ppm|min_sample_rate|halo|band|semantic|digest|accepted" src/DIAPseudoSpectra.cpp' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'wc -l src/DIAPseudoSpectra.cpp && rg -n "detectTraces_|trace_bands|MassTraceDetection|ElutionPeakDetection|mass_error_ppm|min_sample_rate|halo|band|semantic|digest|accepted" src/DIAPseudoSpectra.cpp' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     3040 src/DIAPseudoSpectra.cpp
 18:#include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
@@ -295,7 +295,7 @@ exec
 2634:          // ElutionPeakDetection.cpp:328 (a bare parallel-for with no num_threads, reached from
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '1,760p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '1,760p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
      1	// Copyright (c) 2002-present, OpenMS Inc. -- EKU Tuebingen, ETH Zurich, and FU Berlin
      2	// SPDX-License-Identifier: BSD-3-Clause
@@ -305,7 +305,7 @@ exec
      6	// $Authors: OpenMS-the reference implementation project $
      7	// --------------------------------------------------------------------------
      8	
-     9	#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACT_WITH_MZPEAK)
+     9	#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACTOR_WITH_MZPEAK)
     10	#include <OpenMS/APPLICATIONS/TOPPBase.h>
     11	
     12	#include <OpenMS/FORMAT/FileHandler.h>
@@ -455,7 +455,7 @@ exec
    156	  std::atomic<long long> stat_prec_{0};     ///< precursors scored
    157	  bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
    158	  double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
-   159	  bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
+   159	  bool drop_prec_iso_ = std::getenv("SPEXTRACTOR_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
    160	
    161	  static std::string rss_()
    162	  {
@@ -773,7 +773,7 @@ exec
    474	
    475	
    476	  /// [det] Order-insensitive 64-bit digest of a stage's numeric output, for localising
-   477	  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACT_DET=1.
+   477	  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACTOR_DET=1.
    478	  static uint64_t detDigest_(vector<uint64_t> bits)
    479	  {
    480	    std::sort(bits.begin(), bits.end());
@@ -781,7 +781,7 @@ exec
    482	    for (uint64_t b : bits) { h ^= b; h *= 1099511628211ULL; }
    483	    return h;
    484	  }
-   485	  static bool detOn_() { static const bool on = std::getenv("SPEXTRACT_DET") != nullptr; return on; }
+   485	  static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
    486	  static uint64_t traceDigest_(const vector<Trace>& ts)
    487	  {
    488	    vector<uint64_t> b; b.reserve(ts.size() * 3);
@@ -864,13 +864,13 @@ exec
    565	      std::vector<CompactFrame> compacted((size_t)n);
    566	      std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
    567	      PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
-   568	      // SPEXTRACT_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
+   568	      // SPEXTRACTOR_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
    569	      // scheduling-sensitivity from downstream chaos (kimi, plan review). [pick-det]
-   570	      static const bool par_pick = std::getenv("SPEXTRACT_PICK_SERIAL") == nullptr;
-   571	      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACT_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
+   570	      static const bool par_pick = std::getenv("SPEXTRACTOR_PICK_SERIAL") == nullptr;
+   571	      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACTOR_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
    572	      std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
    573	      // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers (codex, plan review)
-   574	      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACT_PICK_STATIC=1 -> static (history-vs-race probe)
+   574	      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACTOR_PICK_STATIC=1 -> static (history-vs-race probe)
    575	      for (int i = 0; i < n; ++i)
    576	      {
    577	        try
@@ -957,7 +957,7 @@ exec
    658	  private:
    659	    /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
    660	    /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
-   661	    /// store. SPEXTRACT_PICK_BATCH overrides for the sweep.
+   661	    /// store. SPEXTRACTOR_PICK_BATCH overrides for the sweep.
    662	    static const size_t kBatch;
    663	    std::vector<MapType::SpectrumType> buf_;
    664	    std::vector<pair<int, int>> key_;
@@ -969,7 +969,7 @@ exec
    670	    std::function<pair<int, int>(double, double)> keyfn_;
    671	  };
    672	  const size_t PickCompactConsumer::kBatch =
-   673	    std::getenv("SPEXTRACT_PICK_BATCH") ? (size_t)std::atoi(std::getenv("SPEXTRACT_PICK_BATCH")) : 256;
+   673	    std::getenv("SPEXTRACTOR_PICK_BATCH") ? (size_t)std::atoi(std::getenv("SPEXTRACTOR_PICK_BATCH")) : 256;
    674	
    675	  /// [wavelet] Stationary ("a trous") B3-spline wavelet smoothing of an elution profile.
    676	  ///
@@ -1059,7 +1059,7 @@ exec
    760	    for (const auto& f : frags) for (uint32_t k : f.xi) used[k] = 1;
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '761,1500p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '761,1500p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    761	    g.slot_of_frame.assign(na, -1);
    762	    g.rt.clear();
@@ -1803,7 +1803,7 @@ exec
   1500	          if (ms1[pcs[j].trace_idx].intensity > ms1[pcs[i].trace_idx].intensity) { drop[i] = true; break; }
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '827,1166p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '827,1166p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    827	  void registerOptionsAndFlags_() override
    828	  {
@@ -2149,7 +2149,7 @@ exec
 codex
 The implementation already contradicts its own exactness claim at the relevant boundary: detection uses the full `MassTrace` centroid for ownership, but the data supplied to that detector has already been clipped to a finite halo. I’m now checking the actual OpenMS trace-growth implementation, because the running-centroid recurrence and visited/occupancy semantics determine whether the proposed counterexamples are genuinely executable rather than merely intuitive.
 exec
-/bin/bash -lc 'rg -n "OpenMS|OPENMS|MassTraceDetection" CMakeLists.txt cmake .github README* docs patches 2>/dev/null | head -240 && rg -n "MassTraceDetection::|updateIterativeWeightedMeanMZ|min_sample_rate" /Users/kohlbach/Claude /Users/kohlbach/OpenMS /Users/kohlbach 2>/dev/null | head -300' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'rg -n "OpenMS|OPENMS|MassTraceDetection" CMakeLists.txt cmake .github README* docs patches 2>/dev/null | head -240 && rg -n "MassTraceDetection::|updateIterativeWeightedMeanMZ|min_sample_rate" /Users/kohlbach/Claude /Users/kohlbach/OpenMS /Users/kohlbach 2>/dev/null | head -300' in /Users/kohlbach/Claude/speXtractor
  succeeded in 6685ms:
 /Users/kohlbach/OpenMS/src/topp/DIAPseudoSpectra.cpp:514:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
 /Users/kohlbach/OpenMS/src/topp/DIAPseudoSpectra.cpp:517:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
@@ -2264,77 +2264,77 @@ exec
 /Users/kohlbach/Claude/OpenMS - the reference implementation/DIA-tools-vault/benchmark/ms1-funnel.md:27:Anything touching noise thresholds, `chrom_peak_snr`, `min_length`, or `min_sample_rate`
 /Users/kohlbach/Claude/OpenMS - the reference implementation/DIA-tools-vault/benchmark/dataset A-results.md:112:±30 test. Next lever = MS2 min_sample_rate / MS1 sensitivity (extraction-side), running now.**
 /Users/kohlbach/Claude/OpenMS - the reference implementation/DIA-tools-vault/benchmark/dataset A-results.md:161:- `min_sample_rate` 0.5→0.3→0.1: +9 frags but **−130 peptides**. Not a lever. (Hypothesis retired.)
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:876:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:879:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:880:    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:976:                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:987:    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:991:    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2020:    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2040:                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:231:820:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1171:   920	                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1182:   931	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1186:   935	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1633:   919	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1637:   923	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:2166:  1930	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:2180:  1944	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:3092:  1942	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:3112:  1962	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:4421:  1942	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:4441:  1962	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:5282:   820	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:5285:   823	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:5286:   824	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/kimi.err:76:  a) MS2 trace detection at low threshold: speXtract runs MassTraceDetection on raw fragment data with noise threshold 10, ms2_min_length 0, min_sample_rate 0.5 — generating 8.5M traces/window. the reference implementation works on the summed (m/z × IM) matrix and extracts peaks directly, correlating fragment XICs without a full mass-trace detection+valley-split stage. speXtract's trace stage = 48.7% of window time. Also EPD valley-splitting per trace adds cost (comment at :1033: "Valley-splitting is the dominant serial phase (EPD-off dataset D 20:46 vs 28:40 for MS2 alone)" — i.e., EPD adds ~38% wall).
-/Users/kohlbach/Claude/speXtract/docs/reviews/window-loop-perf-2026-09-03/kimi.err:172:  Hmm wait, one more check on score stage cost: is the IM-band scan really dominant vs dot products? Fragment support ~510 points?? The comment says up to 510 support; a fragment trace spanning the whole gradient? min_sample_rate 0.5 and min_length 0... A fragment with 510 support points passing RT gate... RT gate is apex-RT within 3 s, so support points fall in a narrow RT range but grid-walk cost = support length regardless (walks ALL support, probing pdense). If avg support ~20-40 pts and ~1,200 surviving candidates/precursor: 39k × 1,200 × 30 = 1.4e9 ops/window vs scan 1.6e10. Scan dominates ~10×. Yes, the linear IM-band scan is the score hotspot. And score = 3,753.6 window-wall ≈ ~30-40k CPU-s. Cutting scan 10× cuts score CPU maybe 7-9× → saves ~25-30k CPU-s ≈ 30% of total CPU. Wall: score window-wall 3,753.6 → maybe ~600-800 → saves ~3,000/8 ≈ 370 s wall ≈ 27% of total wall (1,351 s). Biggest single neutral win. Risk: moderate (index construction per window, memory for index, exactness of ordering). Actually simpler alternative: since fragments are sorted by IM, build per-IM-block RT-sorted sub-index, or simply sort fragments by RT within coarse IM buckets... Fine, proposal stands: bucketed 2D index.
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2292:   793	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2295:   796	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2296:   797	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2370:   871	                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2381:   882	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2385:   886	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2953:   793	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2956:   796	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:2957:   797	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:3031:   871	                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:3043:   882	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:3047:   886	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:3746:  1885	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:3760:  1899	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:5775:793:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:5778:796:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/codex.transcript:5779:797:    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/release-2026-09-03/kimi.err:393:  - Falsified params exist with claimed defaults: rp_max=0 ✓, consolidate:delta_rt=0 ✓, merge:rt_window=0 ✓, apportion=0 ✓ (but help not marked falsified), ambiguity_margin=0 ✓ (but help silent on dead-in-count-mode), mono_averagine_guard=0 ✓, open_search_safe off ✓, dedup_precursors off ✓, require_isotope_support off ✓ (bench used it ON per decision rule — note). ms2_min_sample_rate=-1 ✓.
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:43:the trace's RUNNING centroid, and it also applies `min_sample_rate` (terminating extension when
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:59:   `min_sample_rate` and valley splitting compound this: occupancy and valley shape are computed
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:166:/bin/bash -lc 'wc -l src/DIAPseudoSpectra.cpp && rg -n "detectTraces_|trace_bands|MassTraceDetection|ElutionPeakDetection|mass_error_ppm|min_sample_rate|halo|band|semantic|digest|accepted" src/DIAPseudoSpectra.cpp' in /Users/kohlbach/Claude/speXtract
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:182:876:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:183:879:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:184:880:    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:193:976:                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:197:987:    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:198:991:    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:232:2020:    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:241:2040:                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1179:   876	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1182:   879	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1183:   880	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1279:   976	                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1290:   987	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1294:   991	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1857:   876	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1860:   879	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1861:   880	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1957:   976	                              double snr, double min_len, double min_sample_rate, double max_len,
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1968:   987	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:1972:   991	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/codex.transcript:2152:/bin/bash -lc 'rg -n "OpenMS|OPENMS|MassTraceDetection" CMakeLists.txt cmake .github README* docs patches 2>/dev/null | head -240 && rg -n "MassTraceDetection::|updateIterativeWeightedMeanMZ|min_sample_rate" /Users/kohlbach/Claude /Users/kohlbach/OpenMS /Users/kohlbach 2>/dev/null | head -300' in /Users/kohlbach/Claude/speXtract
-/Users/kohlbach/Claude/speXtract/docs/reviews/banding-halo-2026-09-03/kimi.err:3:Now let me look at the auto band derivation and the window loop context around line 2377-2530, plus the help text at 908-909 (already seen). Also check where the canonical sort happens after detectTraces_ and where w_bands is derived.Now I have a good picture. Let me also check the OpenMS MassTraceDetection semantics — the user says acceptance is against the RUNNING centroid. Actually, in OpenMS MassTraceDetection, updateWeightedMean_ uses running mean of m/z with weights, and the acceptance check uses `fabs(mt_mz - peak_mz) > mass_error_ppm * peak_mz * 1e-6`? Let me recall: OpenMS MassTraceDetection::run uses `trace_tolerance_ppm_` and compares `fabs(tmp_mz - mt_centroid) / tmp_mz * 1e6 > mass_tolerance_ppm_` roughly. The user asserts running centroid. I shouldn't need to verify OpenMS source, but I can check if OpenMS source is available locally (patches/ dir references OpenMS). The user says don't propose rewriting OpenMS. I can
-/Users/kohlbach/Claude/speXtract/docs/PERF-2026-07-23.md:87:| `MassTraceDetection::run` | 40.2 % |
-/Users/kohlbach/Claude/speXtract/docs/PERF-2026-07-23.md:112:  `mt_quality = 1/(total − missed_down − missed_up) = 1/1 ≥ min_sample_rate`. With
-/Users/kohlbach/Claude/speXtract/docs/ms1-funnel.md:62:Anything touching noise thresholds, `chrom_peak_snr`, `min_length`, or `min_sample_rate`
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:876:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:879:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:880:    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:976:                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:987:    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:991:    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2020:    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2040:                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:231:820:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1171:   920	                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1182:   931	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1186:   935	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1633:   919	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:1637:   923	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:2166:  1930	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:2180:  1944	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:3092:  1942	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:3112:  1962	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:4421:  1942	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:4441:  1962	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:5282:   820	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:5285:   823	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/codex.transcript2:5286:   824	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/kimi.err:76:  a) MS2 trace detection at low threshold: speXtractor runs MassTraceDetection on raw fragment data with noise threshold 10, ms2_min_length 0, min_sample_rate 0.5 — generating 8.5M traces/window. the reference implementation works on the summed (m/z × IM) matrix and extracts peaks directly, correlating fragment XICs without a full mass-trace detection+valley-split stage. speXtractor's trace stage = 48.7% of window time. Also EPD valley-splitting per trace adds cost (comment at :1033: "Valley-splitting is the dominant serial phase (EPD-off dataset D 20:46 vs 28:40 for MS2 alone)" — i.e., EPD adds ~38% wall).
+/Users/kohlbach/Claude/speXtractor/docs/reviews/window-loop-perf-2026-09-03/kimi.err:172:  Hmm wait, one more check on score stage cost: is the IM-band scan really dominant vs dot products? Fragment support ~510 points?? The comment says up to 510 support; a fragment trace spanning the whole gradient? min_sample_rate 0.5 and min_length 0... A fragment with 510 support points passing RT gate... RT gate is apex-RT within 3 s, so support points fall in a narrow RT range but grid-walk cost = support length regardless (walks ALL support, probing pdense). If avg support ~20-40 pts and ~1,200 surviving candidates/precursor: 39k × 1,200 × 30 = 1.4e9 ops/window vs scan 1.6e10. Scan dominates ~10×. Yes, the linear IM-band scan is the score hotspot. And score = 3,753.6 window-wall ≈ ~30-40k CPU-s. Cutting scan 10× cuts score CPU maybe 7-9× → saves ~25-30k CPU-s ≈ 30% of total CPU. Wall: score window-wall 3,753.6 → maybe ~600-800 → saves ~3,000/8 ≈ 370 s wall ≈ 27% of total wall (1,351 s). Biggest single neutral win. Risk: moderate (index construction per window, memory for index, exactness of ordering). Actually simpler alternative: since fragments are sorted by IM, build per-IM-block RT-sorted sub-index, or simply sort fragments by RT within coarse IM buckets... Fine, proposal stands: bucketed 2D index.
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2292:   793	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2295:   796	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2296:   797	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2370:   871	                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2381:   882	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2385:   886	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2953:   793	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2956:   796	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:2957:   797	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:3031:   871	                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:3043:   882	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:3047:   886	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:3746:  1885	    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:3760:  1899	                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:5775:793:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:5778:796:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/codex.transcript:5779:797:    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/release-2026-09-03/kimi.err:393:  - Falsified params exist with claimed defaults: rp_max=0 ✓, consolidate:delta_rt=0 ✓, merge:rt_window=0 ✓, apportion=0 ✓ (but help not marked falsified), ambiguity_margin=0 ✓ (but help silent on dead-in-count-mode), mono_averagine_guard=0 ✓, open_search_safe off ✓, dedup_precursors off ✓, require_isotope_support off ✓ (bench used it ON per decision rule — note). ms2_min_sample_rate=-1 ✓.
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:43:the trace's RUNNING centroid, and it also applies `min_sample_rate` (terminating extension when
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:59:   `min_sample_rate` and valley splitting compound this: occupancy and valley shape are computed
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:166:/bin/bash -lc 'wc -l src/DIAPseudoSpectra.cpp && rg -n "detectTraces_|trace_bands|MassTraceDetection|ElutionPeakDetection|mass_error_ppm|min_sample_rate|halo|band|semantic|digest|accepted" src/DIAPseudoSpectra.cpp' in /Users/kohlbach/Claude/speXtractor
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:182:876:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:183:879:    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:184:880:    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:193:976:                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:197:987:    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:198:991:    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:232:2020:    const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:241:2040:                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1179:   876	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1182:   879	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1183:   880	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1279:   976	                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1290:   987	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1294:   991	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1857:   876	    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1860:   879	    registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1861:   880	    registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1957:   976	                              double snr, double min_len, double min_sample_rate, double max_len,
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1968:   987	    // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:1972:   991	    if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/codex.transcript:2152:/bin/bash -lc 'rg -n "OpenMS|OPENMS|MassTraceDetection" CMakeLists.txt cmake .github README* docs patches 2>/dev/null | head -240 && rg -n "MassTraceDetection::|updateIterativeWeightedMeanMZ|min_sample_rate" /Users/kohlbach/Claude /Users/kohlbach/OpenMS /Users/kohlbach 2>/dev/null | head -300' in /Users/kohlbach/Claude/speXtractor
+/Users/kohlbach/Claude/speXtractor/docs/reviews/banding-halo-2026-09-03/kimi.err:3:Now let me look at the auto band derivation and the window loop context around line 2377-2530, plus the help text at 908-909 (already seen). Also check where the canonical sort happens after detectTraces_ and where w_bands is derived.Now I have a good picture. Let me also check the OpenMS MassTraceDetection semantics — the user says acceptance is against the RUNNING centroid. Actually, in OpenMS MassTraceDetection, updateWeightedMean_ uses running mean of m/z with weights, and the acceptance check uses `fabs(mt_mz - peak_mz) > mass_error_ppm * peak_mz * 1e-6`? Let me recall: OpenMS MassTraceDetection::run uses `trace_tolerance_ppm_` and compares `fabs(tmp_mz - mt_centroid) / tmp_mz * 1e6 > mass_tolerance_ppm_` roughly. The user asserts running centroid. I shouldn't need to verify OpenMS source, but I can check if OpenMS source is available locally (patches/ dir references OpenMS). The user says don't propose rewriting OpenMS. I can
+/Users/kohlbach/Claude/speXtractor/docs/PERF-2026-07-23.md:87:| `MassTraceDetection::run` | 40.2 % |
+/Users/kohlbach/Claude/speXtractor/docs/PERF-2026-07-23.md:112:  `mt_quality = 1/(total − missed_down − missed_up) = 1/1 ≥ min_sample_rate`. With
+/Users/kohlbach/Claude/speXtractor/docs/ms1-funnel.md:62:Anything touching noise thresholds, `chrom_peak_snr`, `min_length`, or `min_sample_rate`
 /Users/kohlbach/Claude/OpenMS-mzpeak-install/include/OpenMS/FEATUREFINDER/MassTraceDetection.h:36:      below a threshold (min_sample_rate, see @ref MassTraceDetection parameters)
 /Users/kohlbach/Claude/OpenMS-mzpeak-install/include/OpenMS/FEATUREFINDER/MassTraceDetection.h:196:        double min_sample_rate_;
 /Users/kohlbach/Claude/OpenMS-mzpeak-build/src/topp/DIAPseudoSpectra.cpp:514:    registerDoubleOption_("trace:max_trace_length_sec", "<sec>", -1.0, "DANGER - NOT a guard. MassTraceDetection::isTraceValid_ RETURNS FALSE on over-length traces and peaks are marked visited only for VALID traces, so an over-length blob is rejected, re-seeded by the next apex, and rejected again - emitting NOTHING at that m/z. Setting this DELETES signal (the falsified direction). Kept only for diagnostics; leave at -1. Splitting requires ElutionPeakDetection, not this. [merged-trace]", false, true);
@@ -2455,7 +2455,7 @@ exec
 exec
 /bin/bash -lc "rg -n \"OpenMS_DIR|OpenMS_VERSION|CMAKE_PREFIX_PATH\" build/CMakeCache.txt CMakeCache.txt 2>/dev/null || true
 nl -ba '/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp' | sed -n '1,760p'
-nl -ba '/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/include/OpenMS/FEATUREFINDER/MassTraceDetection.h' | sed -n '1,245p'" in /Users/kohlbach/Claude/speXtract
+nl -ba '/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/include/OpenMS/FEATUREFINDER/MassTraceDetection.h' | sed -n '1,245p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
      1	// Copyright (c) 2002-present, OpenMS Inc. -- EKU Tuebingen, ETH Zurich, and FU Berlin
      2	// SPDX-License-Identifier: BSD-3-Clause
@@ -3383,7 +3383,7 @@ nl -ba '/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/include/OpenMS/FEA
    207	}
 
 exec
-/bin/bash -lc "nl -ba '/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp' | sed -n '288,540p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba '/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp' | sed -n '288,540p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    288	    MassTraceDetection::PeakCandidate MassTraceDetection::findBestPeak_(
    289	        const MSSpectrum& spectrum,
@@ -3640,7 +3640,7 @@ exec
    540	        while ((trace_down_idx > 0 && down_state.active) || (trace_up_idx < work_exp.size() - 1 && up_state.active))
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '1501,2300p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '1501,2300p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   1501	          drop[j] = true;
   1502	        }
@@ -3716,7 +3716,7 @@ exec
   1572	        if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
   1573	        if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
   1574	        // [C9 A/B, 2026-09-02] 28% of emitted spectra carry the precursor's M+1 and 25% its M+2 as
-  1575	        // "fragments" (unfragmented survivors). SPEXTRACT_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
+  1575	        // "fragments" (unfragmented survivors). SPEXTRACTOR_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
   1576	        if (drop_prec_iso_ && pc.charge > 0)
   1577	        {
   1578	          bool iso = false;
@@ -3994,14 +3994,14 @@ exec
   1850	      Param sp = spicker.getParameters();
   1851	      sp.setValue("pickIMCluster:im_tolerance_cluster", getDoubleOption_("gate:delta_im"));
   1852	      sp.setValue("pickIMCluster:ppm_tolerance_cluster", getDoubleOption_("trace:mass_error_ppm"));
-  1853	      if (const char* m = std::getenv("SPEXTRACT_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
+  1853	      if (const char* m = std::getenv("SPEXTRACTOR_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
   1854	      spicker.setParameters(sp);
   1855	      PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
   1856	      try
   1857	      {
   1858	        if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
   1859	        {
-  1860	#ifdef SPEXTRACT_WITH_MZPEAK
+  1860	#ifdef SPEXTRACTOR_WITH_MZPEAK
   1861	          spx::loadMzPeakStreaming(in, consumer, getIntOption_("threads"));   // consumer counts frames itself
   1862	#else
   1863	          throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
@@ -4014,7 +4014,7 @@ exec
   1870	        phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
   1871	        if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
   1872	        writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-  1873	        if (std::getenv("SPEXTRACT_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+  1873	        if (std::getenv("SPEXTRACTOR_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
   1874	        writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
   1875	                      + " frames, MS1 " + String(ms1_map.size()) + ", windows "
   1876	                      + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -4353,21 +4353,21 @@ exec
   2209	        writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
   2210	                      + " precursors below that charge, " + String(precursors.size()) + " remain");
   2211	    }
-  2212	    // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
+  2212	    // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACTOR_MIN_ISOTOPES=k keeps only precursors whose
   2213	    // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
   2214	    // emission without touching fragment sharing. Pre-registered falsifier in dataset D-BASELINE.
-  2215	    if (const char* mi = std::getenv("SPEXTRACT_MIN_ISOTOPES"))
+  2215	    if (const char* mi = std::getenv("SPEXTRACTOR_MIN_ISOTOPES"))
   2216	    {
   2217	      const int k = std::atoi(mi); const size_t before = precursors.size();
   2218	      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
   2219	                       [k](const Precursor_& pc){ return pc.n_isotopes < k; }), precursors.end());
-  2220	      writeLogInfo_("SPEXTRACT_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
+  2220	      writeLogInfo_("SPEXTRACTOR_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
   2221	                    + " precursors with fewer isotope peaks, " + String(precursors.size()) + " remain");
   2222	    }
-  2223	    // [step-02 sub-arm 2] SPEXTRACT_PRECURSOR_LIST=<tsv: rt_sec mz z, header line> keeps only precursors that
+  2223	    // [step-02 sub-arm 2] SPEXTRACTOR_PRECURSOR_LIST=<tsv: rt_sec mz z, header line> keeps only precursors that
   2224	    // MATCH a listed one (|dRT| <= 10 s, |dm/z| <= 10 ppm, same z or listed z == 0). With the reference implementation's own
   2225	    // precursor list this is the precursor-matched sub-arm: identical precursor population, our spectra.
-  2226	    if (const char* pl = std::getenv("SPEXTRACT_PRECURSOR_LIST"))
+  2226	    if (const char* pl = std::getenv("SPEXTRACTOR_PRECURSOR_LIST"))
   2227	    {
   2228	      struct Ref { double mz, rt; int z; };
   2229	      std::vector<Ref> refs; std::ifstream f(pl); std::string line; std::getline(f, line);   // header
@@ -4380,7 +4380,7 @@ exec
   2236	        for (auto it = lo; it != refs.end() && it->mz <= pc.mono_mz + tol; ++it)
   2237	          if (std::fabs(it->rt - pc.rt) <= 10.0 && (it->z == 0 || pc.charge == 0 || it->z == pc.charge)) return false;
   2238	        return true; }), precursors.end());
-  2239	      writeLogInfo_("SPEXTRACT_PRECURSOR_LIST: " + String(refs.size()) + " reference precursors; kept "
+  2239	      writeLogInfo_("SPEXTRACTOR_PRECURSOR_LIST: " + String(refs.size()) + " reference precursors; kept "
   2240	                    + String(precursors.size()) + " of " + String(before) + " (matched within 10 s / 10 ppm / z)");
   2241	    }
   2242	    // [ms1-funnel] Measured recall against a DIA-NN truth set is 74.3% vs the reference implementation's 84.4%, but a
@@ -4444,9 +4444,9 @@ exec
   2300	    }
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2701,3040p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2701,3040p'" in /Users/kohlbach/Claude/speXtractor
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '1805,2045p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '1805,2045p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   2701	            const Precursor_& pc = precursors[kv2.first];
   2702	            vector<pair<double, double>> frags;
@@ -4764,7 +4764,7 @@ exec
   3014	    // The value travels ON THE LOADED EXPERIMENT (set by BrukerTimsFile), not through a header
   3015	    // static: an inline static can be duplicated across a shared-library boundary, in which case
   3016	    // the tool would read its own copy and always report "unset" [vibe/claude review 2026-09-01].
-  3017	#ifdef SPEXTRACT_WITH_MZPEAK
+  3017	#ifdef SPEXTRACTOR_WITH_MZPEAK
   3018	    if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
   3019	      out_exp.setMetaValue("spx:mz_calibration", spx::lastMzPeakCalibration());   // [codex #13] not BrukerTimsFile's state
   3020	    else
@@ -4790,7 +4790,7 @@ exec
   3040	}
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2301,2700p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2301,2700p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   1805	  ExitCodes main_(int, const char**) override
   1806	  {
@@ -4840,14 +4840,14 @@ exec
   1850	      Param sp = spicker.getParameters();
   1851	      sp.setValue("pickIMCluster:im_tolerance_cluster", getDoubleOption_("gate:delta_im"));
   1852	      sp.setValue("pickIMCluster:ppm_tolerance_cluster", getDoubleOption_("trace:mass_error_ppm"));
-  1853	      if (const char* m = std::getenv("SPEXTRACT_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
+  1853	      if (const char* m = std::getenv("SPEXTRACTOR_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
   1854	      spicker.setParameters(sp);
   1855	      PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
   1856	      try
   1857	      {
   1858	        if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
   1859	        {
-  1860	#ifdef SPEXTRACT_WITH_MZPEAK
+  1860	#ifdef SPEXTRACTOR_WITH_MZPEAK
   1861	          spx::loadMzPeakStreaming(in, consumer, getIntOption_("threads"));   // consumer counts frames itself
   1862	#else
   1863	          throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
@@ -4860,7 +4860,7 @@ exec
   1870	        phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
   1871	        if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
   1872	        writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-  1873	        if (std::getenv("SPEXTRACT_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+  1873	        if (std::getenv("SPEXTRACTOR_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
   1874	        writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
   1875	                      + " frames, MS1 " + String(ms1_map.size()) + ", windows "
   1876	                      + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -5437,7 +5437,7 @@ exec
   2700	          {
 
 exec
-/bin/bash -lc "awk 'BEGIN {m=1000; pc=200000; pd=200; sd=.015; W=100; printf(\"0 %.9f mean %.9f sd %.9f\\n\",1000,m,sd); for(n=1;n<=20;n++){x=m+2.9*sd; I=99; ct=1+I*x/pc; dt=1+I/pd; m=m*(ct/dt); pc=pc*ct; pd=pd*dt; diff=x-m; sd=sqrt((W*sd*sd+I*diff*diff)/(W+I)); W+=I; printf(\"%d %.9f mean %.9f sd %.9f span %.9f\\n\",n,x,m,sd,x-1000)}}'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "awk 'BEGIN {m=1000; pc=200000; pd=200; sd=.015; W=100; printf(\"0 %.9f mean %.9f sd %.9f\\n\",1000,m,sd); for(n=1;n<=20;n++){x=m+2.9*sd; I=99; ct=1+I*x/pc; dt=1+I/pd; m=m*(ct/dt); pc=pc*ct; pd=pd*dt; diff=x-m; sd=sqrt((W*sd*sd+I*diff*diff)/(W+I)); W+=I; printf(\"%d %.9f mean %.9f sd %.9f span %.9f\\n\",n,x,m,sd,x-1000)}}'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 0 1000.000000000 mean 1000.000000000 sd 0.015000000
 1 1000.043500000 mean 1000.014403010 sd 0.023113968 span 0.043500000
@@ -5462,14 +5462,14 @@ exec
 20 1006.077368719 mean 1001.702527297 sd 1.813708546 span 6.077368719
 
 exec
-/bin/bash -lc "awk 'BEGIN {m=1000; pc=200000; pd=200; sd=.015; W=100; sm=100000; si=100; for(n=1;n<=20;n++){x=m+2.9*sd; I=99; sm+=I*x;si+=I; ct=1+I*x/pc; dt=1+I/pd; m=m*(ct/dt); pc*=ct; pd*=dt; diff=x-m; sd=sqrt((W*sd*sd+I*diff*diff)/(W+I)); W+=I; if(n==13||n==20)printf(\"n=%d actual_centroid=%.9f max=%.9f\\n\",n,sm/si,x)}}'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "awk 'BEGIN {m=1000; pc=200000; pd=200; sd=.015; W=100; sm=100000; si=100; for(n=1;n<=20;n++){x=m+2.9*sd; I=99; sm+=I*x;si+=I; ct=1+I*x/pc; dt=1+I/pd; m=m*(ct/dt); pc*=ct; pd*=dt; diff=x-m; sd=sqrt((W*sd*sd+I*diff*diff)/(W+I)); W+=I; if(n==13||n==20)printf(\"n=%d actual_centroid=%.9f max=%.9f\\n\",n,sm/si,x)}}'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 n=13 actual_centroid=1000.652186082 max=1001.973919177
 n=20 actual_centroid=1001.784379570 max=1006.077368719
 
 exec
 /bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '904,963p'
-nl -ba src/DIAPseudoSpectra.cpp | sed -n '2360,2545p'" in /Users/kohlbach/Claude/speXtract
+nl -ba src/DIAPseudoSpectra.cpp | sed -n '2360,2545p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    904	    registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
    905	    registerStringOption_("gate:coelution", "<mode>", "pearson", "[B0] Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
@@ -5719,7 +5719,7 @@ nl -ba src/DIAPseudoSpectra.cpp | sed -n '2360,2545p'" in /Users/kohlbach/Claude
   2545	        for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
 
 exec
-/bin/bash -lc "git -C '/Users/kohlbach/Claude/OpenMS-mzpeak-build' rev-parse --short HEAD && git -C '/Users/kohlbach/Claude/OpenMS-mzpeak-build' status --short -- src/openms/source/FEATUREFINDER/MassTraceDetection.cpp src/openms/include/OpenMS/FEATUREFINDER/MassTraceDetection.h && git status --short && git rev-parse --short HEAD" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "git -C '/Users/kohlbach/Claude/OpenMS-mzpeak-build' rev-parse --short HEAD && git -C '/Users/kohlbach/Claude/OpenMS-mzpeak-build' status --short -- src/openms/source/FEATUREFINDER/MassTraceDetection.cpp src/openms/include/OpenMS/FEATUREFINDER/MassTraceDetection.h && git status --short && git rev-parse --short HEAD" in /Users/kohlbach/Claude/speXtractor
  succeeded in 5990ms:
 2026-09-03 18:10:27.676 xcodebuild[61617:41108457]  DVTFilePathFSEvents: Failed to start fs event stream.
 2026-09-03 18:10:27.877 xcodebuild[61617:41108454] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
@@ -5758,7 +5758,7 @@ git: error: couldn't create cache file '/tmp/xcrun_db-oANEdwqf' (errno=Operation
 0e518a4
 
 exec
-/bin/bash -lc "git diff -- src/DIAPseudoSpectra.cpp && sed -n '1,280p' bench/band_diff.py" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "git diff -- src/DIAPseudoSpectra.cpp && sed -n '1,280p' bench/band_diff.py" in /Users/kohlbach/Claude/speXtractor
  succeeded in 1223ms:
 2026-09-03 18:10:36.477 xcodebuild[61772:41109117]  DVTFilePathFSEvents: Failed to start fs event stream.
 2026-09-03 18:10:36.585 xcodebuild[61772:41109116] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
@@ -5845,7 +5845,7 @@ if __name__ == "__main__":
     main(*sys.argv[1:5])
 
 exec
-/bin/bash -lc "awk 'BEGIN {m=1000; pc=200000; pd=200; sd=.015; W=100; sm=100000; si=100; print \"rt\\tmz\"; printf(\"0\\t%.9f\\n\",m); for(n=1;n<=20;n++){x=m+2.9*sd; I=99; sm+=I*x;si+=I; ct=1+I*x/pc; dt=1+I/pd; m=m*(ct/dt); pc*=ct; pd*=dt; diff=x-m; sd=sqrt((W*sd*sd+I*diff*diff)/(W+I)); W+=I; printf(\"%d\\t%.9f\\n\",n,x); if(n==11) c11=sm/si;} printf(\"edge %.9f lo %.9f hi %.9f c11 %.9f c20 %.9f\\n\",1001.069497614,1001.069497614*(1-.0003),1001.069497614*(1+.0003),c11,sm/si)}'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "awk 'BEGIN {m=1000; pc=200000; pd=200; sd=.015; W=100; sm=100000; si=100; print \"rt\\tmz\"; printf(\"0\\t%.9f\\n\",m); for(n=1;n<=20;n++){x=m+2.9*sd; I=99; sm+=I*x;si+=I; ct=1+I*x/pc; dt=1+I/pd; m=m*(ct/dt); pc*=ct; pd*=dt; diff=x-m; sd=sqrt((W*sd*sd+I*diff*diff)/(W+I)); W+=I; printf(\"%d\\t%.9f\\n\",n,x); if(n==11) c11=sm/si;} printf(\"edge %.9f lo %.9f hi %.9f c11 %.9f c20 %.9f\\n\",1001.069497614,1001.069497614*(1-.0003),1001.069497614*(1+.0003),c11,sm/si)}'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 rt	mz
 0	1000.000000000
@@ -5872,7 +5872,7 @@ rt	mz
 edge 1001.069497614 lo 1000.769176765 hi 1001.369818463 c11 1000.460927687 c20 1001.784379570
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2533,2730p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2533,2730p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   2533	        frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
   2534	          return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(t.rt);
@@ -6079,21 +6079,21 @@ codex
 **Verdict: substantially right, but incomplete.** Banding is not exact. The observed N-dependent output is expected from the implementation, not evidence of a sorting problem. However, two parts of the hypothesis misdescribe the actual OpenMS path:
 
 - Acceptance is not simply “within `mass_error_ppm`.” OpenMS initializes a standard deviation from the ppm value, tests candidates within **±3 standard deviations**, and dynamically re-estimates that deviation by default. See [`MassTraceDetection::findBestPeak_` and `isPeakAcceptable_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:288), [`MassTraceDetection::processPeak_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:384), and the default `reestimate_mt_sd=true` in [`MassTraceDetection::MassTraceDetection`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:26).
-- `min_sample_rate` does not terminate extension in this configuration. speXtract changes its value but leaves `trace_termination_criterion` at OpenMS’s default `"outlier"`; the sample rate is therefore applied as a final validity filter. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:979), [`MassTraceDetection::MassTraceDetection`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:40), and [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445). The comments at [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:987) are inaccurate on that point.
+- `min_sample_rate` does not terminate extension in this configuration. speXtractor changes its value but leaves `trace_termination_criterion` at OpenMS’s default `"outlier"`; the sample rate is therefore applied as a final validity filter. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:979), [`MassTraceDetection::MassTraceDetection`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:40), and [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445). The comments at [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:987) are inaccurate on that point.
 
 The three proposed mechanisms evaluate as follows.
 
-1. **Halo sizing: correct.** The asymmetric arithmetic was a real defect; the current working-tree fix sizes each side from its own edge in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1044). But `20.0` remains an unsupported empirical constant. Nothing in the detector establishes a 20-ppm-multiple span bound.
+1. **Halo sizing: correct.** The asymmetric arithmetic was a real defect; the current working-tree fix sizes each side from its own edge in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1044). But `20.0` remains an unsupported empirical constant. Nothing in the detector establishes a 20-ppm-multiple span bound.
 
-2. **Trace drift: correct in conclusion and stronger than stated.** The running intensity-weighted centroid is updated after each accepted peak, while the allowed standard deviation can also expand. See [`MassTraceDetection::updateIterativeWeightedMean_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:62), [`MassTraceDetection::processPeak_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:417), and [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:537). Even with a fixed tolerance, repeated movement relative to a running mean has no input-independent total-span bound. With variance re-estimation, the failure can be much faster. speXtract also leaves maximum trace length disabled unless explicitly positive in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:991).
+2. **Trace drift: correct in conclusion and stronger than stated.** The running intensity-weighted centroid is updated after each accepted peak, while the allowed standard deviation can also expand. See [`MassTraceDetection::updateIterativeWeightedMean_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:62), [`MassTraceDetection::processPeak_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:417), and [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:537). Even with a fixed tolerance, repeated movement relative to a running mean has no input-independent total-span bound. With variance re-estimation, the failure can be much faster. speXtractor also leaves maximum trace length disabled unless explicitly positive in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:991).
 
 3. **Detection non-locality: correct, but the argument is incomplete.** OpenMS processes intensity-ordered apices through one greedy `peak_visited` state; only peaks belonging to valid traces become visited. Changing the peak set can therefore change later seeds and assignments. See [`MassTraceDetection::run`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:216) and [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:471).
 
-There is an additional, cleaner non-locality defect: **speXtract drops a spectrum completely from a band if it has no raw peak inside that band’s halo** in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1041). OpenMS distinguishes an absent spectrum from a present spectrum containing an out-of-tolerance peak when counting misses and visited scans. Thus even a zero-width mass trace can change validity under banding.
+There is an additional, cleaner non-locality defect: **speXtractor drops a spectrum completely from a band if it has no raw peak inside that band’s halo** in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1041). OpenMS distinguishes an absent spectrum from a present spectrum containing an out-of-tolerance peak when counting misses and visited scans. Thus even a zero-width mass trace can change validity under banding.
 
-Valley splitting is not an independent source of the initial discrepancy. It runs only after band results have been filtered and concatenated in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1090) and [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1100). It can amplify an already altered trace, but if the incoming `MassTrace` set and memberships were identical, per-trace splitting would not manufacture a band-count dependency.
+Valley splitting is not an independent source of the initial discrepancy. It runs only after band results have been filtered and concatenated in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1090) and [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1100). It can amplify an already altered trace, but if the incoming `MassTrace` set and memberships were identical, per-trace splitting would not manufacture a band-count dependency.
 
-The centroid-core filter is also weaker than its comment claims. It suppresses duplicate detections only when independent band runs reconstruct the same trace with the same centroid. It cannot prevent two changed reconstructions from landing in different cores, or both reconstructions from moving away from the original core. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1073). Ownership moreover uses the pre-split intensity-weighted `MassTrace` centroid, whereas emitted `Trace::mz` may be the apex, median, or mean in [`toTrace`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:275).
+The centroid-core filter is also weaker than its comment claims. It suppresses duplicate detections only when independent band runs reconstruct the same trace with the same centroid. It cannot prevent two changed reconstructions from landing in different cores, or both reconstructions from moving away from the original core. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1073). Ownership moreover uses the pre-split intensity-weighted `MassTrace` centroid, whereas emitted `Trace::mz` may be the apex, median, or mean in [`toTrace`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:275).
 
 ### Concrete example 1: drift exceeds the 20× halo
 
@@ -6126,7 +6126,7 @@ RT:  m/z
 20   1006.077368719
 ```
 
-Because every spectrum has one peak, the two-band quantile edge is sample element 10: `1001.069497614`, under the calculation in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1026).
+Because every spectrum has one peak, the two-band quantile edge is sample element 10: `1001.069497614`, under the calculation in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1026).
 
 The halos are approximately:
 
@@ -6135,7 +6135,7 @@ lower-band upper limit = 1001.369818463
 upper-band lower limit = 1000.769176765
 ```
 
-The unbanded detector accepts all 21 points and produces a true intensity-weighted centroid of approximately `1001.784379570`, in the upper core. Neither band contains all 21 points. The lower band receives points 0–11 and can produce a different trace with centroid approximately `1000.460927687`; the upper band lacks points 0–8 and cannot reproduce the unbanded trace. No subsequent canonical sort can repair different memberships; the sort only normalizes ordering in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2538).
+The unbanded detector accepts all 21 points and produces a true intensity-weighted centroid of approximately `1001.784379570`, in the upper core. Neither band contains all 21 points. The lower band receives points 0–11 and can produce a different trace with centroid approximately `1000.460927687`; the upper band lacks points 0–8 and cannot reproduce the unbanded trace. No subsequent canonical sort can repair different memberships; the sort only normalizes ordering in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2538).
 
 ### Concrete example 2: a zero-span trace changes validity
 
@@ -6157,7 +6157,7 @@ RT  m/z   intensity
 
 With one peak sampled from every spectrum, the median quantile edge is 1500. The lower band’s upper halo is about 1500.45, so it includes the 1000 and 1500 spectra but omits the four 2000 spectra.
 
-In the full map, the 1000 trace has three hits over seven adjusted scans: `3/7 < 0.5`, so [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445) rejects it. In the lower-band map, the four internal 2000 spectra do not exist because [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1068) only appends nonempty band spectra. The three 1000 spectra become adjacent in the sub-map, yielding quality `3/3`; the trailing 1500 misses are terminal and are subtracted by the OpenMS validity calculation. The identical zero-span trace is rejected unbanded and retained banded.
+In the full map, the 1000 trace has three hits over seven adjusted scans: `3/7 < 0.5`, so [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445) rejects it. In the lower-band map, the four internal 2000 spectra do not exist because [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1068) only appends nonempty band spectra. The three 1000 spectra become adjacent in the sub-map, yielding quality `3/3`; the trailing 1500 misses are terminal and are subtracted by the OpenMS validity calculation. The identical zero-span trace is rejected unbanded and retained banded.
 
 That destroys the proposition that a bound on final trace span alone establishes locality.
 
@@ -6168,7 +6168,7 @@ Finally, “no halo width can repair this” is literally too strong. A halo cov
 | Approach | Exact? | Cost and conditions | Verification |
 |---|---|---|---|
 | **(a) Halo from a real trace-span bound** | **Not from span alone.** Exact only if the bound covers the detector’s entire causal influence and reproduces full-map scan/miss semantics. | Running centroid and adaptive SD make the worst-case algorithmic bound approach the entire m/z range. A whole-window halo is exact but duplicates essentially all peaks and all MTD work N times. | Compare exact per-trace peak memberships and validity with `bands=1`, not just centroids. Include drift, competing-apex, missing-spectrum and threshold-boundary synthetic tests. |
-| **(b) Partition at large m/z gaps** | **Not as stated.** A gap wider than every final trace is insufficient because unrelated peaks across the gap still determine whether a spectrum is “nonempty” and therefore whether a miss is counted. | It can be exact only with a proven separation of the complete interaction graph and faithful preservation of scan-presence semantics. Components may be extremely uneven or collapse into one component, defeating load balancing. Current sampled quantiles do not search for gaps; they deliberately target load balance in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1024). | For each proposed component, compare the detector’s peak-assignment partition and rejected traces against a full-window run. Test spectra populated exclusively by peaks in other components. |
+| **(b) Partition at large m/z gaps** | **Not as stated.** A gap wider than every final trace is insufficient because unrelated peaks across the gap still determine whether a spectrum is “nonempty” and therefore whether a miss is counted. | It can be exact only with a proven separation of the complete interaction graph and faithful preservation of scan-presence semantics. Components may be extremely uneven or collapse into one component, defeating load balancing. Current sampled quantiles do not search for gaps; they deliberately target load balance in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1024). | For each proposed component, compare the detector’s peak-assignment partition and rejected traces against a full-window run. Test spectra populated exclusively by peaks in other components. |
 | **(c) Detect the whole window** | **Yes.** This is the reference semantics. | It gives up the reduction in candidate population and within-window trace parallelism: approximately the stated 18 minutes/160 GB instead of 12:58/102 GB. It can still run different windows concurrently subject to memory admission. | Repeat `bands=1` for determinism, then make it the oracle for every optimization. Require exact trace membership and final semantic equality. |
 | **(d) Declare banding approximate and pin it** | **No, but reproducible.** | Fix N and the edge algorithm independently of thread count. Different worker counts may schedule the same fixed tasks, but cannot change the scientific partition. “Independent of band count” is possible only by removing band count as a variable or making the algorithm genuinely exact. | Verify identical output across thread counts at fixed N, then publish N-versus-1 error measurements. |
 
@@ -6183,13 +6183,13 @@ perf:trace_bands = 1
 perf:ms1_trace_bands = 1
 ```
 
-Both currently default to 12 and both use the same approximate wrapper in [`TOPPDIAPseudoSpectra::registerOptionsAndFlags_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:904). Banding MS1 is particularly capable of amplification because the resulting traces feed greedy precursor inference after canonical sorting in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2129).
+Both currently default to 12 and both use the same approximate wrapper in [`TOPPDIAPseudoSpectra::registerOptionsAndFlags_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:904). Banding MS1 is particularly capable of amplification because the resulting traces feed greedy precursor inference after canonical sorting in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2129).
 
-**Thread-derived auto should not exist for scientific output.** The current MS2 auto mode reads `omp_get_max_threads()` and computes `ceil(threads/windows)` in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2366). That makes the input, parameters, and software insufficient to specify the result: the available machine changes N, and N changes the accepted-peptide set.
+**Thread-derived auto should not exist for scientific output.** The current MS2 auto mode reads `omp_get_max_threads()` and computes `ceil(threads/windows)` in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2366). That makes the input, parameters, and software insufficient to specify the result: the available machine changes N, and N changes the accepted-peptide set.
 
 If approximate banding is necessary operationally, expose it as an explicit approximation preset with a fixed N—12 may be a reasonable performance default for that preset—and record the resolved N. Do not call it exact, and do not derive it from hardware.
 
-There is also an inconsistency: MS1 value 0 is annotated as auto by the bound-setting comment, but is resolved to 1 rather than to a thread-derived count in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2030).
+There is also an inconsistency: MS1 value 0 is annotated as auto by the bound-setting comment, but is resolved to 1 rather than to a thread-derived count in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2030).
 
 Under a build gate requiring accepted-peptide **set equality**, the effect is not “too small to matter”: any nonzero symmetric difference fails the project’s declared criterion. Evidence could justify an explicitly approximate performance mode, but it cannot restore the word “exact.”
 
@@ -6224,7 +6224,7 @@ At the trace stage, dump or hash exact trace membership before valley splitting:
 
 At the pseudo-spectrum stage, compare canonical full-spectrum hashes, then report coordinate-only additions/removals separately from shared coordinates whose complete peak lists or intensities changed.
 
-The existing [`traceDigest_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:486) is only a tripwire. It sorts individual m/z, RT and intensity bit patterns together, omits IM and profile membership, and provides no magnitude or direction. The upstream compact-map digest in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2484) is useful for proving that every run started from the same picked peaks.
+The existing [`traceDigest_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:486) is only a tripwire. It sorts individual m/z, RT and intensity bit patterns together, omits IM and profile membership, and provides no magnitude or direction. The upstream compact-map digest in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2484) is useful for proving that every run started from the same picked peaks.
 
 Because MS1 and MS2 have separate band parameters, measure them separately:
 
@@ -6238,11 +6238,11 @@ That distinguishes precursor-population changes from fragment-trace changes inst
 
 **Pipeline parallelism: yes. Equivalent within-window MTD parallelism: no, not under the “do not rewrite OpenMS” constraint.**
 
-The current master/worker pool already provides exact parallelism across isolation windows in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2440). Valley splitting and default precursor scoring also create independent tasks in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1115) and [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2610). With `bands=1`, different windows can therefore be tracing, splitting and scoring concurrently.
+The current master/worker pool already provides exact parallelism across isolation windows in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2440). Valley splitting and default precursor scoring also create independent tasks in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1115) and [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2610). With `bands=1`, different windows can therefore be tracing, splitting and scoring concurrently.
 
 But the task pool does not make one MTD call parallel. OpenMS’s trace detector still walks the intensity-ordered apex list serially through one shared visited set in [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:471). During a phase when every in-flight window is inside MTD, useful trace concurrency is capped by the number of admitted windows—at most the acquisition’s window count and possibly less under the memory gate.
 
-Therefore the statement that bands are “no longer needed to fill cores” is only partly true. They are no longer needed to avoid the old rigid nested-team grid, but the band `taskloop` still creates the additional MTD work units in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1073). Removing it also removes within-window trace concurrency.
+Therefore the statement that bands are “no longer needed to fill cores” is only partly true. They are no longer needed to avoid the old rigid nested-team grid, but the band `taskloop` still creates the additional MTD work units in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1073). Removing it also removes within-window trace concurrency.
 
 Practical exact choices without modifying OpenMS are limited to:
 
@@ -6259,21 +6259,21 @@ tokens used
 **Verdict: substantially right, but incomplete.** Banding is not exact. The observed N-dependent output is expected from the implementation, not evidence of a sorting problem. However, two parts of the hypothesis misdescribe the actual OpenMS path:
 
 - Acceptance is not simply “within `mass_error_ppm`.” OpenMS initializes a standard deviation from the ppm value, tests candidates within **±3 standard deviations**, and dynamically re-estimates that deviation by default. See [`MassTraceDetection::findBestPeak_` and `isPeakAcceptable_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:288), [`MassTraceDetection::processPeak_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:384), and the default `reestimate_mt_sd=true` in [`MassTraceDetection::MassTraceDetection`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:26).
-- `min_sample_rate` does not terminate extension in this configuration. speXtract changes its value but leaves `trace_termination_criterion` at OpenMS’s default `"outlier"`; the sample rate is therefore applied as a final validity filter. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:979), [`MassTraceDetection::MassTraceDetection`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:40), and [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445). The comments at [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:987) are inaccurate on that point.
+- `min_sample_rate` does not terminate extension in this configuration. speXtractor changes its value but leaves `trace_termination_criterion` at OpenMS’s default `"outlier"`; the sample rate is therefore applied as a final validity filter. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:979), [`MassTraceDetection::MassTraceDetection`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:40), and [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445). The comments at [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:987) are inaccurate on that point.
 
 The three proposed mechanisms evaluate as follows.
 
-1. **Halo sizing: correct.** The asymmetric arithmetic was a real defect; the current working-tree fix sizes each side from its own edge in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1044). But `20.0` remains an unsupported empirical constant. Nothing in the detector establishes a 20-ppm-multiple span bound.
+1. **Halo sizing: correct.** The asymmetric arithmetic was a real defect; the current working-tree fix sizes each side from its own edge in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1044). But `20.0` remains an unsupported empirical constant. Nothing in the detector establishes a 20-ppm-multiple span bound.
 
-2. **Trace drift: correct in conclusion and stronger than stated.** The running intensity-weighted centroid is updated after each accepted peak, while the allowed standard deviation can also expand. See [`MassTraceDetection::updateIterativeWeightedMean_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:62), [`MassTraceDetection::processPeak_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:417), and [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:537). Even with a fixed tolerance, repeated movement relative to a running mean has no input-independent total-span bound. With variance re-estimation, the failure can be much faster. speXtract also leaves maximum trace length disabled unless explicitly positive in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:991).
+2. **Trace drift: correct in conclusion and stronger than stated.** The running intensity-weighted centroid is updated after each accepted peak, while the allowed standard deviation can also expand. See [`MassTraceDetection::updateIterativeWeightedMean_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:62), [`MassTraceDetection::processPeak_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:417), and [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:537). Even with a fixed tolerance, repeated movement relative to a running mean has no input-independent total-span bound. With variance re-estimation, the failure can be much faster. speXtractor also leaves maximum trace length disabled unless explicitly positive in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:991).
 
 3. **Detection non-locality: correct, but the argument is incomplete.** OpenMS processes intensity-ordered apices through one greedy `peak_visited` state; only peaks belonging to valid traces become visited. Changing the peak set can therefore change later seeds and assignments. See [`MassTraceDetection::run`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:216) and [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:471).
 
-There is an additional, cleaner non-locality defect: **speXtract drops a spectrum completely from a band if it has no raw peak inside that band’s halo** in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1041). OpenMS distinguishes an absent spectrum from a present spectrum containing an out-of-tolerance peak when counting misses and visited scans. Thus even a zero-width mass trace can change validity under banding.
+There is an additional, cleaner non-locality defect: **speXtractor drops a spectrum completely from a band if it has no raw peak inside that band’s halo** in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1041). OpenMS distinguishes an absent spectrum from a present spectrum containing an out-of-tolerance peak when counting misses and visited scans. Thus even a zero-width mass trace can change validity under banding.
 
-Valley splitting is not an independent source of the initial discrepancy. It runs only after band results have been filtered and concatenated in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1090) and [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1100). It can amplify an already altered trace, but if the incoming `MassTrace` set and memberships were identical, per-trace splitting would not manufacture a band-count dependency.
+Valley splitting is not an independent source of the initial discrepancy. It runs only after band results have been filtered and concatenated in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1090) and [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1100). It can amplify an already altered trace, but if the incoming `MassTrace` set and memberships were identical, per-trace splitting would not manufacture a band-count dependency.
 
-The centroid-core filter is also weaker than its comment claims. It suppresses duplicate detections only when independent band runs reconstruct the same trace with the same centroid. It cannot prevent two changed reconstructions from landing in different cores, or both reconstructions from moving away from the original core. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1073). Ownership moreover uses the pre-split intensity-weighted `MassTrace` centroid, whereas emitted `Trace::mz` may be the apex, median, or mean in [`toTrace`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:275).
+The centroid-core filter is also weaker than its comment claims. It suppresses duplicate detections only when independent band runs reconstruct the same trace with the same centroid. It cannot prevent two changed reconstructions from landing in different cores, or both reconstructions from moving away from the original core. See [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1073). Ownership moreover uses the pre-split intensity-weighted `MassTrace` centroid, whereas emitted `Trace::mz` may be the apex, median, or mean in [`toTrace`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:275).
 
 ### Concrete example 1: drift exceeds the 20× halo
 
@@ -6306,7 +6306,7 @@ RT:  m/z
 20   1006.077368719
 ```
 
-Because every spectrum has one peak, the two-band quantile edge is sample element 10: `1001.069497614`, under the calculation in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1026).
+Because every spectrum has one peak, the two-band quantile edge is sample element 10: `1001.069497614`, under the calculation in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1026).
 
 The halos are approximately:
 
@@ -6315,7 +6315,7 @@ lower-band upper limit = 1001.369818463
 upper-band lower limit = 1000.769176765
 ```
 
-The unbanded detector accepts all 21 points and produces a true intensity-weighted centroid of approximately `1001.784379570`, in the upper core. Neither band contains all 21 points. The lower band receives points 0–11 and can produce a different trace with centroid approximately `1000.460927687`; the upper band lacks points 0–8 and cannot reproduce the unbanded trace. No subsequent canonical sort can repair different memberships; the sort only normalizes ordering in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2538).
+The unbanded detector accepts all 21 points and produces a true intensity-weighted centroid of approximately `1001.784379570`, in the upper core. Neither band contains all 21 points. The lower band receives points 0–11 and can produce a different trace with centroid approximately `1000.460927687`; the upper band lacks points 0–8 and cannot reproduce the unbanded trace. No subsequent canonical sort can repair different memberships; the sort only normalizes ordering in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2538).
 
 ### Concrete example 2: a zero-span trace changes validity
 
@@ -6337,7 +6337,7 @@ RT  m/z   intensity
 
 With one peak sampled from every spectrum, the median quantile edge is 1500. The lower band’s upper halo is about 1500.45, so it includes the 1000 and 1500 spectra but omits the four 2000 spectra.
 
-In the full map, the 1000 trace has three hits over seven adjusted scans: `3/7 < 0.5`, so [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445) rejects it. In the lower-band map, the four internal 2000 spectra do not exist because [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1068) only appends nonempty band spectra. The three 1000 spectra become adjacent in the sub-map, yielding quality `3/3`; the trailing 1500 misses are terminal and are subtracted by the OpenMS validity calculation. The identical zero-span trace is rejected unbanded and retained banded.
+In the full map, the 1000 trace has three hits over seven adjusted scans: `3/7 < 0.5`, so [`MassTraceDetection::isTraceValid_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445) rejects it. In the lower-band map, the four internal 2000 spectra do not exist because [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1068) only appends nonempty band spectra. The three 1000 spectra become adjacent in the sub-map, yielding quality `3/3`; the trailing 1500 misses are terminal and are subtracted by the OpenMS validity calculation. The identical zero-span trace is rejected unbanded and retained banded.
 
 That destroys the proposition that a bound on final trace span alone establishes locality.
 
@@ -6348,7 +6348,7 @@ Finally, “no halo width can repair this” is literally too strong. A halo cov
 | Approach | Exact? | Cost and conditions | Verification |
 |---|---|---|---|
 | **(a) Halo from a real trace-span bound** | **Not from span alone.** Exact only if the bound covers the detector’s entire causal influence and reproduces full-map scan/miss semantics. | Running centroid and adaptive SD make the worst-case algorithmic bound approach the entire m/z range. A whole-window halo is exact but duplicates essentially all peaks and all MTD work N times. | Compare exact per-trace peak memberships and validity with `bands=1`, not just centroids. Include drift, competing-apex, missing-spectrum and threshold-boundary synthetic tests. |
-| **(b) Partition at large m/z gaps** | **Not as stated.** A gap wider than every final trace is insufficient because unrelated peaks across the gap still determine whether a spectrum is “nonempty” and therefore whether a miss is counted. | It can be exact only with a proven separation of the complete interaction graph and faithful preservation of scan-presence semantics. Components may be extremely uneven or collapse into one component, defeating load balancing. Current sampled quantiles do not search for gaps; they deliberately target load balance in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1024). | For each proposed component, compare the detector’s peak-assignment partition and rejected traces against a full-window run. Test spectra populated exclusively by peaks in other components. |
+| **(b) Partition at large m/z gaps** | **Not as stated.** A gap wider than every final trace is insufficient because unrelated peaks across the gap still determine whether a spectrum is “nonempty” and therefore whether a miss is counted. | It can be exact only with a proven separation of the complete interaction graph and faithful preservation of scan-presence semantics. Components may be extremely uneven or collapse into one component, defeating load balancing. Current sampled quantiles do not search for gaps; they deliberately target load balance in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1024). | For each proposed component, compare the detector’s peak-assignment partition and rejected traces against a full-window run. Test spectra populated exclusively by peaks in other components. |
 | **(c) Detect the whole window** | **Yes.** This is the reference semantics. | It gives up the reduction in candidate population and within-window trace parallelism: approximately the stated 18 minutes/160 GB instead of 12:58/102 GB. It can still run different windows concurrently subject to memory admission. | Repeat `bands=1` for determinism, then make it the oracle for every optimization. Require exact trace membership and final semantic equality. |
 | **(d) Declare banding approximate and pin it** | **No, but reproducible.** | Fix N and the edge algorithm independently of thread count. Different worker counts may schedule the same fixed tasks, but cannot change the scientific partition. “Independent of band count” is possible only by removing band count as a variable or making the algorithm genuinely exact. | Verify identical output across thread counts at fixed N, then publish N-versus-1 error measurements. |
 
@@ -6363,13 +6363,13 @@ perf:trace_bands = 1
 perf:ms1_trace_bands = 1
 ```
 
-Both currently default to 12 and both use the same approximate wrapper in [`TOPPDIAPseudoSpectra::registerOptionsAndFlags_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:904). Banding MS1 is particularly capable of amplification because the resulting traces feed greedy precursor inference after canonical sorting in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2129).
+Both currently default to 12 and both use the same approximate wrapper in [`TOPPDIAPseudoSpectra::registerOptionsAndFlags_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:904). Banding MS1 is particularly capable of amplification because the resulting traces feed greedy precursor inference after canonical sorting in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2129).
 
-**Thread-derived auto should not exist for scientific output.** The current MS2 auto mode reads `omp_get_max_threads()` and computes `ceil(threads/windows)` in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2366). That makes the input, parameters, and software insufficient to specify the result: the available machine changes N, and N changes the accepted-peptide set.
+**Thread-derived auto should not exist for scientific output.** The current MS2 auto mode reads `omp_get_max_threads()` and computes `ceil(threads/windows)` in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2366). That makes the input, parameters, and software insufficient to specify the result: the available machine changes N, and N changes the accepted-peptide set.
 
 If approximate banding is necessary operationally, expose it as an explicit approximation preset with a fixed N—12 may be a reasonable performance default for that preset—and record the resolved N. Do not call it exact, and do not derive it from hardware.
 
-There is also an inconsistency: MS1 value 0 is annotated as auto by the bound-setting comment, but is resolved to 1 rather than to a thread-derived count in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2030).
+There is also an inconsistency: MS1 value 0 is annotated as auto by the bound-setting comment, but is resolved to 1 rather than to a thread-derived count in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2030).
 
 Under a build gate requiring accepted-peptide **set equality**, the effect is not “too small to matter”: any nonzero symmetric difference fails the project’s declared criterion. Evidence could justify an explicitly approximate performance mode, but it cannot restore the word “exact.”
 
@@ -6404,7 +6404,7 @@ At the trace stage, dump or hash exact trace membership before valley splitting:
 
 At the pseudo-spectrum stage, compare canonical full-spectrum hashes, then report coordinate-only additions/removals separately from shared coordinates whose complete peak lists or intensities changed.
 
-The existing [`traceDigest_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:486) is only a tripwire. It sorts individual m/z, RT and intensity bit patterns together, omits IM and profile membership, and provides no magnitude or direction. The upstream compact-map digest in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2484) is useful for proving that every run started from the same picked peaks.
+The existing [`traceDigest_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:486) is only a tripwire. It sorts individual m/z, RT and intensity bit patterns together, omits IM and profile membership, and provides no magnitude or direction. The upstream compact-map digest in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2484) is useful for proving that every run started from the same picked peaks.
 
 Because MS1 and MS2 have separate band parameters, measure them separately:
 
@@ -6418,11 +6418,11 @@ That distinguishes precursor-population changes from fragment-trace changes inst
 
 **Pipeline parallelism: yes. Equivalent within-window MTD parallelism: no, not under the “do not rewrite OpenMS” constraint.**
 
-The current master/worker pool already provides exact parallelism across isolation windows in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2440). Valley splitting and default precursor scoring also create independent tasks in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1115) and [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2610). With `bands=1`, different windows can therefore be tracing, splitting and scoring concurrently.
+The current master/worker pool already provides exact parallelism across isolation windows in [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2440). Valley splitting and default precursor scoring also create independent tasks in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1115) and [`TOPPDIAPseudoSpectra::main_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2610). With `bands=1`, different windows can therefore be tracing, splitting and scoring concurrently.
 
 But the task pool does not make one MTD call parallel. OpenMS’s trace detector still walks the intensity-ordered apex list serially through one shared visited set in [`MassTraceDetection::run_`](/Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:471). During a phase when every in-flight window is inside MTD, useful trace concurrency is capped by the number of admitted windows—at most the acquisition’s window count and possibly less under the memory gate.
 
-Therefore the statement that bands are “no longer needed to fill cores” is only partly true. They are no longer needed to avoid the old rigid nested-team grid, but the band `taskloop` still creates the additional MTD work units in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1073). Removing it also removes within-window trace concurrency.
+Therefore the statement that bands are “no longer needed to fill cores” is only partly true. They are no longer needed to avoid the old rigid nested-team grid, but the band `taskloop` still creates the additional MTD work units in [`TOPPDIAPseudoSpectra::detectTraces_`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1073). Removing it also removes within-window trace concurrency.
 
 Practical exact choices without modifying OpenMS are limited to:
 

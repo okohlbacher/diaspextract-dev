@@ -212,7 +212,7 @@ agreement this way would just echo our own annotation back at us.
 The experiment is therefore only meaningful if the adjudicating search **re-derives** charge:
 run both tools' outputs with `override_charge = 1, z = 1..5` (MSFragger) and the equivalent
 Sage configuration, so the winning charge is chosen by spectral evidence. That arm already exists
-for MSFragger — `docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`, where it moved SpeXtract +4.5%.
+for MSFragger — `docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`, where it moved SpeXtractor +4.5%.
 
 **Design.**
 1. Extract the same acquisition with both tools. Use the public HeLa benchmark (PXD017703) so the
@@ -252,7 +252,7 @@ labels is recoverable by fixing the call, or only by not declaring one.
 
 ## From the public HeLa table (2026-09-05, docs/HELA-TABLE.md)
 
-- **Low-load A/B on public data.** At 10 ng SpeXtract loses on both engines and both 2019 schemes
+- **Low-load A/B on public data.** At 10 ng SpeXtractor loses on both engines and both 2019 schemes
   (py3: Sage 4.8k vs 9.2k). The isotope-support gate and the z>=2 floor were adopted at 200 ng
   in-house; re-measure both on the six 10 ng files (1.5-5 min per extraction, both engines already
   wired) and on one 100 ng file as the control. Both-engines + entrapment gate applies before any

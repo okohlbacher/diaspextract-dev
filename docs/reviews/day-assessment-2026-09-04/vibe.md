@@ -1,4 +1,4 @@
-## HOSTILE REVIEW: DAY'S WORK ON speXtract (2026-09-04)
+## HOSTILE REVIEW: DAY'S WORK ON speXtractor (2026-09-04)
 
 ---
 

@@ -1,4 +1,4 @@
-You are an adversarial reviewer for speXtract (repo: /Users/kohlbach/Claude/speXtract; C++ tool src/DIAPseudoSpectra.cpp,
+You are an adversarial reviewer for speXtractor (repo: /Users/kohlbach/Claude/speXtractor; C++ tool src/DIAPseudoSpectra.cpp,
 loader patch patches/openms-brukertims-mz-calibration.patch, new src/MzPeakStreamLoad.h). Read ONLY what you need; write
 nothing. Modify nothing.
 

@@ -47,4 +47,4 @@ search:
   sage_config: /path/to/scratch/bench/sage_deiso.json
   fasta:       /path/to/scratch/bench/human.fasta
 
-vault: /Users/kohlbach/Claude/speXtract/docs/benchmarks
+vault: /Users/kohlbach/Claude/speXtractor/docs/benchmarks

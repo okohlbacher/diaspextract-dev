@@ -20,16 +20,16 @@ on the code that was rewritten for parallelism, and it is the most valuable sing
 | 5 | mzPeak: a short `get_spectra_batch` result was clamped with `min()`, leaving empty tail frames and a successful run. | codex | throws on any size mismatch |
 | 6 | mzPeak: m/z and intensity arrays truncated to the shorter; a short IM array became "no IM". | codex | throws on mismatch |
 | 7 | **Shipped defaults could not reproduce any published number**: every figure used `ms2_noise_threshold_int 10` and `ms2_split_valleys 7.0` on the command line while the registered defaults were 100 and 0. | codex, kimi | defaults moved to the benchmarked values; the "Current defaults" block in dataset D-BASELINE now lists all ten and says it was verified against the code |
-| 8 | `SPEXTRACT_MZ_ESTIMATOR` set every reported precursor and fragment m/z from an undocumented env var, invisible in `--help`. | kimi | registered as `trace:mz_estimator` (apex/mean/median, default apex) with valid strings |
+| 8 | `SPEXTRACTOR_MZ_ESTIMATOR` set every reported precursor and fragment m/z from an undocumented env var, invisible in `--help`. | kimi | registered as `trace:mz_estimator` (apex/mean/median, default apex) with valid strings |
 | 9 | `trace:split_valleys_fwhm` help claimed it overrides `ms1_split_valleys`; the code modifies `ms2_split` only. | codex | help corrected |
 | 10 | `charge:ambiguity_margin` is unreachable in the default `count` scoring mode. | codex, kimi | help states the mode dependency |
-| 11 | CHANGELOG advertised `SPEXTRACT_ISO_COLLAPSE` and the backfill env vars, which the ponytail pass had just removed. | codex, kimi | changelog rewritten to match the code, with Fixed/Removed sections |
+| 11 | CHANGELOG advertised `SPEXTRACTOR_ISO_COLLAPSE` and the backfill env vars, which the ponytail pass had just removed. | codex, kimi | changelog rewritten to match the code, with Fixed/Removed sections |
 | 12 | Doxygen header sent readers to `PLAN.md` / `REVIEW.md`, neither of which ships. | codex, kimi | points at `docs/dataset D-BASELINE.md` and `docs/reviews/` |
 | 13 | `MzPeakStreamLoad.h` header said the exact calibration is enabled with `=1`; it is default-on and `=0` disables. | codex | comment corrected |
 | 14 | `bands_for`, a per-window band heuristic, was defined, never called, and a comment said it was kept for reference. | codex | removed |
 | 15 | `ponytail:` as a code tag has no meaning outside this project. | codex | reworded to `deliberate:` |
 | 16 | README called both 15:21 and 12:49 "the current runtime", and its two determinism claims read as contradictory. | codex | runtime updated to 12:49/102 GB; the fixed-binary and cross-build claims separated explicitly |
-| 17 | No test suite at all; verification was whole-file cluster runs only. | codex, kimi, vibe | `test/test_spextract.py`: six checks on a synthetic input -- isotope ownership, min_charge in both directions, two parameter-rejection checks, and 1-vs-4-thread byte identity |
+| 17 | No test suite at all; verification was whole-file cluster runs only. | codex, kimi, vibe | `test/test_spextractor.py`: six checks on a synthetic input -- isotope ownership, min_charge in both directions, two parameter-rejection checks, and 1-vs-4-thread byte identity |
 
 ## Rejected, with evidence
 

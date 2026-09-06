@@ -3,7 +3,7 @@ Reading additional input from stdin...
 2026-09-03T15:09:35.655733Z ERROR codex_models_manager::manager: failed to refresh available models: unexpected status 404 Not Found: Unknown error, url: https://chatgpt.com/backend-api/codex/models?client_version=0.153.0, cf-ray: a355ad2a19e303af-ZRH
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -13,7 +13,7 @@ reasoning summaries: none
 session id: 01a067d1-7628-7e41-b4e0-7d73e0bd20c8
 --------
 user
-You are a hostile performance reviewer. Target: the isolation-window loop of speXtract, an OpenMS
+You are a hostile performance reviewer. Target: the isolation-window loop of speXtractor, an OpenMS
 TOPP tool (single C++ file, `src/DIAPseudoSpectra.cpp`) that converts Bruker timsTOF diaPASEF DIA
 data into pseudo-MS/MS spectra. It is 2.3x SLOWER in wall time than the closed competitor the reference implementation
 on the same file and machine while burning 3.1x the CPU. Explain exactly where the time, the memory
@@ -24,7 +24,7 @@ both tools given 100 threads, each under /usr/bin/time -v. Do not re-derive thes
 
 ## Head to head
 
-| | the reference implementation | speXtract |
+| | the reference implementation | speXtractor |
 |---|---|---|
 | wall | 9:46 | 22:39 |
 | peak RSS | 162.6 GB | 151.7 GB |
@@ -32,7 +32,7 @@ both tools given 100 threads, each under /usr/bin/time -v. Do not re-derive thes
 | mean cores busy | 45 of 128 | 60 of 128 |
 | output | 872,430 spectra | 863,319 spectra |
 
-## speXtract phase profile (wall s | % | CPU s | parallel speedup | RSS MB at end)
+## speXtractor phase profile (wall s | % | CPU s | parallel speedup | RSS MB at end)
 
     LOAD(stream)         55.2    4.1%    4514.3   81.7x    39498
     MS1_TRACE            83.0    6.1%     410.9    5.0x    53842

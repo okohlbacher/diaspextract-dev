@@ -1,7 +1,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -12,7 +12,7 @@ session id: 01a0689e-49f0-7263-81b0-e5e5c73bfea9
 --------
 user
 You are a hostile reviewer of ONE function: `detectTracesInteger_` in
-`/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp` (plus its helpers `splitValleys`,
+`/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp` (plus its helpers `splitValleys`,
 `splitIntegerTraces`, `PeakSlab`, `toSlab`, `TofAxis`). It claims to reimplement OpenMS
 `MassTraceDetection::run_` step for step on integer peak arrays. The FIRST version of it, written
 from a description, lost 92% of identified peptides; a review found fourteen deviations
@@ -93,7 +93,7 @@ Answer, each as its own section:
    with its OWN `visited`. State precisely what can go wrong at the band boundaries and whether it
    is bounded.
 5. **A test that would have caught the first version.** Specify, concretely, the synthetic input
-   and assertion (the suite in `test/test_spextract.py` passed every broken version).
+   and assertion (the suite in `test/test_spextractor.py` passed every broken version).
 
 Cite the tool's line numbers. If you believe the rewrite is now faithful, say so and say what
 residual you would still expect between the two detectors' peptide counts and why.
@@ -101,11 +101,11 @@ residual you would still expect between the two detectors' peptide counts and wh
 Read these files before answering:
   src/DIAPseudoSpectra.cpp
   docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md
-  test/test_spextract.py
+  test/test_spextractor.py
 codex
 I’m using the adversarial-review skill because you asked for a hostile, deviation-focused audit. I’ll first read its instructions and the three required files, then trace the named helpers and cite exact current line numbers.
 exec
-/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && wc -l src/DIAPseudoSpectra.cpp docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md test/test_spextract.py && sed -n '1,260p' docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && wc -l src/DIAPseudoSpectra.cpp docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md test/test_spextractor.py && sed -n '1,260p' docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 ---
 name: bmad-review-adversarial-general
@@ -146,7 +146,7 @@ Output findings as a Markdown list (descriptions only).
 - HALT if content is empty or unreadable
     3589 src/DIAPseudoSpectra.cpp
       49 docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md
-     202 test/test_spextract.py
+     202 test/test_spextractor.py
     3840 total
 # Why the first integer trace detector failed, and what the corrected one does
 
@@ -199,7 +199,7 @@ a twelfth of the work. The corrected detector is judged on peptides first; only 
 wall time a result.
 
 exec
-/bin/bash -lc "rg -n \"detectTracesInteger_|splitValleys|splitIntegerTraces|struct PeakSlab|class PeakSlab|toSlab|struct TofAxis|class TofAxis|TofAxis|PeakSlab\" src/DIAPseudoSpectra.cpp && nl -ba test/test_spextract.py | sed -n '1,260p' && rg -n \"integer|trace|band|mass_trace|min_sample|split_valleys|trace_mz|mz_estimator\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg -n \"detectTracesInteger_|splitValleys|splitIntegerTraces|struct PeakSlab|class PeakSlab|toSlab|struct TofAxis|class TofAxis|TofAxis|PeakSlab\" src/DIAPseudoSpectra.cpp && nl -ba test/test_spextractor.py | sed -n '1,260p' && rg -n \"integer|trace|band|mass_trace|min_sample|split_valleys|trace_mz|mz_estimator\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 462:  struct TofAxis
 487:  inline TofAxis& tofAxis() { static TofAxis a; return a; }
@@ -237,7 +237,7 @@ exec
     13	                         empty-but-successful run
     14	  4. determinism         the same input at 1 and 4 threads must give byte-identical spectrum data
     15	
-    16	Usage: test_spextract.py /path/to/DIAPseudoSpectra [workdir]
+    16	Usage: test_spextractor.py /path/to/DIAPseudoSpectra [workdir]
     17	Exit status is 0 only if every check passes.
     18	"""
     19	import base64, hashlib, os, re, struct, subprocess, sys, tempfile
@@ -308,10 +308,10 @@ exec
     84	                              prec=win)); idx += 1
     85	    body = "\n".join(specs)
     86	    open(path, "w").write(f"""<?xml version="1.0" encoding="ISO-8859-1"?>
-    87	<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="spextract_test">
+    87	<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="spextractor_test">
     88	<cvList count="1"><cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/></cvList>
     89	<fileDescription><fileContent><cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/></fileContent></fileDescription>
-    90	<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextract-test"/></software></softwareList>
+    90	<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextractor-test"/></software></softwareList>
     91	<instrumentConfigurationList count="1"><instrumentConfiguration id="ic_test"><cvParam cvRef="MS" accession="MS:1000031" name="instrument model"/></instrumentConfiguration></instrumentConfigurationList>
     92	<dataProcessingList count="1"><dataProcessing id="dp_test"><processingMethod order="0" softwareRef="so_test"><cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML"/></processingMethod></dataProcessing></dataProcessingList>
     93	<run id="run_test" defaultInstrumentConfigurationRef="ic_test">
@@ -358,7 +358,7 @@ exec
    134	def main():
    135	    if len(sys.argv) < 2: sys.exit(__doc__)
    136	    binary = sys.argv[1]
-   137	    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="spextract_test_")
+   137	    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="spextractor_test_")
    138	    os.makedirs(work, exist_ok=True)
    139	    inp = os.path.join(work, "synth.mzML")
    140	    z2_mono, z1_mono = synth(inp)
@@ -781,7 +781,7 @@ exec
 codex
 The prior failure analysis confirms the known fourteen faults, but the rewrite needs a fresh audit rather than trusting its “corrected” label. I’m now checking the actual control flow, conversion math, and post-splitting reconstruction, including the surrounding `Trace::toTrace` estimator behavior.
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '80,340p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '410,940p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1400,1605p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '2960,3070p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '80,340p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '410,940p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1400,1605p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '2960,3070p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     80	  @htmlinclude TOPP_DIAPseudoSpectra.html
     81	*/
@@ -871,7 +871,7 @@ exec
    165	  std::atomic<long long> stat_prec_{0};     ///< precursors scored
    166	  bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
    167	  double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
-   168	  bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
+   168	  bool drop_prec_iso_ = std::getenv("SPEXTRACTOR_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
    169	
    170	  static std::string rss_()
    171	  {
@@ -1098,7 +1098,7 @@ exec
    461	  /// is one.
    462	  struct TofAxis
    463	  {
-   464	    spextract::TdfMzCalibration cal;
+   464	    spextractor::TdfMzCalibration cal;
    465	    vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
    466	    bool ok = false;
    467	
@@ -1242,7 +1242,7 @@ exec
    605	
    606	
    607	  /// [det] Order-insensitive 64-bit digest of a stage's numeric output, for localising
-   608	  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACT_DET=1.
+   608	  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACTOR_DET=1.
    609	  static uint64_t detDigest_(vector<uint64_t> bits)
    610	  {
    611	    std::sort(bits.begin(), bits.end());
@@ -1250,7 +1250,7 @@ exec
    613	    for (uint64_t b : bits) { h ^= b; h *= 1099511628211ULL; }
    614	    return h;
    615	  }
-   616	  static bool detOn_() { static const bool on = std::getenv("SPEXTRACT_DET") != nullptr; return on; }
+   616	  static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
    617	  static uint64_t traceDigest_(const vector<Trace>& ts)
    618	  {
    619	    vector<uint64_t> b; b.reserve(ts.size() * 3);
@@ -1894,7 +1894,7 @@ exec
   3070	          #pragma omp critical
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '450,690p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '680,875p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '870,940p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1370,1455p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '450,690p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '680,875p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '870,940p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1370,1455p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    450	  ///     digitizer temperature -- so grouping in TOF space does not have to spend part of its ppm
    451	  ///     tolerance absorbing calibration drift, which is exactly what the m/z-space tolerance does;
@@ -1910,7 +1910,7 @@ exec
    461	  /// is one.
    462	  struct TofAxis
    463	  {
-   464	    spextract::TdfMzCalibration cal;
+   464	    spextractor::TdfMzCalibration cal;
    465	    vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
    466	    bool ok = false;
    467	
@@ -2054,7 +2054,7 @@ exec
    605	
    606	
    607	  /// [det] Order-insensitive 64-bit digest of a stage's numeric output, for localising
-   608	  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACT_DET=1.
+   608	  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACTOR_DET=1.
    609	  static uint64_t detDigest_(vector<uint64_t> bits)
    610	  {
    611	    std::sort(bits.begin(), bits.end());
@@ -2062,7 +2062,7 @@ exec
    613	    for (uint64_t b : bits) { h ^= b; h *= 1099511628211ULL; }
    614	    return h;
    615	  }
-   616	  static bool detOn_() { static const bool on = std::getenv("SPEXTRACT_DET") != nullptr; return on; }
+   616	  static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
    617	  static uint64_t traceDigest_(const vector<Trace>& ts)
    618	  {
    619	    vector<uint64_t> b; b.reserve(ts.size() * 3);
@@ -2502,7 +2502,7 @@ web search:
 web search: 
 web search: 
 exec
-/bin/bash -lc "rg -n \"max_trace_length_sec|ms2_min_sample_rate|ms2_min_length_sec|trace:detector|mz_estimator\" src/DIAPseudoSpectra.cpp docs test -g '*.md' -g '*.py' | head -120; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1280,1370p'; rg -n \"TdfMzCalibration|tofToMz|mzToTof\" -S ." in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg -n \"max_trace_length_sec|ms2_min_sample_rate|ms2_min_length_sec|trace:detector|mz_estimator\" src/DIAPseudoSpectra.cpp docs test -g '*.md' -g '*.py' | head -120; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1280,1370p'; rg -n \"TdfMzCalibration|tofToMz|mzToTof\" -S ." in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 src/DIAPseudoSpectra.cpp:288:  /// Reported-m/z estimator, set once from `trace:mz_estimator` before any trace is converted.
 src/DIAPseudoSpectra.cpp:297:    // `trace:mz_estimator` -- see docs/dataset D-BASELINE.md for the comparison that chose apex.
@@ -2521,11 +2521,11 @@ src/DIAPseudoSpectra.cpp:2487:    const double max_trace_len = getDoubleOption_(
 src/DIAPseudoSpectra.cpp:2897:    const bool integer_detector = (getStringOption_("trace:detector") == "integer");
 src/DIAPseudoSpectra.cpp:2916:      writeLogError_("Error: trace:detector=integer needs the vendor flight-time calibration "
 src/DIAPseudoSpectra.cpp:2918:                     "input. Reason: " + why + ". Use trace:detector=openms, or supply a .d / an "
-test/test_spextract.py:104:           "-trace:ms2_min_length_sec", "0", "-trace:ms1_split_valleys", "0",
+test/test_spextractor.py:104:           "-trace:ms2_min_length_sec", "0", "-trace:ms1_split_valleys", "0",
 docs/MZ-AXIS-DESIGN.md:76:**Fail closed.** Without the vendor calibration there is no flight-time axis, and `trace:detector=
 docs/MZ-AXIS-DESIGN.md:157:   path stays live behind `trace:detector=openms|integer` so the two can be A/B'd on the same build.
 docs/reviews/window-loop-perf-2026-09-03/vibe.md:236:| **Change** | Lower `trace:ms2_noise_threshold_int` from **10.0 to 5.0** (line 806) + **disable `trace:ms2_min_length_sec`** (set to 0). |
-docs/reviews/release-2026-09-03/TRIAGE.md:23:| 8 | `SPEXTRACT_MZ_ESTIMATOR` set every reported precursor and fragment m/z from an undocumented env var, invisible in `--help`. | kimi | registered as `trace:mz_estimator` (apex/mean/median, default apex) with valid strings |
+docs/reviews/release-2026-09-03/TRIAGE.md:23:| 8 | `SPEXTRACTOR_MZ_ESTIMATOR` set every reported precursor and fragment m/z from an undocumented env var, invisible in `--help`. | kimi | registered as `trace:mz_estimator` (apex/mean/median, default apex) with valid strings |
 docs/reviews/window-loop-perf-2026-09-03/kimi.md:46:  1. **It traces summed frames; you trace raw ones.** the reference implementation sums adjacent cycles into a composite (m/z × 1/K0) matrix *before* peak picking (documented in your own `aggregateFrames_` header, :290-303). Point volume into its trace-equivalent stage drops ~Nx and S/N rises ~√N, so far fewer noise fragments survive. You centroid every raw frame and trace at noise 10 (:786, `ms2_min_length_sec` 0), producing up to 8.5M fragment traces in one window. Trace (48.7%) and score (46.1%) both scale with trace count — score superlinearly via candidate pairs.
 docs/reviews/integer-tracing-2026-09-03/codex.md:134:| 5 | EPD, aggregation and estimator options are bypassed | Long multimodal traces remain unsplit; `trace:frame_aggregation_n` silently does nothing; `trace:mz_estimator=median` behaves as mean. Output spectra become less coherent even if raw trace counts rise. |
 docs/reviews/integer-tracing-2026-09-03/kimi.md:27:  **Order/reporting-only differences:** seed tie-breaks (draft's (tof,index) tie-break, line 770-774, is deterministic and fine — OpenMS's stable_sort + reverse iteration is not reproducible across implementations anyway); centroid rounded to integer bins each step (line 832); reported RT is the apex frame (line 860) vs OpenMS's intensity-weighted centroid RT (`toTrace` uses `getCentroidRT`) — small, but it shifts every `gate:delta_rt` comparison downstream; `mz_estimator="median"` is silently unsupported (line 857).
@@ -2629,13 +2629,13 @@ docs/dataset D-BASELINE.md:25:`trace:ms2_min_length_sec 0`, `trace:mz_estimator 
 ./src/TdfMzCalibration.h:83:  double tofToMz(double tof, double b) const
 ./src/TdfMzCalibration.h:103:  /// m/z -> TOF index (exact inverse of tofToMz; the model is closed-form in this direction).
 ./src/TdfMzCalibration.h:104:  double mzToTof(double mz, double b) const
-./src/MzPeakStreamLoad.h:25:// TdfMzCalibration per frame. ON BY DEFAULT and fail-closed; SPEXTRACT_MZPEAK_EXACT=0 disables it and
+./src/MzPeakStreamLoad.h:25:// TdfMzCalibration per frame. ON BY DEFAULT and fail-closed; SPEXTRACTOR_MZPEAK_EXACT=0 disables it and
 ./src/MzPeakStreamLoad.h:27:#include <OpenMS/FORMAT/TdfMzCalibration.h>   // installed by the OpenMS patch (same header as src/TdfMzCalibration.h)
-./src/MzPeakStreamLoad.h:75:    spextract::TdfMzCalibration cal;
+./src/MzPeakStreamLoad.h:75:    spextractor::TdfMzCalibration cal;
 ./src/MzPeakStreamLoad.h:183:        const double e = cal.tofToMz(tof, b);
-./src/DIAPseudoSpectra.cpp:24:// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+./src/DIAPseudoSpectra.cpp:24:// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 ./src/DIAPseudoSpectra.cpp:27:#include <OpenMS/FORMAT/TdfMzCalibration.h>
-./src/DIAPseudoSpectra.cpp:464:    spextract::TdfMzCalibration cal;
+./src/DIAPseudoSpectra.cpp:464:    spextractor::TdfMzCalibration cal;
 ./src/DIAPseudoSpectra.cpp:470:    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
 ./src/DIAPseudoSpectra.cpp:473:      const double t = cal.mzToTof(mz, b);
 ./src/DIAPseudoSpectra.cpp:481:      const double t2 = cal.mzToTof(mz * (1.0 + ppm * 1e-6), b);
@@ -2649,21 +2649,21 @@ docs/dataset D-BASELINE.md:25:`trace:ms2_min_length_sec 0`, `trace:mz_estimator 
 ./scripts/sync_cluster.sh:31:ssh "$NODE" "grep -q TdfMzCalibration /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
 ./tests/test_calibration_cpp.cpp:1:// Golden test for the SHIPPED C++ calibration (src/TdfMzCalibration.h) against values produced by
 ./tests/test_calibration_cpp.cpp:4:#include "TdfMzCalibration.h"
-./tests/test_calibration_cpp.cpp:42:    spextract::TdfMzCalibration cal;
+./tests/test_calibration_cpp.cpp:42:    spextractor::TdfMzCalibration cal;
 ./tests/test_calibration_cpp.cpp:69:      const double got = cal.tofToMz(tof, b);
 ./tests/test_calibration_cpp.cpp:79:      const double back = cal.mzToTof(got, b);
-./tests/test_calibration_cpp.cpp:83:      spextract::TdfMzCalibration no_c2 = cal; no_c2.C2 = 0.0;
+./tests/test_calibration_cpp.cpp:83:      spextractor::TdfMzCalibration no_c2 = cal; no_c2.C2 = 0.0;
 ./tests/test_calibration_cpp.cpp:84:      worst_noc2 = std::fmax(worst_noc2, std::fabs(no_c2.tofToMz(tof, b) - mz) / mz * 1e6);
-./tests/test_calibration_cpp.cpp:96:  spextract::TdfMzCalibration bad;
-./tests/test_calibration_cpp.cpp:117:  spextract::TdfMzCalibration ok;
+./tests/test_calibration_cpp.cpp:96:  spextractor::TdfMzCalibration bad;
+./tests/test_calibration_cpp.cpp:117:  spextractor::TdfMzCalibration ok;
 ./tests/test_calibration_cpp.cpp:125:  const double mz_at_zero = ok.tofToMz(0.0, bb);
 ./tests/test_calibration_cpp.cpp:128:  if (!(ok.tofToMz(1e5, bb) > mz_at_zero))
-./tests/test_calibration_cpp.cpp:131:  spextract::TdfMzCalibration late = ok; late.C0 = 1e9;
+./tests/test_calibration_cpp.cpp:131:  spextractor::TdfMzCalibration late = ok; late.C0 = 1e9;
 ./tests/test_calibration_cpp.cpp:132:  if (!std::isnan(late.tofToMz(1e5, late.frameFactor(late.T1_ref))))
 ./README.md:18:scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
-./patches/openms-brukertims-mz-calibration.patch:33:+// The MODEL lives in speXtract's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
+./patches/openms-brukertims-mz-calibration.patch:33:+// The MODEL lives in speXtractor's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
 ./patches/openms-brukertims-mz-calibration.patch:38:+#include <OpenMS/FORMAT/TdfMzCalibration.h>
-./patches/openms-brukertims-mz-calibration.patch:45:+  spextract::TdfMzCalibration cal_;
+./patches/openms-brukertims-mz-calibration.patch:45:+  spextractor::TdfMzCalibration cal_;
 ./patches/openms-brukertims-mz-calibration.patch:56:+      throw std::runtime_error("TdfMzCalibration: cannot open " + tdf + ": " + why);
 ./patches/openms-brukertims-mz-calibration.patch:64:+    { sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: " + std::to_string(nrows) + " MzCalibration rows, expected exactly 1"); }
 ./patches/openms-brukertims-mz-calibration.patch:75:+          throw std::runtime_error("TdfMzCalibration: MzCalibration column " + std::to_string(col)
@@ -2676,74 +2676,74 @@ docs/dataset D-BASELINE.md:25:`trace:ms2_min_length_sec 0`, `trace:mz_estimator 
 ./patches/openms-brukertims-mz-calibration.patch:124:+    for (uint32_t i = 0; i < size; ++i) tofs[i] = (uint32_t)std::max(0.0, std::round(cal_.mzToTof(mzs[i], b))); }
 ./patches/openms-brukertims-mz-calibration.patch:125:+  std::string description() override final { return "TdfMzCalibration (ModelType 1 + temperature, exact)"; }
 ./docs/MZ-AXIS-DESIGN.md:49:   temperature -- that per-frame factor is exactly what `TdfMzCalibration::frameFactor` models, and
-./docs/MZ-AXIS-DESIGN.md:54:`spextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+./docs/MZ-AXIS-DESIGN.md:54:`spextractor::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
 ./docs/MZ-AXIS-DESIGN.md:55:`mzToTof(mz, b)`, plus `frameFactor(T1)`. So the axis is:
-./docs/MZ-AXIS-DESIGN.md:60:  spextract::TdfMzCalibration cal;
-./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1101:   464	    spextract::TdfMzCalibration cal;
+./docs/MZ-AXIS-DESIGN.md:60:  spextractor::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1101:   464	    spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1107:   470	    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
 ./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1110:   473	      const double t = cal.mzToTof(mz, b);
 ./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1118:   481	      const double t2 = cal.mzToTof(mz * (1.0 + ppm * 1e-6), b);
-./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1913:   464	    spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1913:   464	    spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1919:   470	    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
 ./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1922:   473	      const double t = cal.mzToTof(mz, b);
 ./docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript:1930:   481	      const double t2 = cal.mzToTof(mz * (1.0 + ppm * 1e-6), b);
 ./docs/reviews/integer-tracing-2026-09-03/codex.md:156:   - For m/z, measure the residual `abs(mzToTof(picked_mz)-round(...))` before rounding and the resulting ppm error after round-trip.
 ./docs/reviews/release-2026-09-03/kimi.err:32:  Also README build instructions: `build/DIAPseudoSpectra` but CMakeLists doesn't show how to build standalone beyond `cmake -DOpenMS_DIR=...`. README says "then rebuild the OpenMS DIAPseudoSpectra target" — contradictory with "standalone application, lives outside the OpenMS source tree"! The README Build section says apply patches to OpenMS and "rebuild the OpenMS DIAPseudoSpectra target" — but the tool is standalone per CMakeLists comment. That's an inconsistency worth flagging: the apply_openms_patches.sh installs src/TdfMzCalibration.h + patches into OpenMS; but where does DIAPseudoSpectra get built? CMakeLists exists for standalone. README never gives the actual cmake commands for building this repo. Gap.
-./docs/reviews/release-2026-09-03/kimi.err:116:  Env vars in code: SPEXTRACT_DROP_PREC_ISO, SPEXTRACT_MZ_ESTIMATOR, SPEXTRACT_DET, SPEXTRACT_PICK_SERIAL, SPEXTRACT_PICK_STATIC, SPEXTRACT_PICK_BATCH, SPEXTRACT_PICK_MZ_MODE, SPEXTRACT_LOAD_ONLY, SPEXTRACT_MIN_ISOTOPES, SPEXTRACT_PRECURSOR_LIST, SPEXTRACT_MZPEAK_EXACT, SPEXTRACT_MZPEAK_TDF, SPEXTRACT_ALLOW_CHORD_FALLBACK (in TdfMzCalibration.h presumably), SPEXTRACT_BACKFILL_RAW?, SPEXTRACT_ISO_COLLAPSE? Need grep.
-./docs/reviews/release-2026-09-03/kimi.err:120:  1. `SPEXTRACT_ISO_COLLAPSE` and `SPEXTRACT_BACKFILL_RAW` / `SPEXTRACT_BACKFILL_MAXFRAGS` are documented in CHANGELOG (Unreleased → "Added") but DO NOT EXIST in the source. Grep of getenv in src/ shows neither. So the CHANGELOG claims features that aren't in the code. That's a doc-vs-code inconsistency — maybe implemented elsewhere? Let me grep the whole src for "ISO_COLLAPSE" and "BACKFILL" to be sure (could be non-getenv via Param?). Also `SPEXTRACT_ALLOW_CHORD_FALLBACK` lives in TdfMzCalibration.h (src/TdfMzCalibration.h) — outside the two files but fine.
+./docs/reviews/release-2026-09-03/kimi.err:116:  Env vars in code: SPEXTRACTOR_DROP_PREC_ISO, SPEXTRACTOR_MZ_ESTIMATOR, SPEXTRACTOR_DET, SPEXTRACTOR_PICK_SERIAL, SPEXTRACTOR_PICK_STATIC, SPEXTRACTOR_PICK_BATCH, SPEXTRACTOR_PICK_MZ_MODE, SPEXTRACTOR_LOAD_ONLY, SPEXTRACTOR_MIN_ISOTOPES, SPEXTRACTOR_PRECURSOR_LIST, SPEXTRACTOR_MZPEAK_EXACT, SPEXTRACTOR_MZPEAK_TDF, SPEXTRACTOR_ALLOW_CHORD_FALLBACK (in TdfMzCalibration.h presumably), SPEXTRACTOR_BACKFILL_RAW?, SPEXTRACTOR_ISO_COLLAPSE? Need grep.
+./docs/reviews/release-2026-09-03/kimi.err:120:  1. `SPEXTRACTOR_ISO_COLLAPSE` and `SPEXTRACTOR_BACKFILL_RAW` / `SPEXTRACTOR_BACKFILL_MAXFRAGS` are documented in CHANGELOG (Unreleased → "Added") but DO NOT EXIST in the source. Grep of getenv in src/ shows neither. So the CHANGELOG claims features that aren't in the code. That's a doc-vs-code inconsistency — maybe implemented elsewhere? Let me grep the whole src for "ISO_COLLAPSE" and "BACKFILL" to be sure (could be non-getenv via Param?). Also `SPEXTRACTOR_ALLOW_CHORD_FALLBACK` lives in TdfMzCalibration.h (src/TdfMzCalibration.h) — outside the two files but fine.
 ./docs/reviews/release-2026-09-03/kimi.err:248:  1. tests/test_calibration_cpp.cpp exists for the calibration header — but does CI test the main tool? .github/workflows/tests.yml exists per CHANGELOG. Q5 asks about unit tests for the tool itself: none. tests/ covers TdfMzCalibration + entrapment estimator only.
-./docs/reviews/release-2026-09-03/codex.transcript:654:    25	// TdfMzCalibration per frame. Enabled with SPEXTRACT_MZPEAK_EXACT=1.
+./docs/reviews/release-2026-09-03/codex.transcript:654:    25	// TdfMzCalibration per frame. Enabled with SPEXTRACTOR_MZPEAK_EXACT=1.
 ./docs/reviews/release-2026-09-03/codex.transcript:655:    26	#include <OpenMS/FORMAT/TdfMzCalibration.h>   // installed by the OpenMS patch (same header as src/TdfMzCalibration.h)
-./docs/reviews/release-2026-09-03/codex.transcript:703:    74	    spextract::TdfMzCalibration cal;
+./docs/reviews/release-2026-09-03/codex.transcript:703:    74	    spextractor::TdfMzCalibration cal;
 ./docs/reviews/release-2026-09-03/codex.transcript:802:   173	        const double e = cal.tofToMz(tof, b);
 ./docs/reviews/release-2026-09-03/codex.transcript:1003:    18	scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
 ./docs/reviews/release-2026-09-03/codex.transcript:5150:   173	        const double e = cal.tofToMz(tof, b);
 ./docs/reviews/release-2026-09-03/codex.transcript:5359:    18	scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
 ./docs/reviews/release-2026-09-03/codex.transcript:5744:src/TdfMzCalibration.h
-./docs/reviews/release-2026-09-03/codex.transcript:5877:src/MzPeakStreamLoad.h:25:// TdfMzCalibration per frame. Enabled with SPEXTRACT_MZPEAK_EXACT=1.
+./docs/reviews/release-2026-09-03/codex.transcript:5877:src/MzPeakStreamLoad.h:25:// TdfMzCalibration per frame. Enabled with SPEXTRACTOR_MZPEAK_EXACT=1.
 ./docs/reviews/release-2026-09-03/codex.transcript:7279:    18	install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h"
 ./docs/reviews/release-2026-09-03/codex.transcript:7280:    19	echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:29:  flight-time bin (the vendor calibration is exact and invertible, `TdfMzCalibration`); ion mobility
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:255:// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:255:// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:258:#include <OpenMS/FORMAT/TdfMzCalibration.h>
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:594:/bin/bash -lc "rg -n \"materializeWindow|MassTraceDetection|runMassTrace|detect|trace:|min_sample|noise_threshold|chrom_peak_snr|setParameters|TdfMzCalibration|tof|mobility|scan|window|task|worker\" src/DIAPseudoSpectra.cpp CMakeLists.txt cmake .github docs -g '"'!docs/INTEGER-TRACING-DESIGN.md'"'" in /Users/kohlbach/Claude/speXtract
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:600:src/DIAPseudoSpectra.cpp:24:// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:594:/bin/bash -lc "rg -n \"materializeWindow|MassTraceDetection|runMassTrace|detect|trace:|min_sample|noise_threshold|chrom_peak_snr|setParameters|TdfMzCalibration|tof|mobility|scan|window|task|worker\" src/DIAPseudoSpectra.cpp CMakeLists.txt cmake .github docs -g '"'!docs/INTEGER-TRACING-DESIGN.md'"'" in /Users/kohlbach/Claude/speXtractor
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:600:src/DIAPseudoSpectra.cpp:24:// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:601:src/DIAPseudoSpectra.cpp:27:#include <OpenMS/FORMAT/TdfMzCalibration.h>
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:632:src/DIAPseudoSpectra.cpp:464:    spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:632:src/DIAPseudoSpectra.cpp:464:    spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:633:src/DIAPseudoSpectra.cpp:470:    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1058:docs/MZ-AXIS-DESIGN.md:49:   temperature -- that per-frame factor is exactly what `TdfMzCalibration::frameFactor` models, and
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1059:docs/MZ-AXIS-DESIGN.md:54:`spextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1060:docs/MZ-AXIS-DESIGN.md:60:  spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1059:docs/MZ-AXIS-DESIGN.md:54:`spextractor::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1060:docs/MZ-AXIS-DESIGN.md:60:  spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1537:docs/reviews/integer-tracing-2026-09-03/codex.transcript:29:  flight-time bin (the vendor calibration is exact and invertible, `TdfMzCalibration`); ion mobility
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1587:docs/reviews/integer-tracing-2026-09-03/codex.transcript:255:// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1587:docs/reviews/integer-tracing-2026-09-03/codex.transcript:255:// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1588:docs/reviews/integer-tracing-2026-09-03/codex.transcript:258:#include <OpenMS/FORMAT/TdfMzCalibration.h>
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:1992:docs/reviews/release-2026-09-03/kimi.err:32:  Also README build instructions: `build/DIAPseudoSpectra` but CMakeLists doesn't show how to build standalone beyond `cmake -DOpenMS_DIR=...`. README says "then rebuild the OpenMS DIAPseudoSpectra target" — contradictory with "standalone application, lives outside the OpenMS source tree"! The README Build section says apply patches to OpenMS and "rebuild the OpenMS DIAPseudoSpectra target" — but the tool is standalone per CMakeLists comment. That's an inconsistency worth flagging: the apply_openms_patches.sh installs src/TdfMzCalibration.h + patches into OpenMS; but where does DIAPseudoSpectra get built? CMakeLists exists for standalone. README never gives the actual cmake commands for building this repo. Gap.
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:2000:docs/reviews/release-2026-09-03/kimi.err:116:  Env vars in code: SPEXTRACT_DROP_PREC_ISO, SPEXTRACT_MZ_ESTIMATOR, SPEXTRACT_DET, SPEXTRACT_PICK_SERIAL, SPEXTRACT_PICK_STATIC, SPEXTRACT_PICK_BATCH, SPEXTRACT_PICK_MZ_MODE, SPEXTRACT_LOAD_ONLY, SPEXTRACT_MIN_ISOTOPES, SPEXTRACT_PRECURSOR_LIST, SPEXTRACT_MZPEAK_EXACT, SPEXTRACT_MZPEAK_TDF, SPEXTRACT_ALLOW_CHORD_FALLBACK (in TdfMzCalibration.h presumably), SPEXTRACT_BACKFILL_RAW?, SPEXTRACT_ISO_COLLAPSE? Need grep.
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:2001:docs/reviews/release-2026-09-03/kimi.err:120:  1. `SPEXTRACT_ISO_COLLAPSE` and `SPEXTRACT_BACKFILL_RAW` / `SPEXTRACT_BACKFILL_MAXFRAGS` are documented in CHANGELOG (Unreleased → "Added") but DO NOT EXIST in the source. Grep of getenv in src/ shows neither. So the CHANGELOG claims features that aren't in the code. That's a doc-vs-code inconsistency — maybe implemented elsewhere? Let me grep the whole src for "ISO_COLLAPSE" and "BACKFILL" to be sure (could be non-getenv via Param?). Also `SPEXTRACT_ALLOW_CHORD_FALLBACK` lives in TdfMzCalibration.h (src/TdfMzCalibration.h) — outside the two files but fine.
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:2000:docs/reviews/release-2026-09-03/kimi.err:116:  Env vars in code: SPEXTRACTOR_DROP_PREC_ISO, SPEXTRACTOR_MZ_ESTIMATOR, SPEXTRACTOR_DET, SPEXTRACTOR_PICK_SERIAL, SPEXTRACTOR_PICK_STATIC, SPEXTRACTOR_PICK_BATCH, SPEXTRACTOR_PICK_MZ_MODE, SPEXTRACTOR_LOAD_ONLY, SPEXTRACTOR_MIN_ISOTOPES, SPEXTRACTOR_PRECURSOR_LIST, SPEXTRACTOR_MZPEAK_EXACT, SPEXTRACTOR_MZPEAK_TDF, SPEXTRACTOR_ALLOW_CHORD_FALLBACK (in TdfMzCalibration.h presumably), SPEXTRACTOR_BACKFILL_RAW?, SPEXTRACTOR_ISO_COLLAPSE? Need grep.
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:2001:docs/reviews/release-2026-09-03/kimi.err:120:  1. `SPEXTRACTOR_ISO_COLLAPSE` and `SPEXTRACTOR_BACKFILL_RAW` / `SPEXTRACTOR_BACKFILL_MAXFRAGS` are documented in CHANGELOG (Unreleased → "Added") but DO NOT EXIST in the source. Grep of getenv in src/ shows neither. So the CHANGELOG claims features that aren't in the code. That's a doc-vs-code inconsistency — maybe implemented elsewhere? Let me grep the whole src for "ISO_COLLAPSE" and "BACKFILL" to be sure (could be non-getenv via Param?). Also `SPEXTRACTOR_ALLOW_CHORD_FALLBACK` lives in TdfMzCalibration.h (src/TdfMzCalibration.h) — outside the two files but fine.
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:2018:docs/reviews/release-2026-09-03/kimi.err:248:  1. tests/test_calibration_cpp.cpp exists for the calibration header — but does CI test the main tool? .github/workflows/tests.yml exists per CHANGELOG. Q5 asks about unit tests for the tool itself: none. tests/ covers TdfMzCalibration + entrapment estimator only.
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4062:docs/reviews/release-2026-09-03/codex.transcript:654:    25	// TdfMzCalibration per frame. Enabled with SPEXTRACT_MZPEAK_EXACT=1.
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4062:docs/reviews/release-2026-09-03/codex.transcript:654:    25	// TdfMzCalibration per frame. Enabled with SPEXTRACTOR_MZPEAK_EXACT=1.
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4063:docs/reviews/release-2026-09-03/codex.transcript:655:    26	#include <OpenMS/FORMAT/TdfMzCalibration.h>   // installed by the OpenMS patch (same header as src/TdfMzCalibration.h)
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4065:docs/reviews/release-2026-09-03/codex.transcript:703:    74	    spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4065:docs/reviews/release-2026-09-03/codex.transcript:703:    74	    spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4073:docs/reviews/release-2026-09-03/codex.transcript:802:   173	        const double e = cal.tofToMz(tof, b);
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4091:docs/reviews/release-2026-09-03/codex.transcript:1003:    18	scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4456:docs/reviews/release-2026-09-03/codex.transcript:5150:   173	        const double e = cal.tofToMz(tof, b);
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4475:docs/reviews/release-2026-09-03/codex.transcript:5359:    18	scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4483:docs/reviews/release-2026-09-03/codex.transcript:5744:src/TdfMzCalibration.h
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4521:docs/reviews/release-2026-09-03/codex.transcript:5877:src/MzPeakStreamLoad.h:25:// TdfMzCalibration per frame. Enabled with SPEXTRACT_MZPEAK_EXACT=1.
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4521:docs/reviews/release-2026-09-03/codex.transcript:5877:src/MzPeakStreamLoad.h:25:// TdfMzCalibration per frame. Enabled with SPEXTRACTOR_MZPEAK_EXACT=1.
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4564:docs/reviews/release-2026-09-03/codex.transcript:7279:    18	install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h"
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4565:docs/reviews/release-2026-09-03/codex.transcript:7280:    19	echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4675:    spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4675:    spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4681:    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4684:      const double t = cal.mzToTof(mz, b);
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:4692:      const double t2 = cal.mzToTof(mz * (1.0 + ppm * 1e-6), b);
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:7384:README.md:18:scripts/apply_openms_patches.sh /path/to/OpenMS      # installs src/TdfMzCalibration.h + patches
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:7416:./src/TdfMzCalibration.h
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:8266:    49	   temperature -- that per-frame factor is exactly what `TdfMzCalibration::frameFactor` models, and
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:8271:    54	`spextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:8271:    54	`spextractor::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:8272:    55	`mzToTof(mz, b)`, plus `frameFactor(T1)`. So the axis is:
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:8277:    60	  spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:8277:    60	  spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:10876:docs/reviews/integer-tracing-2026-09-03/codex.transcript-1537-docs/reviews/integer-tracing-2026-09-03/codex.transcript:29:  flight-time bin (the vendor calibration is exact and invertible, `TdfMzCalibration`); ion mobility
-./docs/reviews/integer-tracing-2026-09-03/codex.transcript:12256:   464	    spextract::TdfMzCalibration cal;
+./docs/reviews/integer-tracing-2026-09-03/codex.transcript:12256:   464	    spextractor::TdfMzCalibration cal;
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:12262:   470	    double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:12265:   473	      const double t = cal.mzToTof(mz, b);
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:12273:   481	      const double t2 = cal.mzToTof(mz * (1.0 + ppm * 1e-6), b);
@@ -2751,7 +2751,7 @@ docs/dataset D-BASELINE.md:25:`trace:ms2_min_length_sec 0`, `trace:mz_estimator 
 ./docs/reviews/integer-tracing-2026-09-03/codex.transcript:12671:   - For m/z, measure the residual `abs(mzToTof(picked_mz)-round(...))` before rounding and the resulting ppm error after round-trip.
 
 exec
-/bin/bash -lc 'find docs/reviews/integer-tracing-v2-2026-09-03 -maxdepth 1 -type f -print | sort; for f in docs/reviews/integer-tracing-v2-2026-09-03/*.md; do echo "$f"; sed -n '"'1,260p' \""'$f"; done' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'find docs/reviews/integer-tracing-v2-2026-09-03 -maxdepth 1 -type f -print | sort; for f in docs/reviews/integer-tracing-v2-2026-09-03/*.md; do echo "$f"; sed -n '"'1,260p' \""'$f"; done' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 docs/reviews/integer-tracing-v2-2026-09-03/codex.transcript
 docs/reviews/integer-tracing-v2-2026-09-03/kimi.err
@@ -2774,9 +2774,9 @@ web search: https://raw.githubusercontent.com/OpenMS/OpenMS/develop/src/openms/s
 web search: 
 web search: https://raw.githubusercontent.com/OpenMS/OpenMS/develop/src/openms/include/OpenMS/FEATUREFINDER/MassTrace.h
 exec
-/bin/bash -lc 'for d in /usr/local/include /opt/homebrew/include /Users/kohlbach/Claude; do find "$d" -path '"'*OpenMS*MassTrace.h' -o -path '*OpenMS*MassTrace.cpp' 2>/dev/null; done | head -20; git status --short; sed -n '1,220p' docs/MZ-AXIS-DESIGN.md; nl -ba src/TdfMzCalibration.h | sed -n '1,260p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'for d in /usr/local/include /opt/homebrew/include /Users/kohlbach/Claude; do find "$d" -path '"'*OpenMS*MassTrace.h' -o -path '*OpenMS*MassTrace.cpp' 2>/dev/null; done | head -20; git status --short; sed -n '1,220p' docs/MZ-AXIS-DESIGN.md; nl -ba src/TdfMzCalibration.h | sed -n '1,260p'" in /Users/kohlbach/Claude/speXtractor
 exec
-/bin/bash -lc "git status --short && sed -n '1,220p' docs/MZ-AXIS-DESIGN.md && nl -ba src/TdfMzCalibration.h | sed -n '1,280p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "git status --short && sed -n '1,220p' docs/MZ-AXIS-DESIGN.md && nl -ba src/TdfMzCalibration.h | sed -n '1,280p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 1912ms:
 2026-09-03 20:55:01.646 xcodebuild[13641:41740407]  DVTFilePathFSEvents: Failed to start fs event stream.
 2026-09-03 20:55:01.863 xcodebuild[13641:41740404] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
@@ -2838,13 +2838,13 @@ Three reasons the native axis is better in kind, not merely smaller:
    of the ppm tolerance is spent absorbing that drift. In bin space it is not spent at all.
 3. **An index of 5e5 is a usable subscript.** 1.7e8 is not.
 
-`spextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+`spextractor::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
 `mzToTof(mz, b)`, plus `frameFactor(T1)`. So the axis is:
 
 ```cpp
 using TofIdx = uint32_t;
 struct TofAxis {
-  spextract::TdfMzCalibration cal;
+  spextractor::TdfMzCalibration cal;
   vector<double> b_by_frame;     // per vendor frame Id
   double factor(size_t frame_id) const;
   double mzOf(TofIdx tof, double b) const;      // report time only
@@ -2967,7 +2967,7 @@ Against the current head, on dataset D and dataset A, 100 threads, same node:
 peak memory improves by more than the ~2% replicate spread, then the double conversions were never
 the cost and the remaining time is genuinely in the detector's arithmetic -- in which case step 3 is
 the only thing worth doing, and it should be judged on its own.
-     1	// Copyright (c) 2026, speXtract authors. BSD-3-Clause.
+     1	// Copyright (c) 2026, speXtractor authors. BSD-3-Clause.
      2	//
      3	// Exact TOF -> m/z conversion for Bruker TDF (timsTOF) data, ModelType 1.
      4	//
@@ -3002,7 +3002,7 @@ the only thing worth doing, and it should be judged on its own.
     33	#include <limits>
     34	#include <string>
     35	
-    36	namespace spextract
+    36	namespace spextractor
     37	{
     38	
     39	/// Constants as stored in the TDF `MzCalibration` row plus the per-frame digitizer temperature.
@@ -3077,10 +3077,10 @@ the only thing worth doing, and it should be judged on its own.
    108	  }
    109	};
    110	
-   111	} // namespace spextract
+   111	} // namespace spextractor
 
 exec
-/bin/bash -lc "rg -n \"compactify\\(|PeakPicker|pickExperiment|pickSpectrum|picked|peak picker|mzPeak\" src/DIAPseudoSpectra.cpp | head -160; nl -ba src/DIAPseudoSpectra.cpp | sed -n '2320,2480p'; nl -ba src/MzPeakStreamLoad.h | sed -n '130,205p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg -n \"compactify\\(|PeakPicker|pickExperiment|pickSpectrum|picked|peak picker|mzPeak\" src/DIAPseudoSpectra.cpp | head -160; nl -ba src/DIAPseudoSpectra.cpp | sed -n '2320,2480p'; nl -ba src/MzPeakStreamLoad.h | sed -n '130,205p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 25:// OpenMS patch and already included via the mzPeak loader; including the in-tree copy as well
 29:#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
@@ -3101,14 +3101,14 @@ exec
 2384:    // Peak-pick (centroid) all IM frames in PARALLEL. PeakPickerIM is firstprivate so each thread
 2428:        ms2_by_window[winKey(lo, hi)].push_back(compactify(s, cstat));
 2443:      writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
-2902:      // mzPeak archive can be accompanied by one (SPEXTRACT_MZPEAK_TDF, as the exact-calibration
+2902:      // mzPeak archive can be accompanied by one (SPEXTRACTOR_MZPEAK_TDF, as the exact-calibration
 2919:                     "mzPeak archive with its tdf.");
   2320	      PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
   2321	      try
   2322	      {
   2323	        if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
   2324	        {
-  2325	#ifdef SPEXTRACT_WITH_MZPEAK
+  2325	#ifdef SPEXTRACTOR_WITH_MZPEAK
   2326	          spx::loadMzPeakStreaming(in, consumer, getIntOption_("threads"));   // consumer counts frames itself
   2327	#else
   2328	          throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
@@ -3121,7 +3121,7 @@ exec
   2335	        phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
   2336	        if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
   2337	        writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-  2338	        if (std::getenv("SPEXTRACT_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+  2338	        if (std::getenv("SPEXTRACTOR_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
   2339	        writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
   2340	                      + " frames, MS1 " + String(ms1_map.size()) + ", windows "
   2341	                      + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -3364,7 +3364,7 @@ git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEM
 git: error: couldn't create cache file '/tmp/xcrun_db-y1zwPQ0O' (errno=Operation not permitted)
 2026-09-03 20:55:21.059 xcodebuild[13844:41741257]  DVTFilePathFSEvents: Failed to start fs event stream.
 2026-09-03 20:55:21.173 xcodebuild[13844:41741253] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
- M test/test_spextract.py
+ M test/test_spextractor.py
 ?? docs/reviews/integer-tracing-v2-2026-09-03/
 # A global discrete m/z axis: design
 
@@ -3419,13 +3419,13 @@ Three reasons the native axis is better in kind, not merely smaller:
    of the ppm tolerance is spent absorbing that drift. In bin space it is not spent at all.
 3. **An index of 5e5 is a usable subscript.** 1.7e8 is not.
 
-`spextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+`spextractor::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
 `mzToTof(mz, b)`, plus `frameFactor(T1)`. So the axis is:
 
 ```cpp
 using TofIdx = uint32_t;
 struct TofAxis {
-  spextract::TdfMzCalibration cal;
+  spextractor::TdfMzCalibration cal;
   vector<double> b_by_frame;     // per vendor frame Id
   double factor(size_t frame_id) const;
   double mzOf(TofIdx tof, double b) const;      // report time only
@@ -3548,7 +3548,7 @@ Against the current head, on dataset D and dataset A, 100 threads, same node:
 peak memory improves by more than the ~2% replicate spread, then the double conversions were never
 the cost and the remaining time is genuinely in the detector's arithmetic -- in which case step 3 is
 the only thing worth doing, and it should be judged on its own.
-     1	// Copyright (c) 2026, speXtract authors. BSD-3-Clause.
+     1	// Copyright (c) 2026, speXtractor authors. BSD-3-Clause.
      2	//
      3	// Exact TOF -> m/z conversion for Bruker TDF (timsTOF) data, ModelType 1.
      4	//
@@ -3583,7 +3583,7 @@ the only thing worth doing, and it should be judged on its own.
     33	#include <limits>
     34	#include <string>
     35	
-    36	namespace spextract
+    36	namespace spextractor
     37	{
     38	
     39	/// Constants as stored in the TDF `MzCalibration` row plus the per-frame digitizer temperature.
@@ -3658,10 +3658,10 @@ the only thing worth doing, and it should be judged on its own.
    108	  }
    109	};
    110	
-   111	} // namespace spextract
+   111	} // namespace spextractor
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '929,1070p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1278,1322p'; nl -ba test/test_spextract.py | sed -n '1,210p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '929,1070p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1278,1322p'; nl -ba test/test_spextractor.py | sed -n '1,210p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    929	  /// Rebuild a PeakMap for ONE window from its compact frames, for MassTraceDetection.
    930	  /// Frames are consumed (cleared) as they are materialised so the compact store shrinks in step.
@@ -3732,13 +3732,13 @@ exec
    995	      std::vector<CompactFrame> compacted((size_t)n);
    996	      std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
    997	      PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
-   998	      // SPEXTRACT_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
+   998	      // SPEXTRACTOR_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
    999	      // scheduling-sensitivity from downstream chaos (kimi, plan review). [pick-det]
-  1000	      static const bool par_pick = std::getenv("SPEXTRACT_PICK_SERIAL") == nullptr;
-  1001	      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACT_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
+  1000	      static const bool par_pick = std::getenv("SPEXTRACTOR_PICK_SERIAL") == nullptr;
+  1001	      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACTOR_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
   1002	      std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
   1003	      // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers (codex, plan review)
-  1004	      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACT_PICK_STATIC=1 -> static (history-vs-race probe)
+  1004	      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACTOR_PICK_STATIC=1 -> static (history-vs-race probe)
   1005	      for (int i = 0; i < n; ++i)
   1006	      {
   1007	        try
@@ -3865,7 +3865,7 @@ exec
     13	                         empty-but-successful run
     14	  4. determinism         the same input at 1 and 4 threads must give byte-identical spectrum data
     15	
-    16	Usage: test_spextract.py /path/to/DIAPseudoSpectra [workdir]
+    16	Usage: test_spextractor.py /path/to/DIAPseudoSpectra [workdir]
     17	Exit status is 0 only if every check passes.
     18	"""
     19	import base64, hashlib, os, re, struct, subprocess, sys, tempfile
@@ -3946,10 +3946,10 @@ exec
     94	                              prec=win)); idx += 1
     95	    body = "\n".join(specs)
     96	    open(path, "w").write(f"""<?xml version="1.0" encoding="ISO-8859-1"?>
-    97	<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="spextract_test">
+    97	<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="spextractor_test">
     98	<cvList count="1"><cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/></cvList>
     99	<fileDescription><fileContent><cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/></fileContent></fileDescription>
-   100	<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextract-test"/></software></softwareList>
+   100	<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextractor-test"/></software></softwareList>
    101	<instrumentConfigurationList count="1"><instrumentConfiguration id="ic_test"><cvParam cvRef="MS" accession="MS:1000031" name="instrument model"/></instrumentConfiguration></instrumentConfigurationList>
    102	<dataProcessingList count="1"><dataProcessing id="dp_test"><processingMethod order="0" softwareRef="so_test"><cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML"/></processingMethod></dataProcessing></dataProcessingList>
    103	<run id="run_test" defaultInstrumentConfigurationRef="ic_test">
@@ -4025,7 +4025,7 @@ exec
    173	def main():
    174	    if len(sys.argv) < 2: sys.exit(__doc__)
    175	    binary = sys.argv[1]
-   176	    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="spextract_test_")
+   176	    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="spextractor_test_")
    177	    os.makedirs(work, exist_ok=True)
    178	    inp = os.path.join(work, "synth.mzML")
    179	    z2_mono, z1_mono = synth(inp)
@@ -4063,7 +4063,7 @@ exec
 
 ERROR: Reconnecting... 2/5
 exec
-/bin/bash -lc "nl -ba test/test_spextract.py | sed -n '205,330p'; stat -f '%Sm %z %N' test/test_spextract.py src/DIAPseudoSpectra.cpp docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md 2>/dev/null || stat -c '%y %s %n' test/test_spextract.py src/DIAPseudoSpectra.cpp docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba test/test_spextractor.py | sed -n '205,330p'; stat -f '%Sm %z %N' test/test_spextractor.py src/DIAPseudoSpectra.cpp docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md 2>/dev/null || stat -c '%y %s %n' test/test_spextractor.py src/DIAPseudoSpectra.cpp docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    205	
    206	    out_z1 = os.path.join(work, "z1.mzML")
@@ -4123,12 +4123,12 @@ exec
    260	
    261	if __name__ == "__main__":
    262	    sys.exit(main())
-Sep  3 20:55:20 2026 14722 test/test_spextract.py
+Sep  3 20:55:20 2026 14722 test/test_spextractor.py
 Sep  3 20:51:17 2026 221380 src/DIAPseudoSpectra.cpp
 Sep  3 20:52:20 2026 4201 docs/reviews/integer-tracing-2026-09-03/FAILURE-ANALYSIS.md
 
 exec
-/bin/bash -lc "rg -n \"setNativeID|mzpeak=\" src/MzPeakStreamLoad.h patches src | head -100; rg -n \"frameIdOf|factor\\(0\\)|b_of_rt\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg -n \"setNativeID|mzpeak=\" src/MzPeakStreamLoad.h patches src | head -100; rg -n \"frameIdOf|factor\\(0\\)|b_of_rt\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 src/MzPeakStreamLoad.h:222:      spec.setNativeID("mzpeak=" + std::to_string(frame_idx) + " window=" + std::to_string(w));
 src/MzPeakStreamLoad.h:222:      spec.setNativeID("mzpeak=" + std::to_string(frame_idx) + " window=" + std::to_string(w));
@@ -4144,7 +4144,7 @@ patches/openms-brukertims-mz-calibration.patch:433:+            spec.setNativeID
 922:      t.b = it != b_of_rt.end() ? it->second : ax.factor(0);
 
 exec
-/bin/bash -lc "nl -ba src/MzPeakStreamLoad.h | sed -n '190,245p'; nl -ba src/MzPeakStreamLoad.h | sed -n '245,360p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/MzPeakStreamLoad.h | sed -n '190,245p'; nl -ba src/MzPeakStreamLoad.h | sed -n '245,360p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    190	  };
    191	
@@ -4232,16 +4232,16 @@ exec
    272	    std::unique_ptr<MzPeakExactMz> exact;
    273	    // DEFAULT ON (2026-09-02 18:58): with the exact model recovered from the tdf, mzPeak input gives 12,082 Sage
    274	    // peptides vs 10,785 with the archive's two-point transform (and 12,217 from .d): the transform was 91% of the
-   275	    // loss. Fail closed like the .d path: no tdf (embedded or SPEXTRACT_MZPEAK_TDF sidecar) -> error, unless
-   276	    // SPEXTRACT_MZPEAK_EXACT=0 explicitly accepts the two-point m/z.
-   277	    const char* ex = std::getenv("SPEXTRACT_MZPEAK_EXACT");
+   275	    // loss. Fail closed like the .d path: no tdf (embedded or SPEXTRACTOR_MZPEAK_TDF sidecar) -> error, unless
+   276	    // SPEXTRACTOR_MZPEAK_EXACT=0 explicitly accepts the two-point m/z.
+   277	    const char* ex = std::getenv("SPEXTRACTOR_MZPEAK_EXACT");
    278	    if (!(ex && std::string(ex) == "0"))
    279	    {
    280	      try { exact = std::make_unique<MzPeakExactMz>(path); }
    281	      catch (const std::exception& e)
    282	      {
    283	        throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-   284	          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set SPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or SPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
+   284	          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set SPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz> or SPEXTRACTOR_MZPEAK_EXACT=0 to accept it.", path);
    285	      }
    286	      lastMzPeakCalibration() = "tdf_table_modeltype1 (recovered from the archive's two-point transform + embedded vendor/analysis.tdf.gz) archive=" + path.substr(path.find_last_of('/') + 1);
    287	    }
@@ -4320,7 +4320,7 @@ exec
    360	            // [adv-review codex 2026-09-03]
 
 exec
-/bin/bash -lc "nl -ba src/MzPeakStreamLoad.h | sed -n '355,410p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/MzPeakStreamLoad.h | sed -n '355,410p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    355	            MzPeak::Spectra tsp = tidx->spectra();
    356	            std::vector<std::size_t> want(ids.begin() + (std::ptrdiff_t)c0, ids.begin() + (std::ptrdiff_t)c1);
@@ -4352,10 +4352,10 @@ exec
    382	    return ms1.size() + ms2.size();
    383	  }
    384	} // namespace spx
-   385	#endif // SPEXTRACT_WITH_MZPEAK
+   385	#endif // SPEXTRACTOR_WITH_MZPEAK
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2160,2205p'; rg -n \"exportMz_\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '2160,2205p'; rg -n \"exportMz_\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   2160	      chk(lf > ls, "levels scale with sampling (finer dt -> more levels)");
   2161	      chk(atrousLevels(fast, 0.0) == 0, "scale 0 disables smoothing");
@@ -4412,7 +4412,7 @@ exec
 codex
 The control-flow rewrite is substantially closer, but it is not faithful. The largest remaining semantic problem is now post-trace: OpenMS recomputes trace m/z from the actual peaks, whereas the integer path stores the search centroid, then fabricates every EPD peak at that one m/z. I’m finishing the boundary/banding analysis and turning this into the five requested sections with SET/COORD/ORDER labels.
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '3078,3095p'; nl -ba test/test_spextract.py | sed -n '108,120p'; nl -ba test/test_spextract.py | sed -n '232,258p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '3078,3095p'; nl -ba test/test_spextractor.py | sed -n '108,120p'; nl -ba test/test_spextractor.py | sed -n '232,258p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   3078	          frag_traces = detectTraces_(wmap, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, max_trace_len, ms2_split, &ms2_span, w_bands);
   3079	        if (detOn_())
@@ -4474,7 +4474,7 @@ exec
    258	            if want == 1:
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '3090,3120p'; nl -ba test/test_spextract.py | sed -n '118,130p'; stat -f '%Sm %z %N' test/test_spextract.py src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '3090,3120p'; nl -ba test/test_spextractor.py | sed -n '118,130p'; stat -f '%Sm %z %N' test/test_spextractor.py src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
   3090	
   3091	        frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
@@ -4520,16 +4520,16 @@ exec
    128	    return r
    129	
    130	
-Sep  3 20:56:38 2026 15484 test/test_spextract.py
+Sep  3 20:56:38 2026 15484 test/test_spextractor.py
 Sep  3 20:57:46 2026 222036 src/DIAPseudoSpectra.cpp
 
 codex
 The workspace is changing underneath this review: `DIAPseudoSpectra.cpp` and the test were modified after I read them. I’m re-reading the live function now so the cited lines and verdict describe the version actually present at handoff, not a stale snapshot.
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '630,950p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '2980,3080p'; git diff -- src/DIAPseudoSpectra.cpp test/test_spextract.py 2>/dev/null | sed -n '1,300p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '630,950p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '2980,3080p'; git diff -- src/DIAPseudoSpectra.cpp test/test_spextractor.py 2>/dev/null | sed -n '1,300p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 1192ms:
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '225,320p'; nl -ba test/test_spextract.py | sed -n '1,290p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '225,320p'; nl -ba test/test_spextractor.py | sed -n '1,290p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    225	    if (a.empty()) return 0;
    226	    auto it = lower_bound(a.begin(), a.end(), rt);
@@ -4649,7 +4649,7 @@ exec
     20	without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
     21	real data in the benchmark harness and not here.
     22	
-    23	Usage: test_spextract.py /path/to/DIAPseudoSpectra [workdir]
+    23	Usage: test_spextractor.py /path/to/DIAPseudoSpectra [workdir]
     24	Exit status is 0 only if every check passes.
     25	"""
     26	import base64, hashlib, os, re, struct, subprocess, sys, tempfile
@@ -4730,10 +4730,10 @@ exec
    101	                              prec=win)); idx += 1
    102	    body = "\n".join(specs)
    103	    open(path, "w").write(f"""<?xml version="1.0" encoding="ISO-8859-1"?>
-   104	<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="spextract_test">
+   104	<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="spextractor_test">
    105	<cvList count="1"><cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/></cvList>
    106	<fileDescription><fileContent><cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/></fileContent></fileDescription>
-   107	<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextract-test"/></software></softwareList>
+   107	<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextractor-test"/></software></softwareList>
    108	<instrumentConfigurationList count="1"><instrumentConfiguration id="ic_test"><cvParam cvRef="MS" accession="MS:1000031" name="instrument model"/></instrumentConfiguration></instrumentConfigurationList>
    109	<dataProcessingList count="1"><dataProcessing id="dp_test"><processingMethod order="0" softwareRef="so_test"><cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML"/></processingMethod></dataProcessing></dataProcessingList>
    110	<run id="run_test" defaultInstrumentConfigurationRef="ic_test">
@@ -4809,7 +4809,7 @@ exec
    180	def main():
    181	    if len(sys.argv) < 2: sys.exit(__doc__)
    182	    binary = sys.argv[1]
-   183	    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="spextract_test_")
+   183	    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="spextractor_test_")
    184	    os.makedirs(work, exist_ok=True)
    185	    inp = os.path.join(work, "synth.mzML")
    186	    z2_mono, z1_mono = synth(inp)
@@ -4901,10 +4901,10 @@ exec
    272	    sys.exit(main())
 
 exec
-/bin/bash -lc "stat -f '%Sm %z %N' src/DIAPseudoSpectra.cpp test/test_spextract.py; rg -n \"cnt \\+=|frame_off\\[f \\+ 1\\] >|t\\.mz = cmz|q\\.setMZ|t\\.tof = ax\\.ok|aggregateFrames_\\(wmap|vector<char> visited|const Size total|span_s\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "stat -f '%Sm %z %N' src/DIAPseudoSpectra.cpp test/test_spextractor.py; rg -n \"cnt \\+=|frame_off\\[f \\+ 1\\] >|t\\.mz = cmz|q\\.setMZ|t\\.tof = ax\\.ok|aggregateFrames_\\(wmap|vector<char> visited|const Size total|span_s\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 Sep  3 20:57:46 2026 222036 src/DIAPseudoSpectra.cpp
-Sep  3 20:56:38 2026 15484 test/test_spextract.py
+Sep  3 20:56:38 2026 15484 test/test_spextractor.py
 759:    vector<char> visited(P, 0);
 763:      c *= (ct / dt); cnt += w * v; den += w;
 822:          if (sl.frame_off[f + 1] > sl.frame_off[f])            // an empty frame is not a miss
@@ -4920,7 +4920,7 @@ Sep  3 20:56:38 2026 15484 test/test_spextract.py
 3476:          Peak1D q; q.setMZ(mz_sum / in_sum);
 
 exec
-/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '455,610p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '940,975p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1410,1445p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1548,1585p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba src/DIAPseudoSpectra.cpp | sed -n '455,610p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '940,975p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1410,1445p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '1548,1585p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    455	  ///     digitizer temperature -- so grouping in TOF space does not have to spend part of its ppm
    456	  ///     tolerance absorbing calibration drift, which is exactly what the m/z-space tolerance does;
@@ -4936,7 +4936,7 @@ exec
    466	  /// is one.
    467	  struct TofAxis
    468	  {
-   469	    spextract::TdfMzCalibration cal;
+   469	    spextractor::TdfMzCalibration cal;
    470	    vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
    471	    bool ok = false;
    472	
@@ -5196,45 +5196,45 @@ Verdict: the extension loop is now close, but the implementation is still not st
 
 | Tool line | Difference from OpenMS | Effect |
 |---|---|---|
-| [L822](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:822) | Emptiness is tested on the original slab. OpenMS first deletes every peak `<= noise`, then tests `spec.empty()`. A frame containing only below-noise peaks is therefore empty to OpenMS but non-empty here; this code calls `best()`, fails, and increments `missed`. Six such frames can terminate a direction, and trailing ones are incorrectly removed from the sample-rate denominator. | **SET** |
-| [L761](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:761)–763 | The missing OpenMS lines are `prev_counter *= counter_tmp; prev_denom *= denom_tmp`, not `+= w*v` and `+= w`. They are algebraically equivalent but not floating-point identical. The upstream implementation confirms the multiplications. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L52-L66) | Normally **COORD** at ulp scale; potentially **SET** at a candidate tie/window boundary |
-| [L845](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:845) | OpenMS uses `fabs(last.rt-first.rt)`. This subtracts without `abs`. It is equivalent only if slab frames are RT-ordered. | **SET** on unordered input |
-| [L652](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:652), [L3001](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3001) | `toSlab()` preserves arrival order. The OpenMS path calls `wmap.sortSpectra()` at L3014, but the integer slab is never sorted. Normal loaders probably provide RT order, but the integer path does not enforce the same precondition. | **SET** if input frames are unordered |
-| [L869](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:869) | With valley splitting disabled, reported m/z is the running search centroid, in which the apex has weight twice. OpenMS constructs a `MassTrace` and calls `updateWeightedMeanMZ()`, recomputing the ordinary one-apex weighted mean; `toTrace()` may instead select apex or median. | **COORD**, with downstream set consequences |
-| [L870](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:870) | With splitting disabled, RT is the raw-intensity apex RT. OpenMS first calls `updateWeightedMeanRT()`, and the common `toTrace()` reads `getCentroidRT()`. | **COORD** |
-| [L726](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:726), [L869](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:869) | `mz_est` is ignored inside detection. Consequently `trace:mz_estimator` is ignored whenever `split_valleys <= 0`; all three modes return `cmz`. | **COORD** |
-| [L731](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:731) | OpenMS rejects an input map with fewer than three MS1 spectra. This function only rejects zero frames/peaks and can emit singleton traces from one or two frames. | **SET/behavior** |
-| [L745](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:745), [L748](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:748) | OpenMS promotes the float intensity to double and compares it with the double threshold. This code rounds `noise` and `snr*noise` to float first. Normally harmless for integer thresholds, but not identical at a threshold boundary. | **SET** at the boundary |
-| [L847](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:847), [L1441](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1441) | For `max_len_sec == 0`, integer tracing enables a zero-length maximum. The OpenMS wrapper only sets `max_trace_length` when `max_len > 0`, leaving OpenMS at `-1`. | **SET** for that configuration |
-| [L3016](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3016) | `frame_aggregation_n > 1` transforms only `wmap`; in integer mode `wmap` is empty because `wslab` was already built. Thus the integer detector silently ignores the aggregation option. | **SET** |
-| [L1564](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1564), [L902](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:902) | The actual OpenMS tool branch skips EPD when there is exactly one input trace (`mts.size() > 1`), while the integer branch runs it for any non-empty input. The stated ground truth says EPD should run, so the integer behavior is more faithful, but the two selectable tool branches differ. | **SET** if the sole trace is multimodal |
+| [L822](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:822) | Emptiness is tested on the original slab. OpenMS first deletes every peak `<= noise`, then tests `spec.empty()`. A frame containing only below-noise peaks is therefore empty to OpenMS but non-empty here; this code calls `best()`, fails, and increments `missed`. Six such frames can terminate a direction, and trailing ones are incorrectly removed from the sample-rate denominator. | **SET** |
+| [L761](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:761)–763 | The missing OpenMS lines are `prev_counter *= counter_tmp; prev_denom *= denom_tmp`, not `+= w*v` and `+= w`. They are algebraically equivalent but not floating-point identical. The upstream implementation confirms the multiplications. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L52-L66) | Normally **COORD** at ulp scale; potentially **SET** at a candidate tie/window boundary |
+| [L845](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:845) | OpenMS uses `fabs(last.rt-first.rt)`. This subtracts without `abs`. It is equivalent only if slab frames are RT-ordered. | **SET** on unordered input |
+| [L652](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:652), [L3001](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3001) | `toSlab()` preserves arrival order. The OpenMS path calls `wmap.sortSpectra()` at L3014, but the integer slab is never sorted. Normal loaders probably provide RT order, but the integer path does not enforce the same precondition. | **SET** if input frames are unordered |
+| [L869](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:869) | With valley splitting disabled, reported m/z is the running search centroid, in which the apex has weight twice. OpenMS constructs a `MassTrace` and calls `updateWeightedMeanMZ()`, recomputing the ordinary one-apex weighted mean; `toTrace()` may instead select apex or median. | **COORD**, with downstream set consequences |
+| [L870](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:870) | With splitting disabled, RT is the raw-intensity apex RT. OpenMS first calls `updateWeightedMeanRT()`, and the common `toTrace()` reads `getCentroidRT()`. | **COORD** |
+| [L726](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:726), [L869](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:869) | `mz_est` is ignored inside detection. Consequently `trace:mz_estimator` is ignored whenever `split_valleys <= 0`; all three modes return `cmz`. | **COORD** |
+| [L731](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:731) | OpenMS rejects an input map with fewer than three MS1 spectra. This function only rejects zero frames/peaks and can emit singleton traces from one or two frames. | **SET/behavior** |
+| [L745](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:745), [L748](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:748) | OpenMS promotes the float intensity to double and compares it with the double threshold. This code rounds `noise` and `snr*noise` to float first. Normally harmless for integer thresholds, but not identical at a threshold boundary. | **SET** at the boundary |
+| [L847](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:847), [L1441](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1441) | For `max_len_sec == 0`, integer tracing enables a zero-length maximum. The OpenMS wrapper only sets `max_trace_length` when `max_len > 0`, leaving OpenMS at `-1`. | **SET** for that configuration |
+| [L3016](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3016) | `frame_aggregation_n > 1` transforms only `wmap`; in integer mode `wmap` is empty because `wslab` was already built. Thus the integer detector silently ignores the aggregation option. | **SET** |
+| [L1564](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1564), [L902](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:902) | The actual OpenMS tool branch skips EPD when there is exactly one input trace (`mts.size() > 1`), while the integer branch runs it for any non-empty input. The stated ground truth says EPD should run, so the integer behavior is more faithful, but the two selectable tool branches differ. | **SET** if the sole trace is multimodal |
 
 What is now correct:
 
-- The guard at [L813](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:813) matches OpenMS exactly.
-- [L815](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:815) performs down before up, so up observes centroid/SD changes made by down.
-- IM filtering occurs inside candidate search at [L790](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:790). Thus “closest” means closest among IM-compatible, above-noise peaks.
+- The guard at [L813](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:813) matches OpenMS exactly.
+- [L815](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:815) performs down before up, so up observes centroid/SD changes made by down.
+- IM filtering occurs inside candidate search at [L790](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:790). Thus “closest” means closest among IM-compatible, above-noise peaks.
 - The strict `<` at L792 gives the same first-in-m/z-order tie behavior.
 - The visited test occurs only after the closest candidate is selected at L794. A taken closest peak causes a miss; it does not try the runner-up.
-- The apex is logically double-counted at [L805](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:805)–808.
-- SD is updated after centroid updates at [L828](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:828)–831.
+- The apex is logically double-counted at [L805](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:805)–808.
+- SD is updated after centroid updates at [L828](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:828)–831.
 - The next down/up search recomputes `centroid ± 3*sd`. OpenMS likewise does not retroactively reject the just-accepted peak after SD shrinks.
-- `total` is correctly `down.scan_counter + up.scan_counter + 1` at [L848](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:848). OpenMS then subtracts the two final consecutive-miss counts. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L598-L605)
+- `total` is correctly `down.scan_counter + up.scan_counter + 1` at [L848](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:848). OpenMS then subtracts the two final consecutive-miss counts. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L598-L605)
 - The defensive clamp at L849 is unreachable under normal counters because misses cannot exceed scans; it does not change behavior.
-- Within one invocation, peaks are marked visited only after validity at [L851](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:851).
+- Within one invocation, peaks are marked visited only after validity at [L851](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:851).
 - The descending sort at L754–756 is equivalent to stable ascending sort followed by reverse iteration: equal-intensity apices seed in later-input-index-first order.
 
 ## 2. Bin/m/z round trip
 
 The window-edge implementation itself does not have an obvious off-by-one error.
 
-For a monotone calibration, `round(tofOf(lo_mz))` is never greater than the first integer bin at or above the lower m/z bound. It either begins at that bin or one bin earlier; [L789](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:789) removes the extra one. The upper edge is checked using the reconstructed m/z at L788, with equality admitted. Therefore exact integer-bin input receives the intended inclusive `±3sd` window.
+For a monotone calibration, `round(tofOf(lo_mz))` is never greater than the first integer bin at or above the lower m/z bound. It either begins at that bin or one bin earlier; [L789](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:789) removes the extra one. The upper edge is checked using the reconstructed m/z at L788, with equality admitted. Therefore exact integer-bin input receives the intended inclusive `±3sd` window.
 
 The loss occurs earlier:
 
-- [L603](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:603) quantizes a picked centroid to `1e-5 Da`.
-- [L674](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:674) then rounds that centroid to an integer TOF bin.
-- The reference OpenMS path instead traces the `1e-5 Da` value directly at [L958](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:958).
+- [L603](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:603) quantizes a picked centroid to `1e-5 Da`.
+- [L674](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:674) then rounds that centroid to an integer TOF bin.
+- The reference OpenMS path instead traces the `1e-5 Da` value directly at [L958](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:958).
 
 The comment that this “recovers the ORIGINAL bin exactly” is not generally true. `PeakPickerIM` can calculate an m/z apex by spline interpolation, so a picked centroid need not lie on a raw integer-bin center. [OpenMS PeakPickerIM source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp#L505-L588)
 
@@ -5249,17 +5249,17 @@ That is a genuine **SET** difference, although usually confined to peaks near de
 
 Reattachment after EPD is estimator-dependent:
 
-- `apex`: with a unique RT-to-frame mapping, [L929](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:929) selects the actual apex peak m/z, and [L934](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:934) should recover that apex bin.
+- `apex`: with a unique RT-to-frame mapping, [L929](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:929) selects the actual apex peak m/z, and [L934](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:934) should recover that apex bin.
 - `mean`: there is no measured “right bin” for an intensity-weighted mean. L934 fabricates the nearest bin under the apex frame’s calibration, so exported m/z differs from `t.mz` by up to half a bin.
 - `median`: likewise, unless the median is literally one member peak and its calibration matches the apex frame.
 
-Also, `b_of_rt` at [L905](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:905) is a one-value map. Two frames sharing one global RT index overwrite each other, potentially attaching the wrong factor.
+Also, `b_of_rt` at [L905](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:905) is a one-value map. Two frames sharing one global RT index overwrite each other, potentially attaching the wrong factor.
 
-There is an additional mzPeak-specific danger: `frameIdOf()` treats `mzpeak=<archive index>` as a vendor Frames.Id at [L568](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:568). The mzPeak reader writes the archive index, while its exact calibration separately knows the actual metadata frame ID. If those are not identical, [L670](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:670) uses the wrong temperature factor. Missing/out-of-range IDs silently fall back to the reference factor at [L473](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:473), despite the “fail closed” comments. That can be both **COORD** and **SET**.
+There is an additional mzPeak-specific danger: `frameIdOf()` treats `mzpeak=<archive index>` as a vendor Frames.Id at [L568](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:568). The mzPeak reader writes the archive index, while its exact calibration separately knows the actual metadata frame ID. If those are not identical, [L670](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:670) uses the wrong temperature factor. Missing/out-of-range IDs silently fall back to the reference factor at [L473](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:473), despite the “fail closed” comments. That can be both **COORD** and **SET**.
 
 ## 3. Valley splitting
 
-The premise in the question describes an earlier snapshot. The current live file no longer gives every peak `t.mz`: it now stores per-point TOF in `Trace::xt` at [L247](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:247), populates it at [L864](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:864), and reconstructs each peak’s m/z at [L911](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:911)–917.
+The premise in the question describes an earlier snapshot. The current live file no longer gives every peak `t.mz`: it now stores per-point TOF in `Trace::xt` at [L247](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:247), populates it at [L864](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:864), and reconstructs each peak’s m/z at [L911](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:911)–917.
 
 That change was necessary.
 
@@ -5281,7 +5281,7 @@ With splitting disabled, none of this repair runs; the estimator remains ignored
 
 The band cores cover the full TOF range without gaps, but semantic ownership is not shared.
 
-Each call creates its own `visited` array at [L759](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:759). A band restricts only seeds at [L750](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:750); extension can inspect every peak in the slab. The results are concatenated at [L3065](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3065).
+Each call creates its own `visited` array at [L759](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:759). A band restricts only seeds at [L750](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:750); extension can inspect every peak in the slab. The results are concatenated at [L3065](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3065).
 
 Consequences:
 
@@ -5289,7 +5289,7 @@ Consequences:
 - The two versions need not be identical duplicates. Their different seeds and interleaving histories can choose different competitors, centroids, SDs, termination points, and apexes.
 - A cross-band peak that global OpenMS would already have marked visited remains available. Accepting it can divert another trace, cause an overlength/quality rejection, or prevent a trace that global greedy ownership would have produced. Thus the error is not only additive duplication; traces can also be altered or lost.
 - Ownership is effectively by seed core, whereas the OpenMS halo implementation retains by final centroid core.
-- Raw output order becomes band order rather than global apex-intensity order (**ORDER**), although the later canonical sort at [L3096](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3096) removes that downstream.
+- Raw output order becomes band order rather than global apex-intensity order (**ORDER**), although the later canonical sort at [L3096](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3096) removes that downstream.
 
 The error is not formally bounded to a fixed number of bins around a boundary. Dynamic SD can widen and a running centroid can walk from frame to frame; there is no drift cap. A constructed trace can cross several cores and be duplicated by as many as the number of bands. The only hard bounds are the window and band count. For stable real ions, the practical affected region will usually be a few bins around each core edge, but that is an empirical observation, not an algorithmic guarantee.
 
@@ -5315,7 +5315,7 @@ Also run the same constructed spectra through OpenMS and compare trace membershi
 
 The seven-gap assertion would have failed the first implementation because it lacked OpenMS’s `>5` consecutive-outlier termination and would bridge or reject the wrong span. The one-gap assertion catches premature termination.
 
-The newly added test in [test_spextract.py](/Users/kohlbach/Claude/speXtract/test/test_spextract.py:19) does not test the integer implementation: it explicitly exercises only the default OpenMS detector. The command at [L118](/Users/kohlbach/Claude/speXtract/test/test_spextract.py:118) never passes `-trace:detector integer`, and its trace-count assertion examines MS1 traces, while integer tracing is currently used only for MS2. A synthetic mzML cannot enable it because the implementation demands external TDF calibration. A test seam accepting a synthetic `PeakSlab`/calibration is therefore required.
+The newly added test in [test_spextractor.py](/Users/kohlbach/Claude/speXtractor/test/test_spextractor.py:19) does not test the integer implementation: it explicitly exercises only the default OpenMS detector. The command at [L118](/Users/kohlbach/Claude/speXtractor/test/test_spextractor.py:118) never passes `-trace:detector integer`, and its trace-count assertion examines MS1 traces, while integer tracing is currently used only for MS2. A synthetic mzML cannot enable it because the implementation demands external TDF calibration. A test seam accepting a synthetic `PeakSlab`/calibration is therefore required.
 
 Bottom line: the catastrophic first-version deviations are mostly fixed, but this rewrite is not faithful yet. For the running benchmark, a substantial deficit should first be triaged by:
 
@@ -5334,45 +5334,45 @@ Verdict: the extension loop is now close, but the implementation is still not st
 
 | Tool line | Difference from OpenMS | Effect |
 |---|---|---|
-| [L822](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:822) | Emptiness is tested on the original slab. OpenMS first deletes every peak `<= noise`, then tests `spec.empty()`. A frame containing only below-noise peaks is therefore empty to OpenMS but non-empty here; this code calls `best()`, fails, and increments `missed`. Six such frames can terminate a direction, and trailing ones are incorrectly removed from the sample-rate denominator. | **SET** |
-| [L761](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:761)–763 | The missing OpenMS lines are `prev_counter *= counter_tmp; prev_denom *= denom_tmp`, not `+= w*v` and `+= w`. They are algebraically equivalent but not floating-point identical. The upstream implementation confirms the multiplications. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L52-L66) | Normally **COORD** at ulp scale; potentially **SET** at a candidate tie/window boundary |
-| [L845](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:845) | OpenMS uses `fabs(last.rt-first.rt)`. This subtracts without `abs`. It is equivalent only if slab frames are RT-ordered. | **SET** on unordered input |
-| [L652](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:652), [L3001](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3001) | `toSlab()` preserves arrival order. The OpenMS path calls `wmap.sortSpectra()` at L3014, but the integer slab is never sorted. Normal loaders probably provide RT order, but the integer path does not enforce the same precondition. | **SET** if input frames are unordered |
-| [L869](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:869) | With valley splitting disabled, reported m/z is the running search centroid, in which the apex has weight twice. OpenMS constructs a `MassTrace` and calls `updateWeightedMeanMZ()`, recomputing the ordinary one-apex weighted mean; `toTrace()` may instead select apex or median. | **COORD**, with downstream set consequences |
-| [L870](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:870) | With splitting disabled, RT is the raw-intensity apex RT. OpenMS first calls `updateWeightedMeanRT()`, and the common `toTrace()` reads `getCentroidRT()`. | **COORD** |
-| [L726](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:726), [L869](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:869) | `mz_est` is ignored inside detection. Consequently `trace:mz_estimator` is ignored whenever `split_valleys <= 0`; all three modes return `cmz`. | **COORD** |
-| [L731](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:731) | OpenMS rejects an input map with fewer than three MS1 spectra. This function only rejects zero frames/peaks and can emit singleton traces from one or two frames. | **SET/behavior** |
-| [L745](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:745), [L748](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:748) | OpenMS promotes the float intensity to double and compares it with the double threshold. This code rounds `noise` and `snr*noise` to float first. Normally harmless for integer thresholds, but not identical at a threshold boundary. | **SET** at the boundary |
-| [L847](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:847), [L1441](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1441) | For `max_len_sec == 0`, integer tracing enables a zero-length maximum. The OpenMS wrapper only sets `max_trace_length` when `max_len > 0`, leaving OpenMS at `-1`. | **SET** for that configuration |
-| [L3016](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3016) | `frame_aggregation_n > 1` transforms only `wmap`; in integer mode `wmap` is empty because `wslab` was already built. Thus the integer detector silently ignores the aggregation option. | **SET** |
-| [L1564](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1564), [L902](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:902) | The actual OpenMS tool branch skips EPD when there is exactly one input trace (`mts.size() > 1`), while the integer branch runs it for any non-empty input. The stated ground truth says EPD should run, so the integer behavior is more faithful, but the two selectable tool branches differ. | **SET** if the sole trace is multimodal |
+| [L822](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:822) | Emptiness is tested on the original slab. OpenMS first deletes every peak `<= noise`, then tests `spec.empty()`. A frame containing only below-noise peaks is therefore empty to OpenMS but non-empty here; this code calls `best()`, fails, and increments `missed`. Six such frames can terminate a direction, and trailing ones are incorrectly removed from the sample-rate denominator. | **SET** |
+| [L761](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:761)–763 | The missing OpenMS lines are `prev_counter *= counter_tmp; prev_denom *= denom_tmp`, not `+= w*v` and `+= w`. They are algebraically equivalent but not floating-point identical. The upstream implementation confirms the multiplications. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L52-L66) | Normally **COORD** at ulp scale; potentially **SET** at a candidate tie/window boundary |
+| [L845](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:845) | OpenMS uses `fabs(last.rt-first.rt)`. This subtracts without `abs`. It is equivalent only if slab frames are RT-ordered. | **SET** on unordered input |
+| [L652](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:652), [L3001](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3001) | `toSlab()` preserves arrival order. The OpenMS path calls `wmap.sortSpectra()` at L3014, but the integer slab is never sorted. Normal loaders probably provide RT order, but the integer path does not enforce the same precondition. | **SET** if input frames are unordered |
+| [L869](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:869) | With valley splitting disabled, reported m/z is the running search centroid, in which the apex has weight twice. OpenMS constructs a `MassTrace` and calls `updateWeightedMeanMZ()`, recomputing the ordinary one-apex weighted mean; `toTrace()` may instead select apex or median. | **COORD**, with downstream set consequences |
+| [L870](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:870) | With splitting disabled, RT is the raw-intensity apex RT. OpenMS first calls `updateWeightedMeanRT()`, and the common `toTrace()` reads `getCentroidRT()`. | **COORD** |
+| [L726](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:726), [L869](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:869) | `mz_est` is ignored inside detection. Consequently `trace:mz_estimator` is ignored whenever `split_valleys <= 0`; all three modes return `cmz`. | **COORD** |
+| [L731](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:731) | OpenMS rejects an input map with fewer than three MS1 spectra. This function only rejects zero frames/peaks and can emit singleton traces from one or two frames. | **SET/behavior** |
+| [L745](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:745), [L748](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:748) | OpenMS promotes the float intensity to double and compares it with the double threshold. This code rounds `noise` and `snr*noise` to float first. Normally harmless for integer thresholds, but not identical at a threshold boundary. | **SET** at the boundary |
+| [L847](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:847), [L1441](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1441) | For `max_len_sec == 0`, integer tracing enables a zero-length maximum. The OpenMS wrapper only sets `max_trace_length` when `max_len > 0`, leaving OpenMS at `-1`. | **SET** for that configuration |
+| [L3016](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3016) | `frame_aggregation_n > 1` transforms only `wmap`; in integer mode `wmap` is empty because `wslab` was already built. Thus the integer detector silently ignores the aggregation option. | **SET** |
+| [L1564](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1564), [L902](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:902) | The actual OpenMS tool branch skips EPD when there is exactly one input trace (`mts.size() > 1`), while the integer branch runs it for any non-empty input. The stated ground truth says EPD should run, so the integer behavior is more faithful, but the two selectable tool branches differ. | **SET** if the sole trace is multimodal |
 
 What is now correct:
 
-- The guard at [L813](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:813) matches OpenMS exactly.
-- [L815](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:815) performs down before up, so up observes centroid/SD changes made by down.
-- IM filtering occurs inside candidate search at [L790](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:790). Thus “closest” means closest among IM-compatible, above-noise peaks.
+- The guard at [L813](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:813) matches OpenMS exactly.
+- [L815](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:815) performs down before up, so up observes centroid/SD changes made by down.
+- IM filtering occurs inside candidate search at [L790](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:790). Thus “closest” means closest among IM-compatible, above-noise peaks.
 - The strict `<` at L792 gives the same first-in-m/z-order tie behavior.
 - The visited test occurs only after the closest candidate is selected at L794. A taken closest peak causes a miss; it does not try the runner-up.
-- The apex is logically double-counted at [L805](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:805)–808.
-- SD is updated after centroid updates at [L828](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:828)–831.
+- The apex is logically double-counted at [L805](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:805)–808.
+- SD is updated after centroid updates at [L828](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:828)–831.
 - The next down/up search recomputes `centroid ± 3*sd`. OpenMS likewise does not retroactively reject the just-accepted peak after SD shrinks.
-- `total` is correctly `down.scan_counter + up.scan_counter + 1` at [L848](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:848). OpenMS then subtracts the two final consecutive-miss counts. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L598-L605)
+- `total` is correctly `down.scan_counter + up.scan_counter + 1` at [L848](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:848). OpenMS then subtracts the two final consecutive-miss counts. [OpenMS source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp#L598-L605)
 - The defensive clamp at L849 is unreachable under normal counters because misses cannot exceed scans; it does not change behavior.
-- Within one invocation, peaks are marked visited only after validity at [L851](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:851).
+- Within one invocation, peaks are marked visited only after validity at [L851](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:851).
 - The descending sort at L754–756 is equivalent to stable ascending sort followed by reverse iteration: equal-intensity apices seed in later-input-index-first order.
 
 ## 2. Bin/m/z round trip
 
 The window-edge implementation itself does not have an obvious off-by-one error.
 
-For a monotone calibration, `round(tofOf(lo_mz))` is never greater than the first integer bin at or above the lower m/z bound. It either begins at that bin or one bin earlier; [L789](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:789) removes the extra one. The upper edge is checked using the reconstructed m/z at L788, with equality admitted. Therefore exact integer-bin input receives the intended inclusive `±3sd` window.
+For a monotone calibration, `round(tofOf(lo_mz))` is never greater than the first integer bin at or above the lower m/z bound. It either begins at that bin or one bin earlier; [L789](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:789) removes the extra one. The upper edge is checked using the reconstructed m/z at L788, with equality admitted. Therefore exact integer-bin input receives the intended inclusive `±3sd` window.
 
 The loss occurs earlier:
 
-- [L603](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:603) quantizes a picked centroid to `1e-5 Da`.
-- [L674](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:674) then rounds that centroid to an integer TOF bin.
-- The reference OpenMS path instead traces the `1e-5 Da` value directly at [L958](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:958).
+- [L603](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:603) quantizes a picked centroid to `1e-5 Da`.
+- [L674](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:674) then rounds that centroid to an integer TOF bin.
+- The reference OpenMS path instead traces the `1e-5 Da` value directly at [L958](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:958).
 
 The comment that this “recovers the ORIGINAL bin exactly” is not generally true. `PeakPickerIM` can calculate an m/z apex by spline interpolation, so a picked centroid need not lie on a raw integer-bin center. [OpenMS PeakPickerIM source](https://github.com/OpenMS/OpenMS/blob/develop/src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp#L505-L588)
 
@@ -5387,17 +5387,17 @@ That is a genuine **SET** difference, although usually confined to peaks near de
 
 Reattachment after EPD is estimator-dependent:
 
-- `apex`: with a unique RT-to-frame mapping, [L929](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:929) selects the actual apex peak m/z, and [L934](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:934) should recover that apex bin.
+- `apex`: with a unique RT-to-frame mapping, [L929](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:929) selects the actual apex peak m/z, and [L934](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:934) should recover that apex bin.
 - `mean`: there is no measured “right bin” for an intensity-weighted mean. L934 fabricates the nearest bin under the apex frame’s calibration, so exported m/z differs from `t.mz` by up to half a bin.
 - `median`: likewise, unless the median is literally one member peak and its calibration matches the apex frame.
 
-Also, `b_of_rt` at [L905](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:905) is a one-value map. Two frames sharing one global RT index overwrite each other, potentially attaching the wrong factor.
+Also, `b_of_rt` at [L905](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:905) is a one-value map. Two frames sharing one global RT index overwrite each other, potentially attaching the wrong factor.
 
-There is an additional mzPeak-specific danger: `frameIdOf()` treats `mzpeak=<archive index>` as a vendor Frames.Id at [L568](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:568). The mzPeak reader writes the archive index, while its exact calibration separately knows the actual metadata frame ID. If those are not identical, [L670](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:670) uses the wrong temperature factor. Missing/out-of-range IDs silently fall back to the reference factor at [L473](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:473), despite the “fail closed” comments. That can be both **COORD** and **SET**.
+There is an additional mzPeak-specific danger: `frameIdOf()` treats `mzpeak=<archive index>` as a vendor Frames.Id at [L568](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:568). The mzPeak reader writes the archive index, while its exact calibration separately knows the actual metadata frame ID. If those are not identical, [L670](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:670) uses the wrong temperature factor. Missing/out-of-range IDs silently fall back to the reference factor at [L473](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:473), despite the “fail closed” comments. That can be both **COORD** and **SET**.
 
 ## 3. Valley splitting
 
-The premise in the question describes an earlier snapshot. The current live file no longer gives every peak `t.mz`: it now stores per-point TOF in `Trace::xt` at [L247](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:247), populates it at [L864](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:864), and reconstructs each peak’s m/z at [L911](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:911)–917.
+The premise in the question describes an earlier snapshot. The current live file no longer gives every peak `t.mz`: it now stores per-point TOF in `Trace::xt` at [L247](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:247), populates it at [L864](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:864), and reconstructs each peak’s m/z at [L911](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:911)–917.
 
 That change was necessary.
 
@@ -5419,7 +5419,7 @@ With splitting disabled, none of this repair runs; the estimator remains ignored
 
 The band cores cover the full TOF range without gaps, but semantic ownership is not shared.
 
-Each call creates its own `visited` array at [L759](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:759). A band restricts only seeds at [L750](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:750); extension can inspect every peak in the slab. The results are concatenated at [L3065](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3065).
+Each call creates its own `visited` array at [L759](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:759). A band restricts only seeds at [L750](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:750); extension can inspect every peak in the slab. The results are concatenated at [L3065](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3065).
 
 Consequences:
 
@@ -5427,7 +5427,7 @@ Consequences:
 - The two versions need not be identical duplicates. Their different seeds and interleaving histories can choose different competitors, centroids, SDs, termination points, and apexes.
 - A cross-band peak that global OpenMS would already have marked visited remains available. Accepting it can divert another trace, cause an overlength/quality rejection, or prevent a trace that global greedy ownership would have produced. Thus the error is not only additive duplication; traces can also be altered or lost.
 - Ownership is effectively by seed core, whereas the OpenMS halo implementation retains by final centroid core.
-- Raw output order becomes band order rather than global apex-intensity order (**ORDER**), although the later canonical sort at [L3096](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3096) removes that downstream.
+- Raw output order becomes band order rather than global apex-intensity order (**ORDER**), although the later canonical sort at [L3096](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3096) removes that downstream.
 
 The error is not formally bounded to a fixed number of bins around a boundary. Dynamic SD can widen and a running centroid can walk from frame to frame; there is no drift cap. A constructed trace can cross several cores and be duplicated by as many as the number of bands. The only hard bounds are the window and band count. For stable real ions, the practical affected region will usually be a few bins around each core edge, but that is an empirical observation, not an algorithmic guarantee.
 
@@ -5453,7 +5453,7 @@ Also run the same constructed spectra through OpenMS and compare trace membershi
 
 The seven-gap assertion would have failed the first implementation because it lacked OpenMS’s `>5` consecutive-outlier termination and would bridge or reject the wrong span. The one-gap assertion catches premature termination.
 
-The newly added test in [test_spextract.py](/Users/kohlbach/Claude/speXtract/test/test_spextract.py:19) does not test the integer implementation: it explicitly exercises only the default OpenMS detector. The command at [L118](/Users/kohlbach/Claude/speXtract/test/test_spextract.py:118) never passes `-trace:detector integer`, and its trace-count assertion examines MS1 traces, while integer tracing is currently used only for MS2. A synthetic mzML cannot enable it because the implementation demands external TDF calibration. A test seam accepting a synthetic `PeakSlab`/calibration is therefore required.
+The newly added test in [test_spextractor.py](/Users/kohlbach/Claude/speXtractor/test/test_spextractor.py:19) does not test the integer implementation: it explicitly exercises only the default OpenMS detector. The command at [L118](/Users/kohlbach/Claude/speXtractor/test/test_spextractor.py:118) never passes `-trace:detector integer`, and its trace-count assertion examines MS1 traces, while integer tracing is currently used only for MS2. A synthetic mzML cannot enable it because the implementation demands external TDF calibration. A test seam accepting a synthetic `PeakSlab`/calibration is therefore required.
 
 Bottom line: the catastrophic first-version deviations are mostly fixed, but this rewrite is not faithful yet. For the running benchmark, a substantial deficit should first be triaged by:
 

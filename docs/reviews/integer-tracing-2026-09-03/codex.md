@@ -1,6 +1,6 @@
 ## 1. Is the faithfulness claim credible?
 
-No. Section 3 is not a faithful description of OpenMS `MassTraceDetection`, and the partial implementation already embodies several different scientific decisions. The contradiction is visible in the source itself: [detectTracesInteger_()](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:715) calls the algorithm both “a DIFFERENT ALGORITHM” and, eight lines later, a “FAITHFUL reimplementation.”
+No. Section 3 is not a faithful description of OpenMS `MassTraceDetection`, and the partial implementation already embodies several different scientific decisions. The contradiction is visible in the source itself: [detectTracesInteger_()](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:715) calls the algorithm both “a DIFFERENT ALGORITHM” and, eight lines later, a “FAITHFUL reimplementation.”
 
 Legend below:
 
@@ -10,7 +10,7 @@ Legend below:
 
 | Difference | What OpenMS actually does | Effect |
 |---|---|---|
-| Termination mode | Default is `trace_termination_criterion="outlier"` with `trace_termination_outliers=5`; speXtract never overrides it. Because the test is `consecutive_missed > 5`, termination occurs after six consecutive misses. [`MassTraceDetection` ctor](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:26), [`run_()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:540) | **SET.** The sketch instead stops on sample rate. |
+| Termination mode | Default is `trace_termination_criterion="outlier"` with `trace_termination_outliers=5`; speXtractor never overrides it. Because the test is `consecutive_missed > 5`, termination occurs after six consecutive misses. [`MassTraceDetection` ctor](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:26), [`run_()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:540) | **SET.** The sketch instead stops on sample rate. |
 | Role of `min_sample_rate` | Under the active default, it does not terminate extension. It is a final validity test in `isTraceValid_()`. [`isTraceValid_()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:445) | **SET.** The design’s central account of the algorithm is wrong. |
 | Sample-rate semantics when explicitly enabled | OpenMS waits until a direction has visited more than five scans, then computes one combined rate from both directions plus the apex. It is not a fresh per-direction `hits/visited`. | **SET.** Especially different near gaps and asymmetric peaks. |
 | Final sample-rate denominator | OpenMS uses `trace.size() / (total_scans_visited - terminal_misses_down - terminal_misses_up)`. Internal misses remain; trailing misses are removed. | **SET.** The sketch has no equivalent final check. |
@@ -21,7 +21,7 @@ Legend below:
 | Centroid coordinate | OpenMS averages calibrated m/z doubles. The proposed detector averages TOF bins and rounds the centroid after each hit. Nonlinear, frame-dependent `mz(tof,b)` means these are not equivalent operations. | **SET.** |
 | IM centroid | OpenMS maintains an intensity-weighted running 1/K0 centroid and gates around it. The sketch gates against `scan(seed)`, never a running mobility centroid. | **SET.** |
 | Candidate versus `used` | OpenMS first chooses the closest-m/z candidate satisfying IM, then checks whether that one is visited. If it is visited, the frame is a miss; it does not take the second-closest unused candidate. [`findBestPeak_()` and `isPeakAcceptable_()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:288) | **SET.** The sketch explicitly chooses the closest unused peak. |
-| Membership threshold | OpenMS removes all peaks with intensity `<= noise` before extension. [`run()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:216) | **SET.** The current integer `pick()` searches every slab peak, including below-noise peaks. [`pick` lambda](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:780) |
+| Membership threshold | OpenMS removes all peaks with intensity `<= noise` before extension. [`run()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:216) | **SET.** The current integer `pick()` searches every slab peak, including below-noise peaks. [`pick` lambda](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:780) |
 | Apex threshold | A peak is an apex only when `intensity > snr*noise`. Equality does not pass. | **SET**, minor but deterministic. The current integer code accepts equality because it breaks only on `< min_apex`. |
 | When peaks become used | OpenMS collects provisional indices and marks them visited only after the entire trace passes length and sample-rate validity. [`run_()`](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp:650) | **SET, severe.** The sketch/current code marks immediately and never rolls back an invalid trace, permanently deleting its peaks from later valid traces. |
 | Singleton handling | With `min_trace_length=0`, an OpenMS singleton can pass if its final quality passes. The current integer detector unconditionally drops `xi.size()<2`. | **SET.** Relevant because MS2 min length defaults to zero. |
@@ -29,10 +29,10 @@ Legend below:
 | Equal-intensity seed ordering | OpenMS uses ascending `stable_sort`, then reverse iteration. Equal intensities therefore seed in reverse original frame/peak order. The integer comparator uses `(intensity desc, tof asc, flat index asc)`. | **SET**, not merely order: seeding is greedy, so ties can change ownership. |
 | Closest-peak ties | OpenMS keeps the first candidate in ascending m/z order because replacement uses strict `<`. Integer TOF rounding can collapse distinct m/z values onto one bin and introduces a different tie population. | **SET** in dense regions. |
 | Drift cap | The proposed seed-relative centroid cap has no OpenMS equivalent. | **SET.** It may make banding easier, but it is a new detector definition. |
-| Output coordinates | `toTrace()` reports apex/mean/median m/z as selected, intensity-weighted centroid RT, OpenMS centroid IM, and max intensity. [`toTrace()`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:293) | **COORD.** Current integer code reports apex RT and treats `median` as mean. These values control downstream RT, IM and isotope gates. |
-| Valley splitting | The OpenMS path invokes `ElutionPeakDetection` inside `detectTraces_()`. [`detectTraces_()`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1373) | **SET.** The integer branch currently bypasses it entirely at [the window dispatch](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2969). |
+| Output coordinates | `toTrace()` reports apex/mean/median m/z as selected, intensity-weighted centroid RT, OpenMS centroid IM, and max intensity. [`toTrace()`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:293) | **COORD.** Current integer code reports apex RT and treats `median` as mean. These values control downstream RT, IM and isotope gates. |
+| Valley splitting | The OpenMS path invokes `ElutionPeakDetection` inside `detectTraces_()`. [`detectTraces_()`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1373) | **SET.** The integer branch currently bypasses it entirely at [the window dispatch](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2969). |
 
-There is also a direct profile-corruption bug in the partial implementation: it sorts `xi` before pairing it with `xv`, so intensities are attached to the wrong frames. [`detectTracesInteger_()`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:841). That will change correlations even if trace membership happens to be right.
+There is also a direct profile-corruption bug in the partial implementation: it sorts `xi` before pairing it with `xv`, so intensities are attached to the wrong frames. [`detectTracesInteger_()`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:841). That will change correlations even if trace membership happens to be right.
 
 Bottom line: none of the disputed differences can safely be dismissed as “only order,” except the eventual order of traces that are demonstrably peak-disjoint. Equal seed or candidate ties are not order-only in a greedy consumed-peak algorithm.
 
@@ -63,7 +63,7 @@ Even with true scan IDs, one target-frame `scan_tol` does not correct calibratio
 The current `indexScans()` has two additional defects:
 
 - It stores one worst-case tolerance per frame even though the scan-to-1/K0 spacing can vary with scan position.
-- `hi - i` includes the current value, but the later comparison treats that count as an allowed rank difference. It is at least one rank too permissive. [`indexScans()`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:685)
+- `hi - i` includes the current value, but the later comparison treats that count as an allowed rank difference. It is at least one rank too permissive. [`indexScans()`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:685)
 
 ### Cheap real-data check
 
@@ -84,7 +84,7 @@ When validation fails, keep the existing `uint16 imq` and compare quantized 1/K0
 
 No. It is plausible that arrays help substantially, but 30–50% is not supported by the accounting presented.
 
-First, materialisation is not inside the reported 3,869-second trace number. The window loop times `materializeWindow()` into `t_mat` and starts `t_trace` afterwards. [`window timers`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2924), [`stage report`](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3230). Given 90.9% trace and 4.8% score, materialisation plus grid and emission together occupy at most the remaining 4.3% of that reported subtotal.
+First, materialisation is not inside the reported 3,869-second trace number. The window loop times `materializeWindow()` into `t_mat` and starts `t_trace` afterwards. [`window timers`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2924), [`stage report`](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3230). Given 90.9% trace and 4.8% score, materialisation plus grid and emission together occupy at most the remaining 4.3% of that reported subtotal.
 
 Therefore:
 

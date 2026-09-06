@@ -1,7 +1,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -16,7 +16,7 @@ in this message. The code is at the end, verbatim.
 
 ## What it is
 
-speXtract extracts pseudo-MS/MS spectra from Bruker timsTOF diaPASEF data. Its window loop is an
+speXtractor extracts pseudo-MS/MS spectra from Bruker timsTOF diaPASEF data. Its window loop is an
 OpenMP task pool: up to 24 isolation windows in flight at once, and inside each window the work
 (band tracing, valley splitting, precursor scoring) is spawned as tasks over ~100 threads. An
 experimental detector, `trace:detector=integer`, replaces OpenMS `MassTraceDetection` on a
@@ -241,10 +241,10 @@ compact store, allocator fragmentation from many small vectors), say so and say 
           if (!d.active) continue;
           if (side == 0 ? !(fi > 0) : !(fi + 1 < (long)F)) continue;
           const size_t f = (size_t)(side == 0 ? fi - 1 : fi + 1);
-          // "empty" AFTER sub-noise deletion, as OpenMS tests it. SPEXTRACT_INT_EMPTY_RAW=1 tests
+          // "empty" AFTER sub-noise deletion, as OpenMS tests it. SPEXTRACTOR_INT_EMPTY_RAW=1 tests
           // raw emptiness instead: the A/B that attributes the 12,650 -> 12,466 move between the
           // two corrected versions, which is the only semantic change between them.
-          static const bool empty_raw = std::getenv("SPEXTRACT_INT_EMPTY_RAW") != nullptr;
+          static const bool empty_raw = std::getenv("SPEXTRACTOR_INT_EMPTY_RAW") != nullptr;
           if (empty_raw ? (sl.frame_off[f + 1] > sl.frame_off[f]) : (bool)tp.frame_live[f])
           {
             bool taken = false;

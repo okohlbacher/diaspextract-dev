@@ -11,7 +11,7 @@ peptides):
 | corrected, measured per-peak m/z | 656,241 | **12,650** | 9:28 | 174 GB |
 | corrected, prep hoisted + bin search | 656,256 | 12,466 | 9:31 | 185 GB |
 | **corrected, valley splitting chunked + parallel** | 656,256 | 12,466 | **6:53** | **105 GB** |
-| same, raw-emptiness A/B (SPEXTRACT_INT_EMPTY_RAW=1) | 656,256 | 12,466 (set identical to the row above) | 6:56 | 105 GB |
+| same, raw-emptiness A/B (SPEXTRACTOR_INT_EMPTY_RAW=1) | 656,256 | 12,466 (set identical to the row above) | 6:56 | 105 GB |
 
 **The emptiness rule was NOT the 1.4%.** Same count, same set. The only other semantic change between
 the 12,650 and 12,466 versions is the candidate metric: "closest to the centroid" measured in bins
@@ -109,7 +109,7 @@ what a faithful-but-not-identical reimplementation looks like: a small per-file 
 sign, not a systematic loss.
 
 **Memory is the bigger and more consistent result: 140 GB against 230 GB, a 39% cut**, matching the
-36% seen on dataset D (105 vs 164 GB). It also puts speXtract BELOW the reference implementation's 163 GB on this file for
+36% seen on dataset D (105 vs 164 GB). It also puts speXtractor BELOW the reference implementation's 163 GB on this file for
 the first time. Wall time is a wash here (11:51 vs 11:42) although it won on dataset D (6:53 vs 7:17);
 window-loop CPU is 31,033 s against 41,530 s, i.e. the integer path does 25% less work but fills
 fewer threads (64x vs 87x), so on the larger file the two effects cancel.

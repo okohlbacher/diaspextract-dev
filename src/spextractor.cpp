@@ -6,7 +6,7 @@
 // $Authors: OpenMS-the reference implementation project $
 // --------------------------------------------------------------------------
 
-#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACT_WITH_MZPEAK)
+#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACTOR_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -18,7 +18,7 @@
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <unordered_map>
 #include <cstring>
-// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 // OpenMS patch and already included via the mzPeak loader; including the in-tree copy as well
 // redefines the struct.
 #include <OpenMS/FORMAT/TdfMzCalibration.h>
@@ -65,7 +65,7 @@ using namespace std;
 //-------------------------------------------------------------
 
 /**
-  @page TOPP_SpeXtract SpeXtract
+  @page TOPP_SpeXtractor SpeXtractor
 
   @brief Extracts pseudo-MS/MS ("pseudo-DDA") spectra from diaPASEF (ion-mobility DIA) data.
 
@@ -84,9 +84,9 @@ using namespace std;
   for the adversarial reviews.
 
   <B>The command line parameters of this tool are:</B>
-  @verbinclude TOPP_SpeXtract.cli
+  @verbinclude TOPP_SpeXtractor.cli
   <B>INI file documentation of this tool:</B>
-  @htmlinclude TOPP_SpeXtract.html
+  @htmlinclude TOPP_SpeXtractor.html
 */
 
 /// @cond TOPPCLASSES
@@ -174,7 +174,7 @@ namespace
   std::atomic<long long> stat_prec_{0};     ///< precursors scored
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
-  bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
+  bool drop_prec_iso_ = std::getenv("SPEXTRACTOR_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -639,7 +639,7 @@ namespace
   /// is one.
   struct TofAxis
   {
-    spextract::TdfMzCalibration cal;
+    spextractor::TdfMzCalibration cal;
     vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
     bool ok = false;
 
@@ -674,7 +674,7 @@ namespace
     TofAxis& ax = tofAxis();
     ax.ok = false;
     std::vector<double> t1;
-    if (!spextract::loadTdfCalibration(tdf_path, ax.cal, t1, why)) return false;
+    if (!spextractor::loadTdfCalibration(tdf_path, ax.cal, t1, why)) return false;
     ax.b_by_frame.assign(t1.size(), 0.0);
     for (size_t i = 1; i < t1.size(); ++i) ax.b_by_frame[i] = ax.cal.frameFactor(t1[i]);
     // Frames the tdf did not list keep the reference factor rather than a zero -- but index 0
@@ -769,7 +769,7 @@ namespace
 
 
   /// [det] Order-insensitive 64-bit digest of a stage's numeric output, for localising
-  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACT_DET=1.
+  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under SPEXTRACTOR_DET=1.
   static uint64_t detDigest_(vector<uint64_t> bits)
   {
     std::sort(bits.begin(), bits.end());
@@ -777,7 +777,7 @@ namespace
     for (uint64_t b : bits) { h ^= b; h *= 1099511628211ULL; }
     return h;
   }
-  static bool detOn_() { static const bool on = std::getenv("SPEXTRACT_DET") != nullptr; return on; }
+  static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
   static uint64_t traceDigest_(const vector<Trace>& ts)
   {
     vector<uint64_t> b; b.reserve(ts.size() * 3);
@@ -1036,10 +1036,10 @@ namespace
           if (!d.active) continue;
           if (side == 0 ? !(fi > 0) : !(fi + 1 < (long)F)) continue;
           const size_t f = (size_t)(side == 0 ? fi - 1 : fi + 1);
-          // "empty" AFTER sub-noise deletion, as OpenMS tests it. SPEXTRACT_INT_EMPTY_RAW=1 tests
+          // "empty" AFTER sub-noise deletion, as OpenMS tests it. SPEXTRACTOR_INT_EMPTY_RAW=1 tests
           // raw emptiness instead: the A/B that attributes the 12,650 -> 12,466 move between the
           // two corrected versions, which is the only semantic change between them.
-          static const bool empty_raw = std::getenv("SPEXTRACT_INT_EMPTY_RAW") != nullptr;
+          static const bool empty_raw = std::getenv("SPEXTRACTOR_INT_EMPTY_RAW") != nullptr;
           if (empty_raw ? (sl.frame_off[f + 1] > sl.frame_off[f]) : (bool)tp.frame_live[f])
           {
             bool taken = false;
@@ -1048,7 +1048,7 @@ namespace
             // over-length trace that is thrown away also throws away every peak in it, which is
             // why trace:max_trace_length_sec is falsified. Here the trace simply stops growing and
             // ElutionPeakDetection still splits what was found.
-            static const bool span_terminate = std::getenv("SPEXTRACT_SPAN_TERMINATE") != nullptr;
+            static const bool span_terminate = std::getenv("SPEXTRACTOR_SPAN_TERMINATE") != nullptr;
             if (span_terminate && k >= 0 && max_span_sec > 0.0)
             {
               const uint32_t nlo = std::min(sfmin, (uint32_t)f), nhi = std::max(sfmax, (uint32_t)f);
@@ -1288,13 +1288,13 @@ namespace
       std::vector<CompactFrame> compacted((size_t)n);
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
-      // SPEXTRACT_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
+      // SPEXTRACTOR_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
       // scheduling-sensitivity from downstream chaos (kimi, plan review). [pick-det]
-      static const bool par_pick = std::getenv("SPEXTRACT_PICK_SERIAL") == nullptr;
-      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACT_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
+      static const bool par_pick = std::getenv("SPEXTRACTOR_PICK_SERIAL") == nullptr;
+      static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACTOR_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
       std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
       // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers (codex, plan review)
-      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACT_PICK_STATIC=1 -> static (history-vs-race probe)
+      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACTOR_PICK_STATIC=1 -> static (history-vs-race probe)
       for (int i = 0; i < n; ++i)
       {
         try
@@ -1381,7 +1381,7 @@ namespace
   private:
     /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
     /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
-    /// store. SPEXTRACT_PICK_BATCH overrides for the sweep.
+    /// store. SPEXTRACTOR_PICK_BATCH overrides for the sweep.
     static const size_t kBatch;
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
@@ -1393,7 +1393,7 @@ namespace
     std::function<WinKey(double, double, uint32_t)> keyfn_;
   };
   const size_t PickCompactConsumer::kBatch =
-    std::getenv("SPEXTRACT_PICK_BATCH") ? (size_t)std::atoi(std::getenv("SPEXTRACT_PICK_BATCH")) : 256;
+    std::getenv("SPEXTRACTOR_PICK_BATCH") ? (size_t)std::atoi(std::getenv("SPEXTRACTOR_PICK_BATCH")) : 256;
 
   /// [wavelet] Stationary ("a trous") B3-spline wavelet smoothing of an elution profile.
   ///
@@ -1521,15 +1521,15 @@ namespace
   }
 }
 
-class TOPPSpeXtract : public TOPPBase
+class TOPPSpeXtractor : public TOPPBase
 {
 public:
-  TOPPSpeXtract() :
-    // official=false: SpeXtract is a STANDALONE tool that links against OpenMS, not a tool IN
+  TOPPSpeXtractor() :
+    // official=false: SpeXtractor is a STANDALONE tool that links against OpenMS, not a tool IN
     // OpenMS, so it is deliberately absent from ToolHandler's official list. TOPPBase rejects an
     // unregistered name when official is left true -- which is how the rename surfaced that the
     // old name had been passing itself off as an official TOPP tool.
-    TOPPBase("SpeXtract", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
+    TOPPBase("SpeXtractor", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
   {
   }
 
@@ -1537,7 +1537,7 @@ protected:
   void registerOptionsAndFlags_() override
   {
     registerInputFile_("in", "<file>", "", "Input diaPASEF data (ion-mobility DIA; 1/K0 / VSSC): mzML, mzPeak, or a Bruker .d directory.");
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
     setValidFormats_("in", {"mzML", "mzpeak", "d"});
 #else
     setValidFormats_("in", {"mzML", "d"});      // stock OpenMS does not know the mzpeak format
@@ -1546,7 +1546,7 @@ protected:
                         "EXTENSION: .mzpeak (default) or .mzML. mzPeak is columnar and much smaller; "
                         "mzML is what DDA search engines read today, so pass an .mzML name (or "
                         "-out_type mzML) if the next step is a search.");
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
     setValidFormats_("out", {"mzpeak", "mzML"});
 #else
     setValidFormats_("out", {"mzML"});
@@ -1615,7 +1615,7 @@ protected:
                           "gradient, while real chromatographic peaks here are 5-30 s -- so what a 120 s cap removes "
                           "is the far tail of a blob ElutionPeakDetection did not split. Trimming AFTER the fact is "
                           "deliberate: it leaves detection's peak ownership untouched, unlike terminating extension "
-                          "(SPEXTRACT_SPAN_TERMINATE=1, diagnostic), and unlike trace:max_trace_length_sec, which "
+                          "(SPEXTRACTOR_SPAN_TERMINATE=1, diagnostic), and unlike trace:max_trace_length_sec, which "
                           "DISCARDS an over-length trace and deletes all signal at that m/z (falsified). 0 = no cap. "
                           "CHANGES OUTPUT.", false);
     setMinFloat_("trace:max_span_sec", 0.0);
@@ -2414,7 +2414,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         const Trace& f = frag_traces[fi];
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
         // [C9 A/B, 2026-09-02] 28% of emitted spectra carry the precursor's M+1 and 25% its M+2 as
-        // "fragments" (unfragmented survivors). SPEXTRACT_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
+        // "fragments" (unfragmented survivors). SPEXTRACTOR_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
         if (drop_prec_iso_ && pc.charge > 0)
         {
           bool iso = false;
@@ -2800,18 +2800,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       Param sp = spicker.getParameters();
       sp.setValue("pickIMCluster:im_tolerance_cluster", getDoubleOption_("gate:delta_im"));
       sp.setValue("pickIMCluster:ppm_tolerance_cluster", getDoubleOption_("trace:mass_error_ppm"));
-      if (const char* m = std::getenv("SPEXTRACT_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
+      if (const char* m = std::getenv("SPEXTRACTOR_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
       spicker.setParameters(sp);
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
       try
       {
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
         if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
 #else
         if (false)
 #endif
         {
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
           spx::loadMzPeakStreaming(in, consumer, n_threads_req);   // consumer counts frames itself
 #else
           throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
@@ -2824,7 +2824,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
         if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-        if (std::getenv("SPEXTRACT_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+        if (std::getenv("SPEXTRACTOR_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -2841,7 +2841,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     {
       Phase _ph("LOAD(full)");
       FileHandler().loadExperiment(in, exp,
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
                                    {FileTypes::MZML, FileTypes::MZPEAK, FileTypes::BRUKER_TDF},
 #else
                                    {FileTypes::MZML, FileTypes::BRUKER_TDF},
@@ -2862,7 +2862,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        writeLogError_("Error: input has no ion-mobility data at MS1. SpeXtract requires diaPASEF (IM DIA) input.");
+        writeLogError_("Error: input has no ion-mobility data at MS1. SpeXtractor requires diaPASEF (IM DIA) input.");
         return ILLEGAL_PARAMETERS;
       }
     }
@@ -3183,21 +3183,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
                       + " precursors below that charge, " + String(precursors.size()) + " remain");
     }
-    // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
+    // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACTOR_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
     // emission without touching fragment sharing. Pre-registered falsifier in dataset D-BASELINE.
-    if (const char* mi = std::getenv("SPEXTRACT_MIN_ISOTOPES"))
+    if (const char* mi = std::getenv("SPEXTRACTOR_MIN_ISOTOPES"))
     {
       const int k = std::atoi(mi); const size_t before = precursors.size();
       precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
                        [k](const Precursor_& pc){ return pc.n_isotopes < k; }), precursors.end());
-      writeLogInfo_("SPEXTRACT_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
+      writeLogInfo_("SPEXTRACTOR_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
                     + " precursors with fewer isotope peaks, " + String(precursors.size()) + " remain");
     }
-    // [step-02 sub-arm 2] SPEXTRACT_PRECURSOR_LIST=<tsv: rt_sec mz z, header line> keeps only precursors that
+    // [step-02 sub-arm 2] SPEXTRACTOR_PRECURSOR_LIST=<tsv: rt_sec mz z, header line> keeps only precursors that
     // MATCH a listed one (|dRT| <= 10 s, |dm/z| <= 10 ppm, same z or listed z == 0). With the reference implementation's own
     // precursor list this is the precursor-matched sub-arm: identical precursor population, our spectra.
-    if (const char* pl = std::getenv("SPEXTRACT_PRECURSOR_LIST"))
+    if (const char* pl = std::getenv("SPEXTRACTOR_PRECURSOR_LIST"))
     {
       struct Ref { double mz, rt; int z; };
       std::vector<Ref> refs; std::ifstream f(pl); std::string line; std::getline(f, line);   // header
@@ -3210,7 +3210,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         for (auto it = lo; it != refs.end() && it->mz <= pc.mono_mz + tol; ++it)
           if (std::fabs(it->rt - pc.rt) <= 10.0 && (it->z == 0 || pc.charge == 0 || it->z == pc.charge)) return false;
         return true; }), precursors.end());
-      writeLogInfo_("SPEXTRACT_PRECURSOR_LIST: " + String(refs.size()) + " reference precursors; kept "
+      writeLogInfo_("SPEXTRACTOR_PRECURSOR_LIST: " + String(refs.size()) + " reference precursors; kept "
                     + String(precursors.size()) + " of " + String(before) + " (matched within 10 s / 10 ppm / z)");
     }
     // [ms1-funnel] Measured recall against a DIA-NN truth set is 74.3% vs the reference implementation's 84.4%, but a
@@ -3406,12 +3406,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     if (integer_detector && !tofAxis().ok)
     {
       // The flight-time axis comes from the input's own analysis.tdf: a .d directory has one, and an
-      // mzPeak archive can be accompanied by one (SPEXTRACT_MZPEAK_TDF, as the exact-calibration
+      // mzPeak archive can be accompanied by one (SPEXTRACTOR_MZPEAK_TDF, as the exact-calibration
       // path already uses).
       why = "no candidate tdf";
       std::vector<std::string> cand;
       cand.push_back(in + "/analysis.tdf");
-      if (const char* sc = std::getenv("SPEXTRACT_MZPEAK_TDF")) cand.push_back(sc);
+      if (const char* sc = std::getenv("SPEXTRACTOR_MZPEAK_TDF")) cand.push_back(sc);
       for (const std::string& c : cand)
         if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
               + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
@@ -4164,7 +4164,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // The value travels ON THE LOADED EXPERIMENT (set by BrukerTimsFile), not through a header
     // static: an inline static can be duplicated across a shared-library boundary, in which case
     // the tool would read its own copy and always report "unset" [vibe/claude review 2026-09-01].
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
     if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
       out_exp.setMetaValue("spx:mz_calibration", spx::lastMzPeakCalibration());   // [codex #13] not BrukerTimsFile's state
     else
@@ -4179,7 +4179,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
     FileTypes::Type out_type = FileTypes::MZML;
     const String out_type_opt = getStringOption_("out_type");
-#ifdef SPEXTRACT_WITH_MZPEAK
+#ifdef SPEXTRACTOR_WITH_MZPEAK
     if (!out_type_opt.empty())
       { String t = out_type_opt; t.toLower(); out_type = (t == "mzml") ? FileTypes::MZML : FileTypes::MZPEAK; }
     else
@@ -4213,6 +4213,6 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
 int main(int argc, const char** argv)
 {
-  TOPPSpeXtract tool;
+  TOPPSpeXtractor tool;
   return tool.main(argc, argv);
 }

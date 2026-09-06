@@ -123,7 +123,7 @@ If the compact store were **not** 20.8 GB, or if the 8.5 M fragments/window were
 
 **Algorithmic differences, not implementation:**
 
-| Aspect | speXtract | the reference implementation | CPU Impact |
+| Aspect | speXtractor | the reference implementation | CPU Impact |
 |---|---|---|---|
 | **Correlation method** | Pearson over **full RT grid G (~1300 points)** with **zero-padding** (`scoreCandidates_` line 1572) | Pearson over **shared support only** (Nat Commun 16:95) | **~2.5–3×** |
 | **Precursor XIC smoothing** | **Off by default** (wl_scale_ = 0.0 unless set) | **2D Gaussian + Savitzky-Golay** on precursor XIC (Nat Commun 16:95 Methods) | **N/A (smoothing is cheap)** |
@@ -133,7 +133,7 @@ If the compact store were **not** 20.8 GB, or if the 8.5 M fragments/window were
 
 ### The dominant gap: **correlation kernel work volume**
 
-- speXtract: **Pearson over G** (line 1522–1572):
+- speXtractor: **Pearson over G** (line 1522–1572):
   For each (precursor, fragment) pair:
   `dot = Σ (p_dense[i] * f_grid[i])` over **G ≈ 1300 points**.
   **F × P × G** operations.
@@ -145,10 +145,10 @@ If the compact store were **not** 20.8 GB, or if the 8.5 M fragments/window were
   Same pair count, but **100–200× fewer FLOP per pair**.
 
 **Result: the reference implementation’s correlation kernel does 100–200× less work per pair, and the pair count is similar after gating.**
-Even with speXtract’s [Q1] variance_support (line 1534–1547), the union support is still **~10× larger** than the intersection for sparse fragments.
+Even with speXtractor’s [Q1] variance_support (line 1534–1547), the union support is still **~10× larger** than the intersection for sparse fragments.
 
 **The 3.1× CPU gap is **almost entirely explained by the correlation kernel’s O(G) vs O(|support|) work**.
-SpeXtract’s **grid-based optimization** (precomputed `mean`/`invnorm`) **replaced an O(P log F) search with O(1) per point**, but it **introduced O(G) zero-padding** that the reference implementation avoids.
+SpeXtractor’s **grid-based optimization** (precomputed `mean`/`invnorm`) **replaced an O(P log F) search with O(1) per point**, but it **introduced O(G) zero-padding** that the reference implementation avoids.
 
 ---
 

@@ -7,11 +7,11 @@ A five-lens adversarial analysis, every claim below re-verified by hand in the c
 `harness/collate.py:118` keys the counter `zc[(z, best["Precursor.Charge"])]` with `z` read off OUR
 mzML, and `:164` prints it `f"{a}->{t}"`. So the key is (ours, truth). The delta-mass a search
 engine sees is ours minus truth = **+1198 Da** at m/z 600, not the -1198 quoted in the help string
-at `src/spextract.cpp:1509` and repeated below. The repository does not agree with itself on this.
+at `src/spextractor.cpp:1509` and repeated below. The repository does not agree with itself on this.
 
 **2. That table belongs to a retired algorithm whose tie-break is the OPPOSITE of the shipped one.**
 The table is the `envelope` arm. Envelope breaks score ties toward the HIGHEST z
-(`src/spextract.cpp:2152`, `if (a.z != b.z) return a.z > b.z;`). The shipping `count` arm breaks
+(`src/spextractor.cpp:2152`, `if (a.z != b.z) return a.z > b.z;`). The shipping `count` arm breaks
 ties toward the LOWEST z (`:2047-2048`, strict `>` over an ascending z loop from `best_n = 1`).
 **The shipped arm's confusion cells have never been measured -- they are `--` in the table below.**
 So the structural bias of the code that actually ships is toward UNDERCALL, and the fixes discussed
@@ -43,7 +43,7 @@ flag exists to protect are deleted before it can act. Its comment still reads "O
 **6. Charge errors cost CLOSED-search identifications today, in the published numbers.**
 `msfragger.params` has `override_charge = 0`, so MSFragger TRUSTS our annotation. Measured
 2026-09-02 (`docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`): forcing the engine to re-derive charge
-instead (`override_charge=1, z=1..5`) moved SpeXtract 10,750 -> **11,238 (+4.5%)** against the
+instead (`override_charge=1, z=1..5`) moved SpeXtractor 10,750 -> **11,238 (+4.5%)** against the
 reference tool's 13,004 -> 13,276 (+2.1%), narrowing the gap 2,254 -> 2,038. So roughly 10% of the
 MSFragger deficit is our charge labels, and it is recoverable. The help string's counter-claim at
 `:1509` -- "Closed search barely notices (charge unset cost only 1.3%: 8,123->8,019)" -- has no

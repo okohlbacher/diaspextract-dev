@@ -20,7 +20,7 @@ The claim *"Traces cannot span more than trace:mass_error_ppm in m/z, so banding
 ### Reason 2: Traces **do** drift — the running centroid is the fatal flaw
 
 - **OpenMS MassTraceDetection behaviour:** Per your description and consistent with standard centroid-updating trace growth: each new peak within `mass_error_ppm` of the **current** centroid is accepted, and the centroid is **recomputed** to include it.
-- **Code evidence within speXtract:** `src/DIAPseudoSpectra.cpp:2911-2913` in the merging logic shows the *same* pattern:
+- **Code evidence within speXtractor:** `src/DIAPseudoSpectra.cpp:2911-2913` in the merging logic shows the *same* pattern:
   ```cpp
   while (b < pk.size() && fabs(pk[b].first - mz_sum / in_sum) <= mg_mz)
   { mz_sum += pk[b].first * pk[b].second; in_sum += pk[b].second; ...

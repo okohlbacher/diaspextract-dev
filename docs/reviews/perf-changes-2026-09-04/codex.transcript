@@ -1,7 +1,7 @@
 Reading additional input from stdin...
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -11,7 +11,7 @@ reasoning summaries: none
 session id: 01a06b8f-b148-76c2-875c-732b582675d2
 --------
 user
-Hostile review of THREE performance changes just made to speXtract's integer trace detector in
+Hostile review of THREE performance changes just made to speXtractor's integer trace detector in
 src/DIAPseudoSpectra.cpp. All three are claimed to be OUTPUT-NEUTRAL: identical spectra, identical
 order, identical peptides. A digest A/B is running on three files. Your job is to find where that
 claim is FALSE, or where the change is slower/heavier than what it replaced.
@@ -64,7 +64,7 @@ Read these files before answering:
 codex
 I’m using the adversarial-review skill because this is explicitly a hostile correctness/performance audit. I’ll read its instructions, the two required files, and locate the exact OpenMS source/configuration before assigning verdicts.
 exec
-/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && sed -n '1,260p' src/DIAPseudoSpectra.cpp && sed -n '1,260p' patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && sed -n '1,260p' src/DIAPseudoSpectra.cpp && sed -n '1,260p' patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 ---
 name: bmad-review-adversarial-general
@@ -111,7 +111,7 @@ Output findings as a Markdown list (descriptions only).
 // $Authors: OpenMS-the reference implementation project $
 // --------------------------------------------------------------------------
 
-#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACT_WITH_MZPEAK)
+#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACTOR_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -126,7 +126,7 @@ Output findings as a Markdown list (descriptions only).
 #if __has_include(<SQLiteCpp/SQLiteCpp.h>)
 #include <SQLiteCpp/SQLiteCpp.h>
 #endif
-// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 // OpenMS patch and already included via the mzPeak loader; including the in-tree copy as well
 // redefines the struct.
 #include <OpenMS/FORMAT/TdfMzCalibration.h>
@@ -270,7 +270,7 @@ namespace
   std::atomic<long long> stat_prec_{0};     ///< precursors scored
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
-  bool drop_prec_iso_ = std::getenv("SPEXTRACT_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
+  bool drop_prec_iso_ = std::getenv("SPEXTRACTOR_DROP_PREC_ISO") != nullptr;   ///< [C9 A/B] drop precursor M+1..M+3 from fragment lists
 
   static std::string rss_()
   {
@@ -363,7 +363,7 @@ namespace
     uint16_t len = 0;      ///< frames spanned (a gradient is ~1,400; asserted < 65536)
     uint16_t npts = 0;     ///< REAL points in the span
     uint16_t apex = 0;     ///< position of the apex within the span
-# OpenMS ElutionPeakDetection made LOCK-FREE for speXtract's nested band-parallel calls.
+# OpenMS ElutionPeakDetection made LOCK-FREE for speXtractor's nested band-parallel calls.
 # Removes the program-global critical OPENMS_ElutionPeakDetection_mtraces (per-thread accumulation
 # in detectPeaks(vector); serial nested path into the caller's own vector). Combined with the
 # ms1_traces canonical sort in DIAPseudoSpectra (determinism fix), the whole tool is now
@@ -374,8 +374,8 @@ namespace
 < #endif
 <     for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
 ---
->     // [speXtract lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
->     // inside another parallel region (speXtract's per-band trace loop, 96 concurrent callers) that
+>     // [speXtractor lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
+>     // inside another parallel region (speXtractor's per-band trace loop, 96 concurrent callers) that
 >     // one lock serialised everything -> 195M context switches, 37% system time. Fix: at TOP LEVEL,
 >     // collect into per-thread buffers and merge (no shared vector, no lock); when already NESTED,
 >     // run serially into the caller's own vector (also no sharing). detectElutionPeaks_ no longer
@@ -421,7 +421,7 @@ namespace
 <           single_mtraces.push_back(mt);
 <         }
 ---
->         single_mtraces.push_back(mt);   // [speXtract] lock-free: vector is thread-private
+>         single_mtraces.push_back(mt);   // [speXtractor] lock-free: vector is thread-private
 544,549c550
 < #ifdef _OPENMP
 < #pragma omp critical (OPENMS_ElutionPeakDetection_mtraces)
@@ -430,12 +430,12 @@ namespace
 <             single_mtraces.push_back(new_mt);
 <           }
 ---
->             single_mtraces.push_back(new_mt);   // [speXtract] lock-free: vector is thread-private
+>             single_mtraces.push_back(new_mt);   // [speXtractor] lock-free: vector is thread-private
 
 codex
 The initial read confirms the patch changes output merge order in the top-level parallel path (thread-buffer order, not input-trace order), though the new streamed call may always occur inside an existing parallel region. I’m now tracing actual call contexts and exact data invariants; that distinction decides whether it is a live regression or merely a latent patch defect.
 exec
-/bin/bash -lc "rg -n \"struct TraceStore|absorb\\(|splitIntegerTraces|splitValleys|detectPeaks\\(|scoreCandidates_|frag_rt|bucketOf|rt_bucket|quant|any_bins|reserve\\(\" src/DIAPseudoSpectra.cpp patches/openms-epd-lockfree.patch && git status --short && git diff -- src/DIAPseudoSpectra.cpp patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg -n \"struct TraceStore|absorb\\(|splitIntegerTraces|splitValleys|detectPeaks\\(|scoreCandidates_|frag_rt|bucketOf|rt_bucket|quant|any_bins|reserve\\(\" src/DIAPseudoSpectra.cpp patches/openms-epd-lockfree.patch && git status --short && git diff -- src/DIAPseudoSpectra.cpp patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtractor
  succeeded in 3220ms:
 2026-09-04 10:36:33.370 xcodebuild[26672:44062918]  DVTFilePathFSEvents: Failed to start fs event stream.
 2026-09-04 10:36:33.572 xcodebuild[26672:44062917] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
@@ -460,7 +460,7 @@ index 0b2a812..e47d460 100644
 @@ -752,12 +752,12 @@ namespace
    /// bytes per structure, which is what this records. One atomic add per structure (never per
    /// element), so the measurement cost is unmeasurable against stages that run for minutes.
-   /// Enabled with SPEXTRACT_MEM_LEDGER=1.
+   /// Enabled with SPEXTRACTOR_MEM_LEDGER=1.
 -  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_LIST, MEM_EPD_MT,
 +  enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_MT,
                  MEM_GRID, MEM_PDENSE, MEM_SPECTRA, MEM_WMAP, MEM_N };
@@ -711,7 +711,7 @@ index 0b2a812..e47d460 100644
          // window's precursors (this window runs on one thread). [perf]
 
 exec
-/bin/bash -lc "sed -n '240,330p' src/DIAPseudoSpectra.cpp; sed -n '1020,1210p' src/DIAPseudoSpectra.cpp; sed -n '1640,1885p' src/DIAPseudoSpectra.cpp; sed -n '2200,2350p' src/DIAPseudoSpectra.cpp; sed -n '3350,3565p' src/DIAPseudoSpectra.cpp; rg --files /Users/kohlbach/Claude/speXtract | rg 'ElutionPeakDetection\\.(cpp|h|hpp)"'$|MassTrace'"\\.(cpp|h|hpp)"'$|CMakeCache.txt|compile_commands.json|Dockerfile|openms'"' | head -200" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '240,330p' src/DIAPseudoSpectra.cpp; sed -n '1020,1210p' src/DIAPseudoSpectra.cpp; sed -n '1640,1885p' src/DIAPseudoSpectra.cpp; sed -n '2200,2350p' src/DIAPseudoSpectra.cpp; sed -n '3350,3565p' src/DIAPseudoSpectra.cpp; rg --files /Users/kohlbach/Claude/speXtractor | rg 'ElutionPeakDetection\\.(cpp|h|hpp)"'$|MassTrace'"\\.(cpp|h|hpp)"'$|CMakeCache.txt|compile_commands.json|Dockerfile|openms'"' | head -200" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     /// that still compare in m/z space, and the value actually written out is recomputed from these
     /// two at export. 0 means the trace came from the OpenMS detector, which has no bin.
@@ -804,7 +804,7 @@ exec
   ///   * what it removes is the far tail of a blob that ElutionPeakDetection did not split, not
   ///     part of a chromatographic peak -- real peaks here are 5-30 s wide.
   /// On the span representation this is free: three integers move, no bytes are copied. The arena
-          static const bool empty_raw = std::getenv("SPEXTRACT_INT_EMPTY_RAW") != nullptr;
+          static const bool empty_raw = std::getenv("SPEXTRACTOR_INT_EMPTY_RAW") != nullptr;
           if (empty_raw ? (sl.frame_off[f + 1] > sl.frame_off[f]) : (bool)tp.frame_live[f])
           {
             bool taken = false;
@@ -813,7 +813,7 @@ exec
             // over-length trace that is thrown away also throws away every peak in it, which is
             // why trace:max_trace_length_sec is falsified. Here the trace simply stops growing and
             // ElutionPeakDetection still splits what was found.
-            static const bool span_terminate = std::getenv("SPEXTRACT_SPAN_TERMINATE") != nullptr;
+            static const bool span_terminate = std::getenv("SPEXTRACTOR_SPAN_TERMINATE") != nullptr;
             if (span_terminate && k >= 0 && max_span_sec > 0.0)
             {
               const uint32_t nlo = std::min(sfmin, (uint32_t)f), nhi = std::max(sfmax, (uint32_t)f);
@@ -1089,14 +1089,14 @@ exec
         for (int b = 0; b <= bands; ++b)
           edge[b] = sample[std::min(sample.size() - 1, (size_t)((double)b / bands * sample.size()))];
       edge.front() = 0.0; edge.back() = std::numeexec
-/bin/bash -lc "find /Users/kohlbach/Claude /Users/kohlbach/.conan2 /Users/kohlbach/mambaforge /Users/kohlbach/miniconda3 /opt/homebrew -type f \\( -name 'ElutionPeakDetection.cpp' -o -name 'ElutionPeakDetection.h' -o -name 'MassTrace.cpp' -o -name 'MassTrace.h' \\) 2>/dev/null | head -100" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "find /Users/kohlbach/Claude /Users/kohlbach/.conan2 /Users/kohlbach/mambaforge /Users/kohlbach/miniconda3 /opt/homebrew -type f \\( -name 'ElutionPeakDetection.cpp' -o -name 'ElutionPeakDetection.h' -o -name 'MassTrace.cpp' -o -name 'MassTrace.h' \\) 2>/dev/null | head -100" in /Users/kohlbach/Claude/speXtractor
 exec
-/bin/bash -lc "sed -n '1,300p' docs/reviews/perf-changes-2026-09-04/vibe.md && sed -n '1,320p' docs/reviews/perf-changes-2026-09-04/kimi.md && sed -n '1,240p' docs/reviews/perf-changes-2026-09-04/codex.transcript" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '1,300p' docs/reviews/perf-changes-2026-09-04/vibe.md && sed -n '1,320p' docs/reviews/perf-changes-2026-09-04/kimi.md && sed -n '1,240p' docs/reviews/perf-changes-2026-09-04/codex.transcript" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 Reading additional input from stdin...
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -1106,7 +1106,7 @@ reasoning summaries: none
 session id: 01a06b8f-b148-76c2-875c-732b582675d2
 --------
 user
-Hostile review of THREE performance changes just made to speXtract's integer trace detector in
+Hostile review of THREE performance changes just made to speXtractor's integer trace detector in
 src/DIAPseudoSpectra.cpp. All three are claimed to be OUTPUT-NEUTRAL: identical spectra, identical
 order, identical peptides. A digest A/B is running on three files. Your job is to find where that
 claim is FALSE, or where the change is slower/heavier than what it replaced.
@@ -1159,7 +1159,7 @@ Read these files before answering:
 codex
 I’m using the adversarial-review skill because this is explicitly a hostile correctness/performance audit. I’ll read its instructions, the two required files, and locate the exact OpenMS source/configuration before assigning verdicts.
 exec
-/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && sed -n '1,260p' src/DIAPseudoSpectra.cpp && sed -n '1,260p' patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && sed -n '1,260p' src/DIAPseudoSpectra.cpp && sed -n '1,260p' patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 ---
 name: bmad-review-adversarial-general
@@ -1206,7 +1206,7 @@ Output findings as a Markdown list (descriptions only).
 // $Authors: OpenMS-the reference implementation project $
 // --------------------------------------------------------------------------
 
-#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACT_WITH_MZPEAK)
+#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACTOR_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -1221,7 +1221,7 @@ Output findings as a Markdown list (descriptions only).
 #if __has_include(<SQLiteCpp/SQLiteCpp.h>)
 #include <SQLiteCpp/SQLiteCpp.h>
 #endif
-// spextract::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
+// spextractor::TdfMzCalibration comes from <OpenMS/FORMAT/TdfMzCalibration.h>, installed by the
 // OpenMS patch and already included via the mzPeak loader; including the in-tree copy as well
 // redefines the struct.
 #include <OpenMS/FORMAT/TdfMzCalibration.h>
@@ -1361,7 +1361,7 @@ namespace
 /Users/kohlbach/Claude/OpenMS-mzpeak-install/include/OpenMS/KERNEL/MassTrace.h
 
 exec
-/bin/bash -lc 'wc -l docs/reviews/perf-changes-2026-09-04/* && for f in docs/reviews/perf-changes-2026-09-04/vibe.md docs/reviews/perf-changes-2026-09-04/kimi.md docs/reviews/perf-changes-2026-09-04/kimi.err; do ls -l "$f"; sed -n '"'1,260p' \""'$f"; done' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'wc -l docs/reviews/perf-changes-2026-09-04/* && for f in docs/reviews/perf-changes-2026-09-04/vibe.md docs/reviews/perf-changes-2026-09-04/kimi.md docs/reviews/perf-changes-2026-09-04/kimi.err; do ls -l "$f"; sed -n '"'1,260p' \""'$f"; done' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     1623 docs/reviews/perf-changes-2026-09-04/codex.transcript
       35 docs/reviews/perf-changes-2026-09-04/kimi.err
@@ -1409,7 +1409,7 @@ Now read the main file. 4008 lines. I need to find the three changes: TraceStore
   2. CHANGE 2: verify against OpenMS ElutionPeakDetection source. Need to check:
   - detectPeaks(const MassTrace&, vector<MassTrace>&) single overload: it calls single_mtraces.clear() first? The claim says the single-trace overload does `single_mtraces.clear()` first. Buffer reuse safe
 exec
-/bin/bash -lc 'tail -240 docs/reviews/perf-changes-2026-09-04/codex.transcript' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'tail -240 docs/reviews/perf-changes-2026-09-04/codex.transcript' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     }
   };
@@ -1444,7 +1444,7 @@ exec
 /Users/kohlbach/Claude/OpenMS-mzpeak-install/include/OpenMS/KERNEL/MassTrace.h
 
 exec
-/bin/bash -lc 'wc -l docs/reviews/perf-changes-2026-09-04/* && for f in docs/reviews/perf-changes-2026-09-04/vibe.md docs/reviews/perf-changes-2026-09-04/kimi.md docs/reviews/perf-changes-2026-09-04/kimi.err; do ls -l "$f"; sed -n '"'1,260p' \""'$f"; done' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'wc -l docs/reviews/perf-changes-2026-09-04/* && for f in docs/reviews/perf-changes-2026-09-04/vibe.md docs/reviews/perf-changes-2026-09-04/kimi.md docs/reviews/perf-changes-2026-09-04/kimi.err; do ls -l "$f"; sed -n '"'1,260p' \""'$f"; done' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     1623 docs/reviews/perf-changes-2026-09-04/codex.transcript
       35 docs/reviews/perf-changes-2026-09-04/kimi.err
@@ -1508,7 +1508,7 @@ web search:
 web search: 
 web search: 'MassTrace::MassTrace'
 exec
-/bin/bash -lc "sed -n '3090,3265p' src/DIAPseudoSpectra.cpp; sed -n '1650,1740p' src/DIAPseudoSpectra.cpp; nl -ba patches/openms-epd-lockfree.patch | sed -n '1,120p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '274,315p;1090,1195p;2225,2340p;3408,3442p'" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '3090,3265p' src/DIAPseudoSpectra.cpp; sed -n '1650,1740p' src/DIAPseudoSpectra.cpp; nl -ba patches/openms-epd-lockfree.patch | sed -n '1,120p'; nl -ba src/DIAPseudoSpectra.cpp | sed -n '274,315p;1090,1195p;2225,2340p;3408,3442p'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
            << (pc.guessed ? 1 : 0) << '\t' << pc.trace_idx << '\n';
       fp.close();
@@ -1662,12 +1662,12 @@ exec
     if (integer_detector && !tofAxis().ok)
     {
       // The flight-time axis comes from the input's own analysis.tdf: a .d directory has one, and an
-      // mzPeak archive can be accompanied by one (SPEXTRACT_MZPEAK_TDF, as the exact-calibration
+      // mzPeak archive can be accompanied by one (SPEXTRACTOR_MZPEAK_TDF, as the exact-calibration
       // path already uses).
       why = "no candidate tdf";
       std::vector<std::string> cand;
       cand.push_back(in + "/analysis.tdf");
-      if (const char* sc = std::getenv("SPEXTRACT_MZPEAK_TDF")) cand.push_back(sc);
+      if (const char* sc = std::getenv("SPEXTRACTOR_MZPEAK_TDF")) cand.push_back(sc);
       for (const std::string& c : cand)
         if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
               + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
@@ -1777,7 +1777,7 @@ exec
       vector<PeakMap> sub(bands);
       for (auto& s : map)          // non-const: each spectrum is released once distributed
       {
-     1	# OpenMS ElutionPeakDetection made LOCK-FREE for speXtract's nested band-parallel calls.
+     1	# OpenMS ElutionPeakDetection made LOCK-FREE for speXtractor's nested band-parallel calls.
      2	# Removes the program-global critical OPENMS_ElutionPeakDetection_mtraces (per-thread accumulation
      3	# in detectPeaks(vector); serial nested path into the caller's own vector). Combined with the
      4	# ms1_traces canonical sort in DIAPseudoSpectra (determinism fix), the whole tool is now
@@ -1788,8 +1788,8 @@ exec
      9	< #endif
     10	<     for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
     11	---
-    12	>     // [speXtract lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
-    13	>     // inside another parallel region (speXtract's per-band trace loop, 96 concurrent callers) that
+    12	>     // [speXtractor lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
+    13	>     // inside another parallel region (speXtractor's per-band trace loop, 96 concurrent callers) that
     14	>     // one lock serialised everything -> 195M context switches, 37% system time. Fix: at TOP LEVEL,
     15	>     // collect into per-thread buffers and merge (no shared vector, no lock); when already NESTED,
     16	>     // run serially into the caller's own vector (also no sharing). detectElutionPeaks_ no longer
@@ -1835,7 +1835,7 @@ exec
     56	<           single_mtraces.push_back(mt);
     57	<         }
     58	---
-    59	>         single_mtraces.push_back(mt);   // [speXtract] lock-free: vector is thread-private
+    59	>         single_mtraces.push_back(mt);   // [speXtractor] lock-free: vector is thread-private
     60	544,549c550
     61	< #ifdef _OPENMP
     62	< #pragma omp critical (OPENMS_ElutionPeakDetection_mtraces)
@@ -1844,7 +1844,7 @@ exec
     65	<             single_mtraces.push_back(new_mt);
     66	<           }
     67	---
-    68	>             single_mtraces.push_back(new_mt);   // [speXtract] lock-free: vector is thread-private
+    68	>             single_mtraces.push_back(new_mt);   // [speXtractor] lock-free: vector is thread-private
    274	  struct TraceStore
    275	  {
    276	    vector<uint32_t> rt_index;   ///< frame -> global RT axis
@@ -2103,7 +2103,7 @@ exec
   2332	        const Trace& f = frag_traces[fi];
   2333	        if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
   2334	        // [C9 A/B, 2026-09-02] 28% of emitted spectra carry the precursor's M+1 and 25% its M+2 as
-  2335	        // "fragments" (unfragmented survivors). SPEXTRACT_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
+  2335	        // "fragments" (unfragmented survivors). SPEXTRACTOR_DROP_PREC_ISO=1 drops M+1..M+3 (z known) too.
   2336	        if (drop_prec_iso_ && pc.charge > 0)
   2337	        {
   2338	          bool iso = false;
@@ -2146,10 +2146,10 @@ exec
   3442	          // the MassTrace payloads peak was the largest lifetime defect the plan found.
 
 exec
-/bin/bash -lc "rg -n \"omp parallel|omp single|taskgroup|taskloop\" src/DIAPseudoSpectra.cpp | tail -40; sed -n '3260,3370p' src/DIAPseudoSpectra.cpp; sed -n '3650,3745p' src/DIAPseudoSpectra.cpp; sed -n '1,120p' docs/reviews/perf-changes-2026-09-04/codex.transcript 2>/dev/null" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "rg -n \"omp parallel|omp single|taskgroup|taskloop\" src/DIAPseudoSpectra.cpp | tail -40; sed -n '3260,3370p' src/DIAPseudoSpectra.cpp; sed -n '3650,3745p' src/DIAPseudoSpectra.cpp; sed -n '1,120p' docs/reviews/perf-changes-2026-09-04/codex.transcript 2>/dev/null" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 1104:    #pragma omp taskloop grainsize(1) default(shared)
-1269:      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACT_PICK_STATIC=1 -> static (history-vs-race probe)
+1269:      #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACTOR_PICK_STATIC=1 -> static (history-vs-race probe)
 1315:      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
 1482:    #pragma omp taskloop default(shared)
 1772:      #pragma omp taskloop grainsize(1) default(shared)
@@ -2372,7 +2372,7 @@ exec
 Reading additional input from stdin...
 OpenAI Codex v0.153.0
 --------
-workdir: /Users/kohlbach/Claude/speXtract
+workdir: /Users/kohlbach/Claude/speXtractor
 model: gpt-5.6-sol
 provider: openai
 approval: never
@@ -2382,7 +2382,7 @@ reasoning summaries: none
 session id: 01a06b8f-b148-76c2-875c-732b582675d2
 --------
 user
-Hostile review of THREE performance changes just made to speXtract's integer trace detector in
+Hostile review of THREE performance changes just made to speXtractor's integer trace detector in
 src/DIAPseudoSpectra.cpp. All three are claimed to be OUTPUT-NEUTRAL: identical spectra, identical
 order, identical peptides. A digest A/B is running on three files. Your job is to find where that
 claim is FALSE, or where the change is slower/heavier than what it replaced.
@@ -2435,7 +2435,7 @@ Read these files before answering:
 codex
 I’m using the adversarial-review skill because this is explicitly a hostile correctness/performance audit. I’ll read its instructions, the two required files, and locate the exact OpenMS source/configuration before assigning verdicts.
 exec
-/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && sed -n '1,260p' src/DIAPseudoSpectra.cpp && sed -n '1,260p' patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/.agents/skills/bmad-review-adversarial-general/SKILL.md && sed -n '1,260p' src/DIAPseudoSpectra.cpp && sed -n '1,260p' patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 ---
 name: bmad-review-adversarial-general
@@ -2482,7 +2482,7 @@ Output findings as a Markdown list (descriptions only).
 // $Authors: OpenMS-the reference implementation project $
 // --------------------------------------------------------------------------
 
-#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACT_WITH_MZPEAK)
+#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (SPEXTRACTOR_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -2491,7 +2491,7 @@ Output findings as a Markdown list (descriptions only).
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 
 exec
-/bin/bash -lc 'rg --files docs/reviews/perf-changes-2026-09-04 | sort; for f in docs/reviews/perf-changes-2026-09-04/*; do case "$f" in *.transcript) ;; *) echo "$f"; sed -n '"'1,240p' \""'$f";; esac; done' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'rg --files docs/reviews/perf-changes-2026-09-04 | sort; for f in docs/reviews/perf-changes-2026-09-04/*; do case "$f" in *.transcript) ;; *) echo "$f"; sed -n '"'1,240p' \""'$f";; esac; done' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 docs/reviews/perf-changes-2026-09-04/codex.transcript
 docs/reviews/perf-changes-2026-09-04/kimi.err
@@ -2600,7 +2600,7 @@ Now read the main file. 4008 lines. I need to find the three changes: TraceStore
   ```
 
   There's `mt.computeMedianIntensity_`? Hmm. I genuinely need the OpenMS source. The user) Clamping: bucketOf clamps x <= 0 → 0 and x >= 65535 → 65535. A prexec
-/bin/bash -lc "sed -n '3480,3650p' src/DIAPseudoSpectra.cpp && rg -n \"delta_rt =|getDoubleOption_\\(\\\"gate:delta_rt|setMinFloat_\\(\\\"gate:delta_rt\" src/DIAPseudoSpectra.cpp && nl -ba src/DIAPseudoSpectra.cpp | sed -n '285,320p;1090,1195p;2230,2270p;2310,2335p;3415,3440p;3475,3500p' && nl -ba patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '3480,3650p' src/DIAPseudoSpectra.cpp && rg -n \"delta_rt =|getDoubleOption_\\(\\\"gate:delta_rt|setMinFloat_\\(\\\"gate:delta_rt\" src/DIAPseudoSpectra.cpp && nl -ba src/DIAPseudoSpectra.cpp | sed -n '285,320p;1090,1195p;2230,2270p;2310,2335p;3415,3440p;3475,3500p' && nl -ba patches/openms-epd-lockfree.patch" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
           return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(t.rt);
@@ -2717,7 +2717,7 @@ I could not read the cluster copy directly because its SSH gateway was unreachab
    candidate RT = 0.0
    ```
 
-   At [DIAPseudoSpectra.cpp:2257](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2257), `1.0 / delta_rt` overflows to infinity. Widening then computes `65000.0 / span`, which is also infinity. For the minimum RT, [bucketOf()](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2246) evaluates `(0.0 - 0.0) * inf`, yielding NaN, and then casts NaN to `int`. That conversion is undefined behavior. The exact test would accept the pair because its distance equals `delta_rt`; the quantised gate may reject it or do anything else. This makes Change 3 strictly **NOT OUTPUT-NEUTRAL**, although ordinary LC-MS RT scales cannot trigger it.
+   At [DIAPseudoSpectra.cpp:2257](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2257), `1.0 / delta_rt` overflows to infinity. Widening then computes `65000.0 / span`, which is also infinity. For the minimum RT, [bucketOf()](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2246) evaluates `(0.0 - 0.0) * inf`, yielding NaN, and then casts NaN to `int`. That conversion is undefined behavior. The exact test would accept the pair because its distance equals `delta_rt`; the quantised gate may reject it or do anything else. This makes Change 3 strictly **NOT OUTPUT-NEUTRAL**, although ordinary LC-MS RT scales cannot trigger it.
 
 2. **Normal finite RTs do not have a quantised false-negative.**  
    After widening, the effective bucket width is at least `delta_rt`, modulo rounding. Two values satisfying `|f-p| <= delta_rt` differ by at most one mathematical bucket; a boundary-rounding discrepancy can raise that to two. Therefore `±2` is sufficient for finite, non-overflowing calculations. The 535-bucket margin between the chosen maximum of 65000 and clamp at 65535 also makes ordinary multiplication rounding harmless.
@@ -2744,7 +2744,7 @@ I could not read the cluster copy directly because its SSH gateway was unreachab
    Integer-detector band stores satisfy `bins.empty()` or `bins.size() == inten.size()`. Nonempty split-child stores have no `bins`. Under that invariant, `bins.resize(base)` only creates zeros corresponding to preceding unbinned intensity entries, and `bins` can never grow beyond the total `inten` size. Therefore reserving the summed intensity size cannot be too small.
 
 10. **That safety is an unenforced call-site invariant, not a property of `TraceStore::absorb`.**  
-    A malformed source with `other.bins.size() > other.inten.size()` immediately invalidates the reserve calculation. More subtly, absorbing a binned store followed by a nonempty bins-less store leaves destination `bins` nonempty but shorter than `inten`. Any later consumer using only `bins.empty()` before indexing the second trace reads out of bounds. The current two merges do not mix stores that way, but `absorb()` itself does not defend the invariant at [DIAPseudoSpectra.cpp:297](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:297).
+    A malformed source with `other.bins.size() > other.inten.size()` immediately invalidates the reserve calculation. More subtly, absorbing a binned store followed by a nonempty bins-less store leaves destination `bins` nonempty but shorter than `inten`. Any later consumer using only `bins.empty()` before indexing the second trace reads out of bounds. The current two merges do not mix stores that way, but `absorb()` itself does not defend the invariant at [DIAPseudoSpectra.cpp:297](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:297).
 
 11. **The arena reserve does not guarantee lower peak memory.**  
     It requests the complete destination capacity while every source vector and its spare capacity still exists. Incremental insertion releases each source after absorption, so on allocators with substantial source-capacity slack, strict commit, or fragmentation, the upfront reserve can raise the allocation peak or fail where incremental growth survives. On normal Linux overcommit, untouched reserved pages generally do not immediately raise RSS, so this is primarily an address-space/allocator-risk caveat rather than proof that the measured RSS will increase.
@@ -2771,7 +2771,7 @@ I could not read the cluster copy directly because its SSH gateway was unreachab
     The `live` calculation counts one parent `Peak2D` payload and child `Peak2D` payloads, but during detection both the reusable `pk` vector and `MassTrace mt` contain copies of the parent peaks. It also omits the parent and child `smoothed_intensities_` vectors, approximately another 8 bytes per point. Streaming is still clearly smaller than retaining a whole chunk, but the recorded “parent+children” number is not the actual live allocation.
 
 19. **The OpenMS patch is not globally order-equivalent, although that does not break Change 2.**  
-    Its top-level branch merges output in thread-buffer order, whereas the original critical section appended in thread-completion order. That changes the raw EPD output order relative to the replaced implementation. The integer streamed path is nested and bypasses that branch, and speXtract later canonically sorts relevant trace collections, so this is not a counterexample to the new per-trace integer path. It does invalidate any broader claim that the patch itself preserves EPD output order universally.
+    Its top-level branch merges output in thread-buffer order, whereas the original critical section appended in thread-completion order. That changes the raw EPD output order relative to the replaced implementation. The integer streamed path is nested and bypasses that branch, and speXtractor later canonically sorts relevant trace collections, so this is not a counterexample to the new per-trace integer path. It does invalidate any broader claim that the patch itself preserves EPD output order universally.
 
 The actionable result is: keep Change 2; keep Change 1 with a pre-reserve 32-bit check and preferably assertions for the arena invariant; harden Change 3 by handling non-finite/non-positive `inv` without conversion—e.g. disable the coarse gate when `inv` is not finite.
 tokens used
@@ -2798,7 +2798,7 @@ I could not read the cluster copy directly because its SSH gateway was unreachab
    candidate RT = 0.0
    ```
 
-   At [DIAPseudoSpectra.cpp:2257](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2257), `1.0 / delta_rt` overflows to infinity. Widening then computes `65000.0 / span`, which is also infinity. For the minimum RT, [bucketOf()](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2246) evaluates `(0.0 - 0.0) * inf`, yielding NaN, and then casts NaN to `int`. That conversion is undefined behavior. The exact test would accept the pair because its distance equals `delta_rt`; the quantised gate may reject it or do anything else. This makes Change 3 strictly **NOT OUTPUT-NEUTRAL**, although ordinary LC-MS RT scales cannot trigger it.
+   At [DIAPseudoSpectra.cpp:2257](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2257), `1.0 / delta_rt` overflows to infinity. Widening then computes `65000.0 / span`, which is also infinity. For the minimum RT, [bucketOf()](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2246) evaluates `(0.0 - 0.0) * inf`, yielding NaN, and then casts NaN to `int`. That conversion is undefined behavior. The exact test would accept the pair because its distance equals `delta_rt`; the quantised gate may reject it or do anything else. This makes Change 3 strictly **NOT OUTPUT-NEUTRAL**, although ordinary LC-MS RT scales cannot trigger it.
 
 2. **Normal finite RTs do not have a quantised false-negative.**  
    After widening, the effective bucket width is at least `delta_rt`, modulo rounding. Two values satisfying `|f-p| <= delta_rt` differ by at most one mathematical bucket; a boundary-rounding discrepancy can raise that to two. Therefore `±2` is sufficient for finite, non-overflowing calculations. The 535-bucket margin between the chosen maximum of 65000 and clamp at 65535 also makes ordinary multiplication rounding harmless.
@@ -2825,7 +2825,7 @@ I could not read the cluster copy directly because its SSH gateway was unreachab
    Integer-detector band stores satisfy `bins.empty()` or `bins.size() == inten.size()`. Nonempty split-child stores have no `bins`. Under that invariant, `bins.resize(base)` only creates zeros corresponding to preceding unbinned intensity entries, and `bins` can never grow beyond the total `inten` size. Therefore reserving the summed intensity size cannot be too small.
 
 10. **That safety is an unenforced call-site invariant, not a property of `TraceStore::absorb`.**  
-    A malformed source with `other.bins.size() > other.inten.size()` immediately invalidates the reserve calculation. More subtly, absorbing a binned store followed by a nonempty bins-less store leaves destination `bins` nonempty but shorter than `inten`. Any later consumer using only `bins.empty()` before indexing the second trace reads out of bounds. The current two merges do not mix stores that way, but `absorb()` itself does not defend the invariant at [DIAPseudoSpectra.cpp:297](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:297).
+    A malformed source with `other.bins.size() > other.inten.size()` immediately invalidates the reserve calculation. More subtly, absorbing a binned store followed by a nonempty bins-less store leaves destination `bins` nonempty but shorter than `inten`. Any later consumer using only `bins.empty()` before indexing the second trace reads out of bounds. The current two merges do not mix stores that way, but `absorb()` itself does not defend the invariant at [DIAPseudoSpectra.cpp:297](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:297).
 
 11. **The arena reserve does not guarantee lower peak memory.**  
     It requests the complete destination capacity while every source vector and its spare capacity still exists. Incremental insertion releases each source after absorption, so on allocators with substantial source-capacity slack, strict commit, or fragmentation, the upfront reserve can raise the allocation peak or fail where incremental growth survives. On normal Linux overcommit, untouched reserved pages generally do not immediately raise RSS, so this is primarily an address-space/allocator-risk caveat rather than proof that the measured RSS will increase.
@@ -2852,13 +2852,13 @@ I could not read the cluster copy directly because its SSH gateway was unreachab
     The `live` calculation counts one parent `Peak2D` payload and child `Peak2D` payloads, but during detection both the reusable `pk` vector and `MassTrace mt` contain copies of the parent peaks. It also omits the parent and child `smoothed_intensities_` vectors, approximately another 8 bytes per point. Streaming is still clearly smaller than retaining a whole chunk, but the recorded “parent+children” number is not the actual live allocation.
 
 19. **The OpenMS patch is not globally order-equivalent, although that does not break Change 2.**  
-    Its top-level branch merges output in thread-buffer order, whereas the original critical section appended in thread-completion order. That changes the raw EPD output order relative to the replaced implementation. The integer streamed path is nested and bypasses that branch, and speXtract later canonically sorts relevant trace collections, so this is not a counterexample to the new per-trace integer path. It does invalidate any broader claim that the patch itself preserves EPD output order universally.
+    Its top-level branch merges output in thread-buffer order, whereas the original critical section appended in thread-completion order. That changes the raw EPD output order relative to the replaced implementation. The integer streamed path is nested and bypasses that branch, and speXtractor later canonically sorts relevant trace collections, so this is not a counterexample to the new per-trace integer path. It does invalidate any broader claim that the patch itself preserves EPD output order universally.
 
 The actionable result is: keep Change 2; keep Change 1 with a pre-reserve 32-bit check and preferably assertions for the arena invariant; harden Change 3 by handling non-finite/non-positive `inv` without conversion—e.g. disable the coarse gate when `inv` is not finite.
 0	<     for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
     11	---
-    12	>     // [speXtract lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
-    13	>     // inside another parallel region (speXtract's per-band trace loop, 96 concurrent callers) that
+    12	>     // [speXtractor lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
+    13	>     // inside another parallel region (speXtractor's per-band trace loop, 96 concurrent callers) that
     14	>     // one lock serialised everything -> 195M context switches, 37% system time. Fix: at TOP LEVEL,
     15	>     // collect into per-thread buffers and merge (no shared vector, no lock); when already NESTED,
     16	>     // run serially into the caller's own vector (also no sharing). detectElutionPeaks_ no longer
@@ -2904,7 +2904,7 @@ The actionable result is: keep Change 2; keep Change 1 with a pre-reserve 32-bit
     56	<           single_mtraces.push_back(mt);
     57	<         }
     58	---
-    59	>         single_mtraces.push_back(mt);   // [speXtract] lock-free: vector is thread-private
+    59	>         single_mtraces.push_back(mt);   // [speXtractor] lock-free: vector is thread-private
     60	544,549c550
     61	< #ifdef _OPENMP
     62	< #pragma omp critical (OPENMS_ElutionPeakDetection_mtraces)
@@ -2913,10 +2913,10 @@ The actionable result is: keep Change 2; keep Change 1 with a pre-reserve 32-bit
     65	<             single_mtraces.push_back(new_mt);
     66	<           }
     67	---
-    68	>             single_mtraces.push_back(new_mt);   // [speXtract] lock-free: vector is thread-private
+    68	>             single_mtraces.push_back(new_mt);   // [speXtractor] lock-free: vector is thread-private
 
 exec
-/bin/bash -lc "nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp | sed -n '308,365p' && patch --dry-run -p0 -d /Users/kohlbach/Claude/OpenMS < patches/openms-epd-lockfree.patch 2>&1 | head -80" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp | sed -n '308,365p' && patch --dry-run -p0 -d /Users/kohlbach/Claude/OpenMS < patches/openms-epd-lockfree.patch 2>&1 | head -80" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
    308	
    309	    return;
@@ -2998,12 +2998,12 @@ for z in range(3000000):
  if not math.isfinite(pc) or abs(f-pc)>d: continue
  q=b(f,lo,inv); pq=b(pc,lo,inv)
  if q is None or pq is None or abs(q-pq)>2: bad=[lo,hi,f,pc,d,inv,q,pq,abs(f-pc)]; break
-print(bad)'" in /Users/kohlbach/Claude/speXtract
+print(bad)'" in /Users/kohlbach/Claude/speXtractor
  succeeded in 3934ms:
 []
 
 exec
-/bin/bash -lc "nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp | sed -n '20,115p;312,570p;570,650p' && nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/source/KERNEL/MassTrace.cpp | sed -n '15,65p' && nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/MassTrace.h | sed -n '300,370p' && git diff --check -- src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp | sed -n '20,115p;312,570p;570,650p' && nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/source/KERNEL/MassTrace.cpp | sed -n '15,65p' && nl -ba /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/MassTrace.h | sed -n '300,370p' && git diff --check -- src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 1385ms:
 2026-09-04 10:40:10.252 xcodebuild[30644:44077539]  DVTFilePathFSEvents: Failed to start fs event stream.
 2026-09-04 10:40:10.374 xcodebuild[30644:44077538] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
@@ -3013,7 +3013,7 @@ git: error: couldn't create cache file '/tmp/xcrun_db-PBszBWyZ' (errno=Operation
 2026-09-04 10:40:10.902 xcodebuild[30646:44077571] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
 
 exec
-/bin/bash -lc 'for d in /Users/kohlbach/Claude/OpenMS /Users/kohlbach/Claude/OpenMS-mzpeak-build /Users/kohlbach/Claude/OpenMS-metafix /Users/kohlbach/Claude/mzPeak/OpenDIAlyzer/ext/OpenMS; do shasum "$d/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp" "$d/src/openms/source/KERNEL/MassTrace.cpp" 2>/dev/null; done && cmp -s /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp /Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp; echo cmp_epd=$? && cmp -s /Users/kohlbach/Claude/OpenMS/src/openms/source/KERNEL/MassTrace.cpp /Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/KERNEL/MassTrace.cpp; echo cmp_mt=$?' in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc 'for d in /Users/kohlbach/Claude/OpenMS /Users/kohlbach/Claude/OpenMS-mzpeak-build /Users/kohlbach/Claude/OpenMS-metafix /Users/kohlbach/Claude/mzPeak/OpenDIAlyzer/ext/OpenMS; do shasum "$d/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp" "$d/src/openms/source/KERNEL/MassTrace.cpp" 2>/dev/null; done && cmp -s /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp /Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp; echo cmp_epd=$? && cmp -s /Users/kohlbach/Claude/OpenMS/src/openms/source/KERNEL/MassTrace.cpp /Users/kohlbach/Claude/OpenMS-mzpeak-build/src/openms/source/KERNEL/MassTrace.cpp; echo cmp_mt=$?' in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 5e2c45912dd12123a07b0ebaff71c6ed564078a1  /Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
 8cdaa26389f3bea5b0a5b2f32f91201e1cfc72b9  /Users/kohlbach/Claude/OpenMS/src/openms/source/KERNEL/MassTrace.cpp
@@ -3027,7 +3027,7 @@ cmp_epd=0
 cmp_mt=0
 
 exec
-/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak2D.h && rg -n \"class OPENMS_DLLAPI Peak2D|class Peak2D|typedef.*Peak2D\" /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak2D.h /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak1D.h" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '1,240p' /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak2D.h && rg -n \"class OPENMS_DLLAPI Peak2D|class Peak2D|typedef.*Peak2D\" /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak2D.h /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak1D.h" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
 // Copyright (c) 2002-present, OpenMS Inc. -- EKU Tuebingen, ETH Zurich, and FU Berlin
 // SPDX-License-Identifier: BSD-3-Clause
@@ -3272,12 +3272,12 @@ public:
 /Users/kohlbach/Claude/OpenMS/src/openms/include/OpenMS/KERNEL/Peak2D.h:29:  class OPENMS_DLLAPI Peak2D
 
 exec
-/bin/bash -lc "sed -n '730,815p' src/DIAPseudoSpectra.cpp && rg -n \"MEM_EPD_MT|MEM_EPD_LIST\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtract
+/bin/bash -lc "sed -n '730,815p' src/DIAPseudoSpectra.cpp && rg -n \"MEM_EPD_MT|MEM_EPD_LIST\" src/DIAPseudoSpectra.cpp" in /Users/kohlbach/Claude/speXtractor
  succeeded in 0ms:
     for (uint64_t b : bits) { h ^= b; h *= 1099511628211ULL; }
     return h;
   }
-  static bool detOn_() { static const bool on = std::getenv("SPEXTRACT_DET") != nullptr; return on; }
+  static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
   static uint64_t traceDigest_(const vector<Trace>& ts)
   {
     vector<uint64_t> b; b.reserve(ts.size() * 3);
@@ -3298,7 +3298,7 @@ exec
   /// who owns it; windows run concurrently, so the interesting quantity is the PEAK CONCURRENT
   /// bytes per structure, which is what this records. One atomic add per structure (never per
   /// element), so the measurement cost is unmeasurable against stages that run for minutes.
-  /// Enabled with SPEXTRACT_MEM_LEDGER=1.
+  /// Enabled with SPEXTRACTOR_MEM_LEDGER=1.
   enum MemCat { MEM_SLAB, MEM_PREP, MEM_VISITED, MEM_TRACES, MEM_EPD_MT,
                 MEM_GRID, MEM_PDENSE, MEM_SPECTRA, MEM_WMAP, MEM_N };
   inline const char* memName(int c)
@@ -3313,7 +3313,7 @@ exec
   inline std::array<std::atomic<long long>, MEM_N>& memPeak()
   { static std::array<std::atomic<long long>, MEM_N> v{}; return v; }
   inline std::atomic<long long>& memTotalPeak() { static std::atomic<long long> v{0}; return v; }
-  inline bool memOn() { static const bool on = std::getenv("SPEXTRACT_MEM_LEDGER") != nullptr; return on; }
+  inline bool memOn() { static const bool on = std::getenv("SPEXTRACTOR_MEM_LEDGER") != nullptr; return on; }
   inline void memAdd(int c, long long bytes)
   {
     if (!memOn() || bytes <= 0) return;
@@ -3364,7 +3364,7 @@ exec
 1172:      MemGuard g_mt(MEM_EPD_MT, mt_live);   // now a per-trace peak, not a per-chunk total
 
 codex
-- **1 — Critical, silent-results/UB: CHANGE 3 is NOT OUTPUT-NEUTRAL without a stronger parameter guard.** With `delta_rt = std::numeric_limits<double>::denorm_min()`, one fragment at RT `1.0`, and a precursor at RT `1.0`, the original exact gate passes. The new code computes `inv = inf`, then `(1.0 - 1.0) * inf = NaN`; `bucketOf()` reaches `(int)NaN`, which is undefined behavior. It may reject the fragment, overflow while calculating `dq`, or crash. Positive subnormal values are not excluded by the current `delta_rt >= 0` validation. See [FragRt::bucketOf/build](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2239).
+- **1 — Critical, silent-results/UB: CHANGE 3 is NOT OUTPUT-NEUTRAL without a stronger parameter guard.** With `delta_rt = std::numeric_limits<double>::denorm_min()`, one fragment at RT `1.0`, and a precursor at RT `1.0`, the original exact gate passes. The new code computes `inv = inf`, then `(1.0 - 1.0) * inf = NaN`; `bucketOf()` reaches `(int)NaN`, which is undefined behavior. It may reject the fragment, overflow while calculating `dq`, or crash. Positive subnormal values are not excluded by the current `delta_rt >= 0` validation. See [FragRt::bucketOf/build](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2239).
 
 - **2 — Critical, silent-results/UB: finite RTs can create the same CHANGE 3 failure.** For fragment RTs `{-DBL_MAX, +DBL_MAX}` and an ordinary positive `delta_rt`, `hi - lo` becomes infinity. Widening sets `inv` to zero, after which the high fragment computes `inf * 0 = NaN` and again casts NaN to `int`. Both fragment RTs survive the current `isfinite` filter. This is pathological acquisition data, but it disproves the unconditional neutrality claim. Disable the quantized rejection whenever `delta_rt`, `inv`, `span`, or the computed bucket coordinate is non-finite.
 
@@ -3372,7 +3372,7 @@ codex
 
 - **4 — The CHANGE 3 clamps are safe on both ends within that finite domain.** A precursor below `rt0` that is within `delta_rt` of a fragment can only be within approximately one bucket of bucket zero. At the upper end, real fragment buckets are limited to approximately 65000, and an exact-passing precursor can lie less than one effective bucket beyond the maximum. It therefore cannot reach the 65535 clamp while its fragment remains over two buckets away. The 535-bucket margin also prevents ordinary rounding from overflowing `uint16_t`.
 
-- **5 — NaN/inf RTs do not reach CHANGE 3 through the current caller.** Fragment RTs are removed at [the finiteness filter](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3480), and every precursor scoring path checks finite RT/IM. Negative finite RTs are safe. `delta_rt == 0` is also neutral: all buckets become zero and the exact equality gate remains authoritative. Negative tolerances are rejected by configuration; if invoked directly, the unchanged exact test rejects every finite pair. Empty fragment sets return earlier, and a normal single-element set is safe.
+- **5 — NaN/inf RTs do not reach CHANGE 3 through the current caller.** Fragment RTs are removed at [the finiteness filter](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3480), and every precursor scoring path checks finite RT/IM. Negative finite RTs are safe. `delta_rt == 0` is also neutral: all buckets become zero and the exact equality gate remains authoritative. Negative tolerances are rejected by configuration; if invoked directly, the unchanged exact test rejects every finite pair. Empty fragment sets return earlier, and a normal single-element set is safe.
 
 - **6 — CHANGE 3 always increases resident storage.** It retains the original 8-byte RT array and adds roughly `2N` bytes plus vector metadata for `q`; nothing is removed. That cost is absent from the memory ledger. It is a bandwidth optimization, not a memory optimization. Against the stated 867-billion visits it is plausibly worthwhile, but sparse windows or runs with few precursors can be slower because they pay two construction passes and an extra branch without enough repeated scans to amortize them.
 
@@ -3380,13 +3380,13 @@ codex
 
 - **8 — CHANGE 1 is OUTPUT-NEUTRAL in the two actual merge sites.** Reserving capacity cannot alter elements, offsets, source order, or trace order. No successful-run input was found that changes spectra. In the band merge, every nonempty integer-detector store has `bins.size() == inten.size()` because detection resizes `bins` after each appended span. In the post-split chunk merge, every chunk store has empty `bins`. Thus `any_bins` is correct here.
 
-- **9 — Reserving `bins` to the summed `inten` size cannot be too small under the existing invariant.** `absorb()` can pad only to the current intensity base and then append at most `other.inten.size()` bins, so its required size never exceeds total intensity size. In the band merge it is exactly the required size; after valley splitting `any_bins` is false. See [TraceStore::absorb](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:297).
+- **9 — Reserving `bins` to the summed `inten` size cannot be too small under the existing invariant.** `absorb()` can pad only to the current intensity base and then append at most `other.inten.size()` bins, so its required size never exceeds total intensity size. In the band merge it is exactly the required size; after valley splitting `any_bins` is false. See [TraceStore::absorb](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:297).
 
 - **10 — CHANGE 1 does not guarantee a lower peak.** Both `reserve()` calls allocate the complete destination while every source vector is still live; the old loop grew the destination while freeing each source immediately after absorption. For example, with 48 equal sources whose capacities are near twice their sizes, upfront reserve can have all source capacity plus the full destination live simultaneously, whereas incremental growth may free enough sources before its largest allocation. RSS depends on allocator lazy commitment, but allocator capacity and `bad_alloc` risk can rise. The comments claiming the reserve necessarily eliminates a “2x” transient are too strong; only HWM measurements can establish the result.
 
 - **11 — `TraceStore::absorb()` itself is unsafe for arbitrary mixed binful/binless sources, although neither current merge triggers it.** Absorb a binful source followed by a nonempty binless source: `inten` grows but `bins` does not. A later `!bins.empty()` test followed by indexing the second trace’s offset reads beyond `bins`. The reserve condition does not repair that latent invariant. Either require all nonempty sources to agree about bins or resize `bins` through every binless source once bin storage has begun.
 
-- **12 — CHANGE 2 is OUTPUT-NEUTRAL in the current execution context.** The single overload clears its result and immediately calls the same `detectElutionPeaks_` routine used by the vector overload. Clearing is safe because children are converted before the next call. The surrounding task executes inside the outer OpenMP region, so the patched old vector path was the serial nested loop shown in [the lock-free patch](/Users/kohlbach/Claude/speXtract/patches/openms-epd-lockfree.patch:7), preserving parent and child order.
+- **12 — CHANGE 2 is OUTPUT-NEUTRAL in the current execution context.** The single overload clears its result and immediately calls the same `detectElutionPeaks_` routine used by the vector overload. Clearing is safe because children are converted before the next call. The surrounding task executes inside the outer OpenMP region, so the patched old vector path was the serial nested loop shown in [the lock-free patch](/Users/kohlbach/Claude/speXtractor/patches/openms-epd-lockfree.patch:7), preserving parent and child order.
 
 - **13 — OpenMS confirms there is no cross-trace numerical state in CHANGE 2.** `scan_time`, smoothing window, Savitzky–Golay filtering, extrema, FWHM, and optional noise/SNR are computed from the current trace only in [ElutionPeakDetection.cpp](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp:380). SNR filtering is disabled. The only collection-wide operation is the separately invoked `filterByPeakWidth()`, which this path never calls. Hoisting the EPD object is safe because detection does not accumulate mutable per-call state.
 
@@ -3394,12 +3394,12 @@ codex
 
 - **15 — CHANGE 2 has a definite reallocation regression for highly split inputs.** The old conversion reserved `split.size()` output `Trace` records after EPD. The streamed version reserves only the parent count, `hi - lo`. A chunk where every parent produces three or more children forces geometric reallocations and moves of `Trace` records. Streaming still likely wins overall memory, but this part is strictly slower and transiently heavier. Tracking child counts or reserving additional capacity would avoid it.
 
-- **16 — CHANGE 2’s new memory accounting is invalid.** `MemGuard g_mt` is constructed only after the entire trace loop, when almost all measured parent/child lifetimes have ended. Its byte calculation also omits the reused `pk` buffer, vector capacities, smoothing buffers, and EPD temporaries. `MassTrace mt(pk)` copies `pk`, so both parent representations coexist throughout detection. Consequently the ledger cannot substantiate the claimed peak reduction and materially undercounts the live streamed payload at [lines 1132–1172](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1132).
+- **16 — CHANGE 2’s new memory accounting is invalid.** `MemGuard g_mt` is constructed only after the entire trace loop, when almost all measured parent/child lifetimes have ended. Its byte calculation also omits the reused `pk` buffer, vector capacities, smoothing buffers, and EPD temporaries. `MassTrace mt(pk)` copies `pk`, so both parent representations coexist throughout detection. Consequently the ledger cannot substantiate the claimed peak reduction and materially undercounts the live streamed payload at [lines 1132–1172](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1132).
 
 Strict verdicts: **Change 1 — OUTPUT-NEUTRAL, memory improvement unproven. Change 2 — OUTPUT-NEUTRAL, with measurable allocation/accounting defects. Change 3 — NOT OUTPUT-NEUTRAL until non-finite/intermediate-overflow cases fall back to the exact gate.**
 tokens used
 131.234
-- **1 — Critical, silent-results/UB: CHANGE 3 is NOT OUTPUT-NEUTRAL without a stronger parameter guard.** With `delta_rt = std::numeric_limits<double>::denorm_min()`, one fragment at RT `1.0`, and a precursor at RT `1.0`, the original exact gate passes. The new code computes `inv = inf`, then `(1.0 - 1.0) * inf = NaN`; `bucketOf()` reaches `(int)NaN`, which is undefined behavior. It may reject the fragment, overflow while calculating `dq`, or crash. Positive subnormal values are not excluded by the current `delta_rt >= 0` validation. See [FragRt::bucketOf/build](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:2239).
+- **1 — Critical, silent-results/UB: CHANGE 3 is NOT OUTPUT-NEUTRAL without a stronger parameter guard.** With `delta_rt = std::numeric_limits<double>::denorm_min()`, one fragment at RT `1.0`, and a precursor at RT `1.0`, the original exact gate passes. The new code computes `inv = inf`, then `(1.0 - 1.0) * inf = NaN`; `bucketOf()` reaches `(int)NaN`, which is undefined behavior. It may reject the fragment, overflow while calculating `dq`, or crash. Positive subnormal values are not excluded by the current `delta_rt >= 0` validation. See [FragRt::bucketOf/build](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:2239).
 
 - **2 — Critical, silent-results/UB: finite RTs can create the same CHANGE 3 failure.** For fragment RTs `{-DBL_MAX, +DBL_MAX}` and an ordinary positive `delta_rt`, `hi - lo` becomes infinity. Widening sets `inv` to zero, after which the high fragment computes `inf * 0 = NaN` and again casts NaN to `int`. Both fragment RTs survive the current `isfinite` filter. This is pathological acquisition data, but it disproves the unconditional neutrality claim. Disable the quantized rejection whenever `delta_rt`, `inv`, `span`, or the computed bucket coordinate is non-finite.
 
@@ -3407,7 +3407,7 @@ tokens used
 
 - **4 — The CHANGE 3 clamps are safe on both ends within that finite domain.** A precursor below `rt0` that is within `delta_rt` of a fragment can only be within approximately one bucket of bucket zero. At the upper end, real fragment buckets are limited to approximately 65000, and an exact-passing precursor can lie less than one effective bucket beyond the maximum. It therefore cannot reach the 65535 clamp while its fragment remains over two buckets away. The 535-bucket margin also prevents ordinary rounding from overflowing `uint16_t`.
 
-- **5 — NaN/inf RTs do not reach CHANGE 3 through the current caller.** Fragment RTs are removed at [the finiteness filter](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:3480), and every precursor scoring path checks finite RT/IM. Negative finite RTs are safe. `delta_rt == 0` is also neutral: all buckets become zero and the exact equality gate remains authoritative. Negative tolerances are rejected by configuration; if invoked directly, the unchanged exact test rejects every finite pair. Empty fragment sets return earlier, and a normal single-element set is safe.
+- **5 — NaN/inf RTs do not reach CHANGE 3 through the current caller.** Fragment RTs are removed at [the finiteness filter](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:3480), and every precursor scoring path checks finite RT/IM. Negative finite RTs are safe. `delta_rt == 0` is also neutral: all buckets become zero and the exact equality gate remains authoritative. Negative tolerances are rejected by configuration; if invoked directly, the unchanged exact test rejects every finite pair. Empty fragment sets return earlier, and a normal single-element set is safe.
 
 - **6 — CHANGE 3 always increases resident storage.** It retains the original 8-byte RT array and adds roughly `2N` bytes plus vector metadata for `q`; nothing is removed. That cost is absent from the memory ledger. It is a bandwidth optimization, not a memory optimization. Against the stated 867-billion visits it is plausibly worthwhile, but sparse windows or runs with few precursors can be slower because they pay two construction passes and an extra branch without enough repeated scans to amortize them.
 
@@ -3415,13 +3415,13 @@ tokens used
 
 - **8 — CHANGE 1 is OUTPUT-NEUTRAL in the two actual merge sites.** Reserving capacity cannot alter elements, offsets, source order, or trace order. No successful-run input was found that changes spectra. In the band merge, every nonempty integer-detector store has `bins.size() == inten.size()` because detection resizes `bins` after each appended span. In the post-split chunk merge, every chunk store has empty `bins`. Thus `any_bins` is correct here.
 
-- **9 — Reserving `bins` to the summed `inten` size cannot be too small under the existing invariant.** `absorb()` can pad only to the current intensity base and then append at most `other.inten.size()` bins, so its required size never exceeds total intensity size. In the band merge it is exactly the required size; after valley splitting `any_bins` is false. See [TraceStore::absorb](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:297).
+- **9 — Reserving `bins` to the summed `inten` size cannot be too small under the existing invariant.** `absorb()` can pad only to the current intensity base and then append at most `other.inten.size()` bins, so its required size never exceeds total intensity size. In the band merge it is exactly the required size; after valley splitting `any_bins` is false. See [TraceStore::absorb](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:297).
 
 - **10 — CHANGE 1 does not guarantee a lower peak.** Both `reserve()` calls allocate the complete destination while every source vector is still live; the old loop grew the destination while freeing each source immediately after absorption. For example, with 48 equal sources whose capacities are near twice their sizes, upfront reserve can have all source capacity plus the full destination live simultaneously, whereas incremental growth may free enough sources before its largest allocation. RSS depends on allocator lazy commitment, but allocator capacity and `bad_alloc` risk can rise. The comments claiming the reserve necessarily eliminates a “2x” transient are too strong; only HWM measurements can establish the result.
 
 - **11 — `TraceStore::absorb()` itself is unsafe for arbitrary mixed binful/binless sources, although neither current merge triggers it.** Absorb a binful source followed by a nonempty binless source: `inten` grows but `bins` does not. A later `!bins.empty()` test followed by indexing the second trace’s offset reads beyond `bins`. The reserve condition does not repair that latent invariant. Either require all nonempty sources to agree about bins or resize `bins` through every binless source once bin storage has begun.
 
-- **12 — CHANGE 2 is OUTPUT-NEUTRAL in the current execution context.** The single overload clears its result and immediately calls the same `detectElutionPeaks_` routine used by the vector overload. Clearing is safe because children are converted before the next call. The surrounding task executes inside the outer OpenMP region, so the patched old vector path was the serial nested loop shown in [the lock-free patch](/Users/kohlbach/Claude/speXtract/patches/openms-epd-lockfree.patch:7), preserving parent and child order.
+- **12 — CHANGE 2 is OUTPUT-NEUTRAL in the current execution context.** The single overload clears its result and immediately calls the same `detectElutionPeaks_` routine used by the vector overload. Clearing is safe because children are converted before the next call. The surrounding task executes inside the outer OpenMP region, so the patched old vector path was the serial nested loop shown in [the lock-free patch](/Users/kohlbach/Claude/speXtractor/patches/openms-epd-lockfree.patch:7), preserving parent and child order.
 
 - **13 — OpenMS confirms there is no cross-trace numerical state in CHANGE 2.** `scan_time`, smoothing window, Savitzky–Golay filtering, extrema, FWHM, and optional noise/SNR are computed from the current trace only in [ElutionPeakDetection.cpp](/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp:380). SNR filtering is disabled. The only collection-wide operation is the separately invoked `filterByPeakWidth()`, which this path never calls. Hoisting the EPD object is safe because detection does not accumulate mutable per-call state.
 
@@ -3429,7 +3429,7 @@ tokens used
 
 - **15 — CHANGE 2 has a definite reallocation regression for highly split inputs.** The old conversion reserved `split.size()` output `Trace` records after EPD. The streamed version reserves only the parent count, `hi - lo`. A chunk where every parent produces three or more children forces geometric reallocations and moves of `Trace` records. Streaming still likely wins overall memory, but this part is strictly slower and transiently heavier. Tracking child counts or reserving additional capacity would avoid it.
 
-- **16 — CHANGE 2’s new memory accounting is invalid.** `MemGuard g_mt` is constructed only after the entire trace loop, when almost all measured parent/child lifetimes have ended. Its byte calculation also omits the reused `pk` buffer, vector capacities, smoothing buffers, and EPD temporaries. `MassTrace mt(pk)` copies `pk`, so both parent representations coexist throughout detection. Consequently the ledger cannot substantiate the claimed peak reduction and materially undercounts the live streamed payload at [lines 1132–1172](/Users/kohlbach/Claude/speXtract/src/DIAPseudoSpectra.cpp:1132).
+- **16 — CHANGE 2’s new memory accounting is invalid.** `MemGuard g_mt` is constructed only after the entire trace loop, when almost all measured parent/child lifetimes have ended. Its byte calculation also omits the reused `pk` buffer, vector capacities, smoothing buffers, and EPD temporaries. `MassTrace mt(pk)` copies `pk`, so both parent representations coexist throughout detection. Consequently the ledger cannot substantiate the claimed peak reduction and materially undercounts the live streamed payload at [lines 1132–1172](/Users/kohlbach/Claude/speXtractor/src/DIAPseudoSpectra.cpp:1132).
 
 Strict verdicts: **Change 1 — OUTPUT-NEUTRAL, memory improvement unproven. Change 2 — OUTPUT-NEUTRAL, with measurable allocation/accounting defects. Change 3 — NOT OUTPUT-NEUTRAL until non-finite/intermediate-overflow cases fall back to the exact gate.**
 exit=0

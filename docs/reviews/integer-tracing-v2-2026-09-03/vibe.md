@@ -68,7 +68,7 @@ Based on my detailed review of the implementation against the OpenMS excerpts, h
 
 ## 5. A test that would have caught the first version
 
-**Synthetic input** (to be added to `test/test_spextract.py`):
+**Synthetic input** (to be added to `test/test_spextractor.py`):
 ```python
 def test_trace_termination_and_validity():
     """
