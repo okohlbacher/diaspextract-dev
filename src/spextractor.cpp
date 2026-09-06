@@ -188,6 +188,13 @@ namespace
     return "";
 #endif
   }
+  /// [experiment] Ask glibc to return the free pages of every arena (MADV_DONTNEED on the
+  /// page-aligned interior of each free chunk, plus systrim of the main top and unmapping of wholly
+  /// free per-thread heaps). Measured, not shipped: 101 GiB of the 149 GiB resident set is on the
+  /// allocator's free lists at the MS1 -> window-loop boundary on a 2-h file, and how much of that
+  /// is page-aligned and coalesced -- rather than stranded in sub-page fragments -- decides how the
+  /// remaining structural steps are priced. SPEXTRACTOR_MALLOC_TRIM=1 turns it on.
+  static bool trimOn_() { static const bool on = std::getenv("SPEXTRACTOR_MALLOC_TRIM") != nullptr; return on; }
   static std::string rss_()
   {
     std::ifstream st("/proc/self/status");
@@ -3302,6 +3309,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // compactUnreferenced() for why container order corrupted ~1% of the kept spans.
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
+#ifdef __GLIBC__
+    if (trimOn_())
+    { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
+      malloc_trim(0);
+      writeLogInfo_("[trim] MS1 -> window loop: " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
+                    + String(phase_clock_() - _tt) + " s" + mem_());
+    }
+#endif
     }
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
                   + " precursor hypotheses (" + String(n_default) + " assigned default charge)." + rss_());
@@ -3906,6 +3921,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
     writeLogInfo_("All windows done." + clk_() + rss_() + mem_()); // parallel-phase peak? [mem]
+#ifdef __GLIBC__
+    if (trimOn_())
+    { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
+      malloc_trim(0);
+      writeLogInfo_("[trim] window loop -> write: " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
+                    + String(phase_clock_() - _tt) + " s" + mem_());
+    }
+#endif
     {
       // These are CPU-seconds summed across threads, not wall time -- a stage that runs on 20
       // threads contributes 20x its wall. That is the right denominator for "where does the work
