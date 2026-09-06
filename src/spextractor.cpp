@@ -189,13 +189,6 @@ namespace
     return "";
 #endif
   }
-  /// [experiment] Ask glibc to return the free pages of every arena (MADV_DONTNEED on the
-  /// page-aligned interior of each free chunk, plus systrim of the main top and unmapping of wholly
-  /// free per-thread heaps). Measured, not shipped: 101 GiB of the 149 GiB resident set is on the
-  /// allocator's free lists at the MS1 -> window-loop boundary on a 2-h file, and how much of that
-  /// is page-aligned and coalesced -- rather than stranded in sub-page fragments -- decides how the
-  /// remaining structural steps are priced. SPEXTRACTOR_MALLOC_TRIM=1 turns it on.
-  static bool trimOn_() { static const bool on = std::getenv("SPEXTRACTOR_MALLOC_TRIM") != nullptr; return on; }
   static std::string rss_()
   {
     std::ifstream st("/proc/self/status");
@@ -1662,6 +1655,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerDoubleOption_("consolidate:delta_im", "<1/K0>", 0.02, "Precursor IM tolerance for feature consolidation. Set larger than the 12 m/z x 2 IM sub-range split to merge a feature emitted from BOTH IM sub-ranges.", false, true);
     registerFlag_("consolidate:same_charge_only", "Only merge spectra that also agree in charge (safer; leaves genuine multi-charge observations intact).");
 
+    registerStringOption_("perf:malloc_trim", "<true/false>", "true",
+                          "Return the allocator's free pages to the OS at the two phase boundaries (glibc only). "
+                          "The window loop's allocations otherwise stack on top of everything the loading and MS1 "
+                          "phases freed but the allocator kept: measured on a 2-h acquisition, that floor is 138 GB "
+                          "at the loop start, and trimming it first takes the run's PEAK from 281.5 to 206.7 GB "
+                          "(-26.6%) for 12.7 s of a 1,800 s run, with byte-identical output. Turn it off to measure "
+                          "the allocator's behaviour, not because it costs anything.", false);
+    setValidStrings_("perf:malloc_trim", {"true", "false"});
     registerStringOption_("perf:stream_load", "<true/false>", "true",
                           "[stream] Read the .d frame-by-frame via BrukerTimsFile::loadDIAStreaming, "
                           "peak-picking and compacting each frame on arrival, instead of loadExperiment() "
@@ -2805,6 +2806,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       return {(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)window_group};
     };
     const bool stream_load = (getStringOption_("perf:stream_load") == "true");
+    const bool trim_on = (getStringOption_("perf:malloc_trim") == "true");
     bool streamed = false;
 
     if (stream_load)
@@ -3320,7 +3322,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
 #ifdef __GLIBC__
-    if (trimOn_())
+    if (trim_on)
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
       malloc_trim(0);
       writeLogInfo_("[trim] MS1 -> window loop: " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
@@ -3929,7 +3931,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
     writeLogInfo_("All windows done." + clk_() + rss_() + mem_()); // parallel-phase peak? [mem]
 #ifdef __GLIBC__
-    if (trimOn_())
+    if (trim_on)
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
       malloc_trim(0);
       writeLogInfo_("[trim] window loop -> write: " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
