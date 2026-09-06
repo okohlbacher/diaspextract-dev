@@ -3244,7 +3244,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // Apex, then walk outwards to half maximum with linear interpolation between samples;
       // -1 when the trace never falls to half max on both sides (truncated peak), which must be
       // reported rather than silently imputed -- a truncated peak is not a narrow one.
-      auto fwhm_of = [](const Trace& tr) -> double {
+      auto fwhm_of = [&ms1_store](const Trace& tr) -> double {
         if (tr.np() < 3) return -1.0;
         vector<double> prt, pv; packReal(ms1_store, tr, prt, pv);
         size_t ap = 0;
