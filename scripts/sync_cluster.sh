@@ -45,8 +45,9 @@ ssh "$NODE" "set -eu
   fi
   OMSVER=\$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
   EPD=/scratch/kohlbach/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
-  { printf 'src_sha256=%s\ncalibration_header_sha256=$HDR_SHA\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\n' \
+  { printf 'src_sha256=%s\ncalibration_header_sha256=$HDR_SHA\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\nmasstrace_move_markers=%s\nlibopenms_sha256=%s\n' \
       '$SHA' '$GITREV' \"\$(date -Is)\" \"\$(sha256sum bin/spextract | cut -d' ' -f1)\" \
-      \"\$OMSVER\" \"\$(sha256sum \$EPD | cut -d' ' -f1)\" \"\$(grep -c 'SpeXtract\|lock' \$EPD || true)\"
+      \"\$OMSVER\" \"\$(sha256sum \$EPD | cut -d' ' -f1)\" \"\$(grep -c 'SpeXtract\|lock' \$EPD || true)\" \
+      \"\$(grep -c 'MassTrace(MassTrace &&)' /scratch/kohlbach/OpenMS/src/openms/include/OpenMS/KERNEL/MassTrace.h || true)\" \"\$(sha256sum lib/libOpenMS.so | cut -d' ' -f1)\"
   } > bin/spextract.provenance.tmp && mv bin/spextract.provenance.tmp bin/spextract.provenance
   cat bin/spextract.provenance | tee -a /scratch/kohlbach/deploys.log"

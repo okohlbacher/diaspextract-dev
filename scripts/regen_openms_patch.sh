@@ -1,5 +1,7 @@
 #!/bin/bash
 # Regenerate patches/openms-brukertims-mz-calibration.patch from the cluster's OpenMS tree (NOT a git checkout).
+# (patches/openms-epd-lockfree.patch and patches/openms-masstrace-move.patch are cut from the clean base with
+#  diff -u against `git show <base>:<file>`; they are not regenerated here.)
 # Every edited file keeps a pristine copy next to it (<file>.orig); this diffs each against its .orig (p0 paths)
 # and appends the committed header hunk for files that have no .orig (the BrukerTimsFile.h accessor).
 # Usage (on the cluster): scripts/regen_openms_patch.sh /scratch/kohlbach/OpenMS > new.patch; then grep-verify:

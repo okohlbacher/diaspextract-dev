@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <type_traits>
 #include <array>
 #include <functional>
 #include <cstdio>
@@ -45,6 +46,12 @@
 #ifdef __GLIBC__
 #include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
 #endif
+
+// The three OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
+// third: without defaulted moves an rvalue MassTrace binds to the copy constructor (not noexcept), and
+// every "move" of a trace in the band/split gathering is a deep copy of its points.
+static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is_nothrow_move_assignable_v<OpenMS::MassTrace>,
+              "OpenMS MassTrace has no noexcept move operations: apply patches/openms-masstrace-move.patch to the OpenMS tree");
 #include <exception>   // exception_ptr
 #ifdef _OPENMP
 #include <omp.h>
