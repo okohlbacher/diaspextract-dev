@@ -1659,10 +1659,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerStringOption_("perf:malloc_trim", "<true/false>", "true",
                           "Return the allocator's free pages to the OS at the two phase boundaries (glibc only). "
                           "The window loop's allocations otherwise stack on top of everything the loading and MS1 "
-                          "phases freed but the allocator kept: measured on a 2-h acquisition, that floor is 138 GB "
-                          "at the loop start, and trimming it first takes the run's PEAK from 281.5 to 206.7 GB "
-                          "(-26.6%) for 12.7 s of a 1,800 s run, with byte-identical output. Turn it off to measure "
-                          "the allocator's behaviour, not because it costs anything.", false);
+                          "phases freed but the allocator kept: measured on a 2-h acquisition that floor is 138 GB "
+                          "at the loop start, and trimming it first takes the run's PEAK from 265 to 186 GB. "
+                          "IT IS NOT FREE: the loop then faults those pages back in cold (minor faults +26%), which "
+                          "costs about 8.5% of wall time -- so this trades ~30% of peak memory for ~8% of runtime, "
+                          "measured interleaved on one node. On by default because memory is what bounds this tool "
+                          "(it decides how many isolation windows fit at once, and whether the run fits the machine "
+                          "at all). Turn it off when time is the binding constraint. Output is byte-identical "
+                          "either way.", false);
     setValidStrings_("perf:malloc_trim", {"true", "false"});
     registerStringOption_("perf:stream_load", "<true/false>", "true",
                           "[stream] Read the .d frame-by-frame via BrukerTimsFile::loadDIAStreaming, "

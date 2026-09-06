@@ -8,12 +8,15 @@
   OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.
 
 ### Added
-- **`perf:malloc_trim`, on by default: the peak drops 26.6%.** The window loop's allocations stacked
-  on top of everything the loading and MS1 phases had freed but the allocator kept -- measured, that
-  floor is 138 GB at the loop start of a 2-hour acquisition. Returning it first (`malloc_trim(0)` at
-  the two phase boundaries, glibc only) takes the run's peak from **281.5 GB to 206.7 GB** for 12.7 s
-  of a 1,800 s run, with a byte-identical spectrum list. 92 of the 101 GB the allocator reported free
-  came back, so the pool is recoverable rather than lost to fragmentation.
+- **`perf:malloc_trim`, on by default: 30% less peak memory for about 8% more wall time.** The
+  window loop's allocations stacked on top of everything the loading and MS1 phases had freed but the
+  allocator kept -- measured, that floor is 138 GB at the loop start of a 2-hour acquisition.
+  Returning it first (`malloc_trim(0)` at the two phase boundaries, glibc only) takes the peak from
+  **265 GB to 186 GB**, with a byte-identical spectrum list. It is not free: the loop faults those
+  pages back in cold (minor page faults +26%, window-loop CPU +15% at unchanged concurrency), which
+  costs **+8.5% of wall time** measured interleaved on one node. On by default because memory is what
+  bounds this tool -- it decides how many windows fit at once and whether a run fits the machine at
+  all -- and off is one flag when time is the binding constraint.
 - **The trace record is 56 bytes, was 72.** It carried an 8-byte pointer to the store every trace of
   a vector already shares and an 8-byte copy of a calibration factor the store holds per frame. The
   span accessors take the store explicitly and the factor is a 4-byte frame index. Measured on a

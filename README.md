@@ -89,7 +89,7 @@ sage sage.json -o results pseudo.mzML
 | `-trace:detector` | `integer` | `integer` works on the instrument's flight-time bin; `openms` uses OpenMS `MassTraceDetection`. Different algorithms — see below |
 | `-charge:min_charge` | 2 | lowest precursor charge to emit. Singly-charged hypotheses are ~30% of emission and ~1.7% of peptides |
 | `-assembly:require_isotope_support` | `true` | drop precursor hypotheses with no isotope partner. `false` roughly doubles emission, is ~7× slower, and identifies fewer peptides |
-| `-perf:malloc_trim` | `true` | return the allocator's free pages at the two phase boundaries (glibc). The window loop otherwise stacks on top of everything the earlier phases freed but the allocator kept: measured **-26.6% peak** on a 2-hour acquisition, byte-identical output |
+| `-perf:malloc_trim` | `true` | return the allocator's free pages at the two phase boundaries (glibc). Trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition (the loop re-faults the returned pages cold); byte-identical output either way. Off when time, not memory, is the constraint |
 | `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output** |
 | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
 
