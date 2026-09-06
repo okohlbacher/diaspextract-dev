@@ -109,3 +109,29 @@ The last row is the retention mechanism as a measurement: at the MS1 -> window-l
 two thirds of the resident set is memory the allocator holds free. It is the same pool the ownership
 steps stop creating; it is also what a `malloc_trim(0)` at that boundary would return, which makes
 the declined allocator-hygiene lever a measured 33 GB on this file rather than an assumption.
+
+## CORRECTION (2026-09-06): the per-window numbers, from all 28 windows
+
+An earlier reading of this file's first two `[mem]` lines concluded that the per-window structures
+were about four times smaller than the plan assumed. **That was wrong.** The `[mem]` line prints in
+trace-completion order while admission is heavy-first, so the first two lines are the two SMALLEST
+windows: together 51,343,214 peaks, **1.19% of the run**, not 2/28 = 7.1%. The windows span
+11.9x (min 21.1 M peaks, median 161.8 M, max 251.1 M) because the isolation tiles are 19-141 Da wide.
+
+All 28 lines, scaled per peak (4,318,987,366 MS2 peaks):
+
+| quantity | measured |
+|---|---|
+| parent fragment traces | 925,021,637 = 0.2142 per peak |
+| child traces after the valley split | 1,217,100,843 = 0.2818 per peak |
+| trace records at 72 B, if all were simultaneous | parents 62.0 GiB + children 81.6 GiB = **143.6 GiB** |
+| span arena, one copy | 5,035,898,026 floats = 18.8 GiB |
+| RSS observed at the window lines | 159-263 GiB (VmHWM 268) |
+
+So the trace records are the **largest addressable structure in the tool**, larger than the compact
+store (40.2 GiB) and the picked MS1 map (44.5 GiB). Shrinking the record from 72 to 56 bytes is
+therefore worth roughly 16-24 GiB at the peak rather than the ~4 GiB the two-window reading implied,
+and it is the cheapest change on the list.
+
+The lesson is a measurement lesson: a per-window log line is not a sample of the run unless the
+windows are equal, and these are not. Scale by peaks, never by window count.
