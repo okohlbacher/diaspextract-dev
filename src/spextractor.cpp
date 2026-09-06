@@ -2290,7 +2290,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
   /// co-eluting in RT, co-located in IM). Measured redundancy is 4.6 identified spectra per unique
   /// peptide vs the reference implementation's 1.46, so duplicates cost spectra, RAM and FDR budget without adding
   /// peptides. Keeps the most intense representative. Deterministic (total-order sort).
-  static size_t dedupPrecursors_(vector<Precursor_>& pcs, const vector<Trace>& ms1,
+  static size_t dedupPrecursors_(vector<Precursor_>& pcs, const vector<Trace>& ms1, const TraceStore& ms1st,
                                  double mass_ppm, double rt_tol, double im_tol)
   {
     if (pcs.empty()) return 0;
@@ -2316,7 +2316,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (drop[j]) continue;
         if (fabs(pcs[j].rt - pcs[i].rt) <= rt_tol && fabs(pcs[j].im - pcs[i].im) <= im_tol)
         {
-          if (inten[pcs[j].trace_idx] > inten[pcs[i].trace_idx]) { drop[i] = true; break; }
+          if (intensityOf(ms1st, ms1[pcs[j].trace_idx]) > intensityOf(ms1st, ms1[pcs[i].trace_idx])) { drop[i] = true; break; }
           drop[j] = true;
         }
       }
@@ -3151,14 +3151,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // this one did not. [adv-review codex/kimi 2026-09-03]
     {
       const size_t before = ms1_traces.size();
-      ms1_traces.erase(remove_if(ms1_traces.begin(), ms1_traces.end(), [](const Trace& t) {
+      ms1_traces.erase(remove_if(ms1_traces.begin(), ms1_traces.end(), [&ms1_store](const Trace& t) {
         return !std::isfinite(t.mz) || !std::isfinite(t.rt) || !std::isfinite(t.im)
                || !std::isfinite(intensityOf(ms1_store, t));
       }), ms1_traces.end());
       if (before != ms1_traces.size())
         writeLogInfo_("dropped " + String(before - ms1_traces.size()) + " MS1 traces with non-finite coordinates");
     }
-    sort(ms1_traces.begin(), ms1_traces.end(), [](const Trace& a, const Trace& b) {
+    sort(ms1_traces.begin(), ms1_traces.end(), [&ms1_store](const Trace& a, const Trace& b) {
       if (a.mz != b.mz) return a.mz < b.mz;
       if (a.rt != b.rt) return a.rt < b.rt;
       if (a.im != b.im) return a.im < b.im;
@@ -3177,7 +3177,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     if (getFlag_("assembly:dedup_precursors"))
     {
       const size_t before = precursors.size();
-      const size_t removed = dedupPrecursors_(precursors, ms1_traces, mass_ppm, delta_rt, delta_im);
+      const size_t removed = dedupPrecursors_(precursors, ms1_traces, ms1_store, mass_ppm, delta_rt, delta_im);
       writeLogInfo_("Precursor dedup: removed " + String(removed) + " of " + String(before)
                     + " hypotheses (" + String((int)(1000.0 * removed / std::max<size_t>(before, 1)) / 10.0) + "%)");
     }
