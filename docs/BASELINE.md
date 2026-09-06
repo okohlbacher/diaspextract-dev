@@ -1407,3 +1407,24 @@ inside the loop -- so it is free but also pointless unless something after the l
 The trade is therefore: **-82 GB of peak (-30.7%) for +2:37 of wall (+8.5%)** on a 2-hour
 acquisition. Which side of that is right depends on whether memory or time is the binding
 constraint, and that is a decision, not a measurement.
+
+#### The 48-byte record, measured (output-identical on both files)
+
+| build | peak RSS (GiB) |
+|---|---|
+| v13 baseline | 268.5 |
+| v19 (trim + admission gate + 56-byte record) | 183.0-186.2 |
+| **v20 (48-byte record + the split's reserve fixed)** | **177.5** |
+
+Cumulative **-91.0 GiB, -33.9%**, spectrum digest identical throughout.
+
+The record change is confirmed directly rather than inferred: the per-window `[mem]` lines sum to
+64,986 MB of trace records before and 55,699 MB after, a 9.1 GB reduction that is exactly 8/56 of
+the total, and the peak fell 5.5 GiB of that -- the difference being the ~60% of windows resident at
+the peak. Deriving the apex intensity from the arena costs nothing numerically: it is the same float
+the field held, and the digest proves it on both files.
+
+**A unit trap worth recording.** `/usr/bin/time -v` reports kilobytes; dividing by 1e6 gives a number
+that looks like GB and is 7% smaller than the GiB the tool's own logs print. Comparing one against
+the other made a real 5.5 GiB improvement look like no change at all. Every figure in this file is
+GiB; when in doubt, compare kB against kB.
