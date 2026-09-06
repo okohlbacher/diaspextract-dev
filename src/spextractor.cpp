@@ -1967,7 +1967,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // toTrace only reads, so each MassTrace is dead the moment it is converted. Releasing it here
     // keeps the peak at one MassTrace instead of the whole vector plus the whole Trace vector; the
     // same discipline is already applied to the band and chunk vectors above.
-    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); MassTrace().swap(mts[i]); }
+    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); mts[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
     return out;
   }
 
