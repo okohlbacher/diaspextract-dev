@@ -1379,3 +1379,31 @@ worker sits in a spin loop holding a thread it cannot use.
 cluster executes a copy of `test_spextractor.py` from the deployment point and the copy was stale, so
 the new check silently did not exist. `sync_cluster.sh` now ships the suite with the source it tests.
 A green result from a suite that quietly dropped a test is worse than a red one.
+
+#### CORRECTION (2026-09-06, 19:55): the trim is NOT free -- it trades ~8.5% wall for ~30% memory
+
+An earlier note here said the trim ran "not slower". That came from one unpaired run on a shared
+node and was wrong. The interleaved A/B (v13 vs v19, same node, same input, alternating) and the
+build-by-build series agree:
+
+| build | wall | user CPU | window-loop CPU | minor faults | peak |
+|---|---|---|---|---|---|
+| v13 baseline | 31:16 | 40,671 s | 33,956 s | 363 M | 268.5 GB |
+| v14 + MassTrace moves | 31:36 | 43,984 | 37,203 | | 266.3 |
+| v17 + lifetimes + 56-byte record | 32:06 | 41,994 | 35,850 | | 257.7 |
+| **v18 + the trim** | **33:59** | 46,662 | **41,092** | | **186.1** |
+| interleaved: v13 r1 | 30:41 | 42,116 | 35,738 | 287 M | 264.9 |
+| interleaved: v19 r1 | 33:18 | 47,553 | 40,988 | 362 M | 186.2 |
+
+**Almost the whole memory win and almost the whole wall cost are the same change.** The trim returns
+~99 GB at the MS1 boundary; the window loop then has to fault those pages back in (minor faults
++26%, 287 M -> 362 M) and touches them cold, so the loop's CPU rises ~15% even though concurrency is
+unchanged (both arms admit all 28 windows, parallelism 37.2x vs 36.0x). System time barely moves
+(+46 s), so this is cache and TLB warmth, not kernel overhead.
+
+The second trim, at the loop -> write boundary, cannot affect the peak at all -- the peak happens
+inside the loop -- so it is free but also pointless unless something after the loop needs the RAM.
+
+The trade is therefore: **-82 GB of peak (-30.7%) for +2:37 of wall (+8.5%)** on a 2-hour
+acquisition. Which side of that is right depends on whether memory or time is the binding
+constraint, and that is a decision, not a measurement.
