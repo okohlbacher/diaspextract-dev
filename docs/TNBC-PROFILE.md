@@ -90,3 +90,22 @@ the milestone arithmetic suggests is a mis-normalisation: the term is 20 B per p
 
 Two log lines would remove the two inferred quantities: the picked-MS1 peak count at "Split into",
 and the fragment-trace count per window. Both are one `String(...)` each.
+
+## Measured, not inferred (2026-09-06): the instrumentation the profile lacked
+
+Two quantities this document could only bound, and one mechanism it could only assert, are now log
+lines (`[mem]`, `mallinfo2` at every milestone, per-window stage times). First numbers, from the
+30-min in-house file (S30; the TNBC file is 2-3x larger on every count):
+
+| quantity | measured |
+|---|---|
+| picked MS1 peaks | 725,116,915 in 1,343 frames = 13.8 GB as a PeakMap (20 B/peak) |
+| compact MS2 store | 11,975 MB for 1,255,770,798 peaks (10.0 B/peak) |
+| band-arena merge, per window | 12 band arenas, ~330 MB held **twice** while absorbed, ~6 M traces |
+| allocator after load | arena 31.4 GB, mmapped 8 MB, **free-but-retained 4.0 GB** |
+| allocator after MS1 tracing | arena 47.3 GB, mmapped 345 MB, **free-but-retained 33.4 GB** of a 48.5 GB RSS |
+
+The last row is the retention mechanism as a measurement: at the MS1 -> window-loop boundary about
+two thirds of the resident set is memory the allocator holds free. It is the same pool the ownership
+steps stop creating; it is also what a `malloc_trim(0)` at that boundary would return, which makes
+the declined allocator-hygiene lever a measured 33 GB on this file rather than an assumption.
