@@ -1360,3 +1360,22 @@ here; the allocator trim alone is worth 74.9 GB, which is the honest ranking and
 shipped first. The record change measured -10.7 GB of that 11.3 rather than the 16-24 GB predicted
 from the record count: not every window's records are resident at once, so the concurrency factor
 applies to the saving as well as to the footprint.
+
+#### Step 6: the admission gate now has bounds it can hold (output-identical)
+
+Dataset D peak RSS: v17 (steps 1-4, 8) 75.3 GiB -> **v19 (plus the trim default and the fixed gate)
+55.6 GiB, -26%**, digest == B1. The admission high-water reached 24 of 24 windows, i.e. neither the
+window cap nor the recalibrated byte budget throttled anything: the default behaviour is unchanged
+and the honest budget does not reject windows spuriously. That is the point -- the gate can now hold
+a limit when one is asked for, without imposing one when it is not.
+
+Three defects were in that one gate: `perf:max_concurrent_windows` was computed and logged but never
+checked; the byte projection booked 160 B per peak against a sustained 44 B measured across 28
+windows; and `availableBytes_()` added the process's own resident set back into its own budget.
+Admission moved to the master, before the task is spawned, so both bounds hold by construction and no
+worker sits in a spin loop holding a thread it cannot use.
+
+**Verification note.** The suite reported 12/12 on a build that should have run 13 checks: the
+cluster executes a copy of `test_spextractor.py` from the deployment point and the copy was stale, so
+the new check silently did not exist. `sync_cluster.sh` now ships the suite with the source it tests.
+A green result from a suite that quietly dropped a test is worse than a red one.
