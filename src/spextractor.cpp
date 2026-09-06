@@ -257,7 +257,6 @@ namespace
     double mz = 0.0;
     double rt = 0.0;   ///< apex/centroid RT
     double im = 0.0;   ///< centroid ion mobility (1/K0)
-    double intensity = 0.0;
     /// The flight-time bin this trace was measured on, and the calibration factor of its apex
     /// frame. The pair is the AUTHORITATIVE m/z: `mz` below is a cached convenience for the gates
     /// that still compare in m/z space, and the value actually written out is recomputed from these
@@ -327,7 +326,7 @@ namespace
       return (uint32_t)base;
     }
   };
-  static_assert(sizeof(Trace) == 56, "Trace must stay 56 bytes: it is the largest structure in the tool "
+  static_assert(sizeof(Trace) == 48, "Trace must stay 48 bytes: it is the largest structure in the tool "
                                     "(2.1e9 records on a 2-h file), and a silent 8-byte regrowth costs ~16 GiB");
 
   /// Span accessors take the owning store EXPLICITLY. Every trace of a vector shares one store, so
@@ -344,6 +343,14 @@ namespace
   /// detector has no per-frame factors) yields 0.0, which is what the field held there before, and
   /// exportMz_ returns the cached m/z for those traces because their `tof` is 0.
   inline double bOf(const TraceStore& s, const Trace& t) { return s.b.empty() ? 0.0 : s.b[t.bframe]; }
+  /// The trace's apex intensity. It was an 8-byte field holding a copy of a number the arena already
+  /// stores: makeSpan sets `apex` to the position of the largest value in the span, and both
+  /// producers set the field to exactly that value (sl.inten[kap] on the integer path,
+  /// MassTrace::getMaxIntensity on the OpenMS one). Trimming moves `apex` with the data, so the
+  /// identity survives it. A trace whose profile was released (len == 0) has no apex to read; it is
+  /// also never scored, which is why its profile was released.
+  inline double intensityOf(const TraceStore& s, const Trace& t)
+  { return t.len ? (double)s.inten[t.off + t.apex] : 0.0; }
 
   /// The real points of a trace, packed in frame order, for the consumers that were written over
   /// point lists (smoother, FWHM): identical sequences, so identical arithmetic.
@@ -508,7 +515,6 @@ namespace
     else t.mz = mt.getCentroidMZ();
     t.rt = mt.getCentroidRT();
     t.im = mt.getCentroidIM();
-    t.intensity = mt.getMaxIntensity(false);
     // One peak per frame (MassTraceDetection takes at most one candidate per spectrum), so the
     // profile is a span over the store's frame table with zeros where frames were missed.
     const Size np = mt.getSize();
@@ -516,7 +522,7 @@ namespace
     pts.reserve(np);
     for (Size i = 0; i < np; ++i) pts.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
     Trace sp = makeSpan(pts, store);
-    sp.mz = t.mz; sp.rt = t.rt; sp.im = t.im; sp.intensity = t.intensity;
+    sp.mz = t.mz; sp.rt = t.rt; sp.im = t.im;
     return sp;
   }
 
@@ -790,7 +796,7 @@ namespace
     return h;
   }
   static bool detOn_() { static const bool on = std::getenv("SPEXTRACTOR_DET") != nullptr; return on; }
-  static uint64_t traceDigest_(const vector<Trace>& ts)
+  static uint64_t traceDigest_(const TraceStore& st, const vector<Trace>& ts)
   {
     vector<uint64_t> b; b.reserve(ts.size() * 3);
     for (const auto& t : ts)
@@ -798,7 +804,7 @@ namespace
       uint64_t u; double v;
       v = t.mz; std::memcpy(&u, &v, 8); b.push_back(u);
       v = t.rt; std::memcpy(&u, &v, 8); b.push_back(u);
-      v = t.intensity; std::memcpy(&u, &v, 8); b.push_back(u);
+      v = intensityOf(st, t); std::memcpy(&u, &v, 8); b.push_back(u);
     }
     return detDigest_(std::move(b));
   }
@@ -1109,7 +1115,6 @@ namespace
       t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
       t.rt = rtAxis()[sl.rt_index[fap]];
       t.im = IM_LO + cim / IM_Q;
-      t.intensity = sl.inten[kap];
       out.push_back(std::move(t));
     }
     return out;
@@ -2017,10 +2022,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     vector<double> sorted_mz(N);
     for (size_t i = 0; i < N; ++i) sorted_mz[i] = ms1[by_mz[i]].mz;
 
+    // The apex intensity now lives in the store's arena. This phase reads it O(N log N) times in the
+    // sort below and again in every isotope walk, so pull it into one contiguous float array first:
+    // 4 B per trace, sequentially laid out, against 8 B scattered through 56-byte records before.
+    vector<float> inten(N);
+    for (size_t i = 0; i < N; ++i) inten[i] = (float)intensityOf(ms1st, ms1[i]);
     vector<size_t> order(N);
     for (size_t i = 0; i < N; ++i) order[i] = i;
     sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-      if (ms1[a].intensity != ms1[b].intensity) return ms1[a].intensity > ms1[b].intensity;
+      if (inten[a] != inten[b]) return inten[a] > inten[b];
       if (ms1[a].mz != ms1[b].mz) return ms1[a].mz < ms1[b].mz;
       return a < b; // total order so greedy isotope assignment is deterministic [code-review]
     });
@@ -2064,7 +2074,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         {
           vector<size_t> partners;
           double mono = s.mz;
-          double prev_int = s.intensity;
+          double prev_int = inten[seed];
           vector<long> lefts;
           for (int k = 1; k <= 5; ++k)          // lighter partners define the monoisotope
           {
@@ -2085,10 +2095,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             {
               const double neutral = (s.mz - k * ISO / z) * z - z * PROTON_;
               const double lam = std::max(0.10, 0.000594 * neutral);
-              if (ms1[j].intensity < mono_guard_ * prev_int / lam) break;
+              if (inten[j] < mono_guard_ * prev_int / lam) break;
             }
             lefts.push_back(j);
-            partners.push_back((size_t)j); mono = ms1[j].mz; prev_int = ms1[j].intensity;
+            partners.push_back((size_t)j); mono = ms1[j].mz; prev_int = inten[j];
           }
           vector<long> rights;
           for (int k = 1; k <= 5; ++k)          // heavier partners add confidence
@@ -2110,9 +2120,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           {
             const int nL = (int)lefts.size();
             vector<double> runI;                                  // ascending m/z: lefts, seed, rights
-            for (int i = nL - 1; i >= 0; --i) runI.push_back(ms1[lefts[i]].intensity);
-            runI.push_back(s.intensity);
-            for (long j : rights) runI.push_back(ms1[j].intensity);
+            for (int i = nL - 1; i >= 0; --i) runI.push_back(inten[lefts[i]]);
+            runI.push_back(inten[seed]);
+            for (long j : rights) runI.push_back(inten[j]);
             double best_cos = -1.0; int best_c = nL;              // default: seed is the mono
             vector<double> theo, obs;
             for (int c = 0; c <= nL; ++c)                         // mono cannot be right of the seed
@@ -2177,14 +2187,14 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           vector<size_t> members;
           vector<long> iso_idx(4, -1);
           obs.assign(4, 0.0);
-          obs[0] = ms1[mono_idx].intensity;
+          obs[0] = inten[mono_idx];
           iso_idx[0] = mono_idx;
           if ((size_t)mono_idx != seed) members.push_back((size_t)mono_idx);
           int found = 1;
           for (int k = 1; k <= 3; ++k)
           {
             long j = findPartner(mono_mz + k * ISO / z);
-            if (j >= 0) { obs[k] = ms1[j].intensity; iso_idx[k] = j; ++found;
+            if (j >= 0) { obs[k] = inten[j]; iso_idx[k] = j; ++found;
                           if ((size_t)j != seed) members.push_back((size_t)j); }
           }
           if (found < 2) continue;   // need >=2 isotopes before a shape can be scored
@@ -2306,7 +2316,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (drop[j]) continue;
         if (fabs(pcs[j].rt - pcs[i].rt) <= rt_tol && fabs(pcs[j].im - pcs[i].im) <= im_tol)
         {
-          if (ms1[pcs[j].trace_idx].intensity > ms1[pcs[i].trace_idx].intensity) { drop[i] = true; break; }
+          if (inten[pcs[j].trace_idx] > inten[pcs[i].trace_idx]) { drop[i] = true; break; }
           drop[j] = true;
         }
       }
@@ -2751,7 +2761,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     vector<double> frag_scores;
     scoreCandidates_(pc, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1st, fg, delta_im, delta_rt, min_corr,
                      min_corr_pts, pdense, [&](size_t fi, double c) {
-      const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);
+      const auto [inten, emit_inten] = weighted_(intensityOf(wst, frag_traces[fi]), c, frag_im[fi] - pc.im);
       frags.emplace_back(exportMz_(frag_traces[fi].tof, bOf(wst, frag_traces[fi]), frag_traces[fi].mz), emit_inten);
       frag_scores.push_back(c * inten);
     });
@@ -3036,7 +3046,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), max_trace_len, getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
     { const double cap = getDoubleOption_("trace:max_span_sec");
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
-    if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_traces)));
+    if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
     { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
       st.wall += phase_clock_() - _t_ms1; st.cpu += cpu_seconds_() - _c_ms1; st.rss_end_mb = rss_mb_(); }
     writeLogInfo_("MS1 " + ms1_span);   // [merged-trace] measure, do not assume
@@ -3143,7 +3153,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       const size_t before = ms1_traces.size();
       ms1_traces.erase(remove_if(ms1_traces.begin(), ms1_traces.end(), [](const Trace& t) {
         return !std::isfinite(t.mz) || !std::isfinite(t.rt) || !std::isfinite(t.im)
-               || !std::isfinite(t.intensity);
+               || !std::isfinite(intensityOf(ms1_store, t));
       }), ms1_traces.end());
       if (before != ms1_traces.size())
         writeLogInfo_("dropped " + String(before - ms1_traces.size()) + " MS1 traces with non-finite coordinates");
@@ -3152,7 +3162,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       if (a.mz != b.mz) return a.mz < b.mz;
       if (a.rt != b.rt) return a.rt < b.rt;
       if (a.im != b.im) return a.im < b.im;
-      return a.intensity < b.intensity;
+      return intensityOf(ms1_store, a) < intensityOf(ms1_store, b);
     });
     double _t_win = 0, _c_win = 0;                             // [perf-instr] window loop (function scope)
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
@@ -3284,7 +3294,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       ft.precision(12);
       ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\n";
       for (const auto& t : ms1_traces)
-        ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << t.intensity << '\t'
+        ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << intensityOf(ms1_store, t) << '\t'
            << fwhm_of(t) << '\t' << t.np() << '\n';
       ft.close();
       ofstream fp((ms1_dump + ".precursors.tsv").c_str());
@@ -3714,7 +3724,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         if (detOn_())
         {
           #pragma omp critical
-          writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " frag traces n=" + String(frag_traces.size()) + " digest=" + String(traceDigest_(frag_traces)));
+          writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " frag traces n=" + String(frag_traces.size()) + " digest=" + String(traceDigest_(wst, frag_traces)));
         }
         // (compact frames already released inside materializeWindow) [par-Crit-3]
         if (!span_logged.exchange(true)) { // [merged-trace] one window's span statistics, once
@@ -3731,7 +3741,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (a.im != b.im) return a.im < b.im;
           if (a.mz != b.mz) return a.mz < b.mz;
           if (a.rt != b.rt) return a.rt < b.rt;
-          return a.intensity < b.intensity;
+          return intensityOf(wst, a) < intensityOf(wst, b);
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
@@ -3789,7 +3799,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             scoreCandidates_(pc, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg, delta_im, delta_rt, min_corr,
                              min_corr_pts, pdense, [&](size_t fi, double c) {
               const double w = wsum[fi] > 0.0f ? std::pow(std::max(c, 0.0), apportion) / wsum[fi] : 1.0;
-              const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity * w, c, frag_im[fi] - pc.im);   // [E5]
+              const auto [inten, emit_inten] = weighted_(intensityOf(wst, frag_traces[fi]) * w, c, frag_im[fi] - pc.im);   // [E5]
               frags.emplace_back(exportMz_(frag_traces[fi].tof, bOf(wst, frag_traces[fi]), frag_traces[fi].mz), emit_inten);
               frag_scores.push_back(c * inten);
             });
@@ -3899,7 +3909,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               // this fragment's corr for THIS precursor (from its kept top-k list)
               double c = -1.0;
               for (auto& cp : topk[fi]) if (cp.second == kv2.first) { c = cp.first; break; }
-              const auto [inten, emit_inten] = weighted_(frag_traces[fi].intensity, c, frag_im[fi] - pc.im);   // [E5]
+              const auto [inten, emit_inten] = weighted_(intensityOf(wst, frag_traces[fi]), c, frag_im[fi] - pc.im);   // [E5]
               frags.emplace_back(exportMz_(frag_traces[fi].tof, bOf(wst, frag_traces[fi]), frag_traces[fi].mz), emit_inten);
               frag_scores.push_back(c * inten);
             }
