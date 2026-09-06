@@ -1214,3 +1214,13 @@ SpeXtract is ahead on Sage on 16 of 16 runs (smallest margin 001: 15,468 vs 14,6
 average of **9,296 proteins per run** (Spectronaut directDIA 8,997, DIA-NN library-free 9,520; all
 with quantification/MBR, tryptic). Our comparable figure is Sage protein groups at 1% protein q per
 run, pending in the table; identified-only, so expect it below a quantified-with-MBR count.
+
+### TNBC FINAL (2026-09-06, 07:30): all 16 runs, peptide-level both engines, Sage protein groups
+
+`docs/TNBC-TABLE.md`. Sage peptides **321,430 vs 295,781 (1.09)**, ahead on 16/16 runs; Sage protein
+groups at 1% protein q ahead on 16/16 (per run 3.7-6.0k vs 3.5-5.8k); MSFragger peptides
+**334,607 vs 392,897 (0.85)**, behind on 16/16 -- the in-house MSFragger ratio (0.85-0.90)
+reproduces exactly on the paper's own data, so the engine split is a property of our spectra, not of
+a dataset. Runtime on these 130-min files: SpeXtract 26-38 min vs 18-30 min (median 1.4x slower),
+RSS 204-287 vs 238-307 GB (0.9x). The paper's 9,296 proteins/run is a quantified-with-MBR FragPipe
+figure over the cohort and is not the same statistic as identified protein groups at 1% in one run.
