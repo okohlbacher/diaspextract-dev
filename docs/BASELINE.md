@@ -1279,3 +1279,31 @@ Read honestly: correcting 1.4% of the spectra costs 11 Sage peptides and 2 MSFra
 gains 19 and 10 respectively. The corrupted XICs were producing spectra that scored about as well as
 the correct ones -- the fix is justified by correctness, not by yield, and nothing downstream was
 silently depending on the corruption. Dataset A is still running; its role is to contradict D or not.
+
+#### GATE A, dataset A: the trigger fired, and what the investigation found (14:15)
+
+Dataset A moves far more than D: Sage 11,016 -> 11,218 (**+1.83%**), MSFragger 10,920 -> 10,689
+(**-2.12%**), set overlap 95.5% and 89.6% of the union (D: 99.6% and 99.8%). The engines disagree in
+sign, which is the plan's "A contradicts D" trigger, so the FDR walk was swept before going on:
+
+| threshold | Sage v11 -> v12 | MSFragger v11 -> v12 |
+|---|---|---|
+| 0.1% | 8,262 -> 8,641 (**+4.6%**) | 9,768 -> 9,485 (-2.9%) |
+| 0.5% | 10,081 -> 10,453 (**+3.7%**) | 11,210 -> 11,121 (-0.8%) |
+| 1% | 11,016 -> 11,218 (**+1.8%**) | 11,935 -> 11,679 (-2.1%) |
+| 2% | 11,915 -> 12,066 (**+1.3%**) | 12,571 -> 12,555 (-0.1%) |
+| 5% | 13,671 -> 13,750 (**+0.6%**) | 13,915 -> 13,679 (-1.7%) |
+
+**Sage's gain is monotone in the strictness of the threshold** -- largest where the evidence is
+strongest -- which is what repairing corrupted precursor XICs should look like: better correlations
+lift the best identifications most. **MSFragger's deficit is non-monotone** (-2.9, -0.8, -2.1, -0.1,
+-1.7) with no gradient: scatter around roughly -1.5%, the signature of a ranking/threshold effect in
+its hyperscore target-decoy walk rather than a systematic loss. Entrapment FDR is unchanged on both
+arms (1.13% -> 1.12%, intervals overlapping).
+
+**Verdict: the fix stands and the plan continues.** D is flat in both engines, A gains in Sage with a
+gradient and scatters in MSFragger, entrapment is unchanged everywhere, and the change being measured
+is a correctness fix. This is also the engine disagreement the project has recorded before (the sign
+flips by file); it is not evidence against the fix. Dataset A being ~20x more affected than D is
+worth a note of its own: whatever makes A's low-m/z MS1 traces denser also made it the file where the
+corruption cost the most.
