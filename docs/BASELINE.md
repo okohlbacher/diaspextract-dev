@@ -1307,3 +1307,23 @@ is a correctness fix. This is also the engine disagreement the project has recor
 flips by file); it is not evidence against the fix. Dataset A being ~20x more affected than D is
 worth a note of its own: whatever makes A's low-m/z MS1 traces denser also made it the file where the
 corruption cost the most.
+
+#### Steps 3 and 4 measured on dataset D (both output-identical, digest == B1)
+
+| build | peak RSS | after-MS1 RSS | loop-end RSS |
+|---|---|---|---|
+| v13 (step 2, instrumentation) | 83.11 GB | 48.55 | 48.98 |
+| v14 (step 3, MassTrace moves) | 82.68 GB | 48.09 | 48.91 |
+| v15 (step 4, MS1 state released at the loop join) | **81.73 GB** | 48.09 | 47.85 |
+
+Cumulative -1.38 GB (-1.7%) on this file; the same steps are measured on TNBC separately, where the
+mass-trace payloads are ~8x larger. Wall-clock is NOT quoted from these runs: the node was shared
+with the gate arms for part of them.
+
+One instructive detail from step 4's own log line: releasing the MS1 traces, their arena, the
+precursors and the m/z index does **not** move RSS at that instant (47,847,848 kB before and after,
+allocator free 40.0 GB) -- the bytes go to the per-thread arenas, not to the OS. What the release
+buys is the peak: the sort, the optional merge and consolidate passes and the writer now reuse that
+memory instead of growing on top of it, which is where the 0.9 GB comes from. That is the retention
+mechanism seen from the other side, and it is why "free earlier" and "return to the OS" are two
+different levers.
