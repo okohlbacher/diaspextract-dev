@@ -135,3 +135,28 @@ and it is the cheapest change on the list.
 
 The lesson is a measurement lesson: a per-window log line is not a sample of the run unless the
 windows are equal, and these are not. Scale by peaks, never by window count.
+
+## The allocator experiment (2026-09-06): one line returns 75 GB of the peak
+
+`malloc_trim(0)` at the two phase boundaries, behind `SPEXTRACTOR_MALLOC_TRIM`, on TNBC run 009.
+Output digest **identical**; the run is not slower (30:27 against 31:16 for the same build without it,
+different node load, so treat the wall as unchanged rather than improved).
+
+| boundary | RSS before | RSS after | returned | cost |
+|---|---|---|---|---|
+| MS1 tracing -> window loop | 138,360 MB | 45,931 MB | **92.4 GB** | 7.8 s |
+| window loop -> write | 85,602 MB | 20,088 MB | **65.5 GB** | 4.9 s |
+
+**Peak RSS 281.5 GB -> 206.7 GB, a 74.9 GB (26.6%) reduction, for two lines of code and 12.7 s of a
+1,800 s run.** The mechanism is exactly what the milestones predicted: the loop's in-flight
+allocations were stacking on top of a 138 GB floor of memory the allocator was holding free, and
+returning that floor first means the same in-flight bytes peak 75 GB lower.
+
+This is larger than every structural step on the plan combined, and it re-prices all of them: they
+now act on a 207 GB peak, not a 281 GB one. It also confirms that the free-but-retained pool is
+genuinely recoverable rather than stranded in fragmentation -- 92 of the 101 GB reported free at that
+milestone came back.
+
+What it does NOT do on its own is admit more windows: `availableBytes_()` adds the process's own RSS
+back into its budget, so the admission gate sees roughly the same number either way. Pairing a trim
+with a corrected admission budget is what would turn the freed memory into concurrency.
