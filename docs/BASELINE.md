@@ -1594,3 +1594,43 @@ The **m/z key is a stand-in**: the natural key is the flight-time bin itself, wh
 calibration at all, but `Trace::tof` is 0 on the OpenMS MS1 path (`toTrace` never sets it) and MS1
 tracing still runs that path. Keying precursor inference on tof, and deferring the calibrated m/z
 to the end, becomes available once MS1 goes through the integer detector (plan step 13).
+
+
+### Ordered speculation on the greedy claim loop (v29/v30, 2026-09-07)
+
+Precursor inference was the last single-threaded phase. The loop is greedy -- each seed marks its
+isotope partners used -- but it parallelises EXACTLY, because the only mutable state a seed reads is
+the `used` bitmap and that bitmap is monotone. A batch is evaluated concurrently against a frozen
+bitmap, recording the partner indices each seed's searches returned; the batch then commits in the
+original order, re-evaluating only a seed whose recorded partners have since been claimed.
+
+The dependency set is small and provable: `findPartner` reads `used[j]` only for candidates that
+passed the RT/IM gate and returns the first unused one, so a call returning `j` depended on
+`used[j]` being false, while a call returning -1 saw every candidate either fail the gate or already
+be used -- both stable under a monotone bitmap.
+
+| | greedy walk | phase | parallelism | re-evaluated |
+|---|---:|---:|---:|---:|
+| S30 v28 | 11.9 s | 15.7 s | 1.0x | -- |
+| S30 v29 | **1.4 s** | **4.9 s** | **23.2x** | 2.5% |
+| TNBC v28 | 128.8 s | 148.7 s | 1.0x | -- |
+| TNBC v30 | **7.8 s** | **26.9 s** | **23.4x** | **0.7%** |
+
+Byte-identical on S30 AND on S08 (the S08 gate arm reproduced digest `61d57ca2...` exactly against
+the earlier build), and on TNBC 009.
+
+### TNBC 009 at v30
+
+| phase | wall | % | CPU | par |
+|---|---:|---:|---:|---:|
+| LOAD(stream) | 92.9 s | 13.1% | 5355.5 | 57.7x |
+| MS1_TRACE | 117.9 s | 16.6% | 1182.4 | 10.0x |
+| PRECURSOR_INFER | 26.9 s | 3.8% | 629.7 | 23.4x |
+| WINDOW_LOOP | 380.7 s | 53.5% | 30372.0 | 79.8x |
+| WRITE(mzML) | 52.4 s | 7.4% | 52.2 | 1.0x |
+| **total** | **11:59.75** | | | peak RSS 188,593 MB |
+
+The window loop is still one window's serial chain, and the `[tsub]` timers settle what that chain
+is made of: for window 825-851, trace 304.6 s = slab 5.8 + **detect 286.8** + merge 5.3 + sort 10.8.
+The band taskloop is 94% of it, so the serial merge and the record sort are NOT worth attacking --
+band count is the only lever there.
