@@ -1787,3 +1787,23 @@ A 7% peptide loss for a load-phase speedup is not a trade worth making, and in t
 the wall was not even better (3:12.17 vs 3:13.32). `kBatch` stays at 256. The interesting part is
 what it reveals: **the peak picker is materially sensitive to how frames are grouped across threads**,
 which is a correctness smell worth its own investigation -- see the routes list.
+
+
+## Head to head with the reference implementation, measured tonight (2026-09-08)
+
+Both tools on TNBC 009, on `data`, within the same hour, both given 100 threads. The recorded
+reference timing for this file was from a previous campaign, and `head2head.sh` carries a warning
+that comparing across time is the error that produced one withdrawn claim -- so it was re-measured.
+
+| | rep 1 | rep 2 | mean |
+|---|---|---|---|
+| reference implementation | 21:12.24 / 357.7 GB | 20:41.46 / 323.4 GB | 20:56.9 / 340.6 GB |
+| **SpeXtractor v35** | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
+
+**1.90x faster at 0.53x the peak memory.** For context this file was 1.46x SLOWER than the reference
+before this week's work (31:26.98 against 21:28.00).
+
+One caveat on the memory ratio: the reference is a JVM run with `-Xmx400G`, so its peak RSS partly
+reflects what it was allowed rather than what it needs -- the same flags gave 268.2 GB in the earlier
+campaign. SpeXtractor's 179 GB is a genuine requirement. The honest statement is "roughly half, and
+not sensitive to a heap flag".
