@@ -1656,3 +1656,27 @@ That sensitivity is itself the finding: band boundaries change trace ownership b
 carries its own `visited` set and a trace grown by one band can consume peaks in another band's core.
 Making the partition genuinely band-independent would remove the churn AND turn band count into a
 free speed knob -- see the routes list.
+
+
+### `perf:ms1_trace_bands`: the old sweep was measuring the serial distribute (2026-09-07)
+
+The 12/24/48 sweep that concluded "more MS1 bands is worse" (75.0/93.7/147.9 s) was taken BEFORE the
+band distribution was parallelised. That step was the thing growing with band count. Re-measured on
+the current build, the conclusion inverts completely:
+
+| `ms1_trace_bands` | MS1_TRACE | parallelism | detect | old sweep |
+|---:|---:|---:|---:|---:|
+| 12 (default) | 41.7 s | 9.8x | 31.4 s | 75.0 s |
+| 24 | 27.1 s | 18.4x | 16.8 s | 93.7 s |
+| 48 | **20.4 s** | **32.4x** | 8.4 s | 147.9 s |
+
+And unlike `perf:trace_bands`, it is nearly output-neutral, because the MS1 path really does use the
+halo + core-ownership scheme its comment claims:
+
+| sample | Sage 12 -> 48 | MSFragger 12 -> 48 | Sage overlap | MSFragger overlap | entrapment |
+|---|---|---|---:|---:|---|
+| S30 (D) | 12,594 -> 12,593 (0.9999) | 11,640 -> 11,642 (1.0002) | **99.44%** | **99.37%** | 1.26% -> 1.24% |
+
+Compare the same table for `trace_bands` on S30 at 24: 99.87% / 99.71%, and on S08 at 24: 95.56% /
+89.66%. **S08 is intrinsically far more sensitive to MS2 band boundaries than S30 is** -- which is
+why a knob that looks free on the primary dataset has to be gated on the second one.
