@@ -2130,26 +2130,43 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // order, same first match: output-identical by construction. 16 B/trace of transient state.
     vector<double> sorted_rt(N), sorted_im(N);
     for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = t.rt; sorted_im[i] = t.im; }
-    // [mzidx] A coarse uniform index over `sorted_mz`, ~4 traces per bucket. The greedy walk below
-    // is the single-threaded residue of this phase (measured: 138.3 s of 155.7 on a 2-hour file)
-    // and it spends that time in `lower_bound`/`upper_bound` over 22e6 doubles -- ~25 probes, each
-    // a cache miss, for every one of up to 50 partner queries per seed. Starting the search inside
-    // one bucket makes it one or two lines instead. The POSITION found is unchanged: everything
-    // below bucket b is strictly less than any value in b, everything above is strictly greater,
-    // so the standard-library search runs on a sub-range that provably contains the answer.
+    // [mzidx] A DIRECTLY COMPUTED integer index over `sorted_mz` -- no search to find the bucket
+    // and no floating-point arithmetic to compute it. The greedy walk below is the single-threaded
+    // residue of this phase (measured: 138.3 s of 155.7 on a 2-hour file) and it spent that in
+    // `lower_bound`/`upper_bound` over 22e6 doubles: ~25 probes, each a cache miss, for up to 50
+    // partner queries per seed.
+    //
+    // The key is the top bits of the IEEE-754 bit pattern, which for positive doubles is monotone
+    // non-decreasing in the value -- one load and one shift, exact, with no rounding of its own.
+    // Because the exponent leads, the bucket width is RELATIVE (2^-20 of the binade, ~0.5 mDa at
+    // m/z 512-1024), which is the right shape for a ppm tolerance and keeps the occupancy even
+    // across the m/z range in a way a uniform-in-m/z grid does not.
+    //
+    // NOTE: the natural key here is the flight-time bin itself -- an integer the instrument
+    // already produced, with no calibration applied -- but `Trace::tof` is 0 on the OpenMS MS1
+    // path (`toTrace` never sets it), and MS1 tracing still runs that path by default. Keying on
+    // tof, and deferring the calibrated m/z to the end, becomes available once MS1 goes through
+    // the integer detector.
+    //
+    // The POSITION found is unchanged: the key is monotone, so every element below the query's
+    // bucket is strictly less than the query and every element above is strictly greater; the
+    // standard-library search then runs on a sub-range that provably contains the answer.
     const double mz_lo = N ? sorted_mz.front() : 0.0, mz_hi = N ? sorted_mz.back() : 1.0;
-    const size_t NBK = std::max<size_t>(1u << 12, std::min<size_t>(1u << 23, N / 4 + 1));
-    const double bsc = (mz_hi > mz_lo) ? (double)NBK / (mz_hi - mz_lo) : 0.0;
+    unsigned kshift = 32;
+    auto rawKey = [](double x, unsigned sh) { uint64_t b; std::memcpy(&b, &x, sizeof b); return b >> sh; };
+    while (kshift < 52 && (rawKey(mz_hi, kshift) - rawKey(mz_lo, kshift)) > (1u << 23)) ++kshift;
+    const uint64_t klo = N ? rawKey(mz_lo, kshift) : 0;
+    const size_t kspan = N ? (size_t)(rawKey(mz_hi, kshift) - klo) : 0;
     auto bucketOf = [&](double x) -> size_t {
       if (!(x > mz_lo)) return 0;
-      const double v = (x - mz_lo) * bsc;
-      return v >= (double)NBK ? NBK - 1 : (size_t)v;
+      const uint64_t k = rawKey(x, kshift);
+      return k >= klo + kspan ? kspan : (size_t)(k - klo);
     };
-    vector<uint32_t> bstart(NBK + 1, 0);
+    vector<uint32_t> bstart(kspan + 2, 0);
     {
       size_t i = 0;
-      for (size_t b = 0; b < NBK; ++b) { while (i < N && bucketOf(sorted_mz[i]) < b) ++i; bstart[b] = (uint32_t)i; }
-      bstart[NBK] = (uint32_t)N;
+      for (size_t b = 0; b <= kspan; ++b) { while (i < N && bucketOf(sorted_mz[i]) < b) ++i; bstart[b] = (uint32_t)i; }
+      bstart[kspan + 1] = (uint32_t)N;
     }
     auto lbmz = [&](double x) -> size_t {
       if (N == 0 || x <= mz_lo) return 0;
