@@ -1634,3 +1634,25 @@ The window loop is still one window's serial chain, and the `[tsub]` timers sett
 is made of: for window 825-851, trace 304.6 s = slab 5.8 + **detect 286.8** + merge 5.3 + sort 10.8.
 The band taskloop is 94% of it, so the serial merge and the record sort are NOT worth attacking --
 band count is the only lever there.
+
+
+### `perf:trace_bands` is settled: 24 fails S08 the same way 48 did (2026-09-07)
+
+Re-gated at the intermediate value on the current binary, arms back to back on one node:
+
+| sample | bands | Sage | MSFragger | Sage overlap | MSFragger overlap | entrapment FDR |
+|---|---|---|---|---:|---:|---|
+| S08 | 12 -> 24 | 11,218 -> **11,037 (-1.61%)** | 10,689 -> **10,929 (+2.25%)** | 95.56% | 89.66% | 1.12% -> 1.14% |
+| S08 | 12 -> 48 | 11,218 -> 11,027 (-1.70%) | 10,689 -> 10,928 (+2.24%) | 95.46% | 89.74% | 1.12% -> 0.99% |
+
+The churn is the SAME SIZE at 24 and at 48, so it is not a dose effect of having more bands -- it is
+a one-off change in which band owns a trace at a boundary. Any band count other than the one the
+baseline was measured at moves ~4-10% of the peptide set and the two engines disagree about the
+sign. **`perf:trace_bands` stays at 12**, and with it the window loop stays at its current floor for
+output-identical work: the `[tsub]` timers show 94% of the critical window's trace stage is the band
+taskloop itself, with the serial merge (5.3 s) and record sort (10.8 s) too small to matter.
+
+That sensitivity is itself the finding: band boundaries change trace ownership because each band
+carries its own `visited` set and a trace grown by one band can consume peaks in another band's core.
+Making the partition genuinely band-independent would remove the churn AND turn band count into a
+free speed knob -- see the routes list.
