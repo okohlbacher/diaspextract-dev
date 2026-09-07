@@ -1055,7 +1055,7 @@ namespace
   vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm,
                                      double im_tol, double noise, double min_len_sec, double min_sample_rate,
                                      double max_len_sec, double max_span_sec, TofIdx band_lo = 0, TofIdx band_hi = 0,
-                                     int band = -1, int units_in_flight = 1 << 20)
+                                     int band = -1, const std::atomic<int>* in_flight = nullptr, int nbands = 1)
   {
     vector<Trace> out;
     const size_t F = sl.frames(), P = sl.tof.size();
@@ -1234,10 +1234,18 @@ namespace
     nthr = omp_get_max_threads();
 #endif
     size_t spec_batch = 2048;
-    int inner = std::max(1, std::min(16, nthr / std::max(1, units_in_flight)));
+    int inner_fixed = -1;
     if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_BATCH")) { long v = atol(ev); if (v >= 1) spec_batch = (size_t)v; }
-    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 0) inner = (int)v; }
-    if (inner < 1) inner = 1;
+    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 0) inner_fixed = (int)v; }
+    // Re-read the occupancy EVERY BATCH, not once. The heaviest window -- the one whose chain is the
+    // loop's critical path -- starts its bands while all 28 windows are still in flight, so a width
+    // decided at band start would be 1 for the whole band and the tail, which is the entire point,
+    // would never speculate.
+    auto width = [&]() {
+      if (inner_fixed >= 0) return std::max(1, inner_fixed);
+      const int units = in_flight ? std::max(1, in_flight->load() * std::max(1, nbands)) : (1 << 20);
+      return std::max(1, std::min(16, nthr / units));
+    };
     // The commit tail: marking and the arena append happen ONLY here, in seed order, which is
     // what keeps the arena layout and the emitted sequence identical to the sequential algorithm.
     auto emit = [&](Grow& G)
@@ -1261,30 +1269,33 @@ namespace
       out.push_back(std::move(t));
     };
 
-    if (inner <= 1)
-    {
-      // No idle capacity to spend: run exactly the sequential algorithm, with no speculation at
-      // all. Speculating here is not merely unhelpful, it is negative -- a seed that an earlier
-      // seed of the same batch claims would be grown and then thrown away, and that is the
-      // MAJORITY of seeds (the equivalent figure in precursor inference is 56% already claimed).
-      // Measured with a fixed width of 8: window-loop CPU +31% and the wall 11% WORSE.
-      Grow G;
-      for (size_t si2 = s0; si2 < s1; ++si2)
-      {
-        const uint32_t seed = tp.order[si2];
-        if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
-        if (seen(seed)) continue;
-        grow(seed, G);
-        if (!G.ok) continue;
-        emit(G);
-      }
-      return out;
-    }
-    vector<Grow> res(spec_batch);
-    vector<uint32_t> cand(spec_batch);
+    vector<Grow> res;
+    vector<uint32_t> cand;
+    Grow G0;
     size_t sp = s0;
     while (sp < s1)
     {
+      const int inner = width();
+      if (inner <= 1)
+      {
+        // No idle capacity to spend: run exactly the sequential algorithm for this batch, with no
+        // speculation at all. Speculating here is not merely unhelpful, it is negative -- a seed
+        // that an earlier seed of the same batch claims would be grown and then thrown away, and
+        // that is the MAJORITY of seeds (the equivalent figure in precursor inference is 56%
+        // already claimed). Measured with a fixed width of 8: window-loop CPU +31%, wall 11% WORSE.
+        for (size_t n = 0; n < spec_batch && sp < s1; )
+        {
+          const uint32_t seed = tp.order[sp++];
+          if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
+          if (seen(seed)) continue;
+          ++n;
+          grow(seed, G0);
+          if (!G0.ok) continue;
+          emit(G0);
+        }
+        continue;
+      }
+      if (res.size() < spec_batch) { res.resize(spec_batch); cand.resize(spec_batch); }
       size_t nc = 0;
       while (sp < s1 && nc < spec_batch)
       {
@@ -4080,8 +4091,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             #pragma omp taskloop grainsize(1) default(shared)
             for (int b = 0; b < nb; ++b)
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
-                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b,
-                                            std::max(1, active.load() * nb));
+                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b, &active, nb);
             w_detect = secs(std::chrono::steady_clock::now() - _td0);
             auto _tm0 = std::chrono::steady_clock::now();
             release_input();                       // before the merge, not after it
