@@ -1894,9 +1894,27 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // then release the source map so the halo duplicates are the only overhead.
       tt_edge = tt_s(_te0, tt_now());
       auto _td0 = tt_now();
-      vector<PeakMap> sub(bands);
-      for (auto& s : map)          // non-const: each spectrum is released once distributed
+      // [dist-par 2026-09-07] The distribution was SERIAL and, measured, 51% of this phase
+      // (S30: 39.0 s of 75.9 s; and raising the band count made the phase strictly worse --
+      // 12/24/48 bands -> 75.0/93.7/147.9 s -- because more bands means more of exactly this
+      // copy). Split the SPECTRA into chunks instead: each chunk builds its own per-band maps
+      // and releases its source spectra as it goes, then the chunks are concatenated in chunk
+      // order. Same spectra, same peaks, same order in every band, so byte-identical -- and the
+      // source still shrinks as the copies grow, which is what keeps the transient at ~1x rather
+      // than 2x the map.
+      int n_thr = 1;
+#ifdef _OPENMP
+      n_thr = omp_get_max_threads();
+#endif
+      const int nchunk = std::max(1, std::min((int)map.size(), 4 * n_thr));
+      vector<vector<PeakMap>> csub((size_t)nchunk, vector<PeakMap>(bands));
+      #pragma omp taskloop grainsize(1) default(shared)
+      for (int ci = 0; ci < nchunk; ++ci)
       {
+      const size_t sp0 = (size_t)ci * map.size() / nchunk, sp1 = (size_t)(ci + 1) * map.size() / nchunk;
+      for (size_t spi = sp0; spi < sp1; ++spi)
+      {
+        auto& s = map[spi];        // non-const: each spectrum is released once distributed
         const auto* ima = s.getFloatDataArrays().empty() ? nullptr : &s.getFloatDataArrays()[0];
         for (int b = 0; b < bands; ++b)
         {
@@ -1922,11 +1940,21 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             for (Size i = 0; i < s.size(); ++i)
               if (s[i].getMZ() >= lo && s[i].getMZ() < hi)
               { t.push_back(s[i]); if (ima && i < ima->size()) ia.push_back((*ima)[i]); }
-          if (!t.empty()) { t.getFloatDataArrays().push_back(std::move(ia)); sub[b].addSpectrum(std::move(t)); }
+          if (!t.empty()) { t.getFloatDataArrays().push_back(std::move(ia)); csub[ci][b].addSpectrum(std::move(t)); }
         }
         s.clear(true);   // distributed: release it now, so the source and the copies do not both
       }                  // stand at full size (the transient was ~2x the map)
+      }
       map.clear(true);
+      vector<PeakMap> sub(bands);
+      for (int b = 0; b < bands; ++b)
+      {
+        size_t nsp = 0; for (int ci = 0; ci < nchunk; ++ci) nsp += csub[ci][b].size();
+        sub[b].reserveSpaceSpectra(nsp);
+        for (int ci = 0; ci < nchunk; ++ci)
+        { for (auto& sp : csub[ci][b]) sub[b].addSpectrum(std::move(sp)); csub[ci][b].clear(true); }
+      }
+      vector<vector<PeakMap>>().swap(csub);
       tt_dist = tt_s(_td0, tt_now());
       auto _tm0 = tt_now();
       vector<vector<MassTrace>> per(bands);
