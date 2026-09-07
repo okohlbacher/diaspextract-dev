@@ -25,6 +25,17 @@
   phase now logs its three stages: the residue is the greedy claim loop (156.3 s), not the sorts
   (8.5 s).
 
+- **Two hot loops compute their index instead of searching for it.** `best()`, the innermost step
+  of integer tracing, ran a `lower_bound` over its frame's ~25,000 sorted flight-time bins on every
+  frame step of every trace extension; the bin is an integer the instrument produced, so a
+  per-frame direct-address row (~32 peaks per bucket) makes the search start a subtract and a
+  shift -- **window loop -19% at -9% CPU**. `findPartner`, in the greedy claim loop, searched 22
+  million doubles up to 50 times per seed; the key there is the top bits of the IEEE-754 pattern,
+  monotone for positive doubles, so the bucket is one load and one shift and its width is
+  *relative*, matching a ppm tolerance. Both exact -- the sub-range handed to the search provably
+  contains the same position. (The natural key for the second is the flight-time bin too, but
+  `Trace::tof` is 0 on the OpenMS MS1 path; that needs MS1 through the integer detector.)
+
 ### Fixed
 - **The scoring stage of a large isolation window was silently single-threaded.** libgomp's
   `GOMP_taskloop` runs the whole loop inline in the creating thread once

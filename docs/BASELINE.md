@@ -1554,11 +1554,35 @@ Both are exact: the bucket start is at or below the answer and the next bucket s
 above it, so the standard-library search runs on a sub-range that provably contains the same
 position. Measured, byte-identical on both files:
 
-| build | S30 total | S30 window loop | TNBC wall | TNBC INFER (greedy walk) |
-|---|---:|---:|---:|---:|
-| v25 | 237.5 s | 143.9 s | 15:01 | 155.7 s (138.3) |
-| v27 (m/z key) | 234.2 s | -- | 14:32 | 130.0 s (112.8) |
-| **v28 (+ TOF index)** | **205.2 s** | **116.7 s** (CPU -9%) | -- | -- |
+| build | S30 total | S30 window loop | TNBC wall | TNBC window loop | TNBC INFER (greedy walk) |
+|---|---:|---:|---:|---:|---:|
+| v25 | 237.5 s | 143.9 s | 15:01 | 467.5 s (69.5x) | 155.7 s (138.3) |
+| v27 (m/z key) | 234.2 s | -- | 14:32 | 459.8 s (70.4x) | 130.0 s (112.8) |
+| **v28 (+ TOF index)** | **205.2 s** | **116.7 s** (CPU -9%) | **14:11** | **412.9 s (74.3x)** | 148.7 s (128.8) |
+
+`PRECURSOR_INFER` replicates to about +-15% on `data` between runs of the same binary (130.0 vs
+148.7 s for the same code), so read that column as a level, not a delta.
+
+### Where the day ended
+
+| | v21 | v28 | change |
+|---|---:|---:|---|
+| S30 total | 312.1 s | 205.2 s | **-34%** |
+| TNBC 009 wall | 33:35 | 14:11 | **-58%** |
+| TNBC window loop | 1150.0 s (31.2x) | 412.9 s (74.3x) | -64% |
+| TNBC MS1_TRACE | 252.5 s (4.8x) | 114.8 s (10.7x) | -55% |
+| TNBC PRECURSOR_INFER | 438.8 s | 148.7 s | -66% |
+| TNBC peak RSS | 181,777 MB | 190,849 MB | +5.0% |
+
+Byte-identical spectrum list on both files at every step, 13/13 e2e throughout. The memory cost is
+the chunked band sub-maps and the per-frame TOF index; it is the only regression and is reducible
+by lowering the chunk count if RAM becomes binding again.
+
+Still serial or thin, on TNBC: the greedy claim loop (~129 s of `PRECURSOR_INFER`, sequential by
+construction -- Astra's ordered-speculation scheme would make it exactly parallel but with unknown
+replay cost), the mzML write (52 s, one thread), and the window loop's tail, which is one window's
+prep -> trace -> split -> score chain with trace capped at 12 bands. Whole-run occupancy is 45x of
+100 threads, up from 24x.
 
 The **m/z key is a stand-in**: the natural key is the flight-time bin itself, which needs no
 calibration at all, but `Trace::tof` is 0 on the OpenMS MS1 path (`toTrace` never sets it) and MS1
