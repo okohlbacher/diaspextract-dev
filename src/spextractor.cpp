@@ -938,8 +938,20 @@ namespace
   {
     vector<char>     frame_live;  ///< F: has at least one member
     vector<uint32_t> order;       ///< seeds, intensity desc, later-index-first among equals
+    vector<size_t>   seg;         ///< nb+1 offsets into `order`: band b owns [seg[b], seg[b+1])
   };
-  TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr)
+  /// `bnd` are the nb+1 flight-time band edges the detector will be given (bnd[0] = tlo,
+  /// bnd[nb] = thi+1); pass {0, 0} for the unbanded path, which wants one globally sorted list.
+  ///
+  /// [seg 2026-09-07] The seed list is SEGMENTED BY BAND and each segment sorted on its own,
+  /// instead of one global sort that all 12 bands then re-scan end to end. Exact, because the
+  /// comparator is a total order:  filter_b(sort(all)) == sort(filter_b(all))  -- the sorted
+  /// sequence is unique, so band b receives precisely the subsequence it used to select. What it
+  /// buys: the sort is the whole of this stage (two linear passes plus an O(N log N) sort of up
+  /// to 239e6 indices) and it was SERIAL, at 23-63 s per window on a 2-hour acquisition; as nb
+  /// independent sorts it runs on nb threads of the same pool. Each band also stops walking the
+  /// other bands' seeds.
+  TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vector<TofIdx>& bnd)
   {
     TracePrep tp;
     const size_t F = sl.frames(), P = sl.tof.size();
@@ -953,21 +965,47 @@ namespace
     for (size_t f = 0; f < F; ++f)
       for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
         if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++n_seed; }
-    tp.order.reserve(n_seed);
-    for (uint32_t k = 0; k < P; ++k)
-      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order.push_back(k);
     // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
     // intensities the LATER peak seeds first.
-    sort(tp.order.begin(), tp.order.end(), [&](uint32_t a, uint32_t b) {
+    auto cmp = [&](uint32_t a, uint32_t b) {
       if (sl.inten[a] != sl.inten[b]) return sl.inten[a] > sl.inten[b];
       return a > b;
-    });
+    };
+    const int nb = (int)bnd.size() - 1;
+    tp.order.resize(n_seed);
+    if (nb < 2)                                          // unbanded: one globally sorted list
+    {
+      size_t w = 0;
+      for (uint32_t k = 0; k < P; ++k)
+        if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[w++] = k;
+      sort(tp.order.begin(), tp.order.end(), cmp);
+      tp.seg = {0, n_seed};
+      return tp;
+    }
+    // Band of a peak: the same half-open [bnd[b], bnd[b+1]) partition the detector applies, found
+    // by upper_bound so that empty bands (bnd[b] == bnd[b+1], reachable when nb exceeds the tof
+    // range) are skipped exactly as the detector's own range test skips them.
+    auto bandOf = [&](TofIdx t) {
+      return (size_t)(std::upper_bound(bnd.begin(), bnd.end(), t) - bnd.begin() - 1);
+    };
+    vector<size_t> cnt(nb, 0);
+    for (uint32_t k = 0; k < P; ++k)
+      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) ++cnt[bandOf(sl.tof[k])];
+    tp.seg.assign(nb + 1, 0);
+    for (int b = 0; b < nb; ++b) tp.seg[b + 1] = tp.seg[b] + cnt[b];
+    vector<size_t> cur(tp.seg.begin(), tp.seg.end() - 1);
+    for (uint32_t k = 0; k < P; ++k)
+      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[cur[bandOf(sl.tof[k])]++] = k;
+    #pragma omp taskloop grainsize(1) default(shared)
+    for (int b = 0; b < nb; ++b)
+      sort(tp.order.begin() + tp.seg[b], tp.order.begin() + tp.seg[b + 1], cmp);
     return tp;
   }
 
   vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm,
                                      double im_tol, double noise, double min_len_sec, double min_sample_rate,
-                                     double max_len_sec, double max_span_sec, TofIdx band_lo = 0, TofIdx band_hi = 0)
+                                     double max_len_sec, double max_span_sec, TofIdx band_lo = 0, TofIdx band_hi = 0,
+                                     int band = -1)
   {
     vector<Trace> out;
     const size_t F = sl.frames(), P = sl.tof.size();
@@ -1035,8 +1073,13 @@ namespace
 
     struct Dir { Size hits = 0, missed = 0, scans = 0; bool active = true; };
     vector<pair<uint32_t, uint32_t>> got;   // (frame, peak); marked only if the trace is valid
-    for (uint32_t seed : tp.order)
+    // [seg] Only this band's own segment of the seed list; the range test below stays as the
+    // invariant it always was (and is what the unbanded/whole-list call still relies on).
+    const bool segd = band >= 0 && (size_t)band + 1 < tp.seg.size();
+    const size_t s0 = segd ? tp.seg[band] : 0, s1 = segd ? tp.seg[band + 1] : tp.order.size();
+    for (size_t si = s0; si < s1; ++si)
     {
+      const uint32_t seed = tp.order[si];
       if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
       if (seen(seed)) continue;
       const size_t f0 = frameOfPeak(seed);
@@ -3674,12 +3717,23 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                   "trace:frame_aggregation_n > 1 is not applied by trace:detector=integer");
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
-          const int nb = std::max(1, w_bands);
+          const int nb = (thi <= tlo) ? 1 : std::max(1, w_bands);
           size_t n_seeds = 0, n_parents = 0;
           const size_t n_peaks = wslab.peaks();
           {
+          // The band edges are computed ONCE and shared by the seed segmentation and the detector,
+          // so the two can never disagree about which band owns a seed.
+          vector<TofIdx> bnd;
+          if (nb > 1)
+          {
+            const double wdt = (double)(thi - tlo + 1) / nb;
+            bnd.resize(nb + 1);
+            for (int b = 0; b < nb; ++b) bnd[b] = tlo + (TofIdx)(b * wdt);
+            bnd[nb] = thi + 1;
+          }
+          else bnd = {0, 0};
           auto _tp = std::chrono::steady_clock::now();
-          TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr);         // once per window
+          TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr, bnd);    // once per window
           w_prep = secs(std::chrono::steady_clock::now() - _tp);
           n_seeds = tprep.order.size();
           // The slab and the seed order are dead the moment the detector returns: the merge below
@@ -3692,11 +3746,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
             vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
             vector<uint32_t>().swap(tprep.order); vector<char>().swap(tprep.frame_live);
+            vector<size_t>().swap(tprep.seg);
           };
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
           // store absorbs them in band order and every offset is rebased (R4 sequencing).
           vector<TraceStore> bst(std::max(1, nb));
-          if (thi <= tlo || nb == 1)
+          if (nb == 1)
           {
             frag_traces = detectTracesInteger_(wslab, tprep, bst[0], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr, max_trace_len, max_span);
             release_input();
@@ -3704,15 +3759,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           else
           {
             vector<vector<Trace>> per(nb);
-            const double wdt = (double)(thi - tlo + 1) / nb;
             #pragma omp taskloop grainsize(1) default(shared)
             for (int b = 0; b < nb; ++b)
-            {
-              const TofIdx blo = tlo + (TofIdx)(b * wdt);
-              const TofIdx bhi = (b + 1 == nb) ? thi + 1 : tlo + (TofIdx)((b + 1) * wdt);
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
-                                            max_trace_len, max_span, blo, bhi);
-            }
+                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b);
             release_input();                       // before the merge, not after it
             size_t tot = 0, arena = 0; bool any_bins = false;
             for (int b = 0; b < nb; ++b)
@@ -3728,7 +3778,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               vector<Trace>().swap(per[b]);
             }
           }
-          if (thi <= tlo || nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
+          if (nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
           }                                                  // tprep dies here
           // (the slab and the seed order were released above, before the band-arena merge)
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
@@ -3894,8 +3944,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           // cannot reorder or drop an emission.
           // A fixed, small number of worker tasks that PULL 32-precursor chunks from a shared
           // cursor: dynamic balance without letting the task count depend on the window size, so
-          // no window can ever cross libgomp's inline threshold again -- at any thread count, and
-          // whatever the other windows have queued at that moment.
+          // the task count no longer grows with the window size. The team-wide bound is then
+          // 28 windows x (1 + ~100) = ~2,800 against the 6,400 threshold, with headroom for the
+          // band and split taskloops -- a budget to keep in mind before adding another task layer,
+          // not a guarantee that holds whatever else is queued.
           const long n_prec_w = (long)phi - (long)plo;
           const long n_task_w = std::max(1L, std::min((n_prec_w + 31) / 32, (long)n_threads));
           std::atomic<long> pcur{(long)plo};
