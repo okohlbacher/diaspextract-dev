@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Changed
+- **`perf:ms1_trace_bands` default 12 -> 48: MS1 tracing is 2x faster.** The earlier sweep concluded
+  more bands were worse (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a *serial* band
+  distribution that grew with the band count. With that step parallel the order inverts:
+  **41.7/27.1/20.4 s at 9.8x/18.4x/32.4x**. Gated on both datasets -- Sage 0.9999 / 0.9994,
+  MSFragger 1.0002 / 1.0203, entrapment FDR 1.26->1.24% and 1.12->1.07%.
+- **Precursor inference is parallel and exact** (ordered speculation): the greedy claim loop went
+  from 1.0x to **23.4x** on a 2-hour file, 138 s -> 7.8 s, with 0.7% of seeds re-evaluated and a
+  byte-identical spectrum list on three files.
 - **Renamed to SpeXtractor** (the previous name was taken): executable, class, namespace, macros and
   environment variables, source and test file names, CMake project and target, CI workflows, the
   OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.

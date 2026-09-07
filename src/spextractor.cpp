@@ -1055,7 +1055,7 @@ namespace
   vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm,
                                      double im_tol, double noise, double min_len_sec, double min_sample_rate,
                                      double max_len_sec, double max_span_sec, TofIdx band_lo = 0, TofIdx band_hi = 0,
-                                     int band = -1, const std::atomic<int>* in_flight = nullptr, int nbands = 1)
+                                     int band = -1)
   {
     vector<Trace> out;
     const size_t F = sl.frames(), P = sl.tof.size();
@@ -1123,40 +1123,24 @@ namespace
     };
 
     struct Dir { Size hits = 0, missed = 0, scans = 0; bool active = true; };
+    vector<pair<uint32_t, uint32_t>> got;   // (frame, peak); marked only if the trace is valid
     // [seg] Only this band's own segment of the seed list; the range test below stays as the
     // invariant it always was (and is what the unbanded/whole-list call still relies on).
     const bool segd = band >= 0 && (size_t)band + 1 < tp.seg.size();
     const size_t s0 = segd ? tp.seg[band] : 0, s1 = segd ? tp.seg[band + 1] : tp.order.size();
-    // [spec-trace 2026-09-07] ORDERED SPECULATION, the same construction that made precursor
-    // inference exact and parallel. This loop is the window loop's critical path: the [tsub] timers
-    // put 94% of the heaviest window's trace stage inside this band taskloop, and band count is not
-    // available as a knob -- changing it moves 4-10% of the peptide set (gated twice on S08).
-    //
-    // The only mutable state a seed reads is `visited`, and `visited` is monotone. A seed's whole
-    // dependency set is the peaks its walk actually took: `best()` consults `seen()` only for the
-    // single closest candidate it has already chosen, so a step that ACCEPTED peak k depended on
-    // !seen(k) -- recorded, because it can change -- while a step that was refused because the
-    // candidate was already taken stays refused under a monotone bitmap, and a step with no
-    // candidate at all never read `visited`. Those accepted peaks are exactly `got`.
-    //
-    // So: grow a batch of traces concurrently against a frozen bitmap, then walk the batch in seed
-    // order and commit. A seed now taken is skipped exactly as before; a seed any of whose peaks was
-    // taken meanwhile is re-grown against the current bitmap. `mark()` and `makeSpan()` happen only
-    // in the commit, in seed order, so the arena layout and the emitted sequence are unchanged.
-    struct Grow { vector<pair<uint32_t, uint32_t>> got; double cmz = 0, cim = 0; bool ok = false; };
-    auto grow = [&](uint32_t seed, Grow& G)
+    for (size_t si = s0; si < s1; ++si)
     {
-      G.ok = false; G.got.clear();
-      do
-      {
+      const uint32_t seed = tp.order[si];
+      if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
+      if (seen(seed)) continue;
       const size_t f0 = frameOfPeak(seed);
       const double w0 = sl.inten[seed], m0 = mzAt(seed, f0);
-      double& cmz = G.cmz; cmz = m0; double cnt = w0 * m0, den = w0;
+      double cmz = m0, cnt = w0 * m0, den = w0;
       iwm(m0, w0, cmz, cnt, den);                             // seed counted twice, as run_ does
-      double& cim = G.cim; cim = sl.imq[seed]; double cnt_im = w0 * cim, den_im = w0;
+      double cim = sl.imq[seed], cnt_im = w0 * cim, den_im = w0;
       iwm((double)sl.imq[seed], w0, cim, cnt_im, den_im);
       double sd = (cmz / 1e6) * mass_ppm, wsum = w0;
-      G.got.emplace_back((uint32_t)f0, seed);
+      got.clear(); got.emplace_back((uint32_t)f0, seed);
       uint32_t sfmin = (uint32_t)f0, sfmax = (uint32_t)f0;    // running span, for the length cap
       Dir dn, up;
       long fd = (long)f0, fu = (long)f0;
@@ -1195,7 +1179,7 @@ namespace
               iwm(mz, w, cmz, cnt, den);
               iwm((double)sl.imq[k], w, cim, cnt_im, den_im);
               sdRobust(mz, w, cmz, sd, wsum);   // reestimate_mt_sd: the tool never turns it off
-              G.got.emplace_back((uint32_t)f, (uint32_t)k);
+              got.emplace_back((uint32_t)f, (uint32_t)k);
               ++d.hits; d.missed = 0;
             }
             else ++d.missed;
@@ -1206,128 +1190,31 @@ namespace
         }
       }
       // isTraceValid_
-      uint32_t fmin = G.got[0].first, fmax = fmin;
-      for (const auto& g : G.got) { fmin = std::min(fmin, g.first); fmax = std::max(fmax, g.first); }
+      uint32_t fmin = got[0].first, fmax = fmin;
+      for (const auto& g : got) { fmin = std::min(fmin, g.first); fmax = std::max(fmax, g.first); }
       const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
       if (span_s < min_len_sec) continue;
       if (max_len_sec > 0.0 && span_s > max_len_sec) continue;   // the tool passes 0 for "off"
       const Size total = dn.scans + up.scans + 1;
       const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
-      if ((double)G.got.size() / (double)adjusted < msr) continue;
-        G.ok = true;
-      } while (0);
-    };
-
-    // Inner width is a SCHEDULING choice only -- commit order fixes the output -- but it must stay
-    // small enough that (bands x this) plus the loop's other tasks cannot cross libgomp's inline
-    // threshold of 64 x nthreads, which would silently serialise the whole taskloop.
-    //
-    // ADAPTIVE WIDTH, and this is what makes it pay. Speculation is not free: a re-grown trace is
-    // wasted work, and measured on S30 with a fixed width of 8 the window loop's CPU rose 31%
-    // (8,364 -> 10,941 s) and the WALL got worse (123.6 -> 137.1 s), because during most of the loop
-    // all 28 windows x 12 bands already saturate the machine and there is no idle capacity to spend.
-    // The tail is the opposite case: one window, twelve bands, ~88 threads idle, and that tail is
-    // the loop's critical path. So spend threads only when the pool has them -- width is derived
-    // from how many band-units are actually in flight, which the caller passes in.
-    int nthr = 1;
-#ifdef _OPENMP
-    nthr = omp_get_max_threads();
-#endif
-    size_t spec_batch = 2048;
-    int inner_fixed = -1;
-    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_BATCH")) { long v = atol(ev); if (v >= 1) spec_batch = (size_t)v; }
-    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 0) inner_fixed = (int)v; }
-    // Re-read the occupancy EVERY BATCH, not once. The heaviest window -- the one whose chain is the
-    // loop's critical path -- starts its bands while all 28 windows are still in flight, so a width
-    // decided at band start would be 1 for the whole band and the tail, which is the entire point,
-    // would never speculate.
-    auto width = [&]() {
-      if (inner_fixed >= 0) return std::max(1, inner_fixed);
-      const int units = in_flight ? std::max(1, in_flight->load() * std::max(1, nbands)) : (1 << 20);
-      return std::max(1, std::min(16, nthr / units));
-    };
-    // The commit tail: marking and the arena append happen ONLY here, in seed order, which is
-    // what keeps the arena layout and the emitted sequence identical to the sequential algorithm.
-    auto emit = [&](Grow& G)
-    {
-      for (const auto& g : G.got) mark(g.second);               // valid: now they are taken
+      if ((double)got.size() / (double)adjusted < msr) continue;
+      for (const auto& g : got) mark(g.second);               // valid: now they are taken
 
       // the span: (store-local frame, intensity) points, plus the per-frame bin arena the valley
       // splitter needs to give each child ITS measured apex bin
       vector<pair<uint32_t, float>> pts;
-      pts.reserve(G.got.size());
-      uint32_t kap = G.got[0].second, fap = G.got[0].first;
-      for (const auto& g : G.got) { pts.emplace_back(g.first, sl.inten[g.second]);
+      pts.reserve(got.size());
+      uint32_t kap = got[0].second, fap = got[0].first;
+      for (const auto& g : got) { pts.emplace_back(g.first, sl.inten[g.second]);
                                   if (sl.inten[g.second] > sl.inten[kap]) { kap = g.second; fap = g.first; } }
       Trace t = makeSpan(pts, store);
       store.bins.resize(store.inten.size(), 0u);
-      for (const auto& g : G.got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
+      for (const auto& g : got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
       t.tof = sl.tof[kap]; t.bframe = fap;   // got-order first max: the frame the bin was measured on
-      t.mz = G.cmz;                                              // the weighted centroid, as OpenMS reports
+      t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
       t.rt = rtAxis()[sl.rt_index[fap]];
-      t.im = IM_LO + G.cim / IM_Q;
+      t.im = IM_LO + cim / IM_Q;
       out.push_back(std::move(t));
-    };
-
-    vector<Grow> res;
-    vector<uint32_t> cand;
-    Grow G0;
-    size_t sp = s0;
-    while (sp < s1)
-    {
-      const int inner = width();
-      if (inner <= 1)
-      {
-        // No idle capacity to spend: run exactly the sequential algorithm for this batch, with no
-        // speculation at all. Speculating here is not merely unhelpful, it is negative -- a seed
-        // that an earlier seed of the same batch claims would be grown and then thrown away, and
-        // that is the MAJORITY of seeds (the equivalent figure in precursor inference is 56%
-        // already claimed). Measured with a fixed width of 8: window-loop CPU +31%, wall 11% WORSE.
-        for (size_t n = 0; n < spec_batch && sp < s1; )
-        {
-          const uint32_t seed = tp.order[sp++];
-          if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
-          if (seen(seed)) continue;
-          ++n;
-          grow(seed, G0);
-          if (!G0.ok) continue;
-          emit(G0);
-        }
-        continue;
-      }
-      if (res.size() < spec_batch) { res.resize(spec_batch); cand.resize(spec_batch); }
-      size_t nc = 0;
-      while (sp < s1 && nc < spec_batch)
-      {
-        const uint32_t seed = tp.order[sp++];
-        if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
-        if (seen(seed)) continue;                                  // frozen read, re-checked below
-        cand[nc++] = seed;
-      }
-      if (nc == 0) continue;
-      {
-        std::atomic<size_t> cur{0};
-        const int nw = (int)std::min<size_t>((size_t)inner, nc);
-        #pragma omp taskloop num_tasks(nw) default(shared)
-        for (int w = 0; w < nw; ++w)
-          for (;;)
-          {
-            const size_t x = cur.fetch_add(8);
-            if (x >= nc) break;
-            for (size_t y = x; y < std::min(x + 8, nc); ++y) grow(cand[y], res[y]);
-          }
-      }
-      for (size_t y = 0; y < nc; ++y)
-      {
-        const uint32_t seed = cand[y];
-        if (seen(seed)) continue;
-        Grow& G = res[y];
-        bool stale = false;
-        for (const auto& g : G.got) if (seen(g.second)) { stale = true; break; }
-        if (stale) grow(seed, G);
-        if (!G.ok) continue;
-        emit(G);
-      }
     }
     return out;
   }
@@ -1907,7 +1794,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerStringOption_("gate:coelution", "<mode>", "pearson", "[B0] Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
     registerFlag_("gate:variance_support", "[Q1] Compute the Pearson co-elution variance over the UNION SUPPORT of the precursor and fragment profiles (points where either is non-zero) rather than the full RT grid G (~1300). Fixes the [B0] zero-padding: a fragment present in a handful of grid points is no longer scored against ~1300 implicit zeros, and the score no longer depends on grid size. Only affects gate:coelution=pearson. Retune gate:min_correlation when enabling -- the score scale changes. [bench]");
-    registerIntOption_("perf:ms1_trace_bands", "<n>", 12, "[parallel] Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
+    registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "[parallel] Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. DEFAULT RAISED 12 -> 48 on 2026-09-07: the earlier sweep found more bands to be WORSE (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a SERIAL band distribution that grew with band count; with that step parallel the order inverts (41.7/27.1/20.4 s at 9.8x/18.4x/32.4x) and 48 was gated on both datasets -- Sage 0.9999 and 0.9994, MSFragger 1.0002 and 1.0203, entrapment FDR 1.26->1.24%% and 1.12->1.07%%. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
     registerIntOption_("perf:trace_bands", "<n>", 12, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable + our own RSS) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
@@ -4091,7 +3978,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             #pragma omp taskloop grainsize(1) default(shared)
             for (int b = 0; b < nb; ++b)
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
-                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b, &active, nb);
+                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b);
             w_detect = secs(std::chrono::steady_clock::now() - _td0);
             auto _tm0 = std::chrono::steady_clock::now();
             release_input();                       // before the merge, not after it
