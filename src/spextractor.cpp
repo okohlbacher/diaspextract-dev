@@ -2025,11 +2025,20 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     const size_t N = ms1.size();
 
     // m/z-sorted index for O(log N) isotope-partner lookup (avoids O(N^2) over all MS1 traces). [H-8]
+    auto _pi_t0 = std::chrono::steady_clock::now();
     vector<size_t> by_mz(N);
     for (size_t i = 0; i < N; ++i) by_mz[i] = i;
     sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
     vector<double> sorted_mz(N);
     for (size_t i = 0; i < N; ++i) sorted_mz[i] = ms1[by_mz[i]].mz;
+    // [soa] findPartner's candidate scan walks `by_mz` and dereferences ms1[j].rt / ms1[j].im --
+    // two 8-byte fields out of a 48-byte record, reached through an index, i.e. one cache miss per
+    // candidate per field. This phase is single-threaded and 26% of TNBC wall, so lay the two gate
+    // fields out in m/z order next to `sorted_mz` and scan them sequentially. Same values, same
+    // order, same first match: output-identical by construction. 16 B/trace of transient state.
+    vector<double> sorted_rt(N), sorted_im(N);
+    for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = t.rt; sorted_im[i] = t.im; }
+    auto _pi_t1 = std::chrono::steady_clock::now();
 
     // The apex intensity now lives in the store's arena. This phase reads it O(N log N) times in the
     // sort below and again in every isotope walk, so pull it into one contiguous float array first:
@@ -2044,6 +2053,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       return a < b; // total order so greedy isotope assignment is deterministic [code-review]
     });
 
+    auto _pi_t2 = std::chrono::steady_clock::now();
     vector<bool> used(N, false);
     vector<Precursor_> out;
     for (size_t seed : order)
@@ -2059,10 +2069,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         size_t khi = upper_bound(sorted_mz.begin(), sorted_mz.end(), target + tol) - sorted_mz.begin();
         for (size_t k = klo; k < khi; ++k)
         {
+          if (fabs(sorted_rt[k] - s.rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
           size_t j = by_mz[k];
           if (used[j] || j == seed) continue;
-          if (fabs(ms1[j].rt - s.rt) <= delta_rt && fabs(ms1[j].im - s.im) <= iso_im_tol)
-            return (long)j;
+          return (long)j;
         }
         return -1;
       };
@@ -2291,6 +2301,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           break;                            // at most one alternative
         }
       }
+    }
+    {
+      auto _pi_t3 = std::chrono::steady_clock::now();
+      auto secs_ = [](auto d) { return std::chrono::duration<double>(d).count(); };
+      writeLogInfo_("[infer] " + String(N) + " MS1 traces -> " + String(out.size()) + " precursors: mz-index "
+                    + String(secs_(_pi_t1 - _pi_t0)) + " s | intensity-sort " + String(secs_(_pi_t2 - _pi_t1))
+                    + " s | greedy walk " + String(secs_(_pi_t3 - _pi_t2)) + " s (single-threaded)");
     }
     return out;
   }
@@ -3857,16 +3874,50 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           vector<MSSpectrum> pslot(phi > plo ? phi - plo : 0);
           // grainsize, not num_threads: the pool decides how many threads land here, so a window
           // that outlives its neighbours gets the whole machine instead of a fixed team of 12.
-          #pragma omp taskloop grainsize(32) firstprivate(pdense) default(shared)
-          for (long pii = (long)plo; pii < (long)phi; ++pii)
+          //
+          // [gomp-cliff 2026-09-07] ...but the task COUNT must stay bounded, and `grainsize(32)`
+          // does not bound it. libgomp's GOMP_taskloop runs the WHOLE loop inline in the creating
+          // thread when `team->task_count + num_tasks > 64 * team->nthreads` -- with 100 threads
+          // that is 6,400 tasks, i.e. 204,800 precursors at grainsize 32. Above that line the
+          // stage silently becomes SINGLE-THREADED. Measured with a standalone taskloop on the
+          // same libgomp (100 threads, 20 us per iteration):
+          //     200,000 iters grainsize(32) ->  6,250 tasks -> 82.7x
+          //     300,000 iters grainsize(32) ->  9,375 tasks ->  1.0x   <-- the cliff
+          //     300,000 iters num_tasks(400) ->   400 tasks -> 88.0x
+          // On TNBC 009 exactly two windows sit above the line, and they are the two that ran the
+          // window loop into the ground: 525-551 scored 417.6 s and 575-601 scored 581.0 s, while
+          // every neighbouring window -- same fragment count to within 16% -- scored 12-28 s. The
+          // loop's wall (748.5 s) was window 575-601's own chain (741.9 s), 78% of it this stage.
+          // Bound the task count instead: 4 tasks per thread is enough for dynamic balance and
+          // leaves headroom for the other windows' band and split tasks under the same threshold.
+          // Output-identical: every result goes to its own pre-sized slot, so task granularity
+          // cannot reorder or drop an emission.
+          // A fixed, small number of worker tasks that PULL 32-precursor chunks from a shared
+          // cursor: dynamic balance without letting the task count depend on the window size, so
+          // no window can ever cross libgomp's inline threshold again -- at any thread count, and
+          // whatever the other windows have queued at that moment.
+          const long n_prec_w = (long)phi - (long)plo;
+          const long n_task_w = std::max(1L, std::min((n_prec_w + 31) / 32, (long)n_threads));
+          std::atomic<long> pcur{(long)plo};
+          #pragma omp taskloop num_tasks(n_task_w) firstprivate(pdense) default(shared)
+          for (long w = 0; w < n_task_w; ++w)
           {
-            const size_t pi = (size_t)pii;
-            const Precursor_& pc = precursors[pi];
-            if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
-            MSSpectrum ms2;
-            assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
-                         delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
-            if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
+            for (;;)
+            {
+              const long cs = pcur.fetch_add(32);
+              if (cs >= (long)phi) break;
+              const long ce = std::min(cs + 32, (long)phi);
+              for (long pii = cs; pii < ce; ++pii)
+              {
+                const size_t pi = (size_t)pii;
+                const Precursor_& pc = precursors[pi];
+                if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
+                MSSpectrum ms2;
+                assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
+                             delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
+                if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
+              }
+            }
           }
           auto _t6 = std::chrono::steady_clock::now();
           t_score += std::chrono::duration_cast<std::chrono::nanoseconds>(_t6 - _t5).count();

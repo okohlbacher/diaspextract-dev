@@ -7,6 +7,20 @@
   environment variables, source and test file names, CMake project and target, CI workflows, the
   OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.
 
+### Fixed
+- **The scoring stage of a large isolation window was silently single-threaded.** libgomp's
+  `GOMP_taskloop` runs the whole loop inline in the creating thread once
+  `task_count + num_tasks > 64 * nthreads`; with the previous `grainsize(32)` that is 204,800
+  precursors at 100 threads. Measured on the same libgomp at 100 threads and 20 us per iteration:
+  200,000 iterations -> 82.7x, 300,000 iterations -> **1.0x**, and `num_tasks(400)` at 300,000 ->
+  88.0x. On a 2-hour acquisition exactly two of 28 windows sit above that line, and they were the
+  two that decided the run: they scored 417.6 s and 581.0 s where every neighbouring window --
+  within 16% on fragment count -- scored 12-28 s, and the window loop's 748.5 s wall was one
+  window's own 741.9 s chain. Scoring now uses a fixed pool of worker tasks (one per thread) that
+  pull 32-precursor chunks from a shared cursor, so the task count no longer depends on the window
+  size at any thread count. Spectrum output is unchanged (results were already written to pre-sized
+  per-precursor slots).
+
 ### Added
 - **`perf:malloc_trim`, on by default: 30% less peak memory for about 8% more wall time.** The
   window loop's allocations stacked on top of everything the loading and MS1 phases had freed but the
