@@ -1680,3 +1680,58 @@ halo + core-ownership scheme its comment claims:
 Compare the same table for `trace_bands` on S30 at 24: 99.87% / 99.71%, and on S08 at 24: 95.56% /
 89.66%. **S08 is intrinsically far more sensitive to MS2 band boundaries than S30 is** -- which is
 why a knob that looks free on the primary dataset has to be gated on the second one.
+
+
+### v35: `ms1_trace_bands=48` adopted (2026-09-07)
+
+Gate, arms back to back on one node from one binary with only the flag changed:
+
+| sample | Sage 12 -> 48 | MSFragger 12 -> 48 | Sage overlap | MSFragger overlap | entrapment FDR |
+|---|---|---|---:|---:|---|
+| S30 (D) | 12,594 -> 12,593 (0.9999) | 11,640 -> 11,642 (1.0002) | 99.44% | 99.37% | 1.26% -> 1.24% |
+| S08 (A) | 11,218 -> 11,211 (0.9994) | 10,689 -> **10,906 (1.0203)** | 99.24% | 89.33% | 1.12% -> **1.07%** |
+
+Neutral-or-better on both engines and both datasets, with entrapment FDR improving on both. Adopted.
+
+One honest caveat on the metric: MSFragger's accepted set on S08 shows ~89-90% overlap between arms
+in EVERY gate run today, including pairs where Sage overlaps 99.2-99.6% on the same two files. Its
+peptide-level target-decoy walk is simply a much noisier statistic on that file than Sage's q-value
+cut, so a 2% MSFragger move on S08 should not be read as a 2% real gain.
+
+#### S30 at v35
+
+| phase | wall | % | par |
+|---|---:|---:|---:|
+| LOAD(stream) | 21.8 s | 10.7% | 74.3x |
+| MS1_TRACE | **17.8 s** | 8.8% | **22.7x** |
+| PRECURSOR_INFER | 5.6 s | 2.7% | 23.6x |
+| WINDOW_LOOP | 129.6 s | 63.7% | 72.0x |
+| WRITE(mzML) | 15.5 s | 7.6% | 1.0x |
+| **total** | **3:27.48** | | |
+
+S30 total 312.1 s (v21) -> 192.5 s measured (v35), **-38%**. The window loop is now 64% of the run
+and is the floor: 94% of the critical window's trace stage is the band taskloop, and band count is
+not adoptable.
+
+### Trace-detector speculation: implemented, measured, removed
+
+The technique that made precursor inference 23x is the right one in the wrong place. Precursor
+inference runs ALONE on an otherwise idle machine; the band detector runs while 28 windows x 12
+bands already saturate the pool, so speculative work there is pure waste -- a fixed width of 8 cost
+**+31% window-loop CPU and made the wall 11% worse**. Gating the width on live occupancy removed the
+penalty, but then it barely engages, because the window whose detect is the critical path is by
+definition the last one: it only sees idle threads in its final ~20%.
+
+Interleaved A/B, two rounds, one node, digests identical throughout:
+
+| | round 1 | round 2 | mean |
+|---|---:|---:|---:|
+| v30 window loop | 133.0 s | 121.7 s | 127.4 s |
+| v34 window loop (adaptive speculation) | 121.1 s | 121.1 s | 121.1 s |
+| v30 critical-window detect | 89.7 s | 84.0 s | |
+| v34 critical-window detect | 89.5 s | 94.1 s | |
+
+The control's own spread (133.0 vs 121.7) is larger than the difference, and the stage it targets did
+not move. Removed: ~200 lines of speculation machinery in the hottest loop is not worth an
+unmeasurable win. The design is recorded in the routes list, because it becomes worthwhile the
+moment the loop stops being tail-bound.
