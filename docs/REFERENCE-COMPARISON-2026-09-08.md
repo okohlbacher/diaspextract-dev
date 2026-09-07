@@ -62,7 +62,22 @@ Confirmed by measurement, on 009:
 | spectra | 2,343,822 | 4,035,058 (+72%) |
 | wall | 11:59 | ~13:20 (+11%) |
 
-So on this dataset class the z>=2 default costs 14% of Sage peptides and most of the MSFragger
-deficit, at unchanged entrapment FDR. That directly contradicts the S30 measurement that established
-the default (where dropping z=1 GAINED peptides on both engines), so `charge:min_charge` is
-dataset-dependent, not settled. The protein count falling while peptides rise is unexplained.
+Repeated on a second file, and it is stronger there:
+
+| | TNBC 009 z>=2 -> z>=1 | TNBC 001 z>=2 -> z>=1 |
+|---|---|---|
+| Sage peptides | 24,245 -> 27,685 (**+14.2%**) | 15,694 -> 18,854 (**+20.1%**) |
+| Sage ratio vs ref | 1.280 -> **1.463** | 1.063 -> **1.277** |
+| MSFragger peptides | 24,121 -> 26,332 (**+9.2%**) | 15,976 -> 17,068 (**+6.8%**) |
+| MSFragger ratio vs ref | 0.882 -> **0.960** | 0.852 -> **0.911** |
+| Sage proteins | 5,802 -> 5,641 (-2.8%) | 4,074 -> 4,118 (+1.1%) |
+| entrapment FDR | 1.03% -> **1.01%** | 0.98% -> **0.90%** |
+| spectra | +72% | +64% |
+| wall | +11% | +20% |
+
+So on this dataset class the z>=2 default costs 14-20% of Sage peptides and most of the MSFragger
+deficit, with entrapment FDR unchanged or better on both files. That directly contradicts the S30
+measurement that established the default (where dropping z=1 GAINED peptides on both engines), so
+`charge:min_charge` is dataset-dependent, not settled. Two things to resolve before changing it: the
+protein count fell 2.8% on 009 while rising 1.1% on 001, and the cost is a 64-72% larger spectrum
+file for 11-20% more wall.
