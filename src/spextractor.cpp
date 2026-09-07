@@ -1123,24 +1123,40 @@ namespace
     };
 
     struct Dir { Size hits = 0, missed = 0, scans = 0; bool active = true; };
-    vector<pair<uint32_t, uint32_t>> got;   // (frame, peak); marked only if the trace is valid
     // [seg] Only this band's own segment of the seed list; the range test below stays as the
     // invariant it always was (and is what the unbanded/whole-list call still relies on).
     const bool segd = band >= 0 && (size_t)band + 1 < tp.seg.size();
     const size_t s0 = segd ? tp.seg[band] : 0, s1 = segd ? tp.seg[band + 1] : tp.order.size();
-    for (size_t si = s0; si < s1; ++si)
+    // [spec-trace 2026-09-07] ORDERED SPECULATION, the same construction that made precursor
+    // inference exact and parallel. This loop is the window loop's critical path: the [tsub] timers
+    // put 94% of the heaviest window's trace stage inside this band taskloop, and band count is not
+    // available as a knob -- changing it moves 4-10% of the peptide set (gated twice on S08).
+    //
+    // The only mutable state a seed reads is `visited`, and `visited` is monotone. A seed's whole
+    // dependency set is the peaks its walk actually took: `best()` consults `seen()` only for the
+    // single closest candidate it has already chosen, so a step that ACCEPTED peak k depended on
+    // !seen(k) -- recorded, because it can change -- while a step that was refused because the
+    // candidate was already taken stays refused under a monotone bitmap, and a step with no
+    // candidate at all never read `visited`. Those accepted peaks are exactly `got`.
+    //
+    // So: grow a batch of traces concurrently against a frozen bitmap, then walk the batch in seed
+    // order and commit. A seed now taken is skipped exactly as before; a seed any of whose peaks was
+    // taken meanwhile is re-grown against the current bitmap. `mark()` and `makeSpan()` happen only
+    // in the commit, in seed order, so the arena layout and the emitted sequence are unchanged.
+    struct Grow { vector<pair<uint32_t, uint32_t>> got; double cmz = 0, cim = 0; bool ok = false; };
+    auto grow = [&](uint32_t seed, Grow& G)
     {
-      const uint32_t seed = tp.order[si];
-      if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
-      if (seen(seed)) continue;
+      G.ok = false; G.got.clear();
+      do
+      {
       const size_t f0 = frameOfPeak(seed);
       const double w0 = sl.inten[seed], m0 = mzAt(seed, f0);
-      double cmz = m0, cnt = w0 * m0, den = w0;
+      double& cmz = G.cmz; cmz = m0; double cnt = w0 * m0, den = w0;
       iwm(m0, w0, cmz, cnt, den);                             // seed counted twice, as run_ does
-      double cim = sl.imq[seed], cnt_im = w0 * cim, den_im = w0;
+      double& cim = G.cim; cim = sl.imq[seed]; double cnt_im = w0 * cim, den_im = w0;
       iwm((double)sl.imq[seed], w0, cim, cnt_im, den_im);
       double sd = (cmz / 1e6) * mass_ppm, wsum = w0;
-      got.clear(); got.emplace_back((uint32_t)f0, seed);
+      G.got.emplace_back((uint32_t)f0, seed);
       uint32_t sfmin = (uint32_t)f0, sfmax = (uint32_t)f0;    // running span, for the length cap
       Dir dn, up;
       long fd = (long)f0, fu = (long)f0;
@@ -1179,7 +1195,7 @@ namespace
               iwm(mz, w, cmz, cnt, den);
               iwm((double)sl.imq[k], w, cim, cnt_im, den_im);
               sdRobust(mz, w, cmz, sd, wsum);   // reestimate_mt_sd: the tool never turns it off
-              got.emplace_back((uint32_t)f, (uint32_t)k);
+              G.got.emplace_back((uint32_t)f, (uint32_t)k);
               ++d.hits; d.missed = 0;
             }
             else ++d.missed;
@@ -1190,31 +1206,79 @@ namespace
         }
       }
       // isTraceValid_
-      uint32_t fmin = got[0].first, fmax = fmin;
-      for (const auto& g : got) { fmin = std::min(fmin, g.first); fmax = std::max(fmax, g.first); }
+      uint32_t fmin = G.got[0].first, fmax = fmin;
+      for (const auto& g : G.got) { fmin = std::min(fmin, g.first); fmax = std::max(fmax, g.first); }
       const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
       if (span_s < min_len_sec) continue;
       if (max_len_sec > 0.0 && span_s > max_len_sec) continue;   // the tool passes 0 for "off"
       const Size total = dn.scans + up.scans + 1;
       const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
-      if ((double)got.size() / (double)adjusted < msr) continue;
-      for (const auto& g : got) mark(g.second);               // valid: now they are taken
+      if ((double)G.got.size() / (double)adjusted < msr) continue;
+        G.ok = true;
+      } while (0);
+    };
+
+    // Inner width is a SCHEDULING choice only -- commit order fixes the output -- but it must stay
+    // small enough that (bands x this) plus the loop's other tasks cannot cross libgomp's inline
+    // threshold of 64 x nthreads, which would silently serialise the whole taskloop.
+    size_t spec_batch = 2048; int inner = 8;
+    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_BATCH")) { long v = atol(ev); if (v >= 1) spec_batch = (size_t)v; }
+    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 1) inner = (int)v; }
+    vector<Grow> res(spec_batch);
+    vector<uint32_t> cand(spec_batch);
+    size_t sp = s0;
+    while (sp < s1)
+    {
+      size_t nc = 0;
+      while (sp < s1 && nc < spec_batch)
+      {
+        const uint32_t seed = tp.order[sp++];
+        if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
+        if (seen(seed)) continue;                                                      // frozen read, re-checked below
+        cand[nc++] = seed;
+      }
+      if (nc == 0) continue;
+      if (inner > 1 && nc > 1)
+      {
+        std::atomic<size_t> cur{0};
+        const int nw = (int)std::min<size_t>((size_t)inner, nc);
+        #pragma omp taskloop num_tasks(nw) default(shared)
+        for (int w = 0; w < nw; ++w)
+          for (;;)
+          {
+            const size_t x = cur.fetch_add(8);
+            if (x >= nc) break;
+            for (size_t y = x; y < std::min(x + 8, nc); ++y) grow(cand[y], res[y]);
+          }
+      }
+      else for (size_t y = 0; y < nc; ++y) grow(cand[y], res[y]);
+      for (size_t y = 0; y < nc; ++y)
+      {
+        const uint32_t seed = cand[y];
+        if (seen(seed)) continue;
+        Grow& G = res[y];
+        bool stale = false;
+        for (const auto& g : G.got) if (seen(g.second)) { stale = true; break; }
+        if (stale) grow(seed, G);
+        if (!G.ok) continue;
+      for (const auto& g : G.got) mark(g.second);               // valid: now they are taken
 
       // the span: (store-local frame, intensity) points, plus the per-frame bin arena the valley
       // splitter needs to give each child ITS measured apex bin
       vector<pair<uint32_t, float>> pts;
-      pts.reserve(got.size());
-      uint32_t kap = got[0].second, fap = got[0].first;
-      for (const auto& g : got) { pts.emplace_back(g.first, sl.inten[g.second]);
+      pts.reserve(G.got.size());
+      uint32_t kap = G.got[0].second, fap = G.got[0].first;
+      for (const auto& g : G.got) { pts.emplace_back(g.first, sl.inten[g.second]);
                                   if (sl.inten[g.second] > sl.inten[kap]) { kap = g.second; fap = g.first; } }
       Trace t = makeSpan(pts, store);
       store.bins.resize(store.inten.size(), 0u);
-      for (const auto& g : got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
+      for (const auto& g : G.got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
       t.tof = sl.tof[kap]; t.bframe = fap;   // got-order first max: the frame the bin was measured on
-      t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
+      t.mz = G.cmz;                                              // the weighted centroid, as OpenMS reports
       t.rt = rtAxis()[sl.rt_index[fap]];
-      t.im = IM_LO + cim / IM_Q;
+      t.im = IM_LO + G.cim / IM_Q;
       out.push_back(std::move(t));
+      }
     }
     return out;
   }
