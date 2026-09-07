@@ -1238,43 +1238,10 @@ namespace
     if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_BATCH")) { long v = atol(ev); if (v >= 1) spec_batch = (size_t)v; }
     if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 0) inner = (int)v; }
     if (inner < 1) inner = 1;
-    vector<Grow> res(spec_batch);
-    vector<uint32_t> cand(spec_batch);
-    size_t sp = s0;
-    while (sp < s1)
+    // The commit tail: marking and the arena append happen ONLY here, in seed order, which is
+    // what keeps the arena layout and the emitted sequence identical to the sequential algorithm.
+    auto emit = [&](Grow& G)
     {
-      size_t nc = 0;
-      while (sp < s1 && nc < spec_batch)
-      {
-        const uint32_t seed = tp.order[sp++];
-        if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
-        if (seen(seed)) continue;                                                      // frozen read, re-checked below
-        cand[nc++] = seed;
-      }
-      if (nc == 0) continue;
-      if (inner > 1 && nc > 1)
-      {
-        std::atomic<size_t> cur{0};
-        const int nw = (int)std::min<size_t>((size_t)inner, nc);
-        #pragma omp taskloop num_tasks(nw) default(shared)
-        for (int w = 0; w < nw; ++w)
-          for (;;)
-          {
-            const size_t x = cur.fetch_add(8);
-            if (x >= nc) break;
-            for (size_t y = x; y < std::min(x + 8, nc); ++y) grow(cand[y], res[y]);
-          }
-      }
-      else for (size_t y = 0; y < nc; ++y) grow(cand[y], res[y]);
-      for (size_t y = 0; y < nc; ++y)
-      {
-        const uint32_t seed = cand[y];
-        if (seen(seed)) continue;
-        Grow& G = res[y];
-        bool stale = false;
-        for (const auto& g : G.got) if (seen(g.second)) { stale = true; break; }
-        if (stale) grow(seed, G);
-        if (!G.ok) continue;
       for (const auto& g : G.got) mark(g.second);               // valid: now they are taken
 
       // the span: (store-local frame, intensity) points, plus the per-frame bin arena the valley
@@ -1292,6 +1259,63 @@ namespace
       t.rt = rtAxis()[sl.rt_index[fap]];
       t.im = IM_LO + G.cim / IM_Q;
       out.push_back(std::move(t));
+    };
+
+    if (inner <= 1)
+    {
+      // No idle capacity to spend: run exactly the sequential algorithm, with no speculation at
+      // all. Speculating here is not merely unhelpful, it is negative -- a seed that an earlier
+      // seed of the same batch claims would be grown and then thrown away, and that is the
+      // MAJORITY of seeds (the equivalent figure in precursor inference is 56% already claimed).
+      // Measured with a fixed width of 8: window-loop CPU +31% and the wall 11% WORSE.
+      Grow G;
+      for (size_t si2 = s0; si2 < s1; ++si2)
+      {
+        const uint32_t seed = tp.order[si2];
+        if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
+        if (seen(seed)) continue;
+        grow(seed, G);
+        if (!G.ok) continue;
+        emit(G);
+      }
+      return out;
+    }
+    vector<Grow> res(spec_batch);
+    vector<uint32_t> cand(spec_batch);
+    size_t sp = s0;
+    while (sp < s1)
+    {
+      size_t nc = 0;
+      while (sp < s1 && nc < spec_batch)
+      {
+        const uint32_t seed = tp.order[sp++];
+        if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;
+        if (seen(seed)) continue;                                  // frozen read, re-checked below
+        cand[nc++] = seed;
+      }
+      if (nc == 0) continue;
+      {
+        std::atomic<size_t> cur{0};
+        const int nw = (int)std::min<size_t>((size_t)inner, nc);
+        #pragma omp taskloop num_tasks(nw) default(shared)
+        for (int w = 0; w < nw; ++w)
+          for (;;)
+          {
+            const size_t x = cur.fetch_add(8);
+            if (x >= nc) break;
+            for (size_t y = x; y < std::min(x + 8, nc); ++y) grow(cand[y], res[y]);
+          }
+      }
+      for (size_t y = 0; y < nc; ++y)
+      {
+        const uint32_t seed = cand[y];
+        if (seen(seed)) continue;
+        Grow& G = res[y];
+        bool stale = false;
+        for (const auto& g : G.got) if (seen(g.second)) { stale = true; break; }
+        if (stale) grow(seed, G);
+        if (!G.ok) continue;
+        emit(G);
       }
     }
     return out;
