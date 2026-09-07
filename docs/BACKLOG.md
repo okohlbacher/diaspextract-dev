@@ -260,3 +260,39 @@ labels is recoverable by fixing the call, or only by not declaring one.
 - **MSFragger content gap on py3.** MSFragger gets 1.9x more peptides from the reference's py3
   spectra than from ours while Sage is at 0.85. Same content-candidate machinery as before
   (matched fragment ions per co-identified precursor), now on public data where the gap is widest.
+
+## Cluster launch discipline (2026-09-07)
+
+Launching a long job as `ssh HOST 'cd DIR && setsid CMD > log 2>&1 </dev/null & ...'` blocks ssh for
+the **entire job**. The `&` binds to the whole AND-list, so bash forks a subshell to run it; the
+redirections apply only to the inner simple command, so the subshell keeps sshd's stdout/stderr pipes
+and waits, and sshd cannot close a non-PTY channel until the last writer of those pipes closes them.
+Measured on spock with a 6 s payload: **7.0-7.3 s held vs 0.8-1.0 s released.**
+
+The invariant is **not** "avoid `cd &&`" -- `true && setsid ... &` also holds, and so do `( ... ) &`
+and `{ ...; } &`. It is: *no process that outlives the foreground command may still hold the
+session's stdout/stderr*, and bash only avoids leaving one when the backgrounded unit reduces to a
+single redirected simple command it can `exec` in place. So `[ -e "$D" ] && setsid ... &` is unsafe
+too. The obvious alternatives are worse: `cd DIR; setsid ... &` runs the job in quota-limited `$HOME`
+if the `cd` fails, and `{ cd DIR && setsid ...; } &` buries a failed `cd` in a remote log.
+
+Use `bench/launch.sh` (shipped to the cluster by `sync_cluster.sh`):
+
+```
+ssh -n HOST 'bash /ceph/ibmi/abi/oliver/spextract/tools/launch.sh TAG WORKDIR CMD [ARGS...]'
+```
+
+One ssh per Bash call; never `2>/dev/null` on a launch. Confirmation is a pid the payload stamps
+itself -- `pgrep -f ... | wc -l` reported 3 for one job and 1 for a job that had already exited.
+
+Separately: `exit 255` on a long-lived ssh was the laptop clamshell-sleeping, not the job failing.
+Three incidents separate perfectly on "was the connection open across a lid-close"; a 24-second sleep
+sufficed, while a 28-minute connection with no sleep exited 0. macOS reports it only after
+`net.inet.tcp.keepidle` (2 h) unless `ServerAliveInterval` is set, which is now 15 s for the cluster
+hosts. **Not** ControlMaster: one shared connection means one lid-close kills every concurrent
+session instead of one.
+
+`baseline_run.sh` and `verify_publish.sh` now refuse a pre-existing arm directory, as
+`gate_bands.sh`/`gateA.sh` already did -- a launch that merely *looked* failed was relaunched by hand
+once, and nothing would have flagged an overwrite. `gateA.sh` also had a stale `bin/spextract` path,
+broken since the rename to `spextractor`.

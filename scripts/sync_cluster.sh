@@ -33,6 +33,10 @@ scp -q src/TdfLoad.h src/MzPeakStreamLoad.h "$NODE":/scratch/kohlbach/OpenMS/src
 # The end-to-end suite lives at the deployment point and is what every verification run executes.
 # It drifted once already: a newly added check silently did not run because the copy was stale.
 scp -q test/test_spextractor.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
+# The remote launcher. Every long job is started through it, so it must not exist only on ceph with
+# no history -- and a stale copy would silently reintroduce the ssh-channel hang it exists to avoid.
+scp -q bench/launch.sh "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
+ssh "$NODE" "chmod +x /ceph/ibmi/abi/oliver/spextract/tools/launch.sh"
 # Refuse to deploy into a tree that has lost the calibration patch: it would build fine, silently
 # revert masses to the -5..-11 ppm chord, and record a clean-looking provenance [kimi review].
 ssh "$NODE" "grep -q TdfMzCalibration /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
