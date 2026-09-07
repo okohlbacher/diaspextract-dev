@@ -1757,3 +1757,33 @@ peak RSS 190,852 MB. An independent v35 run of the same file on `data` gave **11
 Where the time now is, on a 2-hour acquisition: the window loop (60%), and after it the mzML write
 (7.6%, one thread) and the streaming load (13.7%, 60x). The window loop is tail-bound and its tail is
 94% band taskloop, which band count cannot unlock without moving the peptide set.
+
+
+### `SPEXTRACTOR_PICK_BATCH`: fast, and rejected (2026-09-07)
+
+LOAD is 13.7% of a 2-hour run at ~60x of 100 threads: a read (serial) -> pick (parallel) pipeline
+over batches of `kBatch` frames, where a batch not much larger than the thread count caps occupancy
+and the reader between batches is a bubble. The knob is already an env var, so it was free to sweep
+(S30, v35):
+
+| `PICK_BATCH` | LOAD | par | total | peak RSS | digest |
+|---:|---:|---:|---:|---:|---|
+| 256 (default) | 27.2 s / 19.8 s | 54.4x / 73.6x | 185.4 / 178.3 s | 55.5 GB | `9e5e5514` (both runs) |
+| 1024 | 26.2 s | 56.4x | 183.8 s | 55.3 GB | `561446fb` |
+| 4096 | **16.6 s** | **82.9x** | **165.3 s** | **51.6 GB** | `a3418b5e` |
+
+Deterministic at a fixed batch size (256 reproduced its digest exactly), but the digest CHANGES with
+batch size: the picker carries per-thread state, so which frames a thread sees changes its output --
+the "~2% of intensities at the 1e-5..1e-4 level" the load comment already records for serial vs
+parallel picking.
+
+**Gated and REJECTED.** That perturbation is not benign:
+
+| | Sage | MSFragger | Sage overlap | MSFragger overlap |
+|---|---|---|---:|---:|
+| S30, 256 -> 4096 | 12,593 -> **11,682 (-7.2%)** | 11,642 -> **10,930 (-6.1%)** | 91.7% | 81.3% |
+
+A 7% peptide loss for a load-phase speedup is not a trade worth making, and in the gate's own arms
+the wall was not even better (3:12.17 vs 3:13.32). `kBatch` stays at 256. The interesting part is
+what it reveals: **the peak picker is materially sensitive to how frames are grouped across threads**,
+which is a correctness smell worth its own investigation -- see the routes list.
