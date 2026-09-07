@@ -1055,7 +1055,7 @@ namespace
   vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm,
                                      double im_tol, double noise, double min_len_sec, double min_sample_rate,
                                      double max_len_sec, double max_span_sec, TofIdx band_lo = 0, TofIdx band_hi = 0,
-                                     int band = -1)
+                                     int band = -1, int units_in_flight = 1 << 20)
   {
     vector<Trace> out;
     const size_t F = sl.frames(), P = sl.tof.size();
@@ -1221,9 +1221,23 @@ namespace
     // Inner width is a SCHEDULING choice only -- commit order fixes the output -- but it must stay
     // small enough that (bands x this) plus the loop's other tasks cannot cross libgomp's inline
     // threshold of 64 x nthreads, which would silently serialise the whole taskloop.
-    size_t spec_batch = 2048; int inner = 8;
+    //
+    // ADAPTIVE WIDTH, and this is what makes it pay. Speculation is not free: a re-grown trace is
+    // wasted work, and measured on S30 with a fixed width of 8 the window loop's CPU rose 31%
+    // (8,364 -> 10,941 s) and the WALL got worse (123.6 -> 137.1 s), because during most of the loop
+    // all 28 windows x 12 bands already saturate the machine and there is no idle capacity to spend.
+    // The tail is the opposite case: one window, twelve bands, ~88 threads idle, and that tail is
+    // the loop's critical path. So spend threads only when the pool has them -- width is derived
+    // from how many band-units are actually in flight, which the caller passes in.
+    int nthr = 1;
+#ifdef _OPENMP
+    nthr = omp_get_max_threads();
+#endif
+    size_t spec_batch = 2048;
+    int inner = std::max(1, std::min(16, nthr / std::max(1, units_in_flight)));
     if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_BATCH")) { long v = atol(ev); if (v >= 1) spec_batch = (size_t)v; }
-    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 1) inner = (int)v; }
+    if (const char* ev = std::getenv("SPEXTRACTOR_TRACE_SPEC_INNER")) { long v = atol(ev); if (v >= 0) inner = (int)v; }
+    if (inner < 1) inner = 1;
     vector<Grow> res(spec_batch);
     vector<uint32_t> cand(spec_batch);
     size_t sp = s0;
@@ -4042,7 +4056,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             #pragma omp taskloop grainsize(1) default(shared)
             for (int b = 0; b < nb; ++b)
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
-                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b);
+                                            max_trace_len, max_span, bnd[b], bnd[b + 1], b,
+                                            std::max(1, active.load() * nb));
             w_detect = secs(std::chrono::steady_clock::now() - _td0);
             auto _tm0 = std::chrono::steady_clock::now();
             release_input();                       // before the merge, not after it
