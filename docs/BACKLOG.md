@@ -292,7 +292,32 @@ sufficed, while a 28-minute connection with no sleep exited 0. macOS reports it 
 hosts. **Not** ControlMaster: one shared connection means one lid-close kills every concurrent
 session instead of one.
 
-`baseline_run.sh` and `verify_publish.sh` now refuse a pre-existing arm directory, as
-`gate_bands.sh`/`gateA.sh` already did -- a launch that merely *looked* failed was relaunched by hand
-once, and nothing would have flagged an overwrite. `gateA.sh` also had a stale `bin/spextract` path,
-broken since the rename to `spextractor`.
+`baseline_run.sh` now refuses a pre-existing arm directory, as `gate_bands.sh`/`gateA.sh` already
+did -- a launch that merely *looked* failed was relaunched by hand once, and nothing would have
+flagged an overwrite. `gateA.sh` also had a stale `bin/spextract` path, broken since the rename to
+`spextractor`.
+
+An adversarial review of that first pass found four defects in it, all reproduced and since fixed:
+
+- **`verify_publish.sh`'s guard was on the wrong object.** It protected the node-local scratch e2e
+  directory; the thing that must be immutable is the *published* install `$SPX/$1` on shared `/ceph`,
+  which the script rewrites **in place on the same inode** -- the SIGBUS hazard. v22-v28 were all
+  published with no scratch directory present, so the guard would have passed straight through and
+  overwritten a live install. It now guards `$V`, validates the version name, leaves the scratch
+  workdir unguarded so a failed e2e can be retried, and **refuses to publish when e2e fails** (the
+  exit status used to be printed and then ignored).
+- **`launch.sh`'s duplicate-tag check was a TOCTOU race.** The stamp is written by the payload only
+  after fork+exec, so simultaneous launches all passed the `[ -e ]` test: measured, three concurrent
+  same-tag launches started **two** payloads and printed the *same* pid twice, leaving one untracked.
+  The tag is now reserved atomically (`set -C`) before the fork -- 1 payload from 3.
+- **A short-lived payload was reported as a launch failure and poisoned its tag.** `baseline_run.sh`'s
+  own REFUSED guard exits in milliseconds, so *every refused arm* would have become unlaunchable.
+  Now `LAUNCH_EXITED` (rc 8), tag reusable; a genuine never-started payload is rc 7.
+- **Three drivers silently lost their execute bit.** The tools directory carries a default ACL
+  (`default:group::rwx`, `other:---`), so a file written by a redirect lands 0660 with no `x`
+  regardless of umask. Deploys now `chmod 771` explicitly.
+
+Known and accepted: `LAUNCH_OK` means *started*, not *healthy* -- a payload that dies after the
+~0.5 s confirmation window still reports OK. Check the log once at ~60 s. `LAUNCH_DIR` is node-local,
+so the same tag can be launched on two different hosts; the damage is a wasted job, not corruption,
+since arm directories are node-local and publishing only works on ibminode05.

@@ -36,7 +36,10 @@ scp -q test/test_spextractor.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
 # The remote launcher. Every long job is started through it, so it must not exist only on ceph with
 # no history -- and a stale copy would silently reintroduce the ssh-channel hang it exists to avoid.
 scp -q bench/launch.sh "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
-ssh "$NODE" "chmod +x /ceph/ibmi/abi/oliver/spextract/tools/launch.sh"
+# 771 explicitly, not chmod +x: the tools dir carries a default ACL (default:group::rwx,
+# other:---), so a file created by a redirect or a python write lands 0660 with NO exec bit
+# regardless of umask -- which is how three drivers silently lost theirs on 2026-09-07.
+ssh "$NODE" "chmod 771 /ceph/ibmi/abi/oliver/spextract/tools/launch.sh"
 # Refuse to deploy into a tree that has lost the calibration patch: it would build fine, silently
 # revert masses to the -5..-11 ppm chord, and record a clean-looking provenance [kimi review].
 ssh "$NODE" "grep -q TdfMzCalibration /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
