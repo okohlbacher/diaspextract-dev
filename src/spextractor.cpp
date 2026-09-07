@@ -1859,6 +1859,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     };
 
     vector<MassTrace> mts;
+    // [tstage] Sub-stage seconds for this phase. MS1_TRACE runs at 4.8x on 100 threads and is the
+    // second-largest phase on a 2-hour acquisition, and the milestone timer alone cannot say
+    // whether that is the SERIAL band distribution, imbalance across the band detectors, or the
+    // valley split. One line, so the next decision here is measured rather than assumed.
+    double tt_edge = 0, tt_dist = 0, tt_mtd = 0, tt_gather = 0, tt_split = 0;
+    auto tt_now = []() { return std::chrono::steady_clock::now(); };
+    auto tt_s = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
     if (bands > 1)
     {
       // [bands] The diaPASEF method fixes the window count at 24, so parallelising over
@@ -1870,6 +1877,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       const double ppm = getDoubleOption_("trace:mass_error_ppm");
       // Band edges from m/z QUANTILES, not uniform m/z: peak density varies by orders of
       // magnitude across a window, and uniform edges would leave one band holding most of the work.
+      auto _te0 = tt_now();
       vector<double> sample;
       for (const auto& s : map)
         for (Size i = 0; i < s.size(); i += 97) sample.push_back(s[i].getMZ());
@@ -1884,6 +1892,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
 
       // Partition ONCE (peaks are copied into exactly one core band plus any halo it falls in),
       // then release the source map so the halo duplicates are the only overhead.
+      tt_edge = tt_s(_te0, tt_now());
+      auto _td0 = tt_now();
       vector<PeakMap> sub(bands);
       for (auto& s : map)          // non-const: each spectrum is released once distributed
       {
@@ -1917,6 +1927,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         s.clear(true);   // distributed: release it now, so the source and the copies do not both
       }                  // stand at full size (the transient was ~2x the map)
       map.clear(true);
+      tt_dist = tt_s(_td0, tt_now());
+      auto _tm0 = tt_now();
       vector<vector<MassTrace>> per(bands);
       #pragma omp taskloop grainsize(1) default(shared)
       for (int b = 0; b < bands; ++b)
@@ -1934,9 +1946,12 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (c >= edge[b] && c < edge[b + 1]) per[b].push_back(std::move(mt));
         }
       }
+      tt_mtd = tt_s(_tm0, tt_now());
+      auto _tg0 = tt_now();
       size_t tot = 0; for (const auto& v : per) tot += v.size();
       mts.reserve(tot);
       for (auto& v : per) { for (auto& t : v) mts.push_back(std::move(t)); vector<MassTrace>().swap(v); }
+      tt_gather = tt_s(_tg0, tt_now());
     }
     else
     {
@@ -1959,6 +1974,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // consumers are order-independent (MS2 re-sorted after detectTraces_, MS1 sorted before
     // inferPrecursors_). Reverted once for a -0.8% "regression" that was actually the ms1_traces
     // determinism bug, now fixed.
+    auto _ts0 = tt_now();
     if (split_valleys > 0.0 && mts.size() > 1)
     {
       const int nchunk = std::max(1, bands * 4);      // 4x chunks vs threads -> dynamic load balance
@@ -1980,6 +1996,11 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                                + " traces (" + String((int)(1000.0 * out.size() / std::max<size_t>(n_in,1)) / 10.0) + "%)";
       mts.swap(out);
     }
+    tt_split = tt_s(_ts0, tt_now());
+    writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(mts.size()) + " traces: edges "
+                  + String(tt_edge) + " s | distribute " + String(tt_dist) + " s (serial) | detect "
+                  + String(tt_mtd) + " s | gather " + String(tt_gather) + " s (serial) | valley-split "
+                  + String(tt_split) + " s");
     // [merged-trace] instrumentation: is trace merging actually happening? Log the RT-span
     // distribution. Peaks are 5-30 s here, so a large p90/max means multi-modal merged traces.
     if (!mts.empty())
