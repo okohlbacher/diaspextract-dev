@@ -939,7 +939,55 @@ namespace
     vector<char>     frame_live;  ///< F: has at least one member
     vector<uint32_t> order;       ///< seeds, intensity desc, later-index-first among equals
     vector<size_t>   seg;         ///< nb+1 offsets into `order`: band b owns [seg[b], seg[b+1])
+    /// [tofidx] Per-frame direct-address index over the flight-time bins: bucket
+    /// `(tof - tlo) >> tsh` of frame f starts at peak `fidx[f * (nbk+1) + bucket]`. Computed, not
+    /// searched -- the bin IS an integer the instrument produced, so the bucket is a subtract and
+    /// a shift. It replaces the per-frame-step binary search in `best()`, which ran once for every
+    /// frame step of every trace extension over a frame's ~25,000 sorted bins.
+    vector<uint32_t> fidx;
+    TofIdx tlo = 0; unsigned tsh = 0; uint32_t nbk = 0;
+    inline void range(size_t f, TofIdx lo_t, uint32_t a, uint32_t b, uint32_t& s0, uint32_t& s1) const
+    {
+      if (fidx.empty()) { s0 = a; s1 = b; return; }
+      const uint64_t d = lo_t <= tlo ? 0 : ((uint64_t)(lo_t - tlo) >> tsh);
+      const uint32_t k = d >= nbk ? nbk : (uint32_t)d;
+      const uint32_t* row = &fidx[f * ((size_t)nbk + 1)];
+      s0 = row[k]; s1 = (k + 1 <= nbk) ? row[k + 1] : b;
+    }
   };
+  /// [tofidx] Bucket every frame's flight-time bins so `best()` can address its scan start instead
+  /// of binary-searching for it. ~32 peaks per bucket; the shift is global so bucket boundaries
+  /// line up across frames. Exact: the bucket start is the first peak with `tof >= bucket_lo`, so
+  /// the sub-range handed to lower_bound provably contains the same position it would have found.
+  void buildTofIndex(const PeakSlab& sl, TracePrep& tp, TofIdx tlo, TofIdx thi)
+  {
+    const size_t F = sl.frames(), P = sl.tof.size();
+    if (F == 0 || P == 0 || thi < tlo) return;
+    const uint64_t span = (uint64_t)thi - tlo + 1;
+    const size_t ppf = std::max<size_t>(1, P / F);
+    uint32_t want = 64; while (want < 4096 && (size_t)want * 32 < ppf) want <<= 1;
+    unsigned sh = 0; while ((span >> sh) > want) ++sh;
+    const uint32_t nbk = (uint32_t)std::min<uint64_t>(want, (span >> sh) + 1);
+    // one row of nbk+1 offsets per frame; the extra entry is the row's end
+    if ((double)F * (nbk + 1) > 3e8) return;                 // pathological geometry: skip the index
+    tp.tlo = tlo; tp.tsh = sh; tp.nbk = nbk;
+    tp.fidx.assign(F * ((size_t)nbk + 1), 0);
+    #pragma omp taskloop default(shared)
+    for (long fi = 0; fi < (long)F; ++fi)
+    {
+      const size_t f = (size_t)fi;
+      const uint32_t a = sl.frame_off[f], e = sl.frame_off[f + 1];
+      uint32_t* row = &tp.fidx[f * ((size_t)nbk + 1)];
+      uint32_t k = a;
+      for (uint32_t bk = 0; bk <= nbk; ++bk)
+      {
+        const uint64_t blo = (uint64_t)bk << sh;
+        while (k < e && (uint64_t)(sl.tof[k] - tlo) < blo) ++k;
+        row[bk] = k;
+      }
+    }
+  }
+
   /// `bnd` are the nb+1 flight-time band edges the detector will be given (bnd[0] = tlo,
   /// bnd[nb] = thi+1); pass {0, 0} for the unbanded path, which wants one globally sorted list.
   ///
@@ -951,7 +999,8 @@ namespace
   /// to 239e6 indices) and it was SERIAL, at 23-63 s per window on a 2-hour acquisition; as nb
   /// independent sorts it runs on nb threads of the same pool. Each band also stops walking the
   /// other bands' seeds.
-  TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vector<TofIdx>& bnd)
+  TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vector<TofIdx>& bnd,
+                           TofIdx tlo, TofIdx thi)
   {
     TracePrep tp;
     const size_t F = sl.frames(), P = sl.tof.size();
@@ -999,6 +1048,7 @@ namespace
     #pragma omp taskloop grainsize(1) default(shared)
     for (int b = 0; b < nb; ++b)
       sort(tp.order.begin() + tp.seg[b], tp.order.begin() + tp.seg[b + 1], cmp);
+    buildTofIndex(sl, tp, tlo, thi);
     return tp;
   }
 
@@ -1052,7 +1102,8 @@ namespace
       const double lo_mz = cmz - 3.0 * sd, hi_mz = cmz + 3.0 * sd;
       const TofIdx lo_t = ax.tofOf(lo_mz > 0.0 ? lo_mz : 1e-9, bf);
       const TofIdx hi_t = ax.tofOf(hi_mz, bf);
-      const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + a, sl.tof.begin() + b, lo_t) - sl.tof.begin());
+      uint32_t r0 = a, r1 = b; tp.range(f, lo_t, a, b, r0, r1);   // [tofidx] computed, not searched
+      const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + r0, sl.tof.begin() + r1, lo_t) - sl.tof.begin());
       long bk = -1; double bd = std::numeric_limits<double>::infinity();
       for (uint32_t k = s0; k < b && sl.tof[k] <= hi_t; ++k)
       {
@@ -3831,7 +3882,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           }
           else bnd = {0, 0};
           auto _tp = std::chrono::steady_clock::now();
-          TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr, bnd);    // once per window
+          TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per window
           w_prep = secs(std::chrono::steady_clock::now() - _tp);
           n_seeds = tprep.order.size();
           // The slab and the seed order are dead the moment the detector returns: the merge below
@@ -3844,7 +3895,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
             vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
             vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
             vector<uint32_t>().swap(tprep.order); vector<char>().swap(tprep.frame_live);
-            vector<size_t>().swap(tprep.seg);
+            vector<size_t>().swap(tprep.seg); vector<uint32_t>().swap(tprep.fidx);
           };
           // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
           // store absorbs them in band order and every offset is rebased (R4 sequencing).
