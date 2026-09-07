@@ -3847,12 +3847,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         // Per-window stage seconds and the completion line, printed on EVERY exit of the body
         // (empty window, any assembly arm, exception): what the profile could only infer. [mem]
         double w_prep = 0, w_trace = 0, w_split = 0, w_score = 0, w_emit = 0;
+        // [tsub] w_trace bundles more than the band taskloop -- the slab build, the serial arena
+        // merge, and a full sort of every trace record in the window. Time them apart, so the next
+        // decision about this stage is measured rather than attributed to the parallel part.
+        double w_slab = 0, w_detect = 0, w_merge = 0, w_sort = 0;
         auto secs = [](auto d) { return std::chrono::duration<double>(d).count(); };
         struct WinDone { std::function<void()> f; ~WinDone() { f(); } } win_done_guard{[&]() {
           #pragma omp critical(winlog)
           writeLogInfo_("  window " + String(++win_done) + "/" + String(window_list.size()) + " " + String(win_lo) + "-" + String(win_hi)
                         + ": prep " + String(w_prep) + " s | trace " + String(w_trace) + " s | split " + String(w_split)
-                        + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_());
+                        + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_()
+                        + "\n    [tsub] " + String(win_lo) + "-" + String(win_hi) + " trace = slab " + String(w_slab)
+                        + " + detect " + String(w_detect) + " + merge " + String(w_merge) + " + sort " + String(w_sort) + " s");
         }};
         // [compact] materialise ONLY this window, and free its compact frames as we go
         auto _t0 = std::chrono::steady_clock::now();
@@ -3862,7 +3868,9 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         PeakSlab wslab;
         if (integer_detector)
         {
-          wslab = toSlab(*window_list[wi].second);
+          { auto _tsl = std::chrono::steady_clock::now();
+            wslab = toSlab(*window_list[wi].second);
+            w_slab = secs(std::chrono::steady_clock::now() - _tsl); }
           if (detOn_())
           {
             #pragma omp critical
@@ -3966,10 +3974,13 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           else
           {
             vector<vector<Trace>> per(nb);
+            auto _td0 = std::chrono::steady_clock::now();
             #pragma omp taskloop grainsize(1) default(shared)
             for (int b = 0; b < nb; ++b)
               per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
                                             max_trace_len, max_span, bnd[b], bnd[b + 1], b);
+            w_detect = secs(std::chrono::steady_clock::now() - _td0);
+            auto _tm0 = std::chrono::steady_clock::now();
             release_input();                       // before the merge, not after it
             size_t tot = 0, arena = 0; bool any_bins = false;
             for (int b = 0; b < nb; ++b)
@@ -3984,6 +3995,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
               for (auto& t : per[b]) { t.off += base; frag_traces.push_back(std::move(t)); }
               vector<Trace>().swap(per[b]);
             }
+            w_merge = secs(std::chrono::steady_clock::now() - _tm0);
           }
           if (nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
           }                                                  // tprep dies here
@@ -4024,6 +4036,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           writeLogInfo_("MS2 " + ms2_span);
         }
 
+        auto _tso = std::chrono::steady_clock::now();
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
           return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(t.rt);
         }), frag_traces.end());
@@ -4038,6 +4051,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
         FragRt frag_rt; frag_rt.build(frag_traces, delta_rt);
+        w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
         // window's precursors (this window runs on one thread). [perf]
