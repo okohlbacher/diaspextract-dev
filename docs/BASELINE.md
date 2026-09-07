@@ -1428,3 +1428,57 @@ the field held, and the digest proves it on both files.
 that looks like GB and is 7% smaller than the GiB the tool's own logs print. Comparing one against
 the other made a real 5.5 GiB improvement look like no change at all. Every figure in this file is
 GiB; when in doubt, compare kB against kB.
+
+### Scheduling: the window loop was bounded by one window's serial chain (2026-09-07)
+
+The window loop's wall time equalled the longest SINGLE window's stage chain, on both datasets --
+prep, trace, split and score run sequentially inside a window, so the last window standing runs
+its stages with the machine nearly idle:
+
+| dataset | loop wall | longest window's own chain | that window |
+|---|---:|---:|---|
+| S30 (v21) | 150.7 s | 147.4 s (98%) | 327-469, trace-bound (98.4 s) |
+| TNBC 009 (v21) | 748.5 s | 741.9 s (99%) | 575-601, **score**-bound (581.0 s) |
+
+On TNBC that score figure was not work, it was a scheduler cliff. libgomp's `GOMP_taskloop` runs
+the whole loop inline in the creating thread once `task_count + num_tasks > 64 * nthreads`; at
+`grainsize(32)` and 100 threads that is **204,800 precursors**, and exactly two of 28 windows sit
+above it. Measured on the same libgomp with a standalone taskloop, 20 us per iteration:
+
+| iterations | clause | tasks | parallelism |
+|---:|---|---:|---:|
+| 200,000 | `grainsize(32)` | 6,250 | 82.7x |
+| 300,000 | `grainsize(32)` | 9,375 | **1.0x** |
+| 300,000 | `num_tasks(400)` | 400 | 88.0x |
+
+The two windows above the line scored 417.6 s and 581.0 s; every neighbouring window -- within 16%
+on fragment count -- scored 12-28 s. An unclaused taskloop is safe (libgomp picks ~nthreads tasks,
+verified to 10e6 iterations at 99.1x); only a data-dependent `grainsize` is dangerous.
+
+#### Measured, byte-identical on both files
+
+| build | S30 total | TNBC 009 wall | TNBC window loop | TNBC PRECURSOR_INFER | TNBC peak RSS |
+|---|---:|---:|---:|---:|---:|
+| v21 | 312.1 s | 33:35 | 1150.0 s (31.2x) | 438.8 s (1.0x) | 181,777 MB |
+| **v22** (bounded scoring pool + findPartner SoA) | **266.2 s** | **18:03** | **496.5 s (66.7x)** | **177.2 s** | 181,902 MB |
+
+**-46% wall on TNBC, -15% on S30, at unchanged peak memory and an identical spectrum list on both.**
+The scoring fix is a fixed pool of worker tasks pulling 32-precursor chunks from an atomic cursor,
+so the task count no longer grows with the window size. `PRECURSOR_INFER` fell because
+`findPartner`'s two gate fields (RT, IM) now sit in m/z order beside `sorted_mz` instead of being
+chased through 48-byte records: same values, same order, same first match. Its three stages are now
+logged -- on TNBC, m/z index 1.0 s, intensity sort 7.5 s, **greedy walk 156.3 s**, so the residue is
+the greedy claim loop and not the sorts.
+
+#### `perf:trace_bands` (S30, v22) -- output-CHANGING, needs the peptide gate
+
+| bands | window loop | total | CPU (loop) | spectra | digest |
+|---:|---:|---:|---:|---:|---|
+| 12 (default) | 136.0 s | 266.2 s | 9,236 s | 656,257 | reference |
+| 24 | 117.0 s | 249.8 s | 9,201 s | 656,257 | differs |
+| 48 | 108.7 s | 238.7 s | 9,311 s | 656,260 | differs |
+
+CPU is flat within 1%, so the gain is purely tail parallelism, not less work -- which contradicts
+the older note that banding reduces total trace work superlinearly (that measurement was on the
+OpenMS detector path, not the integer one). A control re-run at 12 bands reproduced to within 2%
+(4:41.7 vs 4:36.9) with an identical digest.
