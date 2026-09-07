@@ -2130,6 +2130,39 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // order, same first match: output-identical by construction. 16 B/trace of transient state.
     vector<double> sorted_rt(N), sorted_im(N);
     for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = t.rt; sorted_im[i] = t.im; }
+    // [mzidx] A coarse uniform index over `sorted_mz`, ~4 traces per bucket. The greedy walk below
+    // is the single-threaded residue of this phase (measured: 138.3 s of 155.7 on a 2-hour file)
+    // and it spends that time in `lower_bound`/`upper_bound` over 22e6 doubles -- ~25 probes, each
+    // a cache miss, for every one of up to 50 partner queries per seed. Starting the search inside
+    // one bucket makes it one or two lines instead. The POSITION found is unchanged: everything
+    // below bucket b is strictly less than any value in b, everything above is strictly greater,
+    // so the standard-library search runs on a sub-range that provably contains the answer.
+    const double mz_lo = N ? sorted_mz.front() : 0.0, mz_hi = N ? sorted_mz.back() : 1.0;
+    const size_t NBK = std::max<size_t>(1u << 12, std::min<size_t>(1u << 23, N / 4 + 1));
+    const double bsc = (mz_hi > mz_lo) ? (double)NBK / (mz_hi - mz_lo) : 0.0;
+    auto bucketOf = [&](double x) -> size_t {
+      if (!(x > mz_lo)) return 0;
+      const double v = (x - mz_lo) * bsc;
+      return v >= (double)NBK ? NBK - 1 : (size_t)v;
+    };
+    vector<uint32_t> bstart(NBK + 1, 0);
+    {
+      size_t i = 0;
+      for (size_t b = 0; b < NBK; ++b) { while (i < N && bucketOf(sorted_mz[i]) < b) ++i; bstart[b] = (uint32_t)i; }
+      bstart[NBK] = (uint32_t)N;
+    }
+    auto lbmz = [&](double x) -> size_t {
+      if (N == 0 || x <= mz_lo) return 0;
+      if (x > mz_hi) return N;
+      const size_t b = bucketOf(x);
+      return (size_t)(std::lower_bound(sorted_mz.begin() + bstart[b], sorted_mz.begin() + bstart[b + 1], x) - sorted_mz.begin());
+    };
+    auto ubmz = [&](double x) -> size_t {
+      if (N == 0 || x < mz_lo) return 0;
+      if (x >= mz_hi) return N;
+      const size_t b = bucketOf(x);
+      return (size_t)(std::upper_bound(sorted_mz.begin() + bstart[b], sorted_mz.begin() + bstart[b + 1], x) - sorted_mz.begin());
+    };
     auto _pi_t1 = std::chrono::steady_clock::now();
 
     // The apex intensity now lives in the store's arena. This phase reads it O(N log N) times in the
@@ -2157,8 +2190,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // Find an unused isotope partner near `target` m/z, co-localized in RT and IM (binary-search
       // the m/z index, scan only the ppm-window candidates); -1 if none. [H-8]
       auto findPartner = [&](double target) -> long {
-        size_t klo = lower_bound(sorted_mz.begin(), sorted_mz.end(), target - tol) - sorted_mz.begin();
-        size_t khi = upper_bound(sorted_mz.begin(), sorted_mz.end(), target + tol) - sorted_mz.begin();
+        size_t klo = lbmz(target - tol), khi = ubmz(target + tol);   // [mzidx] same positions, local search
         for (size_t k = klo; k < khi; ++k)
         {
           if (fabs(sorted_rt[k] - s.rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
