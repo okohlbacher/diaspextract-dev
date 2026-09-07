@@ -1735,3 +1735,25 @@ The control's own spread (133.0 vs 121.7) is larger than the difference, and the
 not move. Removed: ~200 lines of speculation machinery in the hottest loop is not worth an
 unmeasurable win. The design is recorded in the routes list, because it becomes worthwhile the
 moment the loop stops being tail-bound.
+
+
+### New TNBC baseline T2 (v35, 2026-09-07)
+
+`ms1_trace_bands=48` changes the spectrum list, so T1 is retired. **T2 = `da1b86fb5c38409f...`**
+(TNBC 009, v35, `/scratch/kohlbach/t2_009`). Measured on spock:
+
+| phase | wall | % | CPU | par | (v30, same file) |
+|---|---:|---:|---:|---:|---:|
+| LOAD(stream) | 94.5 s | 13.7% | 5688.6 | 60.2x | 92.9 s |
+| MS1_TRACE | **59.3 s** | 8.6% | 1596.8 | **26.9x** | 117.9 s (10.0x) |
+| PRECURSOR_INFER | 24.8 s | 3.6% | 769.9 | 31.0x | 26.9 s |
+| WINDOW_LOOP | 412.0 s | 59.8% | 32968.6 | 80.0x | 380.7 s |
+| WRITE(mzML) | 52.4 s | 7.6% | 52.2 | 1.0x | 52.4 s |
+| **total** | **11:35.90** | | | | 11:59.75 |
+
+peak RSS 190,852 MB. An independent v35 run of the same file on `data` gave **11:24.97 and 179.1 GB**
+-- the two nodes differ by ~6% on RSS and ~2% on wall, which is the usual spread.
+
+Where the time now is, on a 2-hour acquisition: the window loop (60%), and after it the mzML write
+(7.6%, one thread) and the streaming load (13.7%, 60x). The window loop is tail-bound and its tail is
+94% band taskloop, which band count cannot unlock without moving the peptide set.
