@@ -1516,3 +1516,51 @@ What is left, on TNBC: the window loop (467.5 s, 52%) is still one window's seri
 chain is now 86% **trace**, capped at 12 bands; the greedy claim loop in precursor inference
 (138.3 s of the phase's 155.7) is sequential by construction; the mzML write is 53.0 s at one
 thread. Whole-run occupancy is 43x of 100 threads.
+
+### `perf:trace_bands` 48: FAILS the gate, and stays off (2026-09-07)
+
+The speed case was strong -- window loop -30% on both samples, occupancy 70.8x -> 94.2x (S30) and
+67.6x -> 89.9x (S08), at 7% LOWER CPU -- so it went through the full gate protocol (both engines,
+entrapment, datasets D and A, arms back to back on one node from one binary with only the flag
+changed).
+
+| sample | Sage 12 -> 48 | MSFragger 12 -> 48 | Sage set overlap | MSFragger set overlap | entrapment FDR |
+|---|---|---|---:|---:|---|
+| S30 (D) | 12,594 -> 12,607 (+0.10%) | 11,640 -> 11,643 (+0.03%) | 99.55% | 99.77% | 1.26% -> 1.29% |
+| S08 (A) | 11,218 -> **11,027 (-1.70%)** | 10,689 -> **10,928 (+2.24%)** | 95.46% | 89.74% | 1.12% -> 0.99% |
+
+**Rejected.** D is clean, but A both loses more than 1% in one engine and contradicts it in the
+other -- the two engines move in opposite directions by 1.7% and 2.2%, on peptide sets that agree
+only 95% and 90% between arms. That is the decision rule's "A contradicts D" case, and a pure
+speed knob does not get to move 5-10% of the peptide set. `perf:trace_bands` stays at 12; the
+numbers are recorded here so the trade is documented rather than rediscovered.
+
+The speed it was buying has since been taken output-identically instead (below).
+
+### Computed indices instead of binary searches (2026-09-07)
+
+Two hot loops were binary-searching sorted arrays whose key is, or can be, an integer:
+
+- `best()`, the innermost step of integer tracing, ran a `lower_bound` over its frame's ~25,000
+  sorted flight-time bins on **every frame step of every trace extension**. The bin is an integer
+  the instrument produced, so a per-frame direct-address row (~32 peaks per bucket, one global
+  shift so boundaries align across frames) turns the search start into a subtract and a shift.
+- `findPartner`, in the greedy claim loop, searched 22e6 doubles up to 50 times per seed. The key
+  there is the top bits of the IEEE-754 pattern -- monotone in the value for positive doubles, so
+  it is one load and one shift, and because the exponent leads, the bucket width is RELATIVE,
+  which is the right shape for a ppm tolerance.
+
+Both are exact: the bucket start is at or below the answer and the next bucket start is at or
+above it, so the standard-library search runs on a sub-range that provably contains the same
+position. Measured, byte-identical on both files:
+
+| build | S30 total | S30 window loop | TNBC wall | TNBC INFER (greedy walk) |
+|---|---:|---:|---:|---:|
+| v25 | 237.5 s | 143.9 s | 15:01 | 155.7 s (138.3) |
+| v27 (m/z key) | 234.2 s | -- | 14:32 | 130.0 s (112.8) |
+| **v28 (+ TOF index)** | **205.2 s** | **116.7 s** (CPU -9%) | -- | -- |
+
+The **m/z key is a stand-in**: the natural key is the flight-time bin itself, which needs no
+calibration at all, but `Trace::tof` is 0 on the OpenMS MS1 path (`toTrace` never sets it) and MS1
+tracing still runs that path. Keying precursor inference on tof, and deferring the calibrated m/z
+to the end, becomes available once MS1 goes through the integer detector (plan step 13).
