@@ -1568,11 +1568,17 @@ position. Measured, byte-identical on both files:
 | | v21 | v28 | change |
 |---|---:|---:|---|
 | S30 total | 312.1 s | 205.2 s | **-34%** |
-| TNBC 009 wall | 33:35 | 14:11 | **-58%** |
+| TNBC 009 wall | 33:38 / 26:45 (see below) | 14:11 | **-58% / -47%** |
 | TNBC window loop | 1150.0 s (31.2x) | 412.9 s (74.3x) | -64% |
 | TNBC MS1_TRACE | 252.5 s (4.8x) | 114.8 s (10.7x) | -55% |
 | TNBC PRECURSOR_INFER | 438.8 s | 148.7 s | -66% |
 | TNBC peak RSS | 181,777 MB | 190,849 MB | +5.0% |
+
+**Read the TNBC delta with care.** Two v21 runs of the SAME binary with IDENTICAL digests measured
+33:38.00 and 26:44.58 -- 26% apart on node load alone, on a shared machine. The tables here quote
+the slower one as the baseline, which flatters the result; against the faster one v28's 14:10.94 is
+**-47%**. Both bracket the same conclusion, but no single-pair wall-clock claim on `data` is worth
+more than about +-15% unless the arms are interleaved.
 
 Byte-identical spectrum list on both files at every step, 13/13 e2e throughout. The memory cost is
 the chunked band sub-maps and the per-frame TOF index; it is the only regression and is reducible
