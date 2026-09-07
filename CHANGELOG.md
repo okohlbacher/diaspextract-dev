@@ -7,6 +7,24 @@
   environment variables, source and test file names, CMake project and target, CI workflows, the
   OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.
 
+### Changed
+- **Mass-trace detection distributes its bands in parallel, and the seed list is segmented per
+  band.** Two serial stages were setting the floor. (1) The MS1 band distribution copied every
+  peak into its band's sub-map on ONE thread -- measured at 51% of the MS1 phase (39.0 s of
+  75.9 s on a 30-minute file), and it is why raising `perf:ms1_trace_bands` made that phase
+  strictly *worse* (12/24/48 bands -> 75.0/93.7/147.9 s at 3.9x/3.5x/2.5x): more bands is more of
+  exactly this copy. Chunking over spectra takes it to 0.55 s and the phase to **36.3 s at 8.0x**.
+  (2) `prepareTracing` sorted up to 239 million seed indices on one thread and each of the 12
+  bands then walked that whole list to find its own; segmenting by band first and sorting the
+  segments independently is exact (`filter_b(sort(all)) == sort(filter_b(all))` for a total
+  order) and takes per-window prep from 60.1 s to 27.1 s at the worst window, 904 s to 393 s
+  summed. Both are byte-identical on both benchmark files.
+- **`findPartner`'s gate fields are laid out in m/z order.** Precursor inference is
+  single-threaded and was 26% of a 2-hour run; it chased RT and IM through 48-byte records one
+  cache miss at a time. Same values, same order, same first match -- **438.8 s -> 177.2 s**. The
+  phase now logs its three stages: the residue is the greedy claim loop (156.3 s), not the sorts
+  (8.5 s).
+
 ### Fixed
 - **The scoring stage of a large isolation window was silently single-threaded.** libgomp's
   `GOMP_taskloop` runs the whole loop inline in the creating thread once

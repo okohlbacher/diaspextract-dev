@@ -1482,3 +1482,37 @@ CPU is flat within 1%, so the gain is purely tail parallelism, not less work -- 
 the older note that banding reduces total trace work superlinearly (that measurement was on the
 OpenMS detector path, not the integer one). A control re-run at 12 bands reproduced to within 2%
 (4:41.7 vs 4:36.9) with an identical digest.
+
+#### The two serial stages behind the remaining phases (2026-09-07)
+
+Sub-stage timers went in before either change, because the phase milestones could not say where
+the time went. On S30, `MS1_TRACE` = 75.9 s split as edges 1.0 | **distribute 39.0 (serial)** |
+detect 28.2 | gather 0.2 | valley-split 2.4. That explains why raising `perf:ms1_trace_bands`
+made the phase *worse* rather than better -- more bands is more of that same serial copy:
+
+| `perf:ms1_trace_bands` | MS1_TRACE | parallelism | digest |
+|---:|---:|---:|---|
+| 12 (default) | 75.0 s | 3.9x | reference |
+| 24 | 93.7 s | 3.5x | differs |
+| 48 | 147.9 s | 2.5x | differs |
+
+Chunking the distribution over spectra took it to 0.55 s. Segmenting the seed list per band took
+per-window `prep` on TNBC from 60.1 s to 27.1 s at the worst window (904 -> 393 s summed).
+
+#### Cumulative, byte-identical throughout (S30 and TNBC 009 both match their references)
+
+| build | change | S30 total | TNBC wall | TNBC window loop | TNBC MS1_TRACE | TNBC INFER | TNBC peak RSS |
+|---|---|---:|---:|---:|---:|---:|---:|
+| v21 | (before) | 312.1 s | 33:35 | 1150.0 s (31.2x) | 252.5 s (4.8x) | 438.8 s | 181,777 MB |
+| v22 | bounded scoring pool, findPartner SoA | 266.2 s | 18:03 | 496.5 s (66.7x) | 247.3 s (4.8x) | 177.2 s | 181,902 MB |
+| v23 | per-band seed segments | -- | -- | 450.4 s (78.1x) | 248.5 s (4.8x) | 154.0 s | -- |
+| **v25** | parallel band distribution | **237.5 s** | **15:01** | **467.5 s (69.5x)** | **106.2 s (11.2x)** | **155.7 s** | 187,928 MB |
+
+**TNBC 33:35 -> 15:01 (-55%), S30 312.1 -> 237.5 s (-24%)**, spectrum list byte-identical on both
+at every step. Peak memory is +3.4% (the chunked band sub-maps); `perf:malloc_trim` and the record
+work still hold the -34% from the memory pass.
+
+What is left, on TNBC: the window loop (467.5 s, 52%) is still one window's serial chain and that
+chain is now 86% **trace**, capped at 12 bands; the greedy claim loop in precursor inference
+(138.3 s of the phase's 155.7) is sequential by construction; the mzML write is 53.0 s at one
+thread. Whole-run occupancy is 43x of 100 threads.
