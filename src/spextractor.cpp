@@ -2249,8 +2249,33 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     auto _pi_t2 = std::chrono::steady_clock::now();
     vector<bool> used(N, false);
     vector<Precursor_> out;
-    for (size_t seed : order)
+    // [spec 2026-09-07] ORDERED SPECULATION. The claim loop is greedy -- each seed marks its isotope
+    // partners used, so what a later seed sees depends on every earlier one -- and it was the
+    // single-threaded residue of this phase (measured 112-138 s of ~150). It is nevertheless
+    // parallelisable EXACTLY, because the only mutable state a seed reads is `used`, and `used` is
+    // monotone (false -> true, never back).
+    //
+    // Evaluate a batch of seeds concurrently against a frozen `used`, recording for each seed the
+    // partner indices its searches actually returned. Then walk the batch in the ORIGINAL order and
+    // commit: if the seed is now used, skip it exactly as the sequential loop would; otherwise, if
+    // any recorded partner has since been claimed, re-evaluate that one seed against the current
+    // `used`. Everything else is unchanged, so the emitted sequence and the final bitmap are
+    // identical to the sequential algorithm.
+    //
+    // Why the dependency set is just the returned partners: findPartner reads `used[j]` only for
+    // candidates that already passed the RT/IM gate, and it returns the FIRST such j that is unused.
+    // A call that returned j depended on used[j] being false -- that can change, so it is recorded.
+    // A call that returned -1 saw every candidate either fail the gate (no read) or already used;
+    // both are stable under a monotone bitmap, so -1 stays -1 and needs no dependency.
+    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; };
+    auto evalSeed = [&](size_t seed, SeedRes& R)
     {
+      R.emit.clear(); R.claims.clear(); R.deps.clear();
+      // do/while(0): the body below is the sequential loop body VERBATIM, and its seed-level
+      // `continue` statements exit this wrapper exactly as they used to exit one loop iteration,
+      // while `continue` inside the body's own inner loops keeps binding to those loops.
+      do
+      {
       if (used[seed]) continue;
       const Trace& s = ms1[seed];
       const double tol = s.mz * mass_ppm * 1e-6;
@@ -2264,7 +2289,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (fabs(sorted_rt[k] - s.rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
           size_t j = by_mz[k];
           if (used[j] || j == seed) continue;
-          return (long)j;
+          { R.deps.push_back((size_t)j); return (long)j; }
         }
         return -1;
       };
@@ -2372,9 +2397,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (ms1[j].mz == best_mono) { pc0.mono_tof = ms1[j].tof; pc0.mono_b = bOf(ms1st, ms1[j]); break; }
         pc0.charge = best_z;                    // 0 => unknown, default_charge applied later
         pc0.n_isotopes = best_n;                // [Q4] envelope confidence for the mono call
-        out.push_back(pc0);
-        used[seed] = true;
-        for (size_t j : best_partners) used[j] = true;   // de-isotope
+        R.emit.push_back(pc0);
+        for (size_t j : best_partners) R.claims.push_back(j);   // de-isotope
         continue;
       }
 
@@ -2442,8 +2466,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       {
         pc.mono_mz = s.mz; pc.charge = 0;   // no envelope evidence at all -> unknown charge
       pc.mono_tof = s.tof; pc.mono_b = bOf(ms1st, s);
-        out.push_back(pc);
-        used[seed] = true;
+        R.emit.push_back(pc);
         continue;
       }
 
@@ -2474,9 +2497,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       // partners + the seed = envelope size. `members` excludes the seed, so this is the whole
       // envelope only because the seed is always one of its peaks. [adv-review kimi 2026-09-03]
       pc.n_isotopes = 1 + (int)best.partners.size();   // [Q4] envelope confidence for the mono call
-      out.push_back(pc);
-      used[seed] = true;
-      for (size_t j : best.partners) used[j] = true;
+      R.emit.push_back(pc);
+      for (size_t j : best.partners) R.claims.push_back(j);
 
       // [route-3] Ambiguous charge -> retain a second hypothesis (the reference implementation: "when the charge state
       // cannot be confidently determined, multiple values are retained"). 0 disables.
@@ -2489,9 +2511,42 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           Precursor_ alt = pc;
           alt.mono_mz = hyps[h].mono; alt.charge = hyps[h].z;
           alt.n_isotopes = 1 + (int)hyps[h].partners.size();   // [Q4]
-          out.push_back(alt);
+          R.emit.push_back(alt);
           break;                            // at most one alternative
         }
+      }
+      } while (0);
+    };
+
+    size_t spec_batch = 8192;
+    if (const char* e = std::getenv("SPEXTRACTOR_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
+    vector<SeedRes> res(spec_batch);
+    size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
+    for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
+    {
+      const size_t b1 = std::min(b0 + spec_batch, order.size());
+      // Phase 1: speculate. Nothing here writes `used`, so the concurrent reads are safe.
+      #pragma omp parallel for schedule(dynamic, 16)
+      for (long ii = (long)b0; ii < (long)b1; ++ii)
+      {
+        SeedRes& R = res[(size_t)ii - b0];
+        const size_t seed = order[(size_t)ii];
+        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); continue; }
+        evalSeed(seed, R);
+      }
+      // Phase 2: commit in the original seed order.
+      for (size_t ii = b0; ii < b1; ++ii)
+      {
+        const size_t seed = order[ii];
+        if (used[seed]) { ++n_skipped; continue; }
+        SeedRes& R = res[ii - b0];
+        bool stale = false;
+        for (size_t d : R.deps) if (used[d]) { stale = true; break; }
+        if (stale) { evalSeed(seed, R); ++n_conflict; }
+        for (const auto& pc : R.emit) out.push_back(pc);
+        used[seed] = true;
+        for (size_t j : R.claims) used[j] = true;
+        ++n_committed;
       }
     }
     {
@@ -2499,7 +2554,10 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       auto secs_ = [](auto d) { return std::chrono::duration<double>(d).count(); };
       writeLogInfo_("[infer] " + String(N) + " MS1 traces -> " + String(out.size()) + " precursors: mz-index "
                     + String(secs_(_pi_t1 - _pi_t0)) + " s | intensity-sort " + String(secs_(_pi_t2 - _pi_t1))
-                    + " s | greedy walk " + String(secs_(_pi_t3 - _pi_t2)) + " s (single-threaded)");
+                    + " s | greedy walk " + String(secs_(_pi_t3 - _pi_t2)) + " s (speculative, batch "
+                    + String(spec_batch) + ": " + String(n_committed) + " committed, " + String(n_conflict)
+                    + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
+                    + "%), " + String(n_skipped) + " already claimed)");
     }
     return out;
   }
