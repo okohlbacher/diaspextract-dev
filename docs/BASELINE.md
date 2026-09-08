@@ -2095,3 +2095,27 @@ Two things to read from it. The window loop's CPU fell 22.5% -- more than the 10
 trace. And its parallelism fell 90.0x -> 81.6x: with less work per window the tail is a larger share,
 so scheduling now has room it did not have before. The write went from 1.0x to ~49x and is no longer
 the serial floor; LOAD, at 93.5 s and 14% of the run, is now the second-largest phase.
+
+### Parallelising the MS1 trace conversion: 17% slower (2026-09-09)
+
+Converting 22 million OpenMS `MassTrace` objects into the tool's own records is a serial loop, and
+per point it does a binary search over the frame table -- an obvious parallel target, and the
+conversion is most of the gap between the MS1 phase's stage timers (33 s) and its wall (53 s).
+Splitting it into a parallel half (coordinates and the (frame, intensity) point list, which only
+READ the store) and a serial half (the arena append, which must stay ordered because the offsets are
+the trace's identity) is exactly output-identical -- both files reproduce their digests.
+
+It is slower. Interleaved on the 2-hour file, arms alternating:
+
+| | rep 1 | rep 2 | mean wall | MS1_TRACE | parallelism |
+|---|---|---|---|---|---|
+| serial (shipped) | 11:02.29 | 10:47.44 | **654.9 s** | **50.5 s** | 18.8x |
+| parallel halves | 11:14.13 | 12:00.08 | 697.1 s | 59.3 s | 15.5x |
+
+The tell is that its CPU seconds *fell* (899 -> 879) while wall rose: the work really is cheaper, but
+the loop cannot pay for its own bookkeeping. Per trace it is a handful of binary searches, and
+against that the point-list buffers cost more than they save -- 22 million small vector allocations
+move from one thread into all of them and contend in the allocator, and the parallel half writes
+adjacent doubles in three coordinate arrays. A version that pre-sized one flat buffer and avoided
+per-trace allocation might come out differently; this one does not, and the serial loop keeps a
+comment saying so.
