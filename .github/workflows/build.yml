@@ -5,7 +5,7 @@ name: full build
 #
 # SpeXtractor cannot be built against a RELEASED OpenMS package, and that is a property of the tool
 # rather than of CI: it uses BrukerTimsFile::loadDIAStreaming and PeakPickerIM, which postdate
-# OpenMS 3.5.0, the newest tag; and it needs the three patches in patches/, one of which adds
+# OpenMS 3.5.0, the newest tag; and it needs the four patches in patches/, one of which adds
 # BrukerTimsFile::lastMzCalibration(). Hence a source build at a pinned commit.
 #
 # Roughly an hour with a warm ccache, so it runs weekly and on demand rather than per push. It is

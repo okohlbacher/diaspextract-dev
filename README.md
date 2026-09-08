@@ -49,8 +49,8 @@ The binary is `build/spextractor`. `cmake --install build` puts it in `<install 
 ### OpenMS patches
 
 `scripts/apply_openms_patches.sh` installs `src/TdfMzCalibration.h` into the OpenMS tree and applies
-three patches. **All three matter. The build stops without the first and the third; it does not
-notice a missing second:**
+four patches. **All four matter. The build stops without the first and the third; it does not
+notice a missing second or fourth:**
 
 - **Vendor m/z calibration.** Without it the Bruker reader converts flight time to m/z with a
   two-point linear-in-sqrt chord that is **−5 to −11 ppm biased** (m/z dependent) on every file
@@ -63,6 +63,12 @@ notice a missing second:**
 - **`MassTrace` move operations.** OpenMS declares a defaulted destructor and copy operations on
   `MassTrace`, which suppresses the implicit moves, so every `std::move` deep-copied its points. A
   `static_assert` stops the build without this one.
+- **Parallel mzML serialisation.** Writing the spectrum list is CPU-bound, not I/O-bound — measured,
+  it sustains ~400 MB/s against a filesystem that does 4.0 GB/s — and the stock writer does it on
+  one thread. Encoding one spectrum is independent of every other, so this encodes chunks in
+  parallel and appends them in index order, giving byte-identical output. Each thread needs its own
+  handler and validator: the writer memoises CV-term validation in mutable state, and sharing one
+  handler corrupts the heap. Measured on a 30-minute acquisition: **20.1 s → 5.9 s**.
 
 Optionally, `OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library for the
 conversion instead. It is an independent cross-check, not a requirement, and is not redistributed.

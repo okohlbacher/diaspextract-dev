@@ -48,7 +48,7 @@
 #include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
 #endif
 
-// The three OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
+// The four OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
 // third: without defaulted moves an rvalue MassTrace binds to the copy constructor (not noexcept), and
 // every "move" of a trace in the band/split gathering is a deep copy of its points.
 static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is_nothrow_move_assignable_v<OpenMS::MassTrace>,
