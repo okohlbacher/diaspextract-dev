@@ -1807,3 +1807,35 @@ One caveat on the memory ratio: the reference is a JVM run with `-Xmx400G`, so i
 reflects what it was allowed rather than what it needs -- the same flags gave 268.2 GB in the earlier
 campaign. SpeXtractor's 179 GB is a genuine requirement. The honest statement is "roughly half, and
 not sensitive to a heap flag".
+
+
+### v37: `charge:min_charge` 1 + the ion-mobility charge veto -- dataset D (S30) (2026-09-08)
+
+See docs/REFERENCE-COMPARISON-2026-09-08.md for why. Arms: v35 default (`gateMs1Bands/b48_S30`, min_charge 2)
+against v37 (min_charge 1, veto on), same file, same engines.
+
+| | v35 default | v37 | |
+|---|---:|---:|---|
+| spectra | 656,257 | 927,712 | +41% |
+| wall / peak RSS | 3:27.48 / 57.6 GB | **3:25.95 / 57.9 GB** | flat |
+| veto | -- | of 407,478 z=1 calls: 107,040 -> 2+, 93,008 -> 3+, 207,430 kept | |
+| Sage peptides (engine's global cut) | 12,593 | 12,536 (z=1: 202) | -0.45% |
+| MSFragger peptides (global) | 11,642 | 11,581 (z=1: 163) | -0.52% |
+| Sage, **per-charge** walk | 12,493 | **12,597** (z=1: 46) | **+0.8%** |
+| MSFragger, **per-charge** walk | 12,360 | **12,700** (z=1: 28) | **+2.8%** |
+| entrapment FDR, whole run | 1.24% | 1.38% | |
+| entrapment by stratum (v37) | | z=1 **9.2%** (n=144, CI 3.9-16), z=2 1.05%, z=3 1.64% | |
+
+Dataset D is the case the old default was tuned on, and it is where z=1 is rarest: 202 peptides against
+5,000+ on a 2-hour TNBC file. Under the engines' own pooled cut the arm is -0.5% on both engines --
+inside the gate's 1% rule -- and the loss is the pooled-threshold eviction the refuters demonstrated:
+under a per-charge walk the same files give +0.8% and +2.8%. The z=1 stratum's 9% is real but small
+(144 peptides) and is what per-charge control is for.
+
+The veto's **3+ arm is the weak spot**: 93,008 re-calls to 3+ moved the z=3 count from 3,888 to
+3,935 (global) and 3,817 to 3,832 (per-charge) -- essentially nothing -- so on this file they are
+emission without identifications. The fitted 2+ and 3+ mobility lines are only ~1 sigma apart at low
+m/z (at m/z 500: 0.867 vs 0.822 1/K0 against a 3+ sigma of 0.051), so a multiply charged z=1 in that
+overlap is assigned 2 or 3 by whichever residual is smaller. The principled tie-breaker is the
+intermediate-isotope test (a co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 3+), which the
+`SPEXTRACTOR_Z1_DIAG` machinery already computes; not yet wired in.
