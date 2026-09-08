@@ -985,16 +985,7 @@ namespace
       const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
       c *= (ct / dt); cnt += w * v; den += w;
     };
-    static const bool abl_sd = std::getenv("SPEXTRACTOR_ABL_SD") != nullptr;
-    static const bool abl_mz = std::getenv("SPEXTRACTOR_ABL_MZ") != nullptr;
     auto sdRobust = [](double mz, double w, double mean, double& sd, double& wsum) {   // updateWeightedSDEstimateRobust
-      if (abl_sd) {   // ABLATION: algebraically equal, different rounding
-        const double dd = mz - mean;
-        const double denom = std::sqrt(wsum * sd * sd + w * dd * dd);
-        const double ws = wsum + w; const double t = denom / std::sqrt(ws);
-        if (t > std::numeric_limits<double>::epsilon()) sd = t;
-        wsum = ws; return;
-      }
       const double d1 = std::log(wsum) + 2.0 * std::log(sd);
       const double d2 = std::log(w) + 2.0 * std::log(std::abs(mz - mean));
       const double denom = std::sqrt(std::exp(d1) + std::exp(d2));
@@ -1017,7 +1008,6 @@ namespace
       const double lo_mz = cmz - 3.0 * sd, hi_mz = cmz + 3.0 * sd;
       const TofIdx lo_t = ax.tofOf(lo_mz > 0.0 ? lo_mz : 1e-9, bf);
       const TofIdx hi_t = ax.tofOf(hi_mz, bf);
-      const TofIdx ctof = ax.tofOf(cmz > 0.0 ? cmz : 1e-9, bf);   // ABLATION only
       uint32_t r0 = a, r1 = b; tp.range(f, lo_t, a, b, r0, r1);   // [tofidx] computed, not searched
       const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + r0, sl.tof.begin() + r1, lo_t) - sl.tof.begin());
       long bk = -1; double bd = std::numeric_limits<double>::infinity();
@@ -1031,8 +1021,7 @@ namespace
         // bin metric cost 1.4% of peptides (12,650 -> 12,466) and bought no time (the speed came
         // from parallel valley splitting). The walk is still bounded in bins; only candidates
         // inside the window pay the conversion.
-        const double d = abl_mz ? std::abs((double)sl.tof[k] - (double)ctof)
-                                : std::abs(ax.mzOf(sl.tof[k], bf) - cmz);
+        const double d = std::abs(ax.mzOf(sl.tof[k], bf) - cmz);
         if (d < bd) { bd = d; bk = (long)k; }          // strict <: first of equals wins
       }
       if (bk >= 0 && seen((size_t)bk)) { taken = true; return -1; }
