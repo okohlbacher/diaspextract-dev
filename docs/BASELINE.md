@@ -1946,5 +1946,8 @@ to ~90x because there is more scoring work to fill its tail with.
 e2e 13/13. Dataset D on spock (load ~6): **854,817 spectra, 3:17.41, 57.8 GB, window loop 120.6 s at
 78.1x**, digest **`b499027f...`** -- identical to the release candidate built from the same source
 with the old help strings, and the same count as v38. This digest is the dataset-D reference for
-v2.0.0 (**B3**); T4 (`057aad4b...`) is the TNBC 009 reference, re-checked with the published binary
-below.
+v2.0.0 (**B3**). TNBC 009 with the published binary on `data` (load ~20): **3,918,321 spectra,
+14:36.99, 189.9 GB, window loop 552.6 s at 91.9x**, digest **`057aad4b...` = T4** -- the release
+reproduces the v38 reference exactly (the release candidate built from the same source did too:
+14:19.62 / 189.4 GB / identical). The uncontended wall for this file remains the v38 measurement,
+12:42.21.
