@@ -1857,3 +1857,26 @@ intermediate-isotope test (a co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 
 The 72% more spectra cost no memory and ~+11% wall when uncontended (the earlier z>=1 arm ran
 in ~13:20 against 11:59 on the same node); the window loop's occupancy rose to 90.6x because
 more precursors means more scoring work to fill the tail with.
+
+
+### v38: the veto's 3+ arm dropped -- dataset D (S30) (2026-09-08)
+
+Same arms as the v37 table above; v38 differs from v37 only in dropping z=1 calls that sit on the 3+
+mobility band instead of re-labelling them 3+.
+
+| | v35 default | v37 | **v38** |
+|---|---:|---:|---:|
+| spectra | 656,257 | 927,712 | **854,817** |
+| wall / peak RSS | 3:27.48 / 57.6 GB | 3:25.95 / 57.9 GB | **3:12.61 / 57.3 GB** |
+| Sage peptides, engine's pooled cut | 12,593 | 12,536 (-0.45%) | **12,609 (+0.13%)** |
+| MSFragger peptides, pooled cut | 11,642 | 11,581 (-0.52%) | 11,564 (-0.67%) |
+| Sage, per-charge walk | 12,493 | 12,597 (+0.8%) | **12,639 (+1.2%)** |
+| MSFragger, per-charge walk | 12,360 | 12,700 (+2.8%) | **12,666 (+2.5%)** |
+| entrapment, whole run | 1.24% | 1.38% | 1.33% |
+| entrapment z=1 stratum | -- | 9.2% (n=144) | 8.8% (n=151) |
+
+The 93,008 dropped calls were pure emission: peptide counts are unchanged or better on both walks,
+73k fewer spectra than v37, and the fastest S30 wall measured. On dataset D the new default is
+inside the gate's 1% rule under the engines' own pooled cut and positive on both engines under
+per-charge control; the z=1 stratum here is tiny (~150 peptides) and dirty, which is what per-charge
+FDR is for.
