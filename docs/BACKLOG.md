@@ -484,6 +484,38 @@ entrapment FDR at a nominal 1% cut"), which a per-charge walk should undo.
 
 **What would falsify it.** A v38 009 protein count at or above 5,802 under either walk.
 
+### Parallel mzML serialisation: the win is real, OpenMS's writer is not thread-safe
+
+**The idea.** WRITE is the largest serial block left: 92.9 s of an 822 s run on a 2-hour
+acquisition (10.7%), 20 s of 197 s on a 30-minute one, all at 1.0x parallelism. It is CPU-bound,
+not I/O-bound -- measured, the write sustains ~390 MB/s while the filesystem underneath it does
+**4.0 GB/s**, a 10x headroom. Serialising a spectrum is independent of every other spectrum; only
+the concatenation is ordered. Encoding in parallel into per-chunk buffers appended in index order
+is byte-identical by construction, and should take the phase to roughly the I/O floor (~10-15 s).
+
+**Attempted 2026-09-08, and why it was reverted.** The patch (parallel encode in waves, bounded
+buffering, ordered append, `copyfmt` so the number formatting matches) is correct in shape: it
+passed the end-to-end suite and produced the file. On a real acquisition it aborts with
+`double free or corruption`. `MzMLHandler::writeSpectrum_` is const and takes its inputs by const
+reference, but the path underneath it mutates shared state in at least two places:
+`MzMLHandler::cached_terms_` (a `mutable std::map` memoising CV-term validation, written in
+`validateCV_`), and the `SemanticValidator` the writer holds. Freezing `cached_terms_` -- warming
+it serially on the first spectrum, then only reading it -- removed one race and the corruption
+persisted, so the validator has its own.
+
+**What would actually work.** Give each encoding thread its own `MzMLHandler` and its own
+validator, so nothing is shared: the per-thread construction cost is paid once per wave, not per
+spectrum. That is a larger change inside OpenMS than it first appears, and it needs its own
+correctness argument (the handlers must be configured identically, or the output differs).
+Alternatively, precompute only the base64 blobs in parallel -- `Base64::encode` is a pure static
+function -- and have the serial writer consume them; that captures the array encoding but not the
+per-spectrum XML and cvParam work, and the split between those two is unmeasured.
+
+**What would falsify it.** A measurement showing the per-spectrum XML and metadata work, rather
+than base64 of the arrays, is most of the 23.7 us/spectrum -- then a per-thread handler is the only
+route and the base64 shortcut is not worth building. Also: on the default output format (mzPeak,
+which is Parquet) this phase is a different code path entirely and the whole item may not apply.
+
 ### Is Savitzky-Golay the right smoother for elution-peak detection?
 
 **The idea.** `ElutionPeakDetection::smoothData()` smooths every mass trace with a Savitzky-Golay
