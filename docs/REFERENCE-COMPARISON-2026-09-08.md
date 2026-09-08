@@ -177,3 +177,15 @@ The like-for-like comparison, both tools under the same per-charge FDR walk, on 
 Per-charge control moves the reference more than us on Sage (its z>=2 strata sat below 1% under its
 pooled cut), which is why the honest Sage ratio is 1.28 rather than 1.47. On MSFragger the two tools
 are now at parity.
+
+The same on the second file, v38 (the 3+ arm dropped) against the reference on 001:
+
+| | SpeXtractor v38 | reference | ratio |
+|---|---:|---:|---|
+| Sage peptides, per-charge 1% | 19,262 | 15,418 | **1.25** |
+| MSFragger peptides, per-charge 1% | 19,230 | 19,652 | **0.98** |
+| Sage, pooled cut | 19,035 | 14,764 | 1.29 |
+| MSFragger, pooled cut | 18,212 | 18,745 | 0.97 |
+
+Two files, two engines, two walks: +25-28% on Sage and within 2% of parity on MSFragger, with the
+per-charge z=1 stratum at 0.87-0.91% and whole-run entrapment at 0.93-1.01%.
