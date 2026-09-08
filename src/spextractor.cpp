@@ -1771,6 +1771,9 @@ protected:
       {
         auto& s = map[spi];        // non-const: each spectrum is released once distributed
         const auto* ima = s.getFloatDataArrays().empty() ? nullptr : &s.getFloatDataArrays()[0];
+        // isSorted() is a full traversal of the spectrum, and the spectrum does not change between
+        // bands -- evaluating it inside the band loop walked every peak once per band.
+        const bool src_sorted = s.isSorted();
         for (int b = 0; b < bands; ++b)
         {
           // Size each halo from ITS OWN edge: one h derived from edge[b] under-sizes the upper
@@ -1784,7 +1787,7 @@ protected:
           // two lower_bounds instead of a scan of every peak for every band (O(bands x peaks) -> O(bands log
           // peaks)). Same peaks in the same order -> byte-identical; the scan stays as the unsorted fallback.
           Size i0 = 0, i1 = s.size();
-          if (s.isSorted())
+          if (src_sorted)
           {
             i0 = (Size)(s.MZBegin(lo) - s.begin());
             i1 = (Size)(s.MZBegin(hi) - s.begin());
@@ -3924,7 +3927,7 @@ protected:
 
     PeakMap out_exp;
     { Phase _ph("ASSEMBLE(PeakMap)");
-      for (auto& s : all_out) out_exp.addSpectrum(std::move(s)); }
+      out_exp.setSpectra(std::move(all_out)); }   // vector ownership transfer, not per-spectrum moves
     const Size n_out = out_exp.size();
     addDataProcessing_(out_exp, getProcessingInfo_(DataProcessing::DATA_PROCESSING));
     // [provenance] Record the emitted-intensity reweighting so an identical historical command line is

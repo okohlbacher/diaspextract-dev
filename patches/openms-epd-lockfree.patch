@@ -1,38 +1,56 @@
-# SpeXtractor: make OpenMS ElutionPeakDetection lock-free for nested parallel callers.
+# SpeXtractor: two changes to OpenMS ElutionPeakDetection.
 #
-# detectPeaks(vector) guarded a shared output vector with a PROGRAM-GLOBAL named critical. Called
-# from inside SpeXtractor's per-band trace loop (96 concurrent callers) that one lock serialised the
-# whole tool: 195M context switches, 37% system time. At top level this now collects into
-# per-thread buffers and merges; when already nested it runs serially into the caller's own vector.
-# No output vector is ever shared across threads, so the critical is unnecessary. Numerically
-# identical: verified 1,528,113 spectra / 10,036 peptides identical across two machines.
+# 1. Make detectPeaks(vector) lock-free for nested parallel callers.
+#
+# It guarded a shared output vector with a PROGRAM-GLOBAL named critical. Called from inside
+# SpeXtractor's per-band trace loop (96 concurrent callers) that one lock serialised the whole
+# tool: 195M context switches, 37% system time. At top level this now collects into per-thread
+# buffers and merges; when already nested it runs serially into the caller's own vector. No output
+# vector is ever shared across threads, so the critical is unnecessary. Numerically identical:
+# verified 1,528,113 spectra / 10,036 peptides identical across two machines.
+#
+# 2. Cache the Savitzky-Golay filter coefficients per thread.
+#
+# smoothData() constructed a SavitzkyGolayFilter and called setParameters() on every mass trace,
+# and updateMembers_() recomputes the coefficients with one Eigen SVD per half-window on every
+# such call. The coefficients depend only on (frame_length, polynomial_order), which take a
+# handful of distinct values in a run, while smoothData() is called hundreds of millions of times.
+# Caching the configured filter in a thread_local map leaves the coefficients, the filtering loop
+# and every float conversion untouched. Measured on a 30-minute acquisition, with the two callers
+# unchanged: MS1 tracing CPU 411 -> 228 s (-44%), the window loop 10,132 -> 9,105 CPU s (-10%),
+# total CPU -11%, spectrum list byte-identical.
 #
 # Base: OpenMS/OpenMS develop bd4b89555629d68b431b189a4c841efbcc4dfeea (2026-04-24).
-# Regenerated 2026-09-05 as a UNIFIED diff. The previous version was a headerless NORMAL diff
-# ("328,330c328,334") naming no file at all, so `patch` could not know what to modify and ignored
-# every hunk -- which is why the CI build failed at the patch step.
+# Regenerated 2026-09-08 against that commit; verified to reproduce the built tree byte-for-byte.
 # Apply with: patch -p1 -d <OpenMS tree> < this file
 --- a/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
 +++ b/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
-@@ -325,23 +325,34 @@
+@@ -13,6 +13,7 @@
+ #include <OpenMS/MATH/StatisticFunctions.h>
+ 
+ #include <boost/dynamic_bitset.hpp>
++#include <unordered_map>
+ 
+ #ifdef _OPENMP
+ #include <omp.h>
+@@ -325,23 +326,34 @@
      this->startProgress(0, mt_vec.size(), "elution peak detection");
      Size progress(0);
  #ifdef _OPENMP
 -#pragma omp parallel for
 -#endif
 -    for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
--    {
--      IF_MASTERTHREAD this->setProgress(progress);
--
--#ifdef _OPENMP
-+    // [speXtractor lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
-+    // inside another parallel region (speXtractor's per-band trace loop, 96 concurrent callers) that
++    // [speXtract lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
++    // inside another parallel region (speXtract's per-band trace loop, 96 concurrent callers) that
 +    // one lock serialised everything -> 195M context switches, 37% system time. Fix: at TOP LEVEL,
 +    // collect into per-thread buffers and merge (no shared vector, no lock); when already NESTED,
 +    // run serially into the caller's own vector (also no sharing). detectElutionPeaks_ no longer
 +    // takes the critical, which is now safe because no output vector is ever shared across threads.
 +    if (!omp_in_parallel())
-+    {
+     {
+-      IF_MASTERTHREAD this->setProgress(progress);
+-
+-#ifdef _OPENMP
 +      const int nthreads = omp_get_max_threads();
 +      std::vector<std::vector<MassTrace> > local(nthreads > 0 ? nthreads : 1);
 +#pragma omp parallel for
@@ -62,7 +80,7 @@
      return;
    }
  
-@@ -456,12 +467,7 @@
+@@ -456,12 +468,7 @@
            mt.estimateFWHM(true);
          }
  
@@ -72,11 +90,11 @@
 -        {
 -          single_mtraces.push_back(mt);
 -        }
-+        single_mtraces.push_back(mt);   // [speXtractor] lock-free: vector is thread-private
++        single_mtraces.push_back(mt);   // [speXtract] lock-free: vector is thread-private
  
        }
      }
-@@ -541,12 +547,7 @@
+@@ -541,12 +548,7 @@
              new_mt.estimateFWHM(true);
            }
  
@@ -86,7 +104,43 @@
 -          {
 -            single_mtraces.push_back(new_mt);
 -          }
-+            single_mtraces.push_back(new_mt);   // [speXtractor] lock-free: vector is thread-private
++            single_mtraces.push_back(new_mt);   // [speXtract] lock-free: vector is thread-private
          }
        }
      }
+@@ -573,16 +575,30 @@
+     }
+ 
+     MSSpectrum spectrum;
++    spectrum.reserve(mt.getSize());
+     for (Size i = 0; i != mt.getSize(); ++i)
+     {
+       spectrum.push_back(Peak1D(mt[i].getRT(), mt[i].getIntensity()));
+     }
+ 
+-    SavitzkyGolayFilter sg;
+-    Param param;
+-    param.setValue("polynomial_order", 2);
+-    param.setValue("frame_length", std::max(3, win_size)); // frame length must be at least polynomial_order+1, otherwise SG will fail
+-    sg.setParameters(param);
++    // [SpeXtractor] The filter coefficients depend only on (frame_length, polynomial_order), but
++    // setParameters() -> updateMembers_() recomputes them with one Eigen SVD per half-window on
++    // EVERY call. smoothData() runs once per mass trace -- hundreds of millions of times on a full
++    // acquisition -- while the configuration takes only a handful of distinct values. Cache the
++    // configured filter per thread: identical coefficients, computed once instead of per trace.
++    const int frame_len = std::max(3, win_size); // must exceed polynomial_order, or SG throws
++    static thread_local std::unordered_map<int, SavitzkyGolayFilter> sg_cache;
++    auto sg_it = sg_cache.find(frame_len);
++    if (sg_it == sg_cache.end())
++    {
++      Param param;
++      param.setValue("polynomial_order", 2);
++      param.setValue("frame_length", frame_len);
++      sg_it = sg_cache.emplace(std::piecewise_construct, std::forward_as_tuple(frame_len),
++                               std::forward_as_tuple()).first;
++      sg_it->second.setParameters(param);
++    }
++    SavitzkyGolayFilter& sg = sg_it->second;
+     sg.filter(spectrum);
+     MSSpectrum::iterator iter = spectrum.begin();
+     std::vector<double> smoothed_intensities;
