@@ -1953,3 +1953,54 @@ the dataset D reference for v2.0.0. TNBC 009 with the published binary on a load
 the release reproduces the TNBC 009 reference digest exactly (the release candidate built from the
 same source did too: 14:19.62 / 189.4 GB / identical). The uncontended wall for this file remains
 12:42.21.
+
+### Savitzky-Golay coefficient caching (2026-09-08, evening)
+
+OpenMS rebuilt the smoothing filter for every mass trace. `ElutionPeakDetection::smoothData()`
+constructs a `SavitzkyGolayFilter` and calls `setParameters()` per call, and `updateMembers_()`
+recomputes the coefficients with one Eigen SVD per half-window each time. The coefficients depend
+only on (frame_length, polynomial_order), which take a handful of values in a run, while
+smoothData() is called once per trace -- hundreds of millions of times. A thread_local cache of the
+configured filter leaves the coefficients, the filtering loop and every float conversion untouched.
+Shipped in `patches/openms-epd-lockfree.patch`, which now carries both EPD changes.
+
+Two smaller changes landed in the same build: the MS1 band distribution called `isSorted()` -- a
+full traversal -- once per band per spectrum when the spectrum cannot change between bands, and the
+PeakMap assembly moved spectra one at a time where the vector can be transferred whole.
+
+**Interleaved A/B, TNBC 009, `data` alone at load 4, 100 threads, arms alternating:**
+
+| | rep 1 | rep 2 | mean |
+|---|---|---|---|
+| before | 13:44.51 / 190.6 GB | 13:36.80 / 188.3 GB | 13:40.7 / 189.5 GB |
+| **after** | 12:07.35 / 185.2 GB | 12:26.96 / 186.6 GB | **12:17.2 / 185.9 GB** |
+| delta | | | **-83.5 s (-10.2%), -3.6 GB** |
+
+All four runs reproduce the TNBC reference digest. On dataset D the phase CPU shows where it comes
+from (arms at different node loads, so CPU seconds rather than wall):
+
+| phase | before | after | |
+|---|---:|---:|---|
+| LOAD | 1769 | 1692 | -4.3% |
+| MS1_TRACE | 411 | 228 | **-44.4%** |
+| PRECURSOR_INFER | 179 | 114 | -36.3% |
+| WINDOW_LOOP | 10132 | 9105 | **-10.1%** |
+| ASSEMBLE | 0.8 | 0.0 | phase gone |
+| total | 12513 | 11141 | **-11.0%** |
+
+### Two detector hypotheses priced and dropped (2026-09-08, evening)
+
+`perf_event_paranoid` is 4 on these nodes, so the detector was priced by ablation instead. The
+window loop's trace stage is 93% `detectTracesInteger_` (dataset D: detect 1330 s of 1424 s summed
+over windows), so both arms targeted its inner loop. Neither is worth taking:
+
+- **`sdRobust`'s log-space form.** It computes `sqrt(wsum*sd^2 + w*(mz-mean)^2)` through three
+  `log`s and two `exp`s (OpenMS's overflow-safe formulation). Replacing it with the direct algebraic
+  form -- which would be output-changing, hence an ablation rather than a candidate -- measured
+  **+0.9% window-loop CPU**, i.e. nothing. The transcendentals are not on the critical path.
+- **The calibration call in `best()`.** Substituting a flight-time-bin distance for
+  `mzOf()` measured **-1.8%**. That is the whole prize for a change the record already shows costs
+  1.4% of peptides.
+
+Together these say the detector is bound by memory traffic over its three parallel arrays and the
+visited bitmap, not by arithmetic -- which is where any further work on it should aim.
