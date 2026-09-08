@@ -1834,8 +1834,8 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                           "2-hour file, 60%% of them below m/z 750 where a 1+ cannot be scored at all. The 2+ and 3+ lines are "
                           "fitted per run from the run's own confident calls (>= 3 isotopes; 25-Th bin medians, MAD residual "
                           "scale), and a z=1 call whose 1/K0 lies within charge:im_veto_band sigma of the 2+ (3+) line is "
-                          "re-assigned that charge. Genuine 1+ ions are untouched: 0.0-0.6%% of identified z=1 peptides sit on "
-                          "the 2+ band.", false);
+                          "re-assigned 2+; one on the 3+ band is dropped (re-calling it 3+ identified nothing on two files). "
+                          "Genuine 1+ ions are untouched: 0.0-0.6%% of identified z=1 peptides sit on the 2+ band.", false);
     setValidStrings_("charge:im_charge_veto", {"true", "false"});
     registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "[im-veto] Half-width of the 2+/3+ mobility band, in MAD-sigma of "
                           "the confident calls' residuals (measured residual sd ~0.037 1/K0 against a 1+/2+ separation of ~0.29).", false);
@@ -3554,12 +3554,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           const double r2 = fabs(pc.im - (a2 + b2 * pc.mono_mz)) / s2;
           const double r3 = ok3 ? fabs(pc.im - (a3 + b3 * pc.mono_mz)) / s3 : 1e9;
           if (r2 <= kband && r2 <= r3) { pc.charge = 2; ++to2; }
-          else if (ok3 && r3 <= kband) { pc.charge = 3; ++to3; }
+          // [2026-09-08] A z=1 call on the 3+ band is not a 1+ ion, but re-calling it 3+ produced
+          // NOTHING on either benchmark file (z=3 peptides 5,313 -> 5,322 on TNBC 009, 3,888 ->
+          // 3,935 on S30) while adding 178k / 93k spectra -- and the emitted-population split
+          // puts only ~1.8% of z=1 calls genuinely on the 3+ band against the 7% this branch was
+          // catching, because the 2+ and 3+ lines are ~1 sigma apart at low m/z. Unset the charge
+          // instead: the call becomes a guessed precursor and require_isotope_support removes it.
+          else if (ok3 && r3 <= kband) { pc.charge = 0; ++to3; }
         }
         writeLogInfo_("[im-veto] 2+ line 1/K0 = " + String(a2) + " + " + String(b2) + " * m/z (n=" + String(n2) + ", sigma "
                       + String(s2) + ")" + (ok3 ? "; 3+ line " + String(a3) + " + " + String(b3) + " * m/z (n=" + String(n3) + ", sigma " + String(s3) + ")" : String("; no 3+ line"))
                       + ". Of " + String(n1) + " z=1 calls, " + String(to2) + " (" + String((int)(1000.0 * to2 / std::max<size_t>(n1, 1)) / 10.0)
-                      + "%) sit on the 2+ band and are re-called 2+, " + String(to3) + " re-called 3+, " + String(n1 - to2 - to3) + " kept as 1+");
+                      + "%) sit on the 2+ band and are re-called 2+, " + String(to3) + " on the 3+ band are dropped, " + String(n1 - to2 - to3) + " kept as 1+");
       }
       else writeLogInfo_("[im-veto] too few confident 2+ calls to fit a mobility line; no z=1 re-calls");
     }
