@@ -36,6 +36,12 @@ find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLi
 add_executable(spextractor src/spextractor.cpp)
 target_link_libraries(spextractor PRIVATE OpenMS SQLite::SQLite3)
 target_compile_definitions(spextractor PRIVATE SPEXTRACTOR_VERSION="${PROJECT_VERSION}")
+# The source carries the same number as a fallback for builds that do not go through this file
+# (the in-tree OpenMS build); refuse to configure if the two have drifted.
+file(STRINGS src/spextractor.cpp _spx_fallback REGEX "^#define SPEXTRACTOR_VERSION \"")
+if(NOT _spx_fallback MATCHES "\"${PROJECT_VERSION}\"")
+  message(FATAL_ERROR "src/spextractor.cpp's SPEXTRACTOR_VERSION fallback (${_spx_fallback}) != project VERSION ${PROJECT_VERSION}")
+endif()
 
 target_link_libraries(spextractor PRIVATE OpenMP::OpenMP_CXX)
 

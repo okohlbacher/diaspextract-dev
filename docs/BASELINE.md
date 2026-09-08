@@ -1937,3 +1937,14 @@ to ~90x because there is more scoring work to fill its tail with.
 | Sage, per-charge -- 001 | 15,418 | **19,262** | **1.25** |
 | MSFragger, per-charge -- 001 | 19,652 | **19,230** | **0.98** |
 | entrapment FDR, whole run (SpeX) | -- | 1.03% / 0.93% | at nominal 1% |
+
+
+### v2.0.0 published (2026-09-08)
+
+`/ceph/ibmi/abi/oliver/spextract/v2.0.0`, built from 8d79bbc (`src` sha256 `2a45e5e9...`, binary
+`0da8cfd7...`); the release tag sits on the doc-only follow-up commit, whose source is byte-identical.
+e2e 13/13. Dataset D on spock (load ~6): **854,817 spectra, 3:17.41, 57.8 GB, window loop 120.6 s at
+78.1x**, digest **`b499027f...`** -- identical to the release candidate built from the same source
+with the old help strings, and the same count as v38. This digest is the dataset-D reference for
+v2.0.0 (**B3**); T4 (`057aad4b...`) is the TNBC 009 reference, re-checked with the published binary
+below.

@@ -1,0 +1,9 @@
+[adv] no timeout(1) available -- running without a time limit
+[adv] prompt    48445 bytes -> docs/reviews/release-2026-09-08
+
+=== reviewer yield ===
+  codex:      102 lines,    20904 bytes
+  kimi:       66 lines,    12460 bytes
+  vibe:        0 lines,     5632 bytes
+
+outputs: docs/reviews/release-2026-09-08/{codex,kimi,vibe}.md

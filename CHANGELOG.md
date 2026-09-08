@@ -44,7 +44,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   lines are ~1 sigma apart at low m/z -- so dropping them takes 2.9% / 7.9% off the v37 spectrum list
   at a cost below 0.3% of peptides on either engine under either walk.
   Two things to know. Under the engines' pooled 1% cut the z=1 stratum carries more entrapment FDR than
-  the rest -- 2.8-2.9% on the 2-hour files, ~9% on dataset D where the stratum is ~150 peptides -- and
+  the rest -- 2.9% on the 2-hour files, ~9% on dataset D where the stratum is ~150 peptides -- and
   a whole-run figure hides it. The mechanism is a lower true-match prior in that stratum under one
   pooled threshold, not peptide length (at matched score *and* length z=1 is still 3-5x dirtier than
   z=2; decoys reproduce it). A per-charge FDR walk puts the stratum at 0.87-0.91% on the 2-hour files
@@ -60,7 +60,8 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   peak into its band's sub-map on ONE thread -- measured at 51% of the MS1 phase (39.0 s of
   75.9 s on a 30-minute file), and it is why raising `perf:ms1_trace_bands` made that phase
   strictly *worse* (12/24/48 bands -> 75.0/93.7/147.9 s at 3.9x/3.5x/2.5x): more bands is more of
-  exactly this copy. Chunking over spectra takes it to 0.55 s and the phase to **36.3 s at 8.0x**.
+  exactly this copy. Chunking over spectra takes it to 0.55 s (the phase to ~37 s on the 30-minute
+  file, 106.2 s at 11.2x on the 2-hour one).
   (2) `prepareTracing` sorted up to 239 million seed indices on one thread and each of the 12
   bands then walked that whole list to find its own; segmenting by band first and sorting the
   segments independently is exact (`filter_b(sort(all)) == sort(filter_b(all))` for a total
@@ -70,7 +71,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   single-threaded and 22-25% of a 2-hour run; it chased RT and IM through 48-byte records one
   cache miss at a time. Same values, same order, same first match -- **438.8 s -> 177.2 s**. The
   phase logs its three stages; the residue was the greedy claim loop (156.3 s), not the sorts
-  (8.5 s), which the next entry removes.
+  (8.5 s), which the next two entries take on.
 - **Two hot loops compute their index instead of searching for it.** `best()`, the innermost step
   of integer tracing, ran a `lower_bound` over its frame's ~25,000 sorted flight-time bins on every
   frame step of every trace extension; the bin is an integer the instrument produced, so a
@@ -82,9 +83,9 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   contains the same position. (The natural key for the second is the flight-time bin too, but
   `Trace::tof` is 0 on the OpenMS MS1 path; that needs MS1 through the integer detector.)
 - **Precursor inference is parallel and exact** (ordered speculation, batch `SPEXTRACTOR_SPEC_BATCH`,
-  default 8192): the greedy claim loop's thread occupancy went from 1.0x to **23.4x** on a 2-hour
-  file (112-138 s -> 7.8 s), with 0.7% of seeds re-evaluated and a byte-identical spectrum list on
-  three files.
+  default 8192): precursor inference's thread occupancy went from 1.0x to **23.4x** on a 2-hour file
+  (the greedy walk itself 129 s -> 7.8 s), with 0.7% of seeds re-evaluated and a byte-identical
+  spectrum list on three files.
 - **The trace record is 48 bytes, was 72.** It carried an 8-byte pointer to the store every trace of
   a vector already shares, an 8-byte copy of a calibration factor the store holds per frame, and an
   8-byte copy of the apex intensity the arena holds. The span accessors take the store explicitly,
@@ -218,8 +219,9 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
 - **Entrapment FDR on all six datasets at the v0.3.0 defaults (2026-09-05): 1.13-1.31% at a nominal
   1%**, every interval overlapping. At this release's defaults the whole-run figure is 1.33% on
   dataset D and 0.93% / 1.03% on the 2-hour runs 001 / 009, with the z=1 stratum at 2.9% under the
-  pooled cut and 0.87-0.91% under a per-charge walk. Every interval overlaps the nominal 1%; dataset D's
-  whole-run point estimate sits 0.33 points above it.
+  pooled cut and 0.87-0.91% under a per-charge walk. The point estimates sit within a third of a point
+  of the nominal 1% (dataset D's is the high one, 1.33%); intervals were not re-computed for the v38
+  arms.
 - **`SPEXTRACTOR_PICK_BATCH` is fast and rejected.** 256 -> 4096 is -39% on the load phase, but the
   digest changes with the batch size and 4096 loses 7.2% of Sage and 6.1% of MSFragger peptides: the
   picker carries per-thread state across frames. The batch stays at 256, and the sensitivity is on the
@@ -239,7 +241,8 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   | MSFragger, pooled -- 009 / 001 | 27,427 / 18,745 | 26,559 / 18,212 | 0.97 / 0.97 |
 
   The reference is a JVM run with `-Xmx400G`, so its peak partly reflects what it was allowed; the
-  honest memory statement is "roughly half, and not sensitive to a heap flag". Before this cycle the
+  honest memory statement is "roughly half, and not sensitive to a heap flag". The SpeXtractor wall
+  is one run against the reference's two-rep mean; the previous default's two reps spread 8%. Before this cycle the
   same file ran 1.46x *slower* than the reference (31:27 against 21:28).
 
 ## v1.1.0 — 2026-09-04 (public release)
@@ -248,7 +251,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
 - **`-threads` defaults to every core.** TOPPBase's default of 1 was the wrong one for a tool whose
   window loop is essentially the entire runtime. An explicit `-threads 1` is still honoured: the
   command line is inspected rather than the value compared. On 224 cores against the benchmark's
-  `-threads 100`: 5:10 vs 5:22 for byte-identical output.
+  `-threads 100`: 5:10 vs 5:22 for byte-identical output (a single pair).
 - **The output format follows the `-out` extension, `.mzpeak` by default in a build with mzPeak; `-out_type` forces it.**
   mzPeak (Parquet inside a zip) is about a third the size of mzML (2.25 GB against 6.23 GB for the
   same 655,776 spectra). DDA search engines read mzML, not mzPeak, so write `.mzML` whenever a search
@@ -280,7 +283,7 @@ added the same day, after the tag.
 | dataset F | 597,267 | 5:59 | 73.8 GB | 11,362 | 11,049 |
 
 dataset C and dataset F had never been benchmarked before. Peak RSS spans 67.9-108.7 GB across the cohort,
-which is where the README's stated 80-125 GB requirement comes from.
+which is where the README of the time stated an 80-125 GB requirement.
 
 ### Changed
 - **`assembly:require_isotope_support` and `perf:stream_load` now default to TRUE.** Both were

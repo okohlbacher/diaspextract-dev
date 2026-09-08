@@ -199,7 +199,8 @@ now documented rather than hidden.
 One refinement after the first measurement (v37 -> v38): the veto's 3+ arm was re-calling 7% of z=1
 calls to 3+, but only ~1.8% of z=1 calls are genuinely on the 3+ band (the 2+ and 3+ mobility lines
 are ~1 sigma apart at low m/z), and the re-calls identified nothing on either file (z=3 peptides
-5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k spectra. A z=1 call on
+5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k re-called precursors
+(117k / 73k spectra). A z=1 call on
 the 3+ band is now dropped rather than re-labelled. The dataset D pair is on record in BASELINE.md;
 the 009 pair exists only in the source comment beside the veto's 3+ branch in `src/spextractor.cpp`
 (the `[2026-09-08]` note) and in no BASELINE.md entry.

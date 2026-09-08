@@ -1,0 +1,1174 @@
+kimi version 0.41.0
+• The task: adversarial release review. I need to read the actual files to verify. Let me read the key files: CHANGELOG.md, README.md, CONTRIBUTING.md, docs/BASELINE.md (relevant sections), docs/REFERENCE-COMPARISON-2026-09-08.md, src/spextractor.cpp (relevant lines), test/test_spextractor.py.
+
+  This is a big verification job. I could delegate, but I need precision on numbers. Let me read the files myself — the excerpts are given, so the main verification targets are:
+
+  1. Numbers in CHANGELOG/README vs BASELINE.
+  2. Option registrations in src/spextractor.cpp (lines 1650-1875, threads handling near 3110-3130, version_ at 1659).
+  3. test/test_spextractor.py — 13 checks?
+  4. docs/REFERENCE-COMPARISON-2026-09-08.md.
+
+  Let me spot-check from the excerpts already:
+
+  - CHANGELOG v2.0.0 "Where it stands": "runs in 0.61x the reference implementation's wall time at 0.55x its peak memory (12:42 / 188 GB against 20:57 / 341 GB)" — BASELINE says mean 20:56.9 / 340.6 GB, SpeX 12:42.21 / 187.9 GB. OK consistent.
+  - "identifies 1.28x the peptides with Sage and 1.00x with MSFragger (27,831 / 28,181 against 21,743 / 28,294)" — matches BASELINE table.
+  - "on run 001 the ratios are 1.25 / 0.98" — matches.
+  - "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — matches.
+  - "The 30-minute dataset D runs in 3:13 at 57 GB" — BASELINE v38: 3:12.61 / 57.3 GB. OK.
+  - "The record is docs/BASELINE.md (sections dated 2026-09-06 to 2026-09-08)" — need to check if BASELINE has sections dated 2026-09-06. Possible finding.
+  - Charge entry: "discarded 14-20% of Sage peptides" — v38 on 001: +21.3% Sage pooled vs v35... CHANGELOG says "+20.2% / +13.7% on runs 001 / 009" per-charge. 14-20%: 001 pooled +21.3%, 009 +13.7% per-charge... Hmm "14-20%" roughly. BASELINE 009: Sage per-charge +13.7%; 001 +20.2%. So "14-20%" ok.
+  - "~13% of z=1 calls" — T3: 287,900/2,548,391 = 11.3%. Dataset D v37: 107,040/407,478 = 26.3%. 001: 241,062/2,137,636 = 11.3%. So "~13%" is off for some; CHANGELOG says "the count walk calls a 2+ envelope z=1 whenever... ~13% of z=1 calls, 60% of them below m/z 750". Need to check against BASELINE; the veto re-calls ~11-26%. "~13%" may be about charge-halving mechanism fraction, not veto. Can't fully verify.
+  - "re-calling those to 3+ identified nothing on either file (z=3 peptides 5,313 -> 5,322 on run 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k spectra" — BASELINE: D: 3,888 -> 3,935 global ✓; spectra v37-v38 D: 927,712-854,817 = 72,895 (73k), not 93k! Wait — the 93,008 dropped calls on dataset D... 93k calls dropped → but spectra difference is 73k. Hmm, CHANGELOG says "adding 178k / 93k spectra" for run 009 / dataset D. On D, veto 3+ calls = 93,008, and spectra difference 927,712 - 854,817 = 72,895. So "adding 93k spectra" contradicts the measured 73k difference. Actually maybe calls ≠ spectra (each dropped call removes one spectrum, presumably). 93,008 dropped calls but only 73k fewer spectra? Inconsistent. Also run 009: T3 4,035,234 - T4 3,918,321 = 116,913 spectra, but 3+ re-calls = 178,226. So "178k" matches the call count, not the spectra difference of 117k. So CHANGELOG's "adding 178k / 93k spectra" is wrong vs BASELINE: spectra delta is 117k / 73k. Finding HIGH/MEDIUM.
+  - "so dropping them takes 3.0% / 8.5% off the spectrum list for free" — run 009: 116,913/4,035,234 = 2.9% ✓ (~3.0%). Dataset D: 72,895/927,712 = 7.9%, not 8.5%. If using call counts: 178,226/4,035,234 = 4.4%; 93,008/927,712 = 10.0%. Hmm. 8.5%? 72,895/854,817 = 8.5%! Ah — relative to v38 count rather than v37. Ambiguous but 2.9% vs 3.0%... 116,913/3,918,321 = 3.0% ✓. OK so both computed relative to v38 list: 3.0% and 8.5%. Fine, but "adding 178k/93k spectra" still mismatches the actual spectra deltas (117k/73k). So finding: the call counts are quoted as spectrum counts.
+  - "z=1 stratum carries more entrapment FDR — 2.8-2.9% on the 2-hour files" — BASELINE: 2.91% (001), 2.94% (009). So "2.8-2.9%" should be "2.9%"; 2.8 not supported. Minor.
+  - "~9% on dataset D where the stratum is ~150 peptides" — v38: 8.8% (n=151) ✓.
+  - "at matched score *and* length z=1 is still 3-5x dirtier" — can't verify from excerpt.
+  - "Sage per-charge +20.2% / +13.7% on runs 001 / 009 against the old default" ✓ matches.
+  - "MS1 tracing 41.7/27.1/20.4 s at 9.8x/18.4x/32.4x" — can't verify; internal consistency: chunking "takes it to 0.55 s and the phase to 36.3 s at 8.0x" vs earlier "75.0/93.7/147.9 s at 3.9x/3.5x/2.5x" and "39.0 s of 75.9 s". Hmm 36.3s at 8.0x implies serial baseline ~290 s. Can't verify.
+  - "Gated on both datasets — Sage 0.9999 / 0.9994, MSFragger 1.0002 / 1.0203, entrapment FDR 1.26->1.24% and 1.12->1.07%" vs README: "peptide sets within 0.06–2% on both engines". MSFragger 1.0203 = +2.03% — README says "0.06–2%"... 2.03% > 2%. Minor inconsistency (README says "within 0.06–2%", actual 2.03%). LOW/MEDIUM.
+  - findPartner "438.8 s -> 177.2 s", "residue greedy claim loop (156.3 s), not the sorts (8.5 s), which the next entry removes" — but then "Precursor inference is parallel and exact... the greedy claim loop went from 1.0x to 23.4x on a 2-hour file, 112-138 s -> 7.8 s". 156.3 s vs 112-138 s — slight inconsistency? The 156.3 s was the residue within 177.2 s; parallel took it to 7.8 s from 112-138 s. Possibly different windows/runs. Also CHANGELOG says "which the next entry removes" — the next entry is "Two hot loops compute their index" and the entry after is "Precursor inference is parallel". The greedy claim loop was removed by parallelization, not by the hot-loops entry. Minor ordering confusion. Also "112-138 s -> 7.8 s" is 14.3x-17.7x, not 23.4x! 23.4x would need 7.8*23.4 = 182.5 s or from 156.3 → 6.68 s. Inconsistent: 156.3/7.8 = 20x. 112/7.8=14.4, 138/7.8=17.7. None is 23.4x. Finding MEDIUM/HIGH — internal contradiction.
+  - "trace record 48 bytes... 2.1 billion records, 143.6 GiB at 72 bytes" — 2.1e9 * 72 = 151.2e9 bytes = 140.8 GiB. Hmm, 143.6 GiB would be 2.14e9 records. Close-ish. "measured -10.7 GB there and -2.7 GB on dataset D: less than the 16-24 GiB predicted" — 24 GiB = 72-48=24 bytes * 1e9... predicted 16-24 GiB. Can't verify.
+  - "perf:malloc_trim... takes the peak from 265 GB to 186 GB... +8.5% of wall time" — README says "-30% peak for +8.5% wall". 265->186 is -29.8% ✓. But CHANGELOG header says "30% less peak memory for about 8% more wall time" ✓. Note BASELINE head-to-head: v38 187.9 GB peak vs v35 178.8 — the trim... fine.
+  - "Renamed to SpeXtractor (the previous name was taken)" — consistent.
+  - "End-to-end checks 9-13... Thirteen checks; the suite ran every check on the openms fallback before 9 and 10 existed." Need to verify test/test_spextractor.py has 13 checks. README says "Thirteen end-to-end checks". CONTRIBUTING says "13 end-to-end checks". Verify.
+  - "Build reproducibility... the weekly CI job builds OpenMS from source at that pin" — but v1.1.0 changelog says weekly job "builds the tool against an OpenMS source tree patched by scripts/apply_openms_patches.sh". CONTRIBUTING says ".github/workflows/build.yml does exactly this and is the reference recipe" — is build.yml the weekly job or per-push? CONTRIBUTING says the second test form "is what CI runs on four platforms" — ctest with SPEXTRACTOR_TESTS_ONLY. Hmm. Potential inconsistency: does build.yml build OpenMS from source? Need to check .github/workflows.
+  - "MS1 arena compaction overwrote ~1% of precursor XICs" ok.
+  - "perf:max_concurrent_windows was computed and logged but never checked" ok.
+  - "C4 = -0.0905 ... 18 of the 27 public PXD017703 acquisitions" and earlier "py3 scheme (9 of 27 acquisitions)". ok.
+  - "First public-data extraction: 136,818 spectra in 57 s." vs BASELINE? Can't verify from excerpt; earlier "D runs in 3:13" is different dataset. Hmm wait, is the 136,818 spectra / 57 s consistent with anything? PXD017703 files. Can't verify.
+  - "perf:stream_load... on the larger one the one-shot reader finds +223 Sage peptides (+2.0%)" ok.
+  - "Entrapment FDR on all six datasets at the v0.3.0 defaults (2026-09-05): 1.13-1.31%" vs "Measured" section says "with the z=1 stratum at 2.9%" ✓.
+  - "SPEXTRACTOR_PICK_BATCH... 4096 loses 7.2% of Sage and 6.1% of MSFragger" vs README Determinism: "1024 and 4096 change the digest, and 4096 loses 7% of peptides" — CHANGELOG says 256->4096; README says "1024 and 4096 change the digest". Also CHANGELOG: "The batch stays at 256" and README says "default loader batch" — consistent-ish. But README "1 vs 4 threads in the end-to-end suite" vs "8 vs 100 threads" fine.
+  - Head-to-head table in CHANGELOG "Measured": matches BASELINE v38 table ✓. "Before this cycle the same file ran 1.46x slower (31:27 against 21:28)" — BASELINE: "31:26.98 against 21:28.00" ✓.
+  - "Why 2.0" says "The public releases v1.0.0 and v1.1.0 (2026-09-04) were cut from the v0.3.0 tree described below plus the two defaults recorded under v1.1.0" — "described below": the v0.3.0 tree is described... where? CHANGELOG excerpt shows v1.1.0 and v1.0.0 sections; "The v0.3.0 tree below" in v1.0.0. OK.
+  - Q1: semver — executable renamed, mandatory patch, defaults changed, output not digest-comparable. v1.0.0 and v1.1.0 released 2026-09-04, four days ago. Is v2.0.0 right? Under semver, breaking CLI (renamed exe) and changed defaults → major bump is defensible. But arguably the project is 4 days old at 1.x; bumping to 2.0 so fast is unusual but semver-valid. Actually one issue: changed defaults are not API breaks per strict semver, but the rename and mandatory build patch are breaking. Answer: yes, defensible; the rename alone justifies it.
+  - Q2: version_ = "2.0.0" while OpenMS prerelease 3.6.0. Risks: TOPPBase uses version_ in ini file "version" parameter and mzML software entry. OpenMS tools sometimes compare version for ini compatibility (INIOD/upgrade). Setting a custom version: the ini will record 2.0.0; if users run with ini from older version, TOPPBase may warn about version mismatch? Actually OpenMS TOPP tools check ini version vs tool version and warn. Since the tool previously reported the OpenMS version, old inis would carry e.g. "3.6.0-pre..." and now the tool says 2.0.0 → mismatch warnings on old inis (acceptable, breaking release). Also workflows parsing software entry in mzML expecting OpenMS version could break. Also OpenMS's `-debug` or version checks in QC tools (e.g., "unofficial tool" detection in OpenMS: tools whose version doesn't match OpenMS version get flagged "unofficial"). Actually there is a known behavior: TOPPBase logs "because it's an unofficial tool" or the UTILS label... The real risk: version_ is used in the mzML software element; downstream tools (e.g., OpenMS IDFileConverter, ProteomicsDB) may not care. Compatibility risk is minor; correctness fine. Mention: getVersion() is used by some OpenMS infrastructure; nothing breaks at runtime.
+  - Q3: numbers inconsistent:
+    - "adding 178k / 93k spectra" vs measured spectra deltas 117k / 73k (BASELINE).
+    - "2.8-2.9%" vs 2.91/2.94 → "2.9%" (low).
+    - README "peptide sets within 0.06–2%" vs CHANGELOG MSFragger 1.0203 (+2.03%).
+    - README window-loop occupancy "~78×" (30-min) vs options table "~72× (30-min)". The README has BOTH: options table says "~72× (30-min) to ~90× (2-hour)" and performance table says "~78× / ~89×". Internal contradiction within README! BASELINE: v38 window loop 443.4 s (89.2x) on 009; dataset D? T3 90.6x on 009 v37. v38 table: 89.2x. So 2-hour ~89x ✓. 30-min occupancy: not in excerpt. The README contradicts itself: 72× vs 78× for 30-min. Finding.
+    - README memory "~170–190 GB" vs CHANGELOG "265 GB to 186 GB" and peak 187.9. Fine.
+    - README Disk: "mzML output roughly 9 GB for 30-min and 19-20 GB for 2-hour at the previous emission; the current default emits 30–70% more spectra" — v1.1.0 says "655,776 spectra" mzML 6.23 GB for... hmm 6.23 GB at 655,776 spectra. Now dataset D 30-min: v35 656,257 spectra (matches 655,776? close but not equal — 655,776 vs 656,257 differ; different versions). 2-hour: 2.34M spectra at 19-20 GB → current 3.9M spectra (+67%) ~ in "30-70%" ✓.
+    - CHANGELOG "2.1 billion records" vs earlier v1.x? fine.
+    - "12:42 / 188 GB against 20:57 / 341 GB" — 188 vs 187.9, 341 vs 340.6 — rounding, fine. But the Measured table says peak RSS 187.9 ✓.
+    - README Performance table: "pseudo-spectra emitted 3.9 M" vs T4 3,918,321 ✓; 30-min "0.85 M" vs 854,817 ✓. wall "3:13" vs 3:12.61 ✓ (rounds to 3:13). peak 57 GB vs 57.3 ✓. 12:42 ✓.
+    - README options table: "-charge:min_charge... are 14–20% of Sage peptides" consistent with CHANGELOG.
+    - README "-perf:stream_load... (90 GB floor)" — CHANGELOG says "for 1.75x the memory"; 90 GB floor on which file? Larger file presumably 2-hour: 1.75 × ~57 GB ≈ 100 GB on dataset D? Hmm "equivalent on the smaller file, but on the larger one... 1.75x the memory". If the 90 GB floor refers to... can't resolve.
+    - README threads option: "window loop reaches ~72× (30-min)" vs performance "~78×". Also "~90× (2-hour)" vs "~89×". Minor.
+    - CHANGELOG "the greedy claim loop went from 1.0x to 23.4x... 112-138 s -> 7.8 s" contradiction noted above.
+    - CHANGELOG "Where it stands" says "docs/BASELINE.md (sections dated 2026-09-06 to 2026-09-08)" — excerpt shows only 2026-09-08 sections. Need to check BASELINE for 2026-09-06/07 sections. Probably exist. Check.
+    - v1.1.0: "5:10 vs 5:22 for byte-identical output" vs "On 224 cores against the benchmark's -threads 100". Fine.
+    - v1.1.0 mzPeak "2.25 GB against 6.23 GB for the same 655,776 spectra" — README Disk says "mzML output is roughly 9 GB for a 30-minute run". 6.23 GB vs 9 GB — different (previous emission? the v1.1.0 measurement 6.23 GB; README says ~9 GB "at the previous emission" — hmm README says "roughly 9 GB for a 30-minute run... at the previous emission". Contradiction with 6.23 GB? Maybe different file (30-min run vs dataset D 655,776 spectra). Possibly the 30-min gradient file differs from dataset D. Ambiguous — flag as LOW/MEDIUM.
+    - CHANGELOG v2.0.0: "the suite ran every check on the openms fallback before 9 and 10 existed" — need to verify with test file.
+    - CONTRIBUTING: "cmake -B build -DSPEXTRACTOR_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build. The second form needs no OpenMS and is what CI runs on four platforms." But earlier: "You need an OpenMS source tree... .github/workflows/build.yml does exactly this and is the reference recipe." If CI on four platforms runs tests-only build without OpenMS, then build.yml does NOT build against OpenMS on four platforms — but the "Before you start" section says build.yml does exactly the OpenMS patching recipe. Maybe build.yml is the weekly job, and four-platform CI is another workflow (ci.yml?). Need to check .github/workflows. v1.1.0 changelog: "CI runs on four platforms per push (Linux GCC 13 and 11, macOS arm64, Windows MSVC) and a weekly job builds the tool against an OpenMS source tree". CONTRIBUTING says ".github/workflows/build.yml does exactly this" referring to OpenMS source build. Check workflows directory.
+    - CMake: "GCC 13+ or Clang 16+" but CI runs GCC 11! v1.1.0: "Linux GCC 13 and 11". README Requirements: "C++20 — GCC 13+ or Clang 16+". If CI builds on GCC 11, contradiction (unless GCC 11 only builds the tests-only target which may need less C++20). Check CMakeLists/workflows.
+    - README "src/ the tool (one translation unit) plus three headers: the calibration model, the tdf reader and the mzPeak streaming loader" — src listing: MzPeakStreamLoad.h, spextractor.cpp, TdfLoad.h, TdfMzCalibration.h — 3 headers ✓.
+    - README options: "-charge:im_charge_veto ... Genuine 1+ ions are untouched" — overclaim? Veto band 2.5 sigma → some genuine 1+ near 2+ line would be re-called. "Untouched" is strong; evidence: "identically in the reference implementation's own 1+ identifications". Flag as overstatement (LOW).
+    - README Determinism: "byte-identical at any thread count... The loader batch size is not free: 1024 and 4096 change the digest" — CHANGELOG says 256->4096; default batch 256. README says "default loader batch (8 vs 100 threads...)" fine. "1024 and 4096 change the digest" vs CHANGELOG "256 -> 4096 is -39%... digest changes with the batch size". Consistent.
+    - Q: "-out_type mzpeak refuses without a mzPeak build" and README "-out_type follows the extension, mzpeak when the extension says nothing" ✓.
+    - CHANGELOG "massive" claim "0.61x the reference implementation's wall time" — BASELINE: 12:42.21 vs 20:56.9 → 762.21/1256.9 = 0.606 ✓ 0.61x. But note: single SpeXtractor run (12:42.21, one rep) vs mean of two reference reps. BASELINE v38 table also had 12:42.21 single. Fine but "measured tonight" table earlier: v35 mean 11:00.9 two reps; v38 only one rep. Minor.
+    - "1.28x" 27,831/21,743 = 1.280 ✓. "1.00" 28,181/28,294 = 0.996 ✓.
+    - 001 ratios: 19,262/15,418 = 1.249 ✓; 19,230/19,652 = 0.9785 → "0.98" ✓.
+    - CHANGELOG Measured table row "Sage peptides, engines' pooled cut — 009 / 001 | 18,920 / 14,764 | 27,855 / 19,035 | 1.47 / 1.29" — BASELINE 001: v38 19,035 vs reference 14,764 → 1.289 ✓; 009: 27,855/18,920 = 1.472 ✓. MSFragger pooled 26,559/27,427 = 0.968 ✓; 18,212/18,745 = 0.9716 → "0.97" ✓.
+    - Hmm wait: CHANGELOG "Where it stands" says "(27,831 / 28,181 against 21,743 / 28,294)" — order Sage/MSFragger consistent ✓.
+    - "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — but "Measured" says "At this release's defaults the whole-run figure is 1.33% on dataset D and 0.93% / 1.03% on the 2-hour runs". So the "Where it stands" claim "at the nominal 1%" omits dataset D's 1.33%. The sentence says "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — in context of the 2-hour acquisition, ok-ish but the 0.93-1.03% range excludes dataset D. Slightly cherry-picked; the Measured section discloses. LOW.
+    - Also gate criterion in CONTRIBUTING: "entrapment FDR inside the previous interval" — v38 whole-run on D: 1.24% -> 1.33% (v35 1.24%). Previous interval? "1.13-1.31% at v0.3.0 defaults" — 1.33% is OUTSIDE 1.13-1.31%! The gate says entrapment FDR inside previous interval; dataset D v38 = 1.33% > 1.31% previous max. Hmm — previous interval for D specifically: v35 1.24% (interval unknown). The shipped default fails its own stated gate on dataset D? Interesting finding but intervals overlap maybe. v38 table: entrapment whole run 1.33% vs v35 1.24%. The "Measured" section says at v0.3.0 defaults 1.13-1.31% "every interval overlapping". 1.33% exceeds 1.31% — arguably outside the previous interval. MEDIUM finding: default change gate violation, or at least tension.
+    - Also CHANGELOG gate for ms1_trace_bands: "MSFragger 1.0002 / 1.0203" — +2.03% gain; entrapment 1.26->1.24 fine.
+    - README: "the window loop reaches ~72× (30-min)" — also options table "an admission gate sizes concurrency from free RAM at startup" vs CHANGELOG fix "Admission now happens on the master before a window task is spawned" — README Performance says "an admission gate sizes concurrency from free RAM at startup" — "at startup" vs "before a window task is spawned" (dynamic, not at startup). Potential stale: gate is dynamic per-window, README says "at startup". Check: options table says "window concurrency is bounded by a free-RAM admission gate, not by core count" fine; Performance section "an admission gate sizes concurrency from free RAM at startup" — CHANGELOG says admission happens before each window spawn (dynamic). Contradiction MEDIUM.
+    - README Requirements OpenMS: "bd4b895, 2026-04-24; it identifies itself as a 3.6.0 pre-release" — CONTRIBUTING says "(develop, 2026-04-24)" consistent. Verify patches/openms.lock contains bd4b895.
+    - "three headers" — the install script "installs src/TdfMzCalibration.h into the OpenMS tree" — the header lives in src/ AND is installed into OpenMS tree? README Layout says three headers in src including calibration model. Fine.
+    - CHANGELOG "the tool compiles on a stock OpenMS tree (every mzPeak reference is guarded...)" — wait, "stock" meaning patched? It says compiles on a stock OpenMS tree — but CONTRIBUTING says it refuses to compile without the MassTrace patch. Contradiction? Read carefully: "the tool compiles on a stock OpenMS tree (every mzPeak reference is guarded; -out_type mzpeak refuses without a mzPeak build)" — the parenthetical is about mzPeak, and "stock" here might mean "unmodified mzPeak-less"? Ambiguous wording: if it compiles on a stock OpenMS tree, that contradicts the static_assert claim ("a tree without it does not build the tool"). Probably "stock" means "patched OpenMS without mzPeak". Sloppy/contradictory wording — flag MEDIUM.
+    - CHANGELOG: "an ordered slab digest under SPEXTRACTOR_DET" — earlier env var naming "SPEXTRACTOR_DET" fine.
+    - CHANGELOG "End-to-end checks 9-13": "the shipped detector is the one that runs (9, 10)" — README Tests: "and that the shipped detector is the one that actually runs" ✓.
+    - Test file: verify 13 checks and names.
+    - Q: "version_ = SPEXTRACTOR_VERSION" at line 1659 — excerpt shows `1659: version_ = SPEXTRACTOR_VERSION;` ✓.
+    - threads handling: excerpt line 3124 shows `n_threads_req = std::max(1, (int)std::thread::hardware_concurrency());` — but also main_ scans argv for "-threads" only exact match "-threads" as separate arg; `--threads` or `-threads=4`? TOPP style is "-threads 4" separate. Also ini files: threads from ini wouldn't be detected as "given" → ini with threads 1... if user supplies ini with threads=4, getIntOption_ returns 4 ≠ 1, fine. If ini says 1, it's treated as not-given → overridden to all cores! Bug: scanning argv misses -ini specified threads. Also "-threads" check `String(argv[i]) == "-threads"` — misses `--threads`. OpenMS accepts both? Typically single dash. MEDIUM finding for v1.1.0 claim "an explicit -threads 1 is still honoured" — but not via ini. Edge case.
+    - Also excerpt: `if (!given && n_threads_req == 1)` — if user passes -threads 1 explicitly, given=true → honoured ✓.
+    - src line 334: static_assert(sizeof(Trace)==48) ✓ matches CHANGELOG.
+    - src 1805: registerIntOption_ perf:ms1_trace_bands default 48 ✓; 1818 min_charge 1 ✓; 1838 im_charge_veto true ✓; 1848 im_veto_band 2.5 ✓; 1772 malloc_trim true ✓; 1784 stream_load true ✓.
+    - README options table im_veto_band default 2.5 ✓.
+    - README "-trace:max_span_sec 120" — not verified; check source.
+    - CHANGELOG v2.0.0 "The 30-minute dataset D runs in 3:13 at 57 GB" ✓.
+    - "on a 2-hour tryptic acquisition it discarded 14-20% of Sage peptides and most of the MSFragger deficit" — 009 Sage +13.7% per-charge ≈14%; 001 +20.2% ≈20%. ✓ but MSFragger: +15.0%/+12.6% — "most of the MSFragger deficit" fine.
+    - "whose 1/K0 sits +0.29 Vs/cm2 above the 2+ trend line" — unit: 1/K0 has units Vs/cm² ✓.
+    - "~13% of z=1 calls, 60% of them below m/z 750 where a 1+ cannot be scored at all" — check REFERENCE-COMPARISON doc.
+    - "only ~1.8% of z=1 calls are genuinely on the 3+ band" — T3: 178,226/2,548,391 = 7.0% of z=1 calls were re-called 3+. D: 93,008/407,478 = 22.8%. "1.8% genuinely" — different measure (genuinely vs re-called). Can't verify; check reference doc.
+    - "re-calling those to 3+ identified nothing on either file (z=3 peptides 5,313 -> 5,322 on run 009...)" — need to check REFERENCE-COMPARISON or BASELINE for run 009 z=3 5,313->5,322. BASELINE excerpt doesn't show it. Check reference doc.
+    - README: "They agree on about 85% of the union of identified peptides" — can't verify.
+    - README: "integer... roughly 40% less memory" can't verify.
+    - README Requirements memory: "(the 30–60 min cohort spanned 68–109 GB before the memory work)" vs "57 GB" now. Fine.
+    - CHANGELOG v1.1.0: "On 224 cores against the benchmark's -threads 100: 5:10 vs 5:22" — wall on dataset D presumably.
+    - Semver Q1 nuance: v1.0.0/v1.1.0 cut 2026-09-04 from "v0.3.0 tree" — so there were prior private releases 0.x. Public 1.0.0 → 2.0.0 in 4 days. Semver-major is justified by the rename alone; also note "the previous name was taken" — legal/practical reason. Fine. But also: is there a v1.x commitment issue — 2.0.0 4 days after 1.1.0 deprecates quickly; acceptable.
+    - Also "Why 2.0" says "a tree without it does not build the tool" for MassTrace patch, but earlier in the same doc under Build reproducibility: "the tool compiles on a stock OpenMS tree" — direct contradiction within the same section! HIGH-ish. Well, "stock" likely means without mzPeak; but as written it contradicts. Flag.
+    - Also check: README Install "scripts/apply_openms_patches.sh /path/to/OpenMS" then "cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build" fine.
+    - README "the tool warns on every mzPeak write" (v1.1.0) vs v2.0.0? fine.
+    - README Determinism: "1 vs 4 threads in the end-to-end suite on every build" — check test file.
+    - Check .github/workflows to verify CI claims: "CI runs on four platforms per push (Linux GCC 13 and 11...)" vs README "GCC 13+".
+    - Check CMakeLists for SPEXTRACTOR_VERSION 2.0.0 and project name.
+    - Check CITATION.cff version.
+
+  Plan: read the actual files. Big job — delegate? I'll read key files myself with targeted reads. Files: CHANGELOG.md (read), README.md (given complete, but verify it matches disk — trust given? Better to read), docs/BASELINE.md (large; grep for relevant sections), docs/REFERENCE-COMPARISON-2026-09-08.md, src/spextractor.cpp lines 1650-1875 & 3100-3135, test/test_spextractor.py, .github/workflows, CMakeLists.txt, patches/openms.lock, CITATION.cff.
+
+  To save context, delegate some verification to explore agents. But precision matters and excerpts given are substantial. I'll do targeted greps/reads myself:
+
+  1. Read src/spextractor.cpp 1650-1875 (option registrations) — 225 lines.
+  2. Read 3100-3140 threads.
+  3. Grep test_spextractor.py for check definitions.
+  4. Read REFERENCE-COMPARISON doc (probably medium).
+  5. Grep BASELINE for key numbers: 5,313, 1.8%, 13%, 0.29, 41.7/27.1/20.4, 438.8, 23.4, 112-138, 143.6, 265 GB, 186 GB, 90 GB floor, 85%, 40%, 136,818, 9 GB, 6.23, 78×/72×.
+  6. Check .github/workflows files.
+  7. CMakeLists version, CITATION.cff.
+
+  Let me batch. Start with parallel reads/greps.
+
+build.yml
+tests.yml
+OPENMS_BASE=bd4b89555629d68b431b189a4c841efbcc4dfeea
+# OpenMS/OpenMS develop, 2026-04-24. The commit all three patches are cut against and verified to
+# reproduce the benchmarked tree from, byte for byte. Regenerate the patches if you move it.
+CITATION.cff:1:cff-version: 1.2.0
+CITATION.cff:14:version: 2.0.0
+CMakeLists.txt:1:cmake_minimum_required(VERSION 3.16)
+CMakeLists.txt:2:project(SpeXtractor VERSION 2.0.0 LANGUAGES CXX)
+CMakeLists.txt:38:target_compile_definitions(spextractor PRIVATE SPEXTRACTOR_VERSION="${PROJECT_VERSION}")
+• Test file grep for "def check_" found nothing — check the test file structure differently.
+
+  Also workflows: build.yml and tests.yml. v1.1.0 changelog says "CI runs on four platforms per push (Linux GCC 13 and 11, macOS arm64, Windows MSVC) and a weekly job builds the tool against an OpenMS source tree". CONTRIBUTING says ".github/workflows/build.yml does exactly this and is the reference recipe" — build.yml might be the weekly OpenMS job or the four-platform one. Check.
+
+  Also CONTRIBUTING says second test form "is what CI runs on four platforms" — so tests.yml is four-platform? Check both workflow files.
+
+  Next: read test/test_spextractor.py structure, workflows, REFERENCE-COMPARISON doc, and grep BASELINE for key numbers.32:def b64f(vals, double=True):
+37:def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0):
+46:<cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{target}" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/>
+47:<cvParam cvRef="MS" accession="MS:1000828" name="isolation window lower offset" value="{target-lo}" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/>
+48:<cvParam cvRef="MS" accession="MS:1000829" name="isolation window upper offset" value="{hi-target}" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/>
+49:</isolationWindow><activation><cvParam cvRef="MS" accession="MS:1000044" name="dissociation method"/></activation></precursor></precursorList>"""
+53:<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>
+54:<cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{ms_level}"/>
+55:<cvParam cvRef="MS" accession="MS:1000294" name="mass spectrum"/>
+56:<scanList count="1"><cvParam cvRef="MS" accession="MS:1000795" name="no combination"/>
+57:<scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" unitAccession="UO:0000010" unitName="second" unitCvRef="UO"/></scan></scanList>
+60:<binaryDataArray encodedLength="{len(mz)}"><cvParam cvRef="MS" accession="MS:1000514" name="m/z array" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{mz}</binary></binaryDataArray>
+61:<binaryDataArray encodedLength="{len(inten)}"><cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitAccession="MS:1000131" unitName="number of counts" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000521" name="32-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{inten}</binary></binaryDataArray>
+62:<binaryDataArray arrayLength="{len(im)}" encodedLength="{len(imarr)}"><cvParam cvRef="MS" accession="MS:1002816" name="mean inverse reduced ion mobility array" unitAccession="MS:1002814" unitName="volt-second per square centimeter" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{imarr}</binary></binaryDataArray>
+66:def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None):
+112:<fileDescription><fileContent><cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/></fileContent></fileDescription>
+113:<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="spextractor-test"/></software></softwareList>
+114:<instrumentConfigurationList count="1"><instrumentConfiguration id="ic_test"><cvParam cvRef="MS" accession="MS:1000031" name="instrument model"/></instrumentConfiguration></instrumentConfigurationList>
+115:<dataProcessingList count="1"><dataProcessing id="dp_test"><processingMethod order="0" softwareRef="so_test"><cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML"/></processingMethod></dataProcessing></dataProcessingList>
+124:def synth_tdf(path, n_frames):
+153:def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
+166:def precursors(mzml):
+176:def peaks_of(mzml, prec_mz, tol=0.02):
+183:        elif want and 'name="m/z array"' in line: arr = "mz"
+184:        elif want and 'name="intensity array"' in line: arr = "it"
+185:        elif want and 'name="64-bit float"' in line: prec = 8
+186:        elif want and 'name="32-bit float"' in line: prec = 4
+194:def ms1_traces_near(tsv, mz, tol=0.02):
+205:def digest(mzml):
+216:def main():
+226:    def check(name, fn):
+233:    out_def = os.path.join(work, "default.mzML")
+237:    def c1():
+248:    def c2():
+257:    def c3():
+264:    def c4():
+269:    def c5():
+278:    def c6():
+295:        def cg(label=label, want=want_traces, dump=dump, out_g=out_g, gaps=gaps):
+310:    def detector_of(path):
+316:    def c9():
+327:    def c10():
+337:    def c11():
+354:    def c12():
+362:    def c13():
+---
+     379 test/test_spextractor.py
+Key facts established:
+
+  - CI: tests.yml runs on push/PR on 4 platforms WITHOUT OpenMS, only builds SPEXTRACTOR_TESTS_ONLY (calibration header test). build.yml (weekly) is the only job that compiles the tool — and it runs weekly, not per push. So the v2.0.0 tool itself is NOT built by CI per push; "the only job that proves the tool compiles" runs weekly. CONTRIBUTING says build.yml "is the reference recipe" ✓. But: v1.1.0 changelog says "CI runs on four platforms per push (Linux GCC 13 and 11, macOS arm64, Windows MSVC)". tests.yml: ubuntu-latest gcc (version? not pinned — ubuntu-latest currently gcc 13/14, ok), ubuntu-22.04 gcc-11, macos appleclang, windows msvc. But these only build the calibration header tests, not the tool. v1.1.0's phrasing "CI runs on four platforms per push" is arguably misleading but was v1.1.0. More importantly: README Requirements says "C++20 — GCC 13+ or Clang 16+" — but CI builds (tests-only) with gcc-11, and macOS appleclang (AppleClang version not 16+ Clang equivalent necessarily). Also the full tool build (build.yml) uses ubuntu-latest default gcc. GCC 11 cannot compile the tool if it truly needs C++20 features beyond gcc11 — but tests-only target compiles with gcc-11, meaning the claim "GCC 13+" is for the tool; CI doesn't test the tool with gcc-11. Consistent-ish. However README says "Clang 16+" — macos-latest appleclang is not Clang 16 exactly; and tests-only compiles under it. Minor.
+
+  - Wait, important: v1.1.0 changelog says "CI runs on four platforms per push (Linux GCC 13 and 11, macOS arm64, Windows MSVC) and a weekly job builds the tool against an OpenMS source tree patched by scripts/apply_openms_patches.sh". The four-platform job does NOT build the tool (only tests-only targets). The sentence implies CI per push builds... ambiguous. But the bigger release-engineering defect: at v2.0.0, with a mandatory static_assert on the third patch, NO per-push CI compiles the tool at all. The weekly build.yml is the only compile check. Also: does tests.yml even compile src/spextractor.cpp? No. So a release cut could ship a tree that doesn't compile until next Monday's cron. That's a release-engineering defect worth flagging (HIGH/MEDIUM). Did they run build.yml before release? Unknown.
+
+  - Test file: checks c1..c6, then `cg(label=label...)` — check 7/8 via loop (gap cycles?), c9..c13. So 13 checks total presumably. "check(name, fn)" counts. Need to see how many check() calls: c1..c6 = 6, cg loop — how many iterations? Lines 278-310: `def c6():` then a loop with `def cg(...)` and presumably two calls (labels) → checks 7 and 8. Then c9..c13 = 5. Total 13 ✓. CHANGELOG says "the suite ran every check on the openms fallback before 9 and 10 existed" — need to verify: checks c9/c10 are about the shipped detector. Claim: previously every check ran on openms fallback. Check the test file near run() / detector_of and how detector is chosen. Let me read lines 216-379 of the test to verify the 13 checks and what they do, plus the threads determinism check (1 vs 4 threads).
+
+  - CONTRIBUTING: "cmake -B build -DSPEXTRACTOR_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build — The second form needs no OpenMS and is what CI runs on four platforms." ✓ matches tests.yml.
+
+  - build.yml runs weekly Mondays 04:00 UTC ✓ "weekly CI job builds OpenMS from source at that pin, applies the patches and runs the end-to-end suite" ✓.
+
+  - Q2 detail: version_ AND verboseVersion_ both set (lines 1660-1661). Constructor comment explains. So the CHANGELOG claim "the tool reports its own version (--help, the ini version parameter and the output's software entry used to carry the OpenMS version)" — the source supports this. Good. But note: TOPPBase official=false — ToolHandler. One risk: OpenMS's `--help` prints version; ini writes version param; when reading an ini written by an older version... Actually also: checkIniValidity? TOPPBase compares ini "version" against tool version and warns if different — with old inis carrying OpenMS version "3.5.0-pre..." users get a warning. Minor.
+
+  Now read test file lines 216-379, and read docs/REFERENCE-COMPARISON-2026-09-08.md, and grep BASELINE for numbers to verify: 5,313, 178k/93k vs spectra deltas, "1.8%", "+0.29", "13%", "60%", "438.8", "177.2", "156.3", "23.4", "112", "138", "7.8", "41.7", "27.1", "20.4", "36.3", "8.0x", "51%", "39.0", "75.9", "60.1", "904", "393", "143.6", "2.1 billion", "16-24", "10.7", "265", "186", "138 GB", "+26%", "+15%", "82.7", "88.0", "204,800", "417.6", "581.0", "748.5", "741.9", "136,818", "57 s", "9 GB", "6.23", "78", "72", "85%", "40%", "0.06", "1.13-1.31", "2026-09-06", "2026-09-07".44:gate off: 2.15 M precursor hypotheses instead of 1.10 M puts the window loop at 91.8% of the run
+68:  3x: Sage 10,802/10,802/10,802 AND MSFragger 11,560/11,560/11,560. So ALL benchmark peptide counts
+70:  (11,402/11,560/11,482/11,751 across k=1..4) is NOT run-to-run noise -- it is a REAL (non-smooth)
+117:  | **corr_power=2 + im_weight 0.005** | **11,112 (96.5% of dt)** | **11,813 (84.8% of dt)** | **10,574 @ 2.13%** |
+165:apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- SpeXtractor
+279:| unmod | 6,907 | 7,890 | 87.5% at hypothesis level; PEPTIDE level ~parity (96-106% by definition: accepted-union 7,744 vs 8,079; best-hypothesis 6,547 vs 6,164) |
+341:| open unmod @1% | 6,907 (87.5%) | **7,566 (95.9%)** | 7,890 |
+376:in evidence/SHA256SUMS (sha a9708613..., PRERELEASE TDF-SDK 2.21.0 -- Bruker notes a tims_index_to_mz
+377:implementation change in this line); patch base = OpenMS 3.6.0-pre-exported-20260717 tarball; runtime
+471:| **apex** (max-intensity member's m/z) | 927,813 | **12,537 (+2.6%)** | only-default 757 / only-apex 1,077 | **+0.78** | −2.41 |
+499:| weighted (default) | 927,813 | 12,537 | identical | +0.78 / −2.41 |
+511:| dataset A | 10,333 | **10,789** | +4.4% | 10,242 | **105.3%** | +2.63 → +1.47 | −1.95 |
+567:| apex (k=2, today's default) | 1,105,532 | 927,813 | 12,537 | 11,927 | 85.6% | 15:21 |
+583:| apex (all precursors) | 927,813 | 12,537 | 11,927 | 85.6% |
+626:| `trace:ms2_noise_threshold_int 5` | 927,813 | **12,537, symdiff 0 (byte-identical)** | 11,927 | 7 vs 9, deficit +2 |
+665:| backfill N=150 | 11,190 (−10.7%) | 12,042 (+1.0%) | 86.4% | 11,437 / 3,537 | +2 |
+705:from its apex frame's IM-band peaks) + `SPEXTRACTOR_BACKFILL_RAW=50`. Emission rises 927,813 -> **981,223 (+5.8%)**, so
+711:| no-empty N=50 (reference) | 927,813 | 12,208 (−2.6%) | 12,539 (+5.1%) | some PSM 64% |
+712:| no-empty K=150 (reference) | 927,813 | **12,724 (+1.5%)** | 12,000 (+0.6%) | +2 |
+722:unchanged (927,813 spectra in every arm), so this is purely a content lever.
+763:| dataset A | apex | 10,789 | -- | 11,444 | -- |
+766:| dataset B | apex | 10,156 | -- | 9,738 | -- |
+788:| dataset D | 927,813 -> **656,254** (−29.3%) | 12,537 -> **12,642** (+0.8%) | 11,927 -> **12,073** (+1.2%) | 1.28% -> 1.38% |
+789:| dataset A | 1,228,875 -> **863,319** (−29.7%) | 10,789 -> **11,084** (+2.7%) | 11,444 -> **12,061** (+5.4%) | 0.91% -> 0.99% |
+790:| dataset B | 844,755 -> **586,069** (−30.6%) | 10,156 -> **10,294** (+1.4%) | 9,738 -> **9,822** (+0.9%) | 1.13% -> 1.28% |
+1019:| E | 10,710 | 90 | 0.83% | **1.23%** | 1.00-1.48 |
+1031:`benchmark/PXD017703/raw`: 9 Evosep acquisitions (60/100/200 SPD, 200 ng HeLa) and 18 "highsens"
+1052:First extraction, 100SPD 100 ng, shipped defaults: **136,818 pseudo-MS2 spectra, 57 s wall, 28 CPU-min,
+1061:**On reproducing the reference implementation's paper.** The paper (Nat Commun 2025, PMC11696033) contains NO HeLa
+1101:| 100SPD 100 ng S2-C1 (2731) | 136,818 | 0:42 | 16.2 GB | 12,861 | 115,396 |
+1104:| 200SPD 200 ng S3-A2 (2738) | 74,874 | 0:31 | 10.7 GB | 5,701 | 61,750 |
+1181:5. **Reference-side Sage replicates disagree by up to 35%** (2732: 10,394 vs 15,939/15,140; 2738:
+1196:## PUBLIC BENCHMARK 2: TNBC (PXD047793), the reference implementation's paper's headline data (2026-09-06, 07:10)
+1218:### TNBC FINAL (2026-09-06, 07:30): all 16 runs, peptide-level both engines, Sage protein groups
+1228:### 2026-09-06: memory work, steps 1-4 (see the plan in .claude/plans, and docs/TNBC-PROFILE.md)
+1247:| 3 | OpenMS `MassTrace` move operations (third patch) | identical; peak RSS 83.1 -> 82.7 GB, after-MS1 48.5 -> 48.1 GB |
+1261:#### GATE A RESULT, dataset D (primary), 2026-09-06 14:10 — the compaction fix PASSES
+1291:| 0.1% | 8,262 -> 8,641 (**+4.6%**) | 9,768 -> 9,485 (-2.9%) |
+1293:| 1% | 11,016 -> 11,218 (**+1.8%**) | 11,935 -> 11,679 (-2.1%) |
+1317:| v15 (step 4, MS1 state released at the loop join) | **81.73 GB** | 48.09 | 47.85 |
+1324:precursors and the m/z index does **not** move RSS at that instant (47,847,848 kB before and after,
+1340:structure in the tool at scale (925 M parent + 1,217 M child traces on a 2-h acquisition = 143.6 GiB
+1360:shipped first. The record change measured -10.7 GB of that 11.3 rather than the 16-24 GB predicted
+1383:#### CORRECTION (2026-09-06, 19:55): the trim is NOT free -- it trades ~8.5% wall for ~30% memory
+1395:| interleaved: v13 r1 | 30:41 | 42,116 | 35,738 | 287 M | 264.9 |
+1400:+26%, 287 M -> 362 M) and touches them cold, so the loop's CPU rises ~15% even though concurrency is
+1432:### Scheduling: the window loop was bounded by one window's serial chain (2026-09-07)
+1441:| TNBC 009 (v21) | 748.5 s | 741.9 s (99%) | 575-601, **score**-bound (581.0 s) |
+1445:`grainsize(32)` and 100 threads that is **204,800 precursors**, and exactly two of 28 windows sit
+1450:| 200,000 | `grainsize(32)` | 6,250 | 82.7x |
+1452:| 300,000 | `num_tasks(400)` | 400 | 88.0x |
+1454:The two windows above the line scored 417.6 s and 581.0 s; every neighbouring window -- within 16%
+1462:| v21 | 312.1 s | 33:35 | 1150.0 s (31.2x) | 438.8 s (1.0x) | 181,777 MB |
+1463:| **v22** (bounded scoring pool + findPartner SoA) | **266.2 s** | **18:03** | **496.5 s (66.7x)** | **177.2 s** | 181,902 MB |
+1470:logged -- on TNBC, m/z index 1.0 s, intensity sort 7.5 s, **greedy walk 156.3 s**, so the residue is
+1484:(4:41.7 vs 4:36.9) with an identical digest.
+1486:#### The two serial stages behind the remaining phases (2026-09-07)
+1489:the time went. On dataset D, `MS1_TRACE` = 75.9 s split as edges 1.0 | **distribute 39.0 (serial)** |
+1500:per-window `prep` on TNBC from 60.1 s to 27.1 s at the worst window (904 -> 393 s summed).
+1506:| v21 | (before) | 312.1 s | 33:35 | 1150.0 s (31.2x) | 252.5 s (4.8x) | 438.8 s | 181,777 MB |
+1507:| v22 | bounded scoring pool, findPartner SoA | 266.2 s | 18:03 | 496.5 s (66.7x) | 247.3 s (4.8x) | 177.2 s | 181,902 MB |
+1520:### `perf:trace_bands` 48: FAILS the gate, and stays off (2026-09-07)
+1540:### Computed indices instead of binary searches (2026-09-07)
+1560:| v27 (m/z key) | 234.2 s | -- | 14:32 | 459.8 s (70.4x) | 130.0 s (112.8) |
+1573:| TNBC MS1_TRACE | 252.5 s (4.8x) | 114.8 s (10.7x) | -55% |
+1574:| TNBC PRECURSOR_INFER | 438.8 s | 148.7 s | -66% |
+1599:### Ordered speculation on the greedy claim loop (v29/v30, 2026-09-07)
+1617:| TNBC v30 | **7.8 s** | **26.9 s** | **23.4x** | **0.7%** |
+1628:| PRECURSOR_INFER | 26.9 s | 3.8% | 629.7 | 23.4x |
+1639:### `perf:trace_bands` is settled: 24 fails dataset A the same way 48 did (2026-09-07)
+1645:| dataset A | 12 -> 24 | 11,218 -> **11,037 (-1.61%)** | 10,689 -> **10,929 (+2.25%)** | 95.56% | 89.66% | 1.12% -> 1.14% |
+1661:### `perf:ms1_trace_bands`: the old sweep was measuring the serial distribute (2026-09-07)
+1669:| 12 (default) | 41.7 s | 9.8x | 31.4 s | 75.0 s |
+1670:| 24 | 27.1 s | 18.4x | 16.8 s | 93.7 s |
+1671:| 48 | **20.4 s** | **32.4x** | 8.4 s | 147.9 s |
+1678:| dataset D | 12,594 -> 12,593 (0.9999) | 11,640 -> 11,642 (1.0002) | **99.44%** | **99.37%** | 1.26% -> 1.24% |
+1685:### v35: `ms1_trace_bands=48` adopted (2026-09-07)
+1691:| dataset D | 12,594 -> 12,593 (0.9999) | 11,640 -> 11,642 (1.0002) | 99.44% | 99.37% | 1.26% -> 1.24% |
+1692:| dataset A | 11,218 -> 11,211 (0.9994) | 10,689 -> **10,906 (1.0203)** | 99.24% | 89.33% | 1.12% -> **1.07%** |
+1705:| LOAD(stream) | 21.8 s | 10.7% | 74.3x |
+Good. Now check specific claims:
+
+  1. "23.4x" — BASELINE line 1617: "TNBC v30 | 7.8 s | 26.9 s | 23.4x | 0.7%" — so 23.4x comes from 7.8 s vs serial baseline. Serial baseline would be 7.8*23.4 = 182.5 s. Hmm, but line 1628 "PRECURSOR_INFER | 26.9 s | 3.8% | 629.7 | 23.4x" — 629.7/26.9 = 23.4! So 23.4x is measured against 629.7 s → 26.9 s?? Wait: 629.7/26.9 = 23.41. And 7.8 s is... line 1617 columns: | TNBC v30 | 7.8 s | 26.9 s | 23.4x | 0.7% | — maybe 7.8 s is greedy loop, 26.9 s total phase, and 23.4x computed 629.7/26.9. But CHANGELOG says "the greedy claim loop went from 1.0x to 23.4x on a 2-hour file, 112-138 s -> 7.8 s". 112-138 → 7.8 is 14-18x, not 23.4x. And 156.3/7.8 = 20x. So CHANGELOG's juxtaposition of "23.4x" with "112-138 s -> 7.8 s" is internally inconsistent AND misattributes the 23.4x (which per BASELINE is phase-level 629.7→26.9 or something). Where does "112-138 s" come from? BASELINE line 1470: greedy walk 156.3 s. Line 1560: "130.0 s (112.8)". Hmm. Let me check the BASELINE speculation section around line 1599-1630 for the serial baseline. Actually the 23.4x = 629.7/26.9 seems to be phase speedup. But CHANGELOG explicitly says "the greedy claim loop went from 1.0x to 23.4x ... 112-138 s -> 7.8 s". 7.8*23.4 = 182.5, not in 112-138. So the numbers don't multiply. Finding: MEDIUM/HIGH internal inconsistency. Let me read BASELINE 1599-1635 to be sure.
+
+  2. "adding 178k / 93k spectra" — T3/T4: spectra delta 009 = 4,035,234 - 3,918,321 = 116,913 (117k), not 178k. D: 927,712 - 854,817 = 72,895 (73k), not 93k. The 178,226 and 93,008 are veto call counts. So CHANGELOG mislabels call counts as spectra. HIGH.
+
+  Also "dropping them takes 3.0% / 8.5% off the spectrum list" — 116,913/3,918,321 = 2.98% ✓; 72,895/854,817 = 8.53% ✓ (relative to post-drop list). OK internally consistent if denominator is v38. Fine.
+
+  3. "re-calling those to 3+ identified nothing on either file (z=3 peptides 5,313 -> 5,322 on run 009, 3,888 -> 3,935 on dataset D)" — D: BASELINE v37 section: "3,888 to 3,935 (global)" ✓. Run 009 5,313 -> 5,322: grep found no "5,313" in BASELINE. Check REFERENCE-COMPARISON doc. Need to grep that doc.
+
+  4. Entrapment z=1 "2.8-2.9% on the 2-hour files": BASELINE v38: 2.91% (001), 2.94% (009) → both 2.9%, not 2.8-2.9. Also src option text says "~2.8%". LOW.
+
+  5. ms1_trace_bands gate numbers: BASELINE 1678/1691-1692: Sage 0.9999 / 0.9994 ✓, MSFragger 1.0002 / 1.0203 ✓, FDR 1.26->1.24 / 1.12->1.07 ✓. CHANGELOG ✓. But note dataset A MSFragger +2.03% with overlap 89.33% (was 89.66%) — README "peptide sets within 0.06–2%" — 2.03% > 2%. Also the gate criterion in CONTRIBUTING "entrapment FDR inside the previous interval" — dataset A 1.12->1.07 fine.
+
+  But wait — CONTRIBUTING's standing bar for altering a default: "both search engines, entrapment FDR inside the previous interval, and confirmation on a second acquisition." ms1_trace_bands gate: Sage ~flat, MSFragger +0.02%/+2.03% — both engines ✓. OK.
+
+  For min_charge change: dataset D v38 whole-run entrapment 1.33% vs v35 1.24%. Previous interval? "Entrapment FDR on all six datasets at v0.3.0 defaults: 1.13-1.31%". 1.33% exceeds 1.31%. Hmm, is "the previous interval" per-dataset CI? The 1.13-1.31% are point estimates. v38 D = 1.33% vs v35 1.24%. If the gate says "inside the previous interval" and previous D interval... v35 1.24% with some CI. Can't definitively call it a violation without the CI, but 1.33% > the documented 1.31% upper bound of the six-dataset record. Worth flagging as MEDIUM tension: the release's own gate (CONTRIBUTING) requires "entrapment FDR inside the previous interval," and the shipped default measures 1.33% on dataset D where the documented record tops at 1.31%.
+
+  Actually the Measured section says "the whole-run figure is 1.33% on dataset D" and earlier "1.13-1.31% at the v0.3.0 defaults (2026-09-05), every interval overlapping". If intervals overlap, then 1.33 vs 1.31 could be within CI. So it's borderline; flag LOW-MEDIUM.
+
+  6. "Where it stands" says "docs/BASELINE.md (sections dated 2026-09-06 to 2026-09-08)" ✓ — BASELINE has 2026-09-06 sections ✓.
+
+  7. findPartner: "438.8 s -> 177.2 s" ✓ (line 1462-1463). "the residue was the greedy claim loop (156.3 s), not the sorts (8.5 s)" — BASELINE line 1470: "m/z index 1.0 s, intensity sort 7.5 s, greedy walk 156.3 s". So sorts = 1.0 + 7.5 = 8.5 ✓. "which the next entry removes" — but the next entry ("Two hot loops compute their index") does NOT remove the greedy claim loop; the entry after ("Precursor inference is parallel") does. Actually reading the CHANGELOG order: entry "findPartner's gate fields..." then "Two hot loops..." then "Precursor inference is parallel and exact". The text says "the residue was the greedy claim loop (156.3 s), not the sorts (8.5 s), which the next entry removes." "which" grammatically refers to "the sorts" — the next entry (hot loops) removes the searches/sorts. Hmm, ambiguous: "the residue was the greedy claim loop (156.3 s), not the sorts (8.5 s), which the next entry removes" — the relative clause could attach to "the greedy claim loop". If it attaches to the greedy loop, it's wrong (next entry is hot loops; parallel inference is two entries later). If to the sorts, it's right (hot-loops entry removes the binary searches — 22M doubles searched up to 50 times per seed = that's in the greedy claim loop actually... the findPartner bucket search). Ambiguous wording; note as LOW clarity issue, not necessarily factual error. Actually "Two hot loops" entry says: findPartner "searched 22 million doubles up to 50 times per seed" in "the greedy claim loop" — so the hot-loops entry addresses searching within the greedy loop, and the parallel entry removes the loop's serial nature. The claim "which the next entry removes" — the greedy claim loop was NOT removed by the next entry; it was parallelized by the one after. I'll flag as LOW.
+
+  8. "Precursor inference is parallel and exact (ordered speculation, batch SPEXTRACTOR_SPEC_BATCH, default 8192): the greedy claim loop went from 1.0x to 23.4x on a 2-hour file, 112-138 s -> 7.8 s, with 0.7% of seeds re-evaluated and a byte-identical spectrum list on three files." — Check BASELINE 1599-1630 for "112" and "138" and "8192" and "three files". Line 1617: 7.8 s, 23.4x, 0.7% ✓. Need to verify 112-138 and 8192 and three files. Grep didn't show "112" context. Let me read that section.
+
+  9. "trace record 48 bytes... 2.1 billion records, 143.6 GiB at 72 bytes" — BASELINE line 1340: "925 M parent + 1,217 M child traces on a 2-h acquisition = 143.6 GiB" — 925M + 1217M = 2,142M = 2.1 billion ✓ at 72 bytes = 154.2 GB = 143.6 GiB ✓. "measured -10.7 GB there and -2.7 GB on dataset D: less than the 16-24 GiB predicted" — line 1360: "The record change measured -10.7 GB of that 11.3 rather than the 16-24 GB predicted" ✓ (GB vs GiB mixing, fine).
+
+  10. malloc_trim: "takes the peak from 265 GB to 186 GB" — BASELINE line 1395: "v13 r1 | 30:41 | ... | 264.9" — 264.9 ✓ (~265). 186? Check. Line 1383 "trades ~8.5% wall for ~30% memory" ✓. Need "186" grep. Earlier grep "186 GB" — no hit shown in head -80? The grep included "186 GB" pattern; no match shown (output truncated at 80 lines, but line 1395 shows 264.9). Let me grep specifically for 186 and 138 GB floor and "51%".
+
+  11. "measured at 51% of the MS1 phase (39.0 s of 75.9 s)" ✓ line 1489. "Chunking over spectra takes it to 0.55 s and the phase to 36.3 s at 8.0x" — need to verify 0.55/36.3/8.0x. Grep didn't show. Check lines ~1489-1520.
+
+  12. "prepareTracing sorted up to 239 million seed indices" — verify "239". "segmenting by band first... per-window prep from 60.1 s to 27.1 s at the worst window, 904 s to 393 s summed" ✓ line 1500.
+
+  13. "sorted up to 239 million" — grep later.
+
+  14. GOMP: "204,800 precursors at 100 threads" ✓ line 1445. "200,000 iterations -> 82.7x, 300,000 -> 1.0x, num_tasks(400) at 300,000 -> 88.0x" ✓ lines 1450-1452. "exactly two of 28 windows" ✓ 1445. "417.6 s and 581.0 s... 12-28 s... 748.5 s wall... 741.9 s chain" ✓.
+
+  15. "First public-data extraction: 136,818 spectra in 57 s" ✓ line 1052 ("57 s wall" — but line 1101 says "136,818 | 0:42 | 16.2 GB" — 42 s?! Line 1052 says 57 s wall, 28 CPU-min; line 1101 table says 0:42 wall for same acquisition 136,818 spectra. Two different wall times for the same extraction in BASELINE (57 s vs 0:42). Hmm — maybe different hardware or rerun. CHANGELOG says "136,818 spectra in 57 s" matching line 1052. BASELINE internally inconsistent (57 s vs 42 s) — check context around 1052 and 1101. Might be different nodes/runs. Flag if warranted.
+
+  16. C4 claims: "18 of the 27 public PXD017703 acquisitions" — line 1031: "9 Evosep acquisitions ... and 18 'highsens'" ✓. "9 of 27" py3 ✓ (9 Evosep). "C4 = -0.0905 ... firmware 6.0.110" need check.
+
+  17. "Entrapment FDR on all six datasets at the v0.3.0 defaults (2026-09-05): 1.13-1.31%" — verify. Also "At this release's defaults the whole-run figure is 1.33% on dataset D and 0.93% / 1.03%" ✓ BASELINE.
+
+  18. "perf:stream_load... +223 Sage peptides (+2.0%)... 1.75x the memory and ~1.7x the wall" — verify. src option text: "true = 655,776 spectra in 5:11 at 78.4 GB, false = 656,371 in 10:30 at 121.8 GB" — that's dataset D: wall 5:11 vs 10:30 = 2.03x, memory 78.4→121.8 = 1.55x. Hmm, but CHANGELOG says "on the larger one... 1.75x the memory and ~1.7x the wall" — larger file is TNBC 2-hour, dataset D is smaller. README says "(90 GB floor)" and "1.75× the memory and ~1.7× the wall". src says 90.3 GB RSS floor for one-shot. Wait src says "MEASURED 90.3 GB RSS at t=0s" — but dataset D false = 121.8 GB peak. README stream_load row: "false holds the whole run in memory (90 GB floor) ... measured, it is slightly more sensitive on a large file (+2.0% Sage peptides ...) for 1.75× the memory and ~1.7× the wall". Need BASELINE verification of +223 / +2.0% / 1.75x / 1.7x. Grep for "223" and "1.75".
+
+  19. "SPEXTRACTOR_PICK_BATCH... 256 -> 4096 is -39% on the load phase... 4096 loses 7.2% of Sage and 6.1% of MSFragger" — verify. README Determinism says "1024 and 4096 change the digest, and 4096 loses 7% of peptides" consistent-ish.
+
+  20. "Before this cycle the same file ran 1.46x slower than the reference (31:27 against 21:28)" ✓ BASELINE 31:26.98 vs 21:28.00.
+
+  21. README Performance table window-loop occupancy "~78×" (30-min) vs options table "~72× (30-min)". Verify against BASELINE: dataset D v38 window loop occupancy? v38 D wall 3:12.61; earlier T2 (v35): "window loop 412.0 s (80.0x)" — that's TNBC. For dataset D, what's the occupancy? src option text for require_isotope_support: "on = 655,776 spectra, 5:15, 65.7x" (2026-09-04). Hmm 65.7x. README claims 72× or 78× for 30-min. Need BASELINE evidence. Grep for occupancy numbers on dataset D: "78" etc. Let me grep "x)" patterns near dataset D v38 section. Actually the v38 D table doesn't list occupancy. The internal README contradiction (72 vs 78) stands regardless.
+
+  22. README Determinism: "The loader batch size is not free: 1024 and 4096 change the digest, and 4096 loses 7% of peptides" — CHANGELOG says "256 -> 4096 ... digest changes with the batch size and 4096 loses 7.2% of Sage and 6.1% of MSFragger peptides". Consistent.
+
+  23. README Tests: "Thirteen end-to-end checks" ✓ (c1-c6 = 6, cg x2 = 2, c9-c13 = 5 → 13; total computed as 6+2+2+1+1+1 = 13 ✓). README lists: "isotope ownership, the charge floor, parameter validation, thread-count determinism, mass-trace extension across missing cycles, and that the shipped detector is the one that actually runs" ✓.
+
+  24. CHANGELOG: "End-to-end checks 9-13: the shipped detector is the one that runs (9, 10)" — check 9 = integer runs, check 10 = fallback loud. "the shipped detector is the one that runs (9, 10)" — 10 is about fallback, not "the shipped detector runs"; the parenthetical pairs 9&10 as detector checks ✓ fine. "the MS1 arena compaction self-test (12)" ✓, "admission gate's logged high-water mark (13)" ✓, "one isolation m/z in two ion-mobility slices is two windows (11)" ✓.
+
+  25. CHANGELOG: "the suite ran every check on the openms fallback before 9 and 10 existed" — test comment: "Until 2026-09-04 every check above ran on spx:detector=openms" ✓.
+
+  26. v1.1.0: "CI runs on four platforms per push (Linux GCC 13 and 11, macOS arm64, Windows MSVC)" — tests.yml: ubuntu-latest gcc (not pinned to 13 — ubuntu-latest in 2026 would be 24.04/26.04 with gcc 13/14; "GCC 13" claim unverifiable but plausible), ubuntu-22.04 gcc-11 ✓, macos-latest arm64 ✓, windows msvc ✓. But those jobs do NOT build the tool — only tests-only targets. The sentence says "CI runs on four platforms per push" — fine, but CONTRIBUTING says "The second form ... is what CI runs on four platforms" ✓ accurate. The v1.1.0 phrasing could mislead but it's old. However README Requirements "GCC 13+ or Clang 16+" — tests.yml uses gcc-11 and appleclang for the tests-only build. If the tool requires GCC 13+, but CI's only per-push compile uses gcc 11 on a reduced target, and the full-tool build runs weekly only on ubuntu-latest — the README requirement is not CI-enforced. Also worth noting: the full tool has NEVER been CI-built on macOS/Windows; README/CONTRIBUTING don't claim portability of the tool itself. Not a doc contradiction per se. But: is the claim "GCC 13+" consistent with gcc-11 compiling SPEXTRACTOR_TESTS_ONLY? tests-only excludes the tool, so no contradiction.
+
+  27. Q1: Also — v1.1.0 changelog says "the output format follows the -out extension, .mzpeak by default" but src: without mzPeak build, setValidFormats_("out", {"mzML"}) only and -out_type mzpeak refuses. README documents. Fine.
+
+  28. Check the REFERENCE-COMPARISON doc for: 5,313->5,322, "+0.29", "99.4-99.9%", "1.8%", "3-5x", "178k", "13%", "60%", "0.06-2%" etc.
+
+  29. README: "-charge:min_charge ... though only ~1.7% on a 30-minute one" — src: "z=1 was ~30% of emission and ~1.7% of peptides" on dataset D ✓. And BASELINE v37: "202 peptides against 5,000+" — 202/12,536 = 1.6% ✓.
+
+  30. README "-assembly:require_isotope_support ... false roughly doubles emission, is ~7× slower, and identifies fewer peptides" — src: "6.9x SLOWER", emission 655,776 → 1,255,577 = 1.91x ✓, Sage 12,482→12,212 / MSFragger 12,337→12,148 fewer ✓. "~7×" ✓.
+
+  31. README "-perf:malloc_trim ... Trades -30% peak memory for +8.5% wall on a 2-hour acquisition" ✓.
+
+  32. CHANGELOG "Why 2.0": "the MS1 arena-compaction fix, the C4 calibration term and the window key all change spectra" ✓ consistent with Fixed entries.
+
+  33. "The public releases v1.0.0 and v1.1.0 (2026-09-04) were cut from the v0.3.0 tree described below plus the two defaults recorded under v1.1.0" — "the two defaults recorded under v1.1.0": v1.1.0 Changed section lists THREE items: -threads default, output format follows extension, and CI. Two defaults = threads + out format ✓ (CI is not a default). OK.
+
+  34. Semver Q1 — also consider: v1.0.0/v1.1.0 both released same day 2026-09-04, and v2.0.0 four days later. Semver allows it. The rename, mandatory build patch, and output changes are breaking → major ✓. Defaults changed (min_charge) — behavioral break → also major-worthy. So yes 2.0.0 is right; arguably the changes could have been 1.2.0 under lenient reading but the executable rename alone forces major. Answer: yes, correct.
+
+  35. Q2: version_ = "2.0.0". Risks:
+     - TOPPBase ini handling: when writing an ini, the "version" param = 2.0.0; when loading an old ini (with OpenMS version string), TOPPBase warns version mismatch — acceptable, and arguably desirable.
+     - OpenMS "official tools" checks: ToolHandler — they pass official=false ✓ handled (the comment says the old name was "passing itself off as an official TOPP tool").
+     - mzML software entry: downstream tools (e.g., OpenMS FileInfo, IDMapper) don't validate versions; psi-ms may want name+version — fine.
+     - One subtle risk: some OpenMS tools refuse to read ini files whose version is newer than their own; not relevant.
+     - Another: verboseVersion_ set ✓ (they handled it).
+     - Also OpenMS's `-test` mode / TOPPBase writeParamMetaInfo_ — uses version_ for the software userParam. Fine.
+     - Potential real issue: OpenMS 3.6.0-pre version check in CMake? No.
+     - Conclusion: low risk; the pair assignment covers --help and ini; residual risks: external workflow parsers expecting OpenMS-style version strings, and any OpenMS internal that parses version_ as x.y.z — "2.0.0" parses fine.
+
+  36. Q3 numbers cross-check within README: 
+     - "window-loop occupancy ~78×" vs "~72×" (options table) — contradiction.
+     - README "~90× (2-hour)" vs performance "~89×" — rounding, consistent-ish (89.2 ≈ 89, "to ~90×" in options table). The pair "~72× to ~90×" vs "~78× / ~89×": 72 vs 78 is a real discrepancy.
+     - What's actual? BASELINE v38 009: 443.4 s (89.2x) ✓ ~89. Dataset D v38: not in excerpt tables. Earlier: "on = 655,776 spectra, 5:15, 65.7x" (2026-09-04, old). T2 (v35) TNBC 009: 80.0x. So "~72× (30-min)" and "~78× (30-min)" — need the actual number. Grep BASELINE for dataset D window loop occupancy around v38: "3:12.61 / 57.3 GB" no occupancy given. So both 72 and 78 unsupported by the cited record? There may be a D occupancy elsewhere. Grep "occupancy" in BASELINE.
+
+  37. CHANGELOG "The 30-minute dataset D runs in 3:13 at 57 GB" — 3:12.61 rounds to 3:13 ✓; README perf table says 3:13 ✓.
+
+  38. README Disk: "mzML output is roughly 9 GB for a 30-minute run and 19–20 GB for a 2-hour run at the previous emission" — vs v1.1.0: "2.25 GB against 6.23 GB for the same 655,776 spectra". 6.23 GB mzML for 655,776 spectra ≈ dataset D at old emission. README says "roughly 9 GB for a 30-minute run" — inconsistent with 6.23 GB measured for the 30-min dataset D output (655,776 spectra). Unless "30-minute run" ≠ dataset D. Dataset D IS the 30-minute gradient (perf table: 30-minute gradient 33,553 frames; dataset D v35 656,257 spectra ≈ 655,776 at earlier defaults). So 9 GB vs 6.23 GB — the mzML for ~656k spectra measured 6.23 GB (v1.1.0). README's "roughly 9 GB ... at the previous emission" contradicts the project's own 6.23 GB measurement. MEDIUM. Unless output grew... "at the previous emission" should mean ~656k spectra = 6.23 GB. Flag.
+
+  39. "the current default emits 30–70% more spectra" — D: 854,817/656,257 = +30.3% ✓; 009: 3,918,321/2,343,822 = +67.2% ✓.
+
+  40. README Requirements memory: "~57 GB peak on 30-min and ~170–190 GB on 2-hour" ✓; "(the 30–60 min cohort spanned 68–109 GB before the memory work)" — can't verify; presumably BASELINE.
+
+  41. CHANGELOG v2.0.0 "Where it stands" — "identifies 1.28x the peptides with Sage and 1.00x with MSFragger (27,831 / 28,181 against 21,743 / 28,294)" — 28,181/28,294 = 0.996 → "1.00x" ✓.
+
+  42. Hmm, one more: "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — but z=1 stratum is 2.9%; sentence is about whole-run ✓.
+
+  43. "0.61x the reference implementation's wall time at 0.55x its peak memory (12:42 / 188 GB against 20:57 / 341 GB)" — 12:42.21/20:56.9 = 0.606 ✓; 187.9/340.6 = 0.552 ✓.
+
+  44. But NOTE: the head-to-head compares SpeXtractor's SINGLE v38 run (12:42.21, one rep) vs reference mean of two reps. BASELINE's earlier head-to-head table measured v35 twice (11:24.97/10:36.92) — big run-to-run spread (~8%). The v38 number is one run. Also T3 section: 13:43.10 contended, "a clean rerun follows" and v38 table has 12:42.21 single. Minor methodological note: single rep. Also memory 187.9 vs v35 178.8 — v38 peak is +9 GB. Fine.
+
+  45. "The honest memory statement is 'roughly half'" ✓ disclosed.
+
+  46. Check REFERENCE-COMPARISON doc now for claims: 5,313→5,322 (run 009 z=3), "1.8%", "+0.29", "99.4-99.9", "3-5x", "matched score and length", "178k", "+223", "1.75", "1.7x", "7.2%", "6.1%", "-39%", "1024", "239 million", "0.55", "36.3", "8.0x", "51%", "6.23", "9 GB", "85%", "40%", "72", "78", "occupancy", "C4", "-0.0905", "0.0000 ppm", "53", "938", "57 s".
+
+  Let me grep both docs.
+
+44:gate off: 2.15 M precursor hypotheses instead of 1.10 M puts the window loop at 91.8% of the run
+70:  (11,402/11,560/11,482/11,751 across k=1..4) is NOT run-to-run noise -- it is a REAL (non-smooth)
+116:  | corr_power=4 | 10,875 | 11,751 | 10,262 @ 2.15% |
+117:  | **corr_power=2 + im_weight 0.005** | **11,112 (96.5% of dt)** | **11,813 (84.8% of dt)** | **10,574 @ 2.13%** |
+165:apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- SpeXtractor
+394:| dataset A |  9,735 | **10,333** | +6.1%  | -- | +3.19 [-0.8,+7.1] |
+396:**The calibration gain GENERALISES: +6-11% closed Sage on all three files with NO vendor library.**
+413:**SpeXtractor reaches 100.9-110.5% of the reference implementation on closed Sage across the three files** -- no vendor
+440:Three-file pattern: the precursor bias is z=2-dominated (z3/z4 near zero on dataset D/dataset B) and absent in the lowest m/z tercile -- an isotope/mono-envelope effect (our reported mono for z=2 mid/high-m/z precursors sits a fraction of a ppm-scaled isotope offset high?) rather than a uniform centroid shift; the FRAGMENT bias is uniform −2.0..−2.4 ppm on all three files and is the one that touches the 20 ppm search tolerance and Sage's average_ppm feature (−3 ppm uniform shift cost −165 peptides on 09-01). Estimator A/B (apex / median vs weighted mean) queued behind the E5 gate.
+455:FDR. On all three files the shipping arm's true FDR at nominal 1% is 0.95-1.37%, inside the reference implementation's band on the two files where it exists (1.22-1.24%): the 3-file closed-search parity claim now carries its FDR control.
+705:from its apex frame's IM-band peaks) + `SPEXTRACTOR_BACKFILL_RAW=50`. Emission rises 927,813 -> **981,223 (+5.8%)**, so
+709:| empty + K=0 (backfill all) | 981,223 | 12,218 (−2.5%) | 12,600 (+5.6%, 90.4% of dt) | 3,309; some PSM 58% |
+710:| empty + K=60 (faint tail) | 981,223 | 12,593 (+0.4%) | 11,982 (+0.5%) | 3,892; some PSM 64% |
+781:### NEW DEFAULT: `charge:min_charge` = 2 (2026-09-03, 15:05) -- confirmed on all three files, both engines
+823:Measured old-vs-new with both arms on the SAME host, three files concurrently on three machines,
+867:wall-clock change, and possibly ~4% more CPU.** The earlier "−5 to −6% wall on three files" was
+886:so "up to ~3% on one file, none on another", not "−5 to −6% on three files". The CPU cost is real
+905:**CPU-seconds RISE slightly on two of three files** (dataset A 5:40:40 -> 5:51:55, dataset B 3:21:01 ->
+961:beyond the three files every decision in this file was made on.
+994:the larger file, the one-shot reader finds **+223 Sage peptides (+2.0%)** and +18 MSFragger, and
+1004:of Sage peptides on a large file and buys 1.6-1.75x less memory (108 vs 189 GB on dataset A) and
+1005:~1.7x less wall time. On a machine that can hold it, `-perf:stream_load false` is the more sensitive
+1104:| 200SPD 200 ng S3-A2 (2738) | 74,874 | 0:31 | 10.7 GB | 5,701 | 61,750 |
+1293:| 1% | 11,016 -> 11,218 (**+1.8%**) | 11,935 -> 11,679 (-2.1%) |
+1452:| 300,000 | `num_tasks(400)` | 400 | 88.0x |
+1499:Chunking the distribution over spectra took it to 0.55 s. Segmenting the seed list per band took
+1517:(138.3 s of the phase's 155.7) is sequential by construction; the mzML write is 53.0 s at one
+1559:| v25 | 237.5 s | 143.9 s | 15:01 | 467.5 s (69.5x) | 155.7 s (138.3) |
+1560:| v27 (m/z key) | 234.2 s | -- | 14:32 | 459.8 s (70.4x) | 130.0 s (112.8) |
+1784:| dataset D, 256 -> 4096 | 12,593 -> **11,682 (-7.2%)** | 11,642 -> **10,930 (-6.1%)** | 91.7% | 81.3% |
+     231 docs/REFERENCE-COMPARISON-2026-09-08.md
+16:| **SpeXtractor v35** (min_charge 2) | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
+39:| Sage proteins | 5,813 | 4,944 | **1.176** | 4,074 | 3,802 | **1.072** |
+48:| Sage peptides | 27,855 | 18,920 | **1.472** | 19,035 | 14,764 | **1.289** |
+50:| MSFragger peptides | 26,559 | 27,427 | **0.968** | 18,212 | 18,745 | **0.972** |
+90:| spectra | 2,343,822 | 4,035,058 (+72%) |
+103:| spectra | +72% | +64% |
+127:| ion mobility vs the 2+ trend line (1/K0 = 0.5026 + 0.000729 m/z, fit on 15,001 z=2 IDs) | z=1 IDs sit **+0.29 Vs/cm2 above it** in every 100-Th bin; 99.4% above, 0.6% on the 2+ band. A halved 2+ ion would carry the 2+ mobility. |
+128:| the reference implementation's own 1+ IDs | identical offset (+0.283 to +0.296), 99.9% above the 2+ line -- the same population |
+129:| sequence chemistry | 92% are 7-9 residues, ~920 Da, 86% end in K, only ~12% carry any internal K/R/H (69% for z=2): single-basic-site tryptic peptides, the class that flies as 1+ |
+142:Measured on 009: **~13% of the 2.55 M z=1 calls sit on the 2+ mobility band** (p2 = 51% there against
+143:a 2.3% chance rate on the 1+ band), 60% of them below m/z 750 where a 1+ cannot be scored at all --
+170:length, z=1 8-10-mers are 3-5x dirtier than z=2 8-10-mers (009 score octiles: 11.0/2.9/4.1/2.8%
+200:calls to 3+, but only ~1.8% of z=1 calls are genuinely on the 3+ band (the 2+ and 3+ mobility lines
+202:5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k spectra. A z=1 call on
+• Important: line 202 of REFERENCE-COMPARISON says "5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k spectra." So the CHANGELOG's "178k / 93k spectra" matches the REFERENCE-COMPARISON doc — but the actual BASELINE extraction counts show spectra deltas of 116,913 (T3→T4 on 009) and 72,895 (v37→v38 on D). So the "178k/93k" are veto CALL counts (178,226 / 93,008), mislabeled as spectra in both the reference doc and CHANGELOG. Unless a "call" produces more than one spectrum... A z=1 call re-called to 3+ = one spectrum. Dropped call = one spectrum removed. So spectra delta should equal call count minus... hmm, wait: v37→v38 D: spectra 927,712 → 854,817 = -72,895, but 93,008 calls were previously re-labeled 3+ and are now dropped. 93,008 ≠ 72,895. Why fewer spectra dropped than calls? Possibly some calls produce no spectrum (min_fragments filter), or some 3+ spectra... Actually if a call doesn't yield enough fragments, no spectrum is emitted either way — so the emitted-spectrum delta (72,895) can be smaller than the call count (93,008). So "adding 93k spectra" is wrong: it added ~73k spectra. Similarly 009: 178,226 calls but spectra delta 4,035,234-3,918,321 = 116,913 (~117k). So CHANGELOG claim "adding 178k / 93k spectra" is unsupported — evidence says 117k / 73k spectra (the 178k/93k are call counts). HIGH.
+
+  Also REFERENCE line 90: "spectra 2,343,822 | 4,035,058 (+72%)" vs BASELINE T3 = 4,035,234. Minor discrepancy (4,035,058 vs 4,035,234) — the reference doc's own number differs from BASELINE by 176. LOW.
+
+  Now "1.8%": REFERENCE line 200: "only ~1.8% of z=1 calls are genuinely on the 3+ band" ✓ CHANGELOG ✓.
+
+  "112-138 s -> 7.8 s" — check BASELINE speculation section. Line 1559-1560: v25: 155.7 s (138.3); v27: 130.0 (112.8). Hmm those are PRECURSOR_INFER with greedy walk in parens: 138.3 and 112.8. So "112-138 s" = the greedy walk range across versions?? The 23.4x: line 1617 "TNBC v30 | 7.8 s | 26.9 s | 23.4x | 0.7%" and line 1628 "PRECURSOR_INFER | 26.9 s | 3.8% | 629.7 | 23.4x" → 629.7/26.9 = 23.4x. So the 23.4x is phase speedup vs 629.7 CPU-s? Column meaning unclear. Let me read BASELINE lines 1599-1635 to determine what 23.4x refers to. If 23.4x = 182.5/7.8, then serial baseline 182.5 s. CHANGELOG says "the greedy claim loop went from 1.0x to 23.4x ... 112-138 s -> 7.8 s" — 112.8-138.3/7.8 = 14.5-17.7x ≠ 23.4x. Unless baseline is 156.3 s (greedy walk measured on TNBC): 156.3/7.8 = 20.0x ≠ 23.4x. So CHANGELOG's juxtaposition is inconsistent. Read the section.1052:First extraction, 100SPD 100 ng, shipped defaults: **136,818 pseudo-MS2 spectra, 57 s wall, 28 CPU-min,
+1101:| 100SPD 100 ng S2-C1 (2731) | 136,818 | 0:42 | 16.2 GB | 12,861 | 115,396 |
+---
+   than one. The OpenMS patch is regenerated and re-verified byte for byte against the pinned base.
+2. **`C2 == 0` was rejected as "missing".** The 2020 timsTOF Pro firmware behind these files ships a
+   purely linear-in-sqrt calibration with no quadratic term, stored as a real 0.0. The guard existed
+   because a NULL C2 reads as 0.0 through the C API and would silently select the wrong law -- so
+   the loader now converts NULL to NaN (refused with its own reason) and a stored 0.0 is accepted.
+   The cancellation-free root already collapses to (t - C0)/b at C2 = 0; the golden tests pin it.
+3. **The shipped detector never ran in a public build.** `loadTofAxis` sat behind
+   `#if __has_include(<SQLiteCpp/SQLiteCpp.h>)`, false for an OpenMS INSTALLATION, so the integer
+   detector silently fell back to `openms` and only one log line said so. Caught by the tenth
+   end-to-end check on the stock-OpenMS CI. Both readers now use the sqlite3 C API through one
+   helper; a missing SQLite is a compile error. Same class as the two default-flag findings.
+
+First extraction, 100SPD 100 ng, shipped defaults: **136,818 pseudo-MS2 spectra, 57 s wall, 28 CPU-min,
+16 GB peak**, `spx:mz_calibration=tdf_table_modeltype1`, `spx:detector=integer`.
+
+Two operational lessons, recorded because each cost an hour: the ceph install carries its own
+`lib/libOpenMS.so`, so a converter fix in the OpenMS patch is invisible until the LIBRARY is
+republished, not just the executable; and the reference implementation's JVM aborts with
+`locale::facet::_S_create_c_locale name not valid` under a non-interactive environment -- run it
+with `LC_ALL=C`.
+
+**Public HeLa (PXD017703), 2020 Evosep sets, shipped defaults, 100 threads, one node each, Sage 1%
+peptides / MSFragger PSM rows (not peptides -- the driver counts rows; peptide/protein counts come with
+the reference comparison):**
+
+| acquisition | spectra | wall | RSS | Sage peptides | MSFragger PSM rows |
+|---|---|---|---|---|---|
+| 100SPD 100 ng S2-C1 (2731) | 136,818 | 0:42 | 16.2 GB | 12,861 | 115,396 |
+| 100SPD 100 ng S2-C5 (2735) | 130,459 | 0:41 | 15.3 GB | 12,520 | 109,406 |
+| 200SPD 200 ng S3-A1 (2737) | 75,462 | 0:30 | 10.8 GB | 6,154 | 63,161 |
+| 200SPD 200 ng S3-A2 (2738) | 74,874 | 0:31 | 10.7 GB | 5,701 | 61,750 |
+| 200SPD 200 ng S3-A4 (2740) | 72,238 | 0:27 | 10.2 GB | 6,364 | 60,366 |
+Confirmed:
+
+  - 23.4x = 128.8/7.8? 128.8/7.8 = 16.5. No. Phase parallelism 23.4x = CPU/wall = 629.7/26.9. So "23.4x" in the v30 table is the phase's PARALLELISM (CPU/wall), not the speedup of the greedy loop! The greedy walk went 128.8 s → 7.8 s = 16.5x. CHANGELOG says "the greedy claim loop went from 1.0x to 23.4x on a 2-hour file, 112-138 s -> 7.8 s". Actual: greedy walk 128.8 → 7.8 (16.5x); 23.4x is the phase's CPU/wall parallelism ratio. And "112-138 s" — where from? v25 138.3, v27 112.8 greedy walk (parens in lines 1559-1560). v28: 128.8. So "112-138 s" is a mash-up of the v25/v27 greedy-walk times. 138.3/7.8 = 17.7x; 112.8/7.8 = 14.5x. Neither is 23.4x. So the CHANGELOG sentence conflates phase parallelism (23.4x) with the walk speedup (16.5x) and quotes a range that doesn't multiply out. HIGH internal inconsistency / misreported measurement.
+
+  Also CHANGELOG says "byte-identical spectrum list on three files" — BASELINE says "Byte-identical on dataset D AND on dataset A... and on TNBC 009" = three files ✓.
+
+  - "136,818 spectra in 57 s" — BASELINE line 1052 says 57 s wall at "shipped defaults" but line 1101 table says 0:42 for the same acquisition. Two conflicting wall times in BASELINE itself; CHANGELOG picked 57 s. Hmm, maybe the first was first extraction (cold cache?) and table is per-acquisition campaign. The CHANGELOG cites "57 s" which matches the prose. It's a discrepancy within the record — flag LOW/MEDIUM: BASELINE internally reports both 57 s and 0:42 for the same file; the changelog uses the slower one.
+
+  Now check the remaining unverified claims:
+
+  1. ms1 band distribution: "measured at 51% of the MS1 phase (39.0 s of 75.9 s on a 30-minute file)" ✓ 1489. "Chunking over spectra takes it to 0.55 s and the phase to 36.3 s at 8.0x" — line 1499: "Chunking the distribution over spectra took it to 0.55 s." ✓ but "the phase to 36.3 s at 8.0x" — need to check. Grep "36.3" earlier found nothing? First grep included 36.3 — no hits shown (was in pattern list; only lines displayed). Actually the first grep output didn't include any 36.3 line. Let me grep again for "36.3" and "8.0x" and "75.9" and "239".
+
+  2. "prepareTracing sorted up to 239 million seed indices" — grep "239".
+
+  3. "2.8-2.9%": src says ~2.8%; BASELINE says 2.91/2.94 → CHANGELOG "2.8-2.9%" LOW.
+
+  4. "60% of them below m/z 750" ✓ REFERENCE line 143.
+
+  5. "3-5x dirtier" ✓ REFERENCE line 170.
+
+  6. "99.4-99.9%" ✓ REFERENCE 127-128.
+
+  7. "+0.29" ✓.
+
+  8. "7-9 aa, lysine-terminated" ✓ line 129: "92% are 7-9 residues, 86% end in K".
+
+  9. "the two lines are ~1 sigma apart at low m/z" ✓ BASELINE v37 section.
+
+  10. "0.87-0.91%" ✓ (001: 0.87; 009: 0.91).
+
+  11. "entrapment 1.33% on dataset D" ✓ v38 table.
+
+  12. "1.13-1.31%" v0.3.0 defaults six datasets 2026-09-05 — grep to verify.
+
+  13. "-39% on the load phase" for PICK_BATCH — line 1784 confirms 7.2%/6.1%; check -39% and 1024.
+
+  14. C4: "-0.0905", "0.0000 ppm", "-53..-938 ppm", "firmware 6.0.110", "18 of 27" — grep.
+
+  15. malloc_trim "265 GB to 186 GB" — line 1395: 264.9 for v13 r1 interleaved; where's 186? grep "186".
+
+  16. "138 GB at the loop start" — grep "138 GB".
+
+  17. occupancy 72/78 for 30-min — grep "occupancy" / "72x" / "78x" in BASELINE.
+
+  18. "1.13 vs 1.15%" entrapment for stream_load and "108 vs 189 GB" — line 1004: "1.6-1.75x less memory (108 vs 189 GB on dataset A)" — so memory ratio 189/108 = 1.75x ✓ "for 1.75x the memory" ✓. Wall ~1.7x ✓ line 1005. "+223 (+2.0%)" ✓ line 994. "at unchanged entrapment FDR (1.13% vs 1.15%)" — verify via grep. Also README says "(90 GB floor)" — src says 90.3 GB floor ✓.
+
+  19. "the reference implementation" naming — fine.
+
+  20. v1.1.0 "On 224 cores against the benchmark's -threads 100: 5:10 vs 5:22 for byte-identical output" — verify grep "224".
+
+  21. v1.1.0 "2.25 GB against 6.23 GB for the same 655,776 spectra" — grep "6.23\|2.25".
+
+  22. "9 GB" README disk claim — grep BASELINE for mzML size of dataset D output.
+
+  Let me run these greps.35:| | spectra | wall | window-loop occupancy | Sage | MSFragger |
+43:which is why it was re-measured rather than inherited. Note the occupancy collapse to 6.0x with the
+516:26:51 wall / 156 GB peak; dataset B 15:28 / 109 GB. The apex arm outputs are the new benchmark reference
+769:Entrapment is flat everywhere (dataset A apex 0.91% / q05 0.91% / K150 0.97%; dataset B 1.13% / 1.13% / 1.14%),
+790:| dataset B | 844,755 -> **586,069** (−30.6%) | 10,156 -> **10,294** (+1.4%) | 9,738 -> **9,822** (+0.9%) | 1.13% -> 1.28% |
+802:| dataset D, 100 threads | wall | peak RSS | window-loop occupancy | Sage @1% |
+829:| | dataset D (ibminode05, 128c) | dataset A (spock, 224c) | dataset B (data, 224c) |
+835:| window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
+838:| sum of per-structure peaks | 36.2 -> 28.3 GB | 58.5 -> 46.9 GB | 41.3 -> 31.2 GB |
+881:| process peak RSS | 81.3 GB [80.9-81.9] | 77.9 GB [76.4-78.9] | **−4.1%** |
+906:3:23:16) while wall falls everywhere. That is not a contradiction and it is not free: occupancy
+950:| file | spectra | wall | peak RSS | window-loop occupancy | Sage @1% | MSFragger @1% |
+956:| dataset E | 542,533 | 5:38 | 67.9 GB | 61.4x | 11,217 | 10,585 |
+963:Ranges across the cohort: wall 5:21-8:26, peak RSS 67.9-108.7 GB, occupancy 60.7-66.7x, emission
+971:Timings are NOT comparable between rows: the three nodes differ (128 vs 224 cores) and are shared
+990:| **entrapment FDR** | **1.26% [1.01-1.51]** | **1.26% [1.02-1.49]** | **1.13% [0.89-1.40]** | **1.15% [0.93-1.40]** |
+995:**entrapment FDR is unchanged** (1.13% vs 1.15%, intervals essentially identical). The gain is not
+1004:of Sage peptides on a large file and buys 1.6-1.75x less memory (108 vs 189 GB on dataset A) and
+1015:| A | 10,273 | 79 | 0.76% | **1.13%** | 0.89-1.40 |
+1020:| F | 10,869 | 97 | 0.88% | **1.31%** | 1.04-1.57 |
+1022:**True FDR is 1.13-1.31% at a nominal 1%** -- a mild, CONSISTENT under-estimate by the engine, with
+1082:(firmware 6.0.110) stores `C4 = -0.0905`, every frame referencing that row. No open implementation
+1088:constant on frame 1 without the temperature term, **0.0000 ppm with it** (the constant IS that frame's
+1089:`dC1*dT/1e6 = -7.2e-8`), 0.0000 ppm on the last frame. Dropping the term: **-53 .. -938 ppm**, worst
+1109:0.4-4.9 GB mzML each, 1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the
+1302:arms (1.13% -> 1.12%, intervals overlapping).
+1327:memory instead of growing on top of it, which is where the 0.9 GB comes from. That is the retention
+1337:| **v17 (step 8, 56-byte record)** | **78.99 GB** |
+1359:here; the allocator trim alone is worth 74.9 GB, which is the honest ranking and the reason it
+1399:~99 GB at the MS1 boundary; the window loop then has to fault those pages back in (minor faults
+1452:| 300,000 | `num_tasks(400)` | 400 | 88.0x |
+1518:thread. Whole-run occupancy is 43x of 100 threads.
+1522:The speed case was strong -- window loop -30% on both samples, occupancy 70.8x -> 94.2x (dataset D) and
+1590:prep -> trace -> split -> score chain with trace capped at 12 bands. Whole-run occupancy is 45x of
+1721:**+31% window-loop CPU and made the wall 11% worse**. Gating the width on live occupancy removed the
+1765:over batches of `kBatch` frames, where a batch not much larger than the thread count caps occupancy
+1772:| 1024 | 26.2 s | 56.4x | 183.8 s | 55.3 GB | `561446fb` |
+1808:campaign. SpeXtractor's 179 GB is a genuine requirement. The honest statement is "roughly half, and
+1820:| wall / peak RSS | 3:27.48 / 57.6 GB | **3:25.95 / 57.9 GB** | flat |
+1853:| peak RSS | 190.9 GB | **190.3 GB** (flat: emission is not what bounds memory) |
+1858:in ~13:20 against 11:59 on the same node); the window loop's occupancy rose to 90.6x because
+1870:| wall / peak RSS | 3:27.48 / 57.6 GB | 3:25.95 / 57.9 GB | **3:12.61 / 57.3 GB** |
+1915:| peak RSS | 179.1 / 178.5 GB | 177.4 / 180.0 GB | 187.9 GB |
+1925:for v35) and no memory beyond the usual +-10 GB run-to-run spread; the window loop's occupancy rose
+1933:| peak RSS | 357.7 / 323.4 GB (mean 340.6) | **187.9 GB** | **0.55x** |
+Missing verifications:
+  - "36.3 s at 8.0x" — no hit. Line 1489-1500: MS1_TRACE = 75.9 s, distribute 39.0 serial; chunking took it to 0.55 s. But phase "to 36.3 s at 8.0x"? Let me read lines 1486-1520. 75.9 - 39.0 + 0.55 = 37.45 ≈ not 36.3. Need exact text.
+  - "239 million" — no hit for "239". Check "million seed" or "prepareTracing".
+  - "186 GB" — no hit! malloc_trim "takes the peak from 265 GB to 186 GB" — BASELINE line 1395 shows v13 r1 264.9. Where's 186? Line 1399: "~99 GB at the MS1 boundary". Hmm. Also "138 GB at the loop start" — no hit for "138 GB". Line 1399 says ~99 GB at the MS1 boundary. src option text says "measured on a 2-h acquisition that floor is 138 GB at the loop start, and trimming it first takes the run's PEAK from 265 to 186 GB". Let me read BASELINE lines 1383-1430 to see what's recorded.
+  - "1.13-1.31%" ✓ line 1022 (six datasets? line 1015/1020 show A and F; six datasets A-F ✓).
+  - C4 ✓ lines 1082-1089. "firmware 6.0.110" ✓. "-53..-938" ✓.
+  - "0.4-4.9 GB mzML each" for Evosep files — README "roughly 9 GB for a 30-minute run": dataset D is 30-min, in-house. What's the mzML size of D output? Need grep for "GB mzML" or the size of D's mzML. v1.1.0 says 6.23 GB for 655,776 spectra. README says "roughly 9 GB for a 30-minute run ... at the previous emission". If D's mzML at 655,776 spectra = 6.23 GB, then "roughly 9 GB" is wrong-ish... unless "30-minute run" output at previous emission = 656k spectra = 6.23 GB. "Roughly 9" vs 6.23 is a 44% miss. Hmm, maybe different run (dataset D is 30-min gradient, 33,553 frames ✓ same). So README's 9 GB contradicts v1.1.0's 6.23 GB for the same emission. But wait — could the 2-hour "19-20 GB" scale? 6.23 GB × (2.34M/0.656M spectra) = 22 GB — roughly consistent with 19-20. So 9 GB for 30-min looks wrong; should be ~6-7 GB. Flag MEDIUM.
+  - occupancy: cohort line 963: "occupancy 60.7-66.7x" for 30-60 min cohort (old, before memory work). Line 835: dataset D 67.6→69.9x. Line 1522: "occupancy 70.8x -> 94.2x (dataset D)" — that's for something (ms1_trace_bands? trace bands?). Line 1858: 90.6x TNBC v37. Line 1925: ~90x. For 30-min dataset D current: ? README says ~78× (perf table) and ~72× (options table). Evidence: line 835 69.9x (old, 2026-09-03?), line 1522 94.2x?? That was "window loop -30%... occupancy 70.8x -> 94.2x (dataset D)" — 2026-09-07 (perf:trace_bands section?). Line 1518: "Whole-run occupancy is 43x of 100 threads." Hmm these are whole-run vs window-loop. The window-loop occupancy for dataset D at v38... line 1870 table doesn't include occupancy. T2 (v35) TNBC 80.0x. README perf table "~78×" for 30-min: plausible from line 1522's 70.8x→94.2x? Unclear. The contradiction 72 vs 78 within README stands; and neither is directly pinned by the record excerpt — flag as internal inconsistency MEDIUM.
+  - "224 cores... 5:10 vs 5:22" — no hit for "224" near v1.1.0 claim; line 829 mentions spock 224c. The 5:10 vs 5:22 is from private repo presumably; can't verify. Skip.
+  - "-39% on the load phase" for PICK_BATCH — line 1772: "1024 | 26.2 s | 56.4x | 183.8 s | 55.3 GB". Need 4096 row and -39%. Read lines 1760-1790.
+  - "1024 and 4096 change the digest" (README) vs CHANGELOG "the digest changes with the batch size" ✓.
+  - "digest returned the empty hash for a missing list" — fine.
+  - "904 s to 393 s summed" ✓ line 1500.
+  - "60.1 s to 27.1 s" ✓.
+  - "51% of the MS1 phase" — 39.0/75.9 = 51.4% ✓.
+  - "12/24/48 -> 75.0/93.7/147.9 s at 3.9x/3.5x/2.5x" — line 1669-1671 shows "75.0 s / 93.7 s / 147.9 s" ✓ but speedups 3.9x/3.5x/2.5x? Table shows "41.7 s | 9.8x | 31.4 s | 75.0 s" — the columns might be (new time, new speedup, distribute, old time). The old speedups 3.9x/3.5x/2.5x need verification — read lines 1661-1700.
+  - "41.7/27.1/20.4 s at 9.8x/18.4x/32.4x" ✓ lines 1669-1671.
+  - "MS1 tracing is 2x faster" — 41.7→20.4 = 2.04x ✓.
+  - README ms1_trace_bands: "peptide sets within 0.06–2% on both engines and both gate datasets" — actual: Sage -0.01%/-0.06%, MSFragger +0.02%/+2.03%. "0.06–2%" — 2.03% rounds to 2%, ok-ish; "within 0.06-2%" lower bound 0.06 but Sage moved only 0.01% and MSFragger 0.02%. The range "0.06–2%" misstates the low end (0.01-0.02% on three of four arms). LOW.
+  - Also: dataset A MSFragger +2.03% with overlap 89.33% — the gate "both engines" passed, but overlap dropped 89.66→89.33. Fine.
+
+  Now read BASELINE 1383-1430 (malloc trim) and 1486-1520 (serial stages) and 1661-1700 (ms1 bands) and 1760-1790 (pick batch).Key discrepancies confirmed:
+
+  1. malloc_trim: CHANGELOG says "measured, that floor is 138 GB at the loop start of a 2-hour acquisition" — BASELINE says "The trim returns ~99 GB at the MS1 boundary" (line 1399). "138 GB" appears NOWHERE in BASELINE. Hmm — the src option text also says 138 GB. Maybe the floor = retained free pages at loop start measured via mallinfo2 elsewhere. Let me grep "138" more broadly... earlier grep for "138 GB" found nothing. grep "floor" in BASELINE. Also CHANGELOG "takes the peak from 265 GB to 186 GB" — BASELINE: 264.9 → 186.2 interleaved ✓ (265/186 OK). But "138 GB floor" unsupported by BASELINE excerpt; the recorded figure is ~99 GB returned. Also, minor: CHANGELOG "minor page faults +26%" ✓ (287M→362M), "window-loop CPU +15%" ✓, "+8.5% of wall time measured interleaved" ✓.
+
+  Actually let me grep "138" in BASELINE.
+
+  2. MS1 phase: CHANGELOG says "Chunking over spectra takes it to 0.55 s and the phase to 36.3 s at 8.0x." BASELINE: distribute 39.0 → 0.55 ✓, but phase: 75.9 - 39.0 + 0.55 = 37.45 s; no "36.3" or "8.0x" anywhere in BASELINE. Also the serial sweep numbers 3.9x/3.5x/2.5x ✓ (line 1495-1497). The parallel numbers 41.7/27.1/20.4 at 9.8x/18.4x/32.4x ✓ (1669-1671). But "36.3 s at 8.0x" — unsupported. Also note: the 41.7 s at 12 bands (parallel distribute) — CHANGELOG's "MS1 tracing is 2x faster" (41.7→20.4). Fine. So "36.3 s at 8.0x" is an unsupported number — possibly stale from an intermediate build. Flag MEDIUM/HIGH.
+
+  Also CHANGELOG says "measured at 51% of the MS1 phase (39.0 s of 75.9 s on a 30-minute file)" ✓.
+
+  3. "prepareTracing sorted up to 239 million seed indices" — no "239" in BASELINE. Grep "million" or "seed indices".
+
+  4. "112-138 s -> 7.8 s" vs actual greedy walk 128.8 → 7.8 (16.5x), 23.4x is phase CPU/wall. Also "112-138" matches v25's 138.3 and v27's 112.8 greedy-walk remnants — but the direct predecessor v28 measured 128.8. The claim "1.0x to 23.4x" mislabels parallelism as speedup. HIGH.
+
+  5. 136,818 in 57 s vs 0:42 in the same BASELINE — internal contradiction in the record; CHANGELOG uses 57 s. MEDIUM/LOW.
+
+  Remaining checks:
+  - grep "138" and "seed" and "million" and "36.3".
+  - PICK_BATCH -39%: read lines 1760-1790.
+  - v1.1.0 "224 cores 5:10 vs 5:22": grep "5:10" "5:22".
+  - "6.23 GB" grep — no hit in BASELINE! v1.1.0 changelog's 6.23/2.25 GB figures — grep "mzpeak" sizes. Not in BASELINE? grep "2.25".
+  - "1.46 PSMs/peptide" fine.
+  - README "9 GB" — grep BASELINE for mzML output size of dataset D.
+
+  Let me also check REFERENCE-COMPARISON for the 4,035,058 vs 4,035,234 discrepancy and the "178k / 93k spectra" wording (line 202 confirmed it says "adding 178k / 93k spectra" — same error as CHANGELOG).1:195:the M+1 peak unconsumed by `used[]`, so it later seeds its OWN precursor one isotope too heavy -- that is
+2:500:| seed (most intense point) | 896,143 | 12,196 | −2.7% | +0.73 / −2.38 |
+3:503:(weighted/seed/top3) -- it is not produced by anything in our reporting chain after the TOF->m/z conversion, which is
+4:831:| wall base -> perf (SINGLE PAIR -- see the retraction below) | 6:31 -> 6:07 | 8:36 -> 8:09 | 5:40 -> 5:22 |
+5:936:  `[mem] window ... seeds N of P peaks` line reads **100.0%** -- every peak is above noise, so
+6:939:* **Moving the seed sort into the band tasks.** Priced by its own supporting evidence at <1% of CPU,
+7:940:  and it re-partitions seeds across bands -- the exact failure mode that cost 3.3% of peptides once.
+8:1061:**On reproducing the reference implementation's paper.** The paper (Nat Commun 2025, PMC11696033) contains NO HeLa
+9:1078:`final_S30/pseudo.mzML` and `digest_port/pseudo.mzML`, 655,776 spectra, 05:30 wall, 81.8 GB peak.
+10:1109:0.4-4.9 GB mzML each, 1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the
+11:1499:Chunking the distribution over spectra took it to 0.55 s. Segmenting the seed list per band took
+12:1508:| v23 | per-band seed segments | -- | -- | 450.4 s (78.1x) | 248.5 s (4.8x) | 154.0 s | -- |
+13:1517:(138.3 s of the phase's 155.7) is sequential by construction; the mzML write is 53.0 s at one
+14:1548:- `findPartner`, in the greedy claim loop, searched 22e6 doubles up to 50 times per seed. The key
+15:1559:| v25 | 237.5 s | 143.9 s | 15:01 | 467.5 s (69.5x) | 155.7 s (138.3) |
+16:1601:Precursor inference was the last single-threaded phase. The loop is greedy -- each seed marks its
+17:1602:isotope partners used -- but it parallelises EXACTLY, because the only mutable state a seed reads is
+18:1604:bitmap, recording the partner indices each seed's searches returned; the batch then commits in the
+19:1605:original order, re-evaluating only a seed whose recorded partners have since been claimed.
+20:1645:| dataset A | 12 -> 24 | 11,218 -> **11,037 (-1.61%)** | 10,689 -> **10,929 (+2.25%)** | 95.56% | 89.66% | 1.12% -> 1.14% |
+===
+
+
+### `SPEXTRACTOR_PICK_BATCH`: fast, and rejected (2026-09-07)
+
+LOAD is 13.7% of a 2-hour run at ~60x of 100 threads: a read (serial) -> pick (parallel) pipeline
+over batches of `kBatch` frames, where a batch not much larger than the thread count caps occupancy
+and the reader between batches is a bubble. The knob is already an env var, so it was free to sweep
+(dataset D, v35):
+
+| `PICK_BATCH` | LOAD | par | total | peak RSS | digest |
+|---:|---:|---:|---:|---:|---|
+| 256 (default) | 27.2 s / 19.8 s | 54.4x / 73.6x | 185.4 / 178.3 s | 55.5 GB | `9e5e5514` (both runs) |
+| 1024 | 26.2 s | 56.4x | 183.8 s | 55.3 GB | `561446fb` |
+| 4096 | **16.6 s** | **82.9x** | **165.3 s** | **51.6 GB** | `a3418b5e` |
+
+Deterministic at a fixed batch size (256 reproduced its digest exactly), but the digest CHANGES with
+batch size: the picker carries per-thread state, so which frames a thread sees changes its output --
+the "~2% of intensities at the 1e-5..1e-4 level" the load comment already records for serial vs
+parallel picking.
+
+**Gated and REJECTED.** That perturbation is not benign:
+
+| | Sage | MSFragger | Sage overlap | MSFragger overlap |
+|---|---|---|---:|---:|
+| dataset D, 256 -> 4096 | 12,593 -> **11,682 (-7.2%)** | 11,642 -> **10,930 (-6.1%)** | 91.7% | 81.3% |
+
+A 7% peptide loss for a load-phase speedup is not a trade worth making, and in the gate's own arms
+the wall was not even better (3:12.17 vs 3:13.32). `kBatch` stays at 256. The interesting part is
+what it reveals: **the peak picker is materially sensitive to how frames are grouped across threads**,
+which is a correctness smell worth its own investigation -- see the routes list.
+
+
+## Head to head with the reference implementation, measured tonight (2026-09-08)
+
+Both tools on TNBC 009, on `data`, within the same hour, both given 100 threads. The recorded
+reference timing for this file was from a previous campaign, and `head2head.sh` carries a warning
+PICK_BATCH: LOAD 256 → 4096: 27.2 → 16.6 s = -39.0% ✓ "-39% on the load phase". Digest changes ✓. 7.2%/6.1% ✓. But CHANGELOG says "256 -> 4096 is -39% on the load phase" ✓. README: "1024 and 4096 change the digest, and 4096 loses 7% of peptides, so it is not a knob" ✓ consistent.
+
+  "138 GB floor" — not in BASELINE (only ~99 GB returned at MS1 boundary). "239 million seed indices" — not in BASELINE (no "million seed" hit; "22e6 doubles" for findPartner). grep "239" found nothing. So both numbers unsupported by the record. Note the src option text for malloc_trim also says 138 GB — so the claim exists in source help text too, but the measurement record (BASELINE) says ~99 GB. Actually wait — maybe the floor of 138 GB was measured elsewhere (the instrumentation entry says mallinfo2 at every milestone). The evidence I can see says ~99 GB. Flag as unsupported-by-record MEDIUM.
+
+  Also CHANGELOG: "minor page faults +26%, window-loop CPU +15% at unchanged concurrency" ✓ lines 1399-1401.
+
+  "265 GB to 186 GB" ✓ (264.9→186.2 interleaved).
+
+  Now the v1.1.0 numbers: "On 224 cores against the benchmark's -threads 100: 5:10 vs 5:22 for byte-identical output" — line 831: "wall base -> perf (SINGLE PAIR -- see the retraction below) | 6:31 -> 6:07 | 8:36 -> 8:09 | 5:40 -> 5:22" — 5:22 appears but in a RETRACTED single-pair measurement (dataset B? columns are D/A/B?). The "5:10 vs 5:22" and "224 cores" claims can't be verified; the 5:22 figure is associated with a retraction notice. Not enough to call wrong. Skip or LOW.
+
+  "2.25 GB against 6.23 GB" — not in BASELINE. v1.1.0 changelog claims mzPeak 2.25 GB vs mzML 6.23 GB for 655,776 spectra. README Disk says "mzML output is roughly 9 GB for a 30-minute run ... mzPeak is about a third of that". A third of 9 = 3 GB; a third of 6.23 = 2.08 ≈ 2.25 ✓ internally. But 9 GB vs 6.23 GB for the same 30-min emission contradicts. Hmm, is dataset D's mzML 6.23 GB? v1.1.0 says "for the same 655,776 spectra" — dataset D at the time emitted 655,776 spectra ✓. So mzML for 30-min dataset D = 6.23 GB measured. README says "roughly 9 GB for a 30-minute run". Contradiction MEDIUM. Unless "30-minute run" in README means something else — no, dataset D is the 30-minute gradient (perf table). So README 9 GB is inconsistent with v1.1.0's 6.23 GB. Also "19–20 GB for a 2-hour run at the previous emission" — previous emission 2.34M spectra: scaling 6.23 GB × 2.343822/0.655776 = 22.3 GB. "19-20" plausible-ish. OK.
+
+  Also line 1078: "final_S30/pseudo.mzML ... 655,776 spectra, 05:30 wall, 81.8 GB peak" — v1.1.0's "5:10 vs 5:22" not matching 05:30. Whatever, private-repo numbers.
+
+  Now the REFERENCE-COMPARISON doc: line 90 "spectra 2,343,822 | 4,035,058 (+72%)" vs BASELINE T3 = 4,035,234. Minor internal mismatch between docs (176 spectra). And line 202: "adding 178k / 93k spectra" — same mislabeling as CHANGELOG. Also check REFERENCE doc for "27,855" etc. ✓ (lines 48-50 match).
+
+  Also line 142: "~13% of the 2.55 M z=1 calls sit on the 2+ mobility band" — T3: 287,900/2,548,391 = 11.3%, not 13%. Hmm "2.55 M z=1 calls" — 2,548,391 ✓. 287,900/2,548,391 = 11.30%. But "sit on the 2+ band" might include kept calls near band? The veto re-called 287,900 → 2+. So 13% vs 11.3% measured. Eh, "~13%" appears in CHANGELOG, src help, and REFERENCE doc. Measured 11.3% (009), 11.2% (001), 26.3% (D). The "~13%" is loosely unsupported — 11.3% measured on 009. "~13%" could pass as approximation? 11.3 vs 13 is a 15% relative error. Borderline; flag LOW.
+
+  Now also CHANGELOG: "Those identifications ... whose 1/K0 sits +0.29 Vs/cm2 above the 2+ trend line at the same m/z in 99.4-99.9% of cases — identically in the reference implementation's own 1+ identifications — and which co-elute with their own 2+ ion where both are seen." REFERENCE doc supports ✓.
+
+  Now: "and most of the MSFragger deficit against the reference implementation" — 009 MSFragger per-charge: v38 28,181 vs v35 25,029 = +12.6%, closing the pooled deficit 26,559 vs 27,427 (0.97). ✓ roughly.
+
+  Now "Where it stands": "(12:42 / 188 GB against 20:57 / 341 GB)" — the reference mean wall 20:56.9 rounds to 20:57 ✓, 340.6 → 341 ✓, 187.9 → 188 ✓, 12:42.21 → 12:42 ✓.
+
+  CHANGELOG Measured table: all ✓ vs BASELINE v38 table.
+
+  Now the "Where it stands" statement "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — dataset D at this release's defaults is 1.33% (Measured section). The 0.93-1.03% range covers only the two 2-hour runs. The sentence in "Where it stands" follows discussion of the 2-hour acquisition, and then mentions dataset D timing. As written, "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" omits dataset D's 1.33%. Cherry-picked but the Measured section discloses 1.33%. Flag MEDIUM: headline claim contradicts the release's own Measured section unless read as "on the 2-hour runs only."
+
+  Also: "on run 001 the ratios are 1.25 / 0.98" ✓.
+
+  Now Q1 (semver), Q2 (version_), Q3 (numbers).
+
+  More checks:
+  - "The reference is a JVM run with -Xmx400G" ✓ BASELINE.
+  - "Before this cycle the same file ran 1.46x slower (31:27 against 21:28)" ✓.
+  - CHANGELOG v2.0.0 "Added — Third OpenMS patch... a static_assert on is_nothrow_move_constructible means a tree without the patch does not build the tool." Check source: static_assert at line 334 is sizeof(Trace)==48. Is there also a static_assert on is_nothrow_move_constructible? grep.
+  - "Why 2.0": "a third OpenMS patch (MassTrace move operations) is mandatory, and a tree without it does not build the tool" — verify static_assert exists.
+  - Also "Build reproducibility": "the tool compiles on a stock OpenMS tree" — contradiction with the static_assert claim unless "stock" means patched-without-mzPeak. Read the actual sentence again: "the tool compiles on a stock OpenMS tree (every mzPeak reference is guarded; -out_type mzpeak refuses without a mzPeak build)". As written, "stock OpenMS tree" contradicts "a tree without [the third patch] does not build the tool" and CONTRIBUTING's "refuses to compile against a MassTrace without move operations". The parenthetical clarifies it's about mzPeak absence, so "stock" here means "a tree without the mzPeak library" — but that's not what "stock OpenMS tree" means; it directly contradicts the mandatory-patches story. Flag MEDIUM/HIGH wording defect.
+  - static_assert grep for nothrow.
+
+  - The "WindowGroup" fix: "every other scheme has one slice per m/z" fine.
+  - "Runs on the public diaPASEF HeLa benchmark (PXD017703)": "136,818 spectra in 57 s" — the table in the same BASELINE says 0:42 for the same acquisition. Also CHANGELOG title says PXD017703 while the window-key fix entry says "The PXD017703 'py3' scheme (9 of 27 acquisitions)". Wait — window key entry says "PXD017703 'py3'"? It says "The PXD017703 "py3" scheme (9 of 27 acquisitions) acquires each m/z window in two window groups". Hmm, actually the excerpt in the task says 'The PXD017703 "py3" scheme'. Fine.
+
+  - Check CHANGELOG on disk matches the excerpt given (it might differ!). The task says "If you can read files, verify..." — the excerpts are given, but disk files are authoritative. I haven't read CHANGELOG.md or README.md from disk! The excerpts are "complete" per the prompt. But to be safe, spot-check that disk CHANGELOG/README match excerpts (e.g., grep for "178k", "23.4x", "36.3", "0.06–2%", "~78×", "~72×", "9 GB", "2.8-2.9").
+
+  - Q2: check how version_ is used — ini round trip: TOPPBase stores version in ini; also `-help` uses verboseVersion_. They set both ✓. One more risk: TOPPBase::main checks `getVersion()` for the "unofficial tool" warning? In OpenMS, ToolHandler::checkTools / TOPPBase logs "Warning: This tool is not an official OpenMS tool" based on official flag in constructor — handled. Another: the mzML software entry gets name+version — fine. INI: when a user loads a v1.x ini (recorded with OpenMS version like "3.6.0-pre"), TOPPBase warns "version differs" — minor friction, and arguably correct for a breaking release. Also: OpenMS writes `version` into the ini as a restricted parameter; a future 2.1 tool reading a 2.0.0 ini will warn — normal OpenMS behavior.
+
+  - Check src for how software entry/userParams are written — not needed deeply.
+
+  - One more source check: line 62-63 SPEXTRACTOR_VERSION "2.0.0" default but CMakeLists defines it from PROJECT_VERSION 2.0.0 ✓ consistent. CITATION.cff version 2.0.0 ✓ — but check CITATION.cff date-released? grep.
+
+  - Semver Q1 additional wrinkle: v1.0.0 and v1.1.0 were released the same day (2026-09-04), four days before v2.0.0. Under semver, the breaking rename alone mandates a major. Also defaults changed → behavioral. So yes. But one could argue since 1.x existed only 4 days and was "cut from the v0.3.0 tree," a cleaner versioning would have been to rename BEFORE 1.0.0; but that's process, not semver correctness. Answer: yes, 2.0.0 is the correct bump; the only nit is the churn.
+
+  Now let me: grep static_assert nothrow in src; grep disk CHANGELOG/README for the key strings to confirm they match excerpts; check CITATION.cff date; check REFERENCE doc lines 85-105 & 195-205 for exact wording.54:static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is_nothrow_move_assignable_v<OpenMS::MassTrace>,
+334:  static_assert(sizeof(Trace) == 48, "Trace must stay 48 bytes: it is the largest structure in the tool "
+===
+37:  adding 178k / 93k spectra -- only ~1.8% of z=1 calls are genuinely on the 3+ band, and the two lines
+40:  the rest -- 2.8-2.9% on the 2-hour files, ~9% on dataset D where the stratum is ~150 peptides -- and
+56:  exactly this copy. Chunking over spectra takes it to 0.55 s and the phase to **36.3 s at 8.0x**.
+78:  default 8192): the greedy claim loop's thread occupancy went from 1.0x to **23.4x** on a 2-hour
+96:  allocator kept -- measured, that floor is 138 GB at the loop start of a 2-hour acquisition.
+===
+26:| **Memory** | **~57 GB peak** on a 30-minute gradient and **~170–190 GB** on a 2-hour acquisition at the shipped defaults (the 30–60 min cohort spanned 68–109 GB before the memory work); it scales with the acquisition |
+27:| Disk | mzML output is roughly 9 GB for a 30-minute run and 19–20 GB for a 2-hour run at the previous emission; the current default emits 30–70% more spectra. mzPeak is about a third of that |
+92:| `-threads` | all cores | worker threads; an explicit `-threads 1` is honoured. Parallelism is isolation windows × flight-time bands, and the window loop reaches ~78× (30-min) to ~89× (2-hour) thread occupancy at 100 threads; window concurrency is bounded by a free-RAM admission gate, not by core count |
+100:| `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output**: measured, it is slightly *more* sensitive on a large file (+2.0% Sage peptides at unchanged entrapment FDR) for 1.75× the memory and ~1.7× the wall |
+101:| `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (exact partition with a halo). Raised from 12 on 2026-09-07: MS1 tracing 2× faster, peptide sets within 0.06–2% on both engines and both gate datasets; 1 = off |
+134:| window-loop occupancy | 78× | 89× |
+===
+14:version: 2.0.0
+15:date-released: "2026-09-08"
+|---|---:|---:|
+| Sage peptides | 24,245 | **27,685 (+14.2%)** |
+| MSFragger peptides | 24,121 | **26,332 (+9.2%)** |
+| Sage proteins | 5,802 | 5,641 (-2.8%) |
+| entrapment FDR | 1.03% | **1.01%** |
+| spectra | 2,343,822 | 4,035,058 (+72%) |
+| wall | 11:59 | ~13:20 (+11%) |
+
+Repeated on a second file, and it is stronger there:
+
+| | TNBC 009 z>=2 -> z>=1 (v35, no veto) | TNBC 001 z>=2 -> z>=1 (v35, no veto) |
+|---|---|---|
+| Sage peptides | 24,245 -> 27,685 (**+14.2%**) | 15,694 -> 18,854 (**+20.1%**) |
+| Sage ratio vs ref | 1.280 -> **1.463** | 1.063 -> **1.277** |
+| MSFragger peptides | 24,121 -> 26,332 (**+9.2%**) | 15,976 -> 17,068 (**+6.8%**) |
+| MSFragger ratio vs ref | 0.882 -> **0.960** | 0.852 -> **0.911** |
+| Sage proteins | 5,802 -> 5,641 (-2.8%) | 4,074 -> 4,118 (+1.1%) |
+| entrapment FDR | 1.03% -> **1.01%** | 0.98% -> **0.90%** |
+| spectra | +72% | +64% |
+| wall | +11% | +20% |
+
+So on this dataset class the z>=2 default costs 14-20% of Sage peptides and most of the MSFragger
+deficit, with entrapment FDR unchanged or better on both files. That directly contradicts the dataset D
+measurement that established the default (where dropping z=1 GAINED peptides on both engines), so
+`charge:min_charge` is dataset-dependent. Resolved below: the default changed to 1 (v37/v38). Cost at
+v38 on 009: +67% spectra (2,343,822 -> 3,918,321), +15% wall (12:42 against the 11:01 v35 mean), no
+reference implementation reports them too; the halved 2+ calls are corrected by physics the
+instrument already measured; the residual stratum FDR is a search-engine calibration matter and is
+now documented rather than hidden.
+
+One refinement after the first measurement (v37 -> v38): the veto's 3+ arm was re-calling 7% of z=1
+calls to 3+, but only ~1.8% of z=1 calls are genuinely on the 3+ band (the 2+ and 3+ mobility lines
+are ~1 sigma apart at low m/z), and the re-calls identified nothing on either file (z=3 peptides
+5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k spectra. A z=1 call on
+the 3+ band is now dropped rather than re-labelled. The dataset D pair is on record in BASELINE.md;
+the 009 pair exists only in the source comment beside the veto's 3+ branch in `src/spextractor.cpp`
+(the `[2026-09-08]` note) and in no BASELINE.md entry.
+
+The like-for-like comparison, both tools under the same per-charge FDR walk, on 009 (v38, the
+shipped build):
+
+| | SpeXtractor v38 | reference | ratio |
+Big catches:
+
+  1. REFERENCE-COMPARISON admits: "the 009 pair [z=3 peptides 5,313 -> 5,322] exists only in the source comment ... and in no BASELINE.md entry." So the CHANGELOG's "z=3 peptides 5,313 -> 5,322 on run 009" is unsupported by the measurement record — it comes from a source comment. Also "adding 178k / 93k spectra" — 178k and 93k are the veto CALL counts (178,226 / 93,008), but the actual spectrum deltas are 116,913 (T3→T4) and 72,895 (v37→v38). Both docs mislabel calls as spectra. HIGH.
+
+  Also note: v37→v38 on 009 spectra delta = 4,035,234 - 3,918,321 = 116,913. But wait, the veto counts in T3 were from the v37 run: 178,226 re-called to 3+. If all were dropped in v38, spectra should drop by ≤178,226; actual drop 116,913. And on D: 93,008 calls vs 72,895 spectra. So "adding 178k / 93k spectra" is wrong on the record: 117k / 73k. HIGH.
+
+  2. CHANGELOG line 78 on disk differs from the excerpt! Disk: "the greedy claim loop's thread occupancy went from 1.0x to 23.4x" — the excerpt given to me said "the greedy claim loop went from 1.0x to 23.4x". Disk says "thread occupancy". 23.4x = CPU/wall of the phase (629.7/26.9), i.e., parallelism/occupancy — but that's the PHASE's occupancy, not "the greedy claim loop's thread occupancy". Hmm, close enough? The greedy walk went 128.8 s → 7.8 s = 16.5x speedup; occupancy 23.4x is the phase-level CPU/wall. The claim "112-138 s -> 7.8 s" with "23.4x" occupancy — the 23.4x is from line 1617's "parallelism" column for TNBC v30 (23.4x), which is the phase's CPU/wall = 629.7/26.9 = 23.41. So CHANGELOG's "thread occupancy went from 1.0x to 23.4x" — but v28's phase parallelism: 148.7 s wall at 1.0x. CPU at v28 ≈ 148.7 s. Occupancy gain should be (629.7/26.9)/(148.7/148.7) = 23.4x ✓. OK so "thread occupancy 1.0x → 23.4x" is actually accurate as occupancy. But then "112-138 s -> 7.8 s" is the walk time, a 14-17x speedup — fine as stated alongside occupancy. The excerpt I was given says "the greedy claim loop went from 1.0x to 23.4x" — disk says "thread occupancy went from 1.0x to 23.4x". Disk version is defensible. I should base findings on the DISK files, noting where they differ from the excerpt. The excerpt was apparently an earlier draft. Priority: disk is authoritative. Let me re-grep the disk CHANGELOG fully to catch differences from the excerpt. Let me diff key lines: line 37 (178k/93k) same; line 40 (2.8-2.9%) same; line 56 (36.3 at 8.0x) same; line 96 (138 GB) same.
+
+  Also "112-138 s": actual v28 = 128.8 s; 138.3 was v25's greedy remnant and 112.8 was v27's INFER-phase(?) — line 1560 "130.0 s (112.8)" — 112.8 is the greedy-walk part of v27's 130.0. So "112-138" is a span across builds. Meh, acceptable as a range. With occupancy wording, this entry is OK. Downgrade.
+
+  3. "36.3 s at 8.0x" (disk line 56) — BASELINE has no 36.3 or 8.0x. From the numbers: 75.9 s phase, distribute 39.0 → 0.55, so phase → 75.9-39.0+0.55 = 37.45 s; parallelism 8.0x? Not recorded. The v25 cumulative table shows MS1_TRACE 106.2 s (11.2x) on TNBC. On dataset D, MS1_TRACE after chunking: not recorded in BASELINE (the cumulative table has dataset D total 237.5 but not MS1_TRACE). So "36.3 s at 8.0x" is unsupported by the record (computed would be ~37.5 s). MEDIUM/HIGH.
+
+  4. "138 GB at the loop start" (disk line 96) — BASELINE records "~99 GB at the MS1 boundary" returned by the trim. 138 GB appears nowhere. The src help text also claims 138 GB. The measurement record says the trim returns ~99 GB. Actually "the floor is 138 GB at the loop start" vs "trim returns ~99 GB" — these could differ (floor = retained free; returned = what malloc_trim actually released). But no 138 GB measurement is on record. MEDIUM (unsupported number).
+
+  5. "2.8-2.9%" (disk line 40) vs measured 2.91/2.94 → should be ~2.9%. LOW. Also src says ~2.8%.
+
+  6. README line 92 (disk): "~78× (30-min) to ~89× (2-hour)" and line 134 perf table "78× / 89×" — consistent! The excerpt's "~72× (30-min) to ~90×" was apparently from an older draft; the disk README says 78×/89× in both places. Let me verify by grepping "72" in README. The grep for "72×" found nothing (only 78× and 89× shown). So no internal contradiction on disk. Good — must be careful: the disk README differs from the provided excerpt. I need to check the disk README and CHANGELOG fully against my excerpt-based findings. Let me grep README for other items: "14–20%", "1.7%", "655,776", "0.85 M", "3.9 M", "1024 and 4096", "loses 7%", "Thirteen".
+
+  Also verify dataset D window-loop occupancy ~78x: line 1522 "occupancy 70.8x -> 94.2x (dataset D)" was for trace_bands 48 (which FAILED the gate). Current occupancy for dataset D at v38? Not in excerpt. TNBC v38: 89.2x ✓ "~89×". For 30-min: the v30 TNBC window loop 79.8x... that's 2-hour. Dataset D occupancy at v35/v38 — line 1858: v37 TNBC 90.6x. Hmm, for dataset D: no recorded v35/v38 window-loop occupancy in the sections I read. Earlier line 835: 69.9x (2026-09-03 era). Line 1522: 94.2x (trace_bands=48, rejected). So "~78× (30-min)" — where from? T2 (v35) TNBC 80.0x; dataset D... The v38 D table lacks occupancy. README's 78× for 30-min may be unsupported/stale. But README perf table says 78× with wall 3:13 (v38) — the occupancy presumably measured on the same run; just not in BASELINE excerpt I saw. Let me grep BASELINE for "78" near dataset D v38... Actually let me grep "89.2\|80.0\|78\." etc. Line 1915 area v38 table: "window loop 443.4 s (89.2x)" for 009. For D v38 (line 1870): no occupancy column. So 78× is not in the record for dataset D v38. Could be from the run's log but not recorded. Flag LOW (unsupported), not contradiction.
+
+  7. README line 27 "9 GB" vs v1.1.0's 6.23 GB for 655,776 spectra (dataset D emission). Actually wait — is the 6.23 GB figure even on disk? It's in the CHANGELOG v1.1.0 section (given excerpt; verify on disk). grep "6.23" CHANGELOG.md.
+
+  8. CITATION.cff version 2.0.0, date-released 2026-09-08 ✓ consistent.
+
+  9. static_assert on MassTrace move ops exists (line 54) ✓ — "a tree without the patch does not build" ✓. And sizeof(Trace)==48 ✓.
+
+  Now, remaining excerpt-vs-disk verification: I should read the disk CHANGELOG v2.0.0 section fully to catch wording differences that matter (e.g., the "greedy claim loop" line differed). Let me read CHANGELOG.md lines 1-130.
+
+  Also check the disk README "two detectors agree on 85%" etc. And the Determinism section ("1024 and 4096").
+
+• Disk line 38: "so dropping them takes 2.9% / 7.9% off the v37 spectrum list for free" — corrected from the excerpt's "3.0% / 8.5%". 116,913/4,035,234 = 2.90% ✓; 72,895/927,712 = 7.86% ✓ "7.9%" ✓. Good — disk is self-consistent on the percentages. But "adding 178k / 93k spectra" still wrong (actual spectra deltas 117k / 73k; 178k/93k are call counts). HIGH stands.
+
+  Line 57: "239 million seed indices" — check: 925 M parent + 1,217 M child traces... seed indices — not in BASELINE. grep "239" found nothing. Unsupported by record. MEDIUM/LOW. Hmm, "sorted up to 239 million seed indices" — could come from log lines not in BASELINE. As "unsupported by the cited record" — the changelog doesn't cite for this entry. I'll flag LOW.
+
+  Line 78-79: "thread occupancy went from 1.0x to 23.4x (112-138 s -> 7.8 s)" — occupancy claim is accurate per BASELINE (23.4x = phase CPU/wall). But "the greedy claim loop's thread occupancy" — the 23.4x is the PHASE's occupancy (26.9 s wall, 629.7 CPU), not the greedy loop's. The greedy loop itself: 128.8 → 7.8. What's the loop's occupancy? 629.7 CPU includes the whole phase. Saying "the greedy claim loop's thread occupancy went ... to 23.4x" misattributes the phase-level number. Eh, borderline. The "(112-138 s -> 7.8 s)" parenthetical reads as substantiating the 23.4x, but 138/7.8 = 17.7x max. A reader will multiply and get 14-18x, not 23.4x. Internally confusing. MEDIUM.
+
+  Also "112-138 s": v28 measured 128.8 s (the direct serial arm). 112.8 and 138.3 were intermediate builds v27/v25. Using "112-138" as the serial baseline span is defensible-ish but the direct comparison arm is 128.8. LOW.
+
+  Line 85: "~2.1 billion records, ~144 GiB at 72 bytes" — BASELINE: 925M + 1,217M = 2,142M records = 2.14 billion ✓ "~2.1 billion" ✓; 2,142e6 × 72 = 154.2e9 B = 143.6 GiB ✓ "~144 GiB" ✓. "-10.7 GB there and -2.7 GB on dataset D" — BASELINE line 1360: "-10.7 GB of that 11.3 rather than the 16-24 GB predicted" ✓; -2.7 GB on D — plausible, recorded? "measured -10.7 GB there and -2.7 GB on dataset D" — line 1419-1423: cumulative -91 GiB; per-window records 64,986→55,699 MB = 9.1 GB. The -2.7 GB on dataset D: not verified but plausible. Skip.
+
+  Note line 1422-1423: "The record change ... a 9.1 GB reduction that is exactly 8/56 of the total, and the peak fell 5.5 GiB of that" — hmm that's for 56→48. And -10.7 GB was for 72→56? Line 1360 says "The record change measured -10.7 GB of that 11.3" (context: 72→56 record). OK fine.
+
+  Line 96: "that floor is 138 GB at the loop start" — BASELINE says trim returns ~99 GB at the MS1 boundary. 138 GB unsupported by record. Also note the src help text repeats 138 GB. MEDIUM.
+
+  Line 98: "(measured at the previous charge default; with z=1 emitted the release peaks at 187.9 GB)" — good correction on disk.
+
+  Line 17: "12:42 / 187.9 GB against 20:57 / 340.6 GB" ✓ exact.
+
+  Line 18: "1.00x (0.996)" ✓.
+
+  Line 19: "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — dataset D 1.33% omitted; the Measured section discloses. The sentence's scope: whole-run on... ambiguous. Since the paragraph is about run 009/001 and dataset D wall, the FDR claim reads as applying to the release generally. MEDIUM (cherry-picked range; D's 1.33% contradicts "at the nominal 1%" if intervals don't overlap — v38 D 1.33% vs v35 1.24%; CI unknown).
+
+  Line 20: "The record is docs/BASELINE.md (sections dated 2026-09-06 to 2026-09-08)" ✓ sections exist.
+
+  Line 32: "~13% of z=1 calls" — measured 11.3% (009), 11.2% (001); REFERENCE doc says "~13% of the 2.55 M z=1 calls sit on the 2+ mobility band (p2 = 51% there...)". Hmm, maybe the ~13% includes on-band calls among all z=1 calls before veto? The veto re-called 11.3% to 2+. "~13%" vs 11.3% — off by 1.7 points. Actually maybe the 13% counts calls within band before fitting refinements. The record shows 287,900/2,548,391 = 11.30%. I'll flag LOW.
+
+  Line 36: "5,313 -> 5,322 on run 009" — REFERENCE doc admits this exists only in a source comment, "in no BASELINE.md entry". So unsupported by the measurement record. MEDIUM.
+
+  Line 40: "2.8-2.9%" vs measured 2.91/2.94. LOW. "~9% on dataset D where the stratum is ~150 peptides" — v38: 8.8% n=151 ✓.
+
+  Line 43: "0.87-0.91%" ✓. Line 44: "+20.2% / +13.7%" ✓.
+
+  Line 49-50: gate numbers ✓.
+
+  Line 56: "36.3 s at 8.0x" — unsupported; arithmetic from recorded numbers gives ~37.5 s; no 8.0x anywhere. MEDIUM.
+
+  Line 63: "Precursor inference was single-threaded and 22-25% of a 2-hour run" — v21: INFER 438.8 s of 33:35 (2015 s) = 21.8% ✓ ~22%.
+
+  Line 64: "438.8 s -> 177.2 s" ✓. Line 65: "156.3 s" greedy walk, "8.5 s" sorts — BASELINE line 1470: "m/z index 1.0 s, intensity sort 7.5 s, greedy walk 156.3 s" ✓ (8.5 = 1.0+7.5). "which the next entry removes" — the next entry ("Two hot loops") removes the binary searches inside the greedy loop (findPartner's 22M-double searches), not the sorts (m/z index 1.0 s, intensity sort 7.5 s). Grammatically "which" attaches to "the sorts (8.5 s)". Did the next entry remove the sorts? The hot-loops entry replaces the lower_bound in best() and the binary search in findPartner's claim loop — not the phase's m/z index build or intensity sort. So "the sorts (8.5 s), which the next entry removes" is wrong: the 8.5 s sorts are not what the next entry addresses; the next entry addresses searches inside the greedy walk. And the greedy claim loop itself was parallelized by the entry after. MEDIUM (garbled attribution).
+
+  Hmm, wait — actually re-reading: "The phase logs its three stages; the residue was the greedy claim loop (156.3 s), not the sorts (8.5 s), which the next entry removes." Maybe "which" refers to "the greedy claim loop"? "the residue was X, not Y, which the next entry removes" — nearest antecedent is Y (the sorts). Either reading is wrong-ish: next entry removes searches, not sorts, and doesn't remove the greedy loop (the one after parallelizes it). Actually the hot-loops entry DID change findPartner's search within the greedy loop — "findPartner, in the greedy claim loop, searched 22 million doubles" → computed bucket. So the next entry removes the searching inside the greedy loop, contributing to 156.3 → 130.0/128.8. If "which" = greedy claim loop's search cost, ok. Ambiguous; I'll flag LOW.
+
+  Line 68: "~25,000 sorted flight-time bins" — unverified, plausible. "window loop -19% at -9% CPU" — BASELINE line 1560ish: v27 14:32... "-19%"? Line 1573-1574: MS1_TRACE -55%, INFER -66%. Window loop: v25 467.5 → v27 459.8? That's -1.6%. Hmm. Where's "-19% window loop at -9% CPU"? Let me check lines 1540-1575. The "Computed indices" section (1540): v25→v27 numbers: window loop 467.5 (69.5x) → 459.8 (70.4x) → small. -19% not matching. Let me read that section to check.
+
+  Line 71-72: "searched 22 million doubles up to 50 times per seed" ✓ line 1548.
+
+  Line 85: "~144 GiB" ✓.
+
+  Line 98: peak 187.9 with z=1 ✓ T4.
+
+  Line 122-123: "Thirteen checks; the suite ran every check on the openms fallback before 9 and 10 existed" ✓ test comments.
+
+  Line 124-128: "the tool compiles on a stock OpenMS tree" — contradicts line 6-7 ("a tree without [the third patch] does not build the tool") and line 107-108, and CONTRIBUTING. The parenthetical suggests intent = "compiles without the mzPeak library", but as written "stock OpenMS tree" is wrong — a stock (unpatched) OpenMS tree fails the static_assert. MEDIUM/HIGH.
+
+  Also "the sqlite3 tdf reader is its own header (src/TdfLoad.h)" ✓ exists.
+
+  Line 127: "the weekly CI job builds OpenMS from source at that pin, applies the patches and runs the end-to-end suite" ✓ build.yml.
+
+  Now "Fixed" line 161-165 ✓ vs test c13. Line 170-173 digest fix ✓.
+
+  Read the rest of the CHANGELOG (175-300ish) to check the remaining Fixed entries and Measured section on disk, especially differences from the excerpt (e.g., "57 s", "1.13-1.31%", head-to-head table).More findings:
+
+  - Line 282: "which is where the README's stated 80-125 GB requirement comes from" — STALE: the current README states "~57 GB peak on a 30-minute gradient and ~170–190 GB on a 2-hour acquisition", not "80-125 GB". The v0.3.0 section references a README requirement that no longer exists. Also the cohort span "67.9-108.7 GB" vs README's "(the 30–60 min cohort spanned 68–109 GB before the memory work)" ✓ consistent. But "80-125 GB" is stale. MEDIUM (stale cross-reference).
+
+  - Line 299-300: "(Which one is closer to the truth was settled on 2026-09-05 -- see "Measured" under v2.0.0: the one-shot reader is slightly better on a large file...)" — hmm, the v0.3.0 section cross-references v2.0.0. Fine. But wait: src option text for stream_load says "which is closer to the truth is UNMEASURED" — STALE source help text: the changelog v0.3.0 and v2.0.0 Measured say it WAS settled 2026-09-05 (one-shot slightly more sensitive). The src registration text (line 1797-1798: "which is closer to the truth is UNMEASURED. Everything this project has benchmarked used true.") contradicts the measured finding recorded in BASELINE line 994-1005 and the CHANGELOG Measured entry. Stale help text — and README's option table correctly says "slightly more sensitive". So src help is stale. That's a defect in the shipped --help. MEDIUM.
+
+  Also the stream_load measured numbers: CHANGELOG Measured "for 1.75x the memory and ~1.7x the wall" — BASELINE line 1004-1005: "1.6-1.75x less memory (108 vs 189 GB on dataset A) and ~1.7x less wall time" ✓.
+
+  - Line 217-221 (Measured entrapment): "1.13-1.31%... every interval overlapping" ✓ line 1022-ish; "Every interval overlaps the nominal 1%; dataset D's whole-run point estimate sits 0.33 points above it" — is 1.33% interval overlapping 1%? v38 D: 1.33%, CI not shown in excerpt. Earlier: dataset F 1.31% [1.04-1.57]. For v38 D, no CI given in what I read. The claim "Every interval overlaps the nominal 1%" for the v38 numbers — unverified but plausible. However "Where it stands" line 19 says "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — omits 1.33%; the Measured entry discloses. As release headline it's selective. Keep MEDIUM.
+
+  - v1.1.0 line 251: "`.mzpeak` by default in a build with mzPeak" — excerpt said "`.mzpeak` by default"; disk clarified. OK.
+
+  - v1.1.0 line 255-256: "CI runs on four platforms per push ... and a weekly job builds the tool against an OpenMS source tree". Accurate-ish: tests.yml = four platforms per push (tests-only targets, no OpenMS); build.yml = weekly full build. The phrasing "CI runs on four platforms per push" doesn't say it builds the tool there. CONTRIBUTING is accurate. But a release-engineering defect remains: no per-push CI compiles the tool (the only compile proof is weekly/manual). For a release with a mandatory static_assert, the release tree's compile status rests on a weekly cron. Flag MEDIUM as release-engineering gap.
+
+  - Line 249-250: "On 224 cores against the benchmark's -threads 100: 5:10 vs 5:22 for byte-identical output" — can't verify from BASELINE; line 831 shows "5:40 -> 5:22" marked "(SINGLE PAIR -- see the retraction below)". The 5:22 in v1.1.0 might be the same retracted measurement! Line 831: "wall base -> perf (SINGLE PAIR -- see the retraction below) | 6:31 -> 6:07 | 8:36 -> 8:09 | 5:40 -> 5:22". Columns are probably dataset D / A / B. So "5:22" appears in a measurement the BASELINE flags as retracted (single pair, wall-clock comparison invalid). v1.1.0's "5:10 vs 5:22" — the 5:22 matches dataset B's retracted pair (5:40 -> 5:22). Hmm, but v1.1.0 says "On 224 cores against -threads 100: 5:10 vs 5:22" — the retraction (lines 867-886) says wall-clock changes from single pairs on shared machines are unreliable ("so 'up to ~3% on one file, none on another', not '−5 to −6% on three files'"). The v1.1.0 claim of "5:10 vs 5:22" could be a legitimate later measurement on 224 vs 100 threads (different comparison: thread count, not perf build). Can't prove wrong. But "byte-identical output" at 224 vs 100 threads is consistent with the determinism claim. Leave it.
+
+  - Line 293-294: "the loader holds the entire run at a measured 90.3 GB floor, which by itself exceeds the tool's current total peak" — "current total peak" at v0.3.0 was 79 GB (dataset D). Now stale but it's in the v0.3.0 historical section. Fine. But the src help text repeats it: "so with this off the floor alone exceeds the whole tool's current peak" — at v2.0.0, dataset D peak is 57 GB, and 90.3 GB floor > 57 ✓ still true. OK.
+
+  - Line 195: "an additive offset on the mass, `m = u^2 - C4`" — excerpt said "an additive offset on the root". Disk says "on the mass". Whatever, matches disk. Fine.
+
+  - Line 206: "First public-data extraction: 136,818 spectra in 57 s." — BASELINE line 1052 says 57 s, but line 1101's own campaign table says 0:42 for the same acquisition. The record contradicts itself; CHANGELOG picked one. Flag MEDIUM (BASELINE internal inconsistency propagates; the two numbers differ by 36%).
+
+  - Now check "Computed indices" section for "window loop -19% at -9% CPU" (line 71 of CHANGELOG). Read BASELINE 1540-1575.
+
+  - Also check README disk fully for the excerpt differences. The grep showed README line 92 says "~78× (30-min) to ~89×" and line 134 "78× / 89×" consistent. Need to re-scan README disk for other claims I assessed from the excerpt: "0.06–2%" (line 101) — actual gate numbers: Sage -0.01%/-0.06%, MSFragger +0.02%/+2.03%. "peptide sets within 0.06–2%" — wrong range: actual movement 0.01-2.03%. The "0.06" lower bound and "2%" upper bound both off. LOW/MEDIUM.
+
+  Let me read README disk quickly to confirm the parts I rely on (it might differ from the excerpt elsewhere). Read README.md.The disk README differs substantially from the excerpt. Key items on disk:
+
+  - Line 24: "OpenMP | required" — but the excerpt said "strongly recommended; without it the tool runs single-threaded". Disk says "required". Check: does the build fail without OpenMP? CMakeLists? The src calls omp_set_num_threads unconditionally (line 3127) — if compiled without OpenMP, omp_set_num_threads wouldn't exist unless guarded. So "required" might be accurate. The excerpt version is stale; disk is what counts. Not a finding unless contradictory. Actually wait — the excerpt in the task prompt says OpenMP "strongly recommended", disk says "required". I review the disk. No finding.
+
+  - Line 27: Disk figure corrected: "6.2 GB for 656k spectra (30-minute run)" ✓ consistent with 6.23 GB. Good — no 9 GB finding on disk.
+
+  - Line 30-31: "low-load public files (PXD017703) ran in 10–26 GB" — BASELINE line 1104: 10.7-16.2 GB RSS in the table; "10-26 GB"? Line 1109: "34-57 GB on the Evosep files" — wait that says "0.4-4.9 GB mzML each, 1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the..." Hmm! Line 1109: "34-57 GB on the Evosep files" — that contradicts README's "10–26 GB" AND the table at 1101-1104 (10.7-16.2 GB). Wait, maybe 34-57 GB refers to the "highsens" 18 files and the table shows Evosep? Let me read the context around 1101-1110. The table header says "Public HeLa (PXD017703), 2020 Evosep sets" with RSS 10.2-16.2 GB. Line 1109 "34-57 GB on the Evosep files" — hmm that might be a different set (the "highsens" are Evosep too?). Actually line 1031: "9 Evosep acquisitions (60/100/200 SPD, 200 ng HeLa) and 18 'highsens'". Line 1109's "1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the [highsens?]" — wait that doesn't match the table's 0:27-0:42 walls either. Line 1109 might be about the reference implementation's extraction! "0.4-4.9 GB mzML each, 1:02-1:25 / 34-57 GB on Evosep, 2:17-6:18 / 67-197 GB on highsens" — that's probably the reference implementation's numbers (dt). Let me check context. If so, README's "low-load public files (PXD017703) ran in 10–26 GB" refers to SpeXtractor: table shows 10.2-16.2 GB for 5 acquisitions; "10-26" upper bound 26 unverified — maybe from other rows (60 SPD or highsens). Need to check the table fully. Possible finding LOW. Let me read 1095-1115.
+
+  - Line 32-33: "Memory figures throughout are peak RSS as /usr/bin/time reports them (kB ÷ 10⁶)" — but BASELINE line 1427-1430 "A unit trap... Every figure in this file is GiB". README says its figures are kB÷1e6 (i.e., GB, 7% smaller than GiB). BASELINE figures are GiB. So README's "188 GB" (from 187.9 GiB?) mixes: T4 peak 187.9 GiB per BASELINE ("Every figure in this file is GiB"). README claims its memory figures are GB (kB/1e6) — if they just copied 187.9 GiB and call it GB-as-kB/1e6, that's a 7% unit mismatch with the stated convention. The convention note itself may be wrong relative to where the numbers came from. Eh — subtle. The head-to-head table says 187.9 GB (BASELINE: GiB). README line 140 "188 GB". The README's unit disclaimer says kB÷10⁶, which would make 187.9 GiB = 201.8 GB. So either the disclaimer is wrong or the numbers are. Flag LOW/MEDIUM as a unit inconsistency.
+
+  - Line 41: "cmake --build /path/to/OpenMS/build -j # rebuild OpenMS" — addition vs excerpt. Fine.
+
+  - Line 57: "worth roughly 6–11% more closed-search Sage identifications on the three files measured" ✓ BASELINE line 396 "+6-11% closed Sage on all three files".
+
+  - Line 73-76: mzpeak input needs "the OpenMS mzPeak integration (the OpenMS/mzpeak fork...), which the pinned commit does not carry; the plain recipe above builds without it, reads .d and mzML, and writes mzML" ✓ consistent with src guards.
+
+  - Line 84-87: "Every default is the configuration the project benchmarks; a run that needed extra flags to reproduce a published figure would be a bug. The end-to-end suite pins the shipped detector and the charge floor (it passes a few extraction options of its own, so it is not a test of the whole default set)." — The excerpt claimed "and there is a test for exactly that". Disk is more honest. But CONTRIBUTING (excerpt) says "There is a test for this, because it has been broken before." Check disk CONTRIBUTING. The e2e suite: does it verify defaults reproduce the benchmark? c2 checks min_charge default = 1, c9 checks detector default integer. But "every default" is not tested. CONTRIBUTING says "a run with -in, -out and -threads must reproduce the benchmarked configuration. There is a test for this, because it has been broken before." — overstated: the test only pins SOME defaults (detector, charge floor), per README line 86-87's own admission. Contradiction between CONTRIBUTING and README. Need to check disk CONTRIBUTING text. From the given excerpt (which may be stale): "Keep defaults reproducible: a run with -in, -out and -threads must reproduce the benchmarked configuration. There is a test for this, because it has been broken before." Verify on disk.
+
+  - Line 99: "-threads ... (only the command line is inspected: threads = 1 in an ini file is treated as unset)" — honest about the ini limitation ✓ matches source. Good, no finding (the excerpt's claim was weaker). But v1.1.0 changelog still says "An explicit -threads 1 is still honoured: the command line is inspected rather than the value compared." — accurate.
+
+  - Line 102: "Their stratum carries 3–9% entrapment FDR under a pooled 1% cut" ✓ (2.9/9.2 → "3-9%" ✓). "-charge:min_charge 2 -charge:im_charge_veto false restores the old behaviour (the veto runs first, so 2 alone keeps its re-called 2+)" — hmm interesting: with min_charge 2 and veto on, z=1 on the 2+ line re-called 2+ would be EMITTED, whereas old behaviour (v35, no veto) dropped all z=1. So "2 alone keeps its re-called 2+" — correct nuance. OK.
+
+  - Line 103: "11–26% of z=1 calls depending on the file" ✓ (11.2-11.3% TNBC, 26.3% D). Good — the disk README fixed the "~13%". But CHANGELOG line 32 still says "~13% of z=1 calls" and src help says "~13%". Inconsistent with measured 11.3% and README's own 11-26%. LOW.
+
+  - Line 105: "was ~7× slower (measured 2026-09-04, before the scheduling fixes)" ✓.
+
+  - Line 108: "peptide counts within 0.01–2% on both engines and both gate datasets (set overlap 99.4% on dataset D, 89–99% on dataset A)" — actual: counts 0.9999/0.9994/1.0002/1.0203 → deviations 0.01%, 0.06%, 0.02%, 2.03%. "within 0.01–2%" — 2.03% > 2% (rounding, borderline) ✓-ish. Overlap: D 99.44/99.37 → "99.4%" ✓; A 99.24/89.33 → "89–99%" ✓. OK, fixed from excerpt. No finding.
+
+  - Line 111: "`spextractor --helphelp` lists every option" — TYPO: "--helphelp". OpenMS uses "--helphelp" actually! In OpenMS TOPP tools, `--helphelp` shows hidden/advanced parameters. Yes, OpenMS has --help and --helphelp. So it's correct OpenMS idiom. Not a finding.
+
+  - Line 128-130: "They agree on about 85% ... integer ... roughly 40% less [memory]" — src help says same. Verify "40%" in BASELINE? Not checked; the excerpt said the same. Leave (LOW unsupported? The memory claim: v0.3.0 table dataset D 79 GB with integer; openms detector memory? unknown). Skip.
+
+  - Line 141: occupancy "78× / 89×" — 89.2 ✓; 78× for 30-min: the record I read doesn't pin dataset D v38 occupancy. Not directly contradicted. Earlier v0.3.0 era: 65.7x; 2026-09-03: 69.9x. Current 78× unverified but plausible. LOW (unsupported).
+
+  - Line 145: "at parity (0.996)" ✓.
+
+  - Line 154: "The loader is 10–14%." — v30 TNBC: LOAD 92.9 s = 13.1% ✓; line 1762: "LOAD is 13.7% of a 2-hour run" — README says 10-14% ✓. OK.
+
+  - Line 155: "an admission gate sizes concurrency from free RAM at startup" — but src perf:mem_fraction help says "Concurrency is re-decided at every window admission" and CHANGELOG says "Admission now happens on the master before a window task is spawned" — dynamic, not "at startup". README "at startup" is STALE/wrong. MEDIUM.
+
+  - Line 159-162: "byte-identical across thread counts... 8 vs 100 threads on two real-data pairs (measured at v0.3.0, before the compaction fix; no real-data pair has been re-taken since), and 1 vs 4 threads in the end-to-end suite, which exercises the fallback detector on synthetic input." — IMPORTANT: the e2e determinism check (c6) runs on synthetic mzML WITHOUT tdf → detector = openms fallback. So the thread-count determinism of the SHIPPED integer detector is only attested by the v0.3.0 real-data pairs, which predate the arena-compaction fix (output changed since). README is honest about this. But the CHANGELOG "Fixed" entry says "Deterministic, so the thread-count digests never saw it" about the arena bug — fine. However: does the claim "byte-identical at any thread count for a fixed binary" still hold for v2.0.0 output on real data? Not re-measured since v0.3.0 per README's own admission. The excerpt version said "byte-identical at any thread count... (8 vs 100 threads on two real-data pairs...)" without the caveat. Disk is honest. OK, no finding; maybe note as a residual risk in Q2/Q3? Not asked. Skip.
+
+  Also "the determinism digest... thread-count digests never saw it" — the arena compaction bug was deterministic so digests matched across thread counts — consistent.
+
+  - Line 178-180: Tests description ✓.
+
+  Now back to remaining verifications:
+
+  1. "window loop -19% at -9% CPU" (CHANGELOG line 71) — check BASELINE "Computed indices" section lines 1540-1575.
+
+  2. CONTRIBUTING disk — read it to check for the "test for this" claim and other discrepancies (the excerpt may be stale too).
+
+  3. README line 30-31 "10–26 GB" vs BASELINE table.
+
+  4. The "90 GB floor" (README line 107): src says 90.3 GB at t=0 for dataset D one-shot. ✓.
+
+  5. Q3 summary of number inconsistencies (final list):
+     a. CHANGELOG "adding 178k / 93k spectra" vs record 117k / 73k (calls mislabeled as spectra). HIGH.
+     b. CHANGELOG "z=3 peptides 5,313 -> 5,322 on run 009" — exists only in a source comment, no BASELINE entry (admitted by REFERENCE doc). MEDIUM.
+     c. CHANGELOG "36.3 s at 8.0x" — not in record; arithmetic gives ~37.5 s. MEDIUM.
+     d. CHANGELOG "floor is 138 GB" — record says ~99 GB returned. MEDIUM.
+     e. CHANGELOG "2.8-2.9%" vs 2.91/2.94 → "~2.9%". LOW.
+     f. CHANGELOG "~13% of z=1 calls" vs 11.3% measured (009/001) and README's own "11–26%". LOW.
+     g. CHANGELOG "112-138 s -> 7.8 s" beside "23.4x" — the direct serial arm is 128.8 s (16.5x); 23.4x is phase CPU/wall. The disk wording says "thread occupancy" which is technically right, but juxtaposition invites misreading; also "112-138" spans different builds. LOW/MEDIUM.
+     h. CHANGELOG "the sorts (8.5 s), which the next entry removes" — wrong attribution. LOW.
+     i. CHANGELOG v0.3.0 "which is where the README's stated 80-125 GB requirement comes from" — stale; README now says 57 GB / 170-190 GB. MEDIUM (stale).
+     j. src help text stream_load "which is closer to the truth is UNMEASURED" — stale, contradicts CHANGELOG Measured + README. MEDIUM (shipped --help stale).
+     k. src help min_charge "z=1 stratum carries ~2.8%" vs 2.9-2.94 measured. LOW. Also "14-20%" ok.
+     l. README "136,818 in 57 s" — CHANGELOG says 57 s; BASELINE's own campaign table says 0:42 for the same acquisition. MEDIUM (record self-contradictory; release docs picked one).
+     m. README "admission gate sizes concurrency from free RAM at startup" vs dynamic per-window admission (src help + CHANGELOG). MEDIUM.
+     n. README memory-unit note (kB÷10⁶) vs BASELINE "every figure is GiB" — 187.9/188 GB figures are GiB per the record. LOW.
+     o. "the tool compiles on a stock OpenMS tree" (CHANGELOG Build reproducibility) contradicts the mandatory-patch static_assert story (same document, lines 6-7, 107-108; CONTRIBUTING). MEDIUM.
+     p. REFERENCE doc "spectra ... 4,035,058 (+72%)" vs BASELINE T3 4,035,234 — 176-spectra discrepancy between the two release docs. LOW.
+     q. v1.1.0 "On 224 cores ... 5:10 vs 5:22 for byte-identical output" — 5:22 matches a BASELINE line marked "(SINGLE PAIR -- see the retraction below)". Unverifiable/possibly tainted. LOW.
+     r. Head-to-head "0.61x" uses SpeXtractor single run vs reference mean-of-2; v35 had 8% run-to-run spread. Methodological nit. LOW.
+     s. Occupancy "78×" (30-min) not in record. LOW.
+     t. "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — omits dataset D 1.33% (disclosed later in Measured). MEDIUM.
+     u. "Every interval overlaps the nominal 1%" — unverified for v38 D 1.33% (no CI recorded in the v38 tables I read; dataset F's 1.31% [1.04-1.57] suggests intervals ~±0.26, so 1.33% CI might be [1.07-1.59] → overlaps 1%? no — 1.07 > 1.0. Actually overlap with 1% means CI contains 1.0; [1.07-1.59] does NOT contain 1.0. Hmm! For v38 D at 1.33% with n≈12,609 peptides and entrapment count ~168, the CI... The Measured entry says "dataset D's whole-run point estimate sits 0.33 points above it" but claims "Every interval overlaps the nominal 1%". If D's CI is like F's width (±0.26), 1.33-0.26 = 1.07 > 1.0 → does NOT overlap. Can't verify without the CI. But gate criterion "entrapment FDR inside the previous interval" — previous D interval: v35 1.24% CI unknown. This is the standing-bar question: did the min_charge change pass the project's own gate? v38 D whole-run 1.33% vs v35 1.24%; the v0.3.0 six-dataset band tops at 1.31%. 1.33% exceeds the documented band. MEDIUM finding: the shipped default's dataset D entrapment (1.33%) sits above the documented 1.13-1.31% band that the Measured entry itself quotes, and CONTRIBUTING's gate requires "entrapment FDR inside the previous interval" — no interval for v38 D is recorded anywhere to show compliance.
+
+  Let me verify (u): does BASELINE give a CI for v38 D entrapment? The v38 table: "entrapment, whole run | 1.24% | 1.38% | 1.33%" — no CIs. And "every interval overlapping" referred to the v0.3.0 six-dataset measurement (1.13-1.31%). So the release's entrapment-gate compliance for the new defaults rests on point estimates. Fine as MEDIUM.
+
+  6. Q1: semver answer — yes 2.0.0 correct. Executable rename = breaking CLI; mandatory build patch = breaking build; output not digest-comparable + default changes = behavioral break. Also note: v1.0.0 and v1.1.0 were 4 days old; some might argue for 1.2.0, but the rename alone forces major. Also the CHANGELOG's own reasoning is sound. One nit: "the output is not digest-comparable" alone wouldn't require major (output changes with any fix), but combined with rename it's moot. Also worth noting the project jumped 1.0.0 → 1.1.0 → 2.0.0 in 4 days; users of 1.x get no deprecation window — process note, not semver violation.
+
+  7. Q2: version_ assignment. Facts: version_ = SPEXTRACTOR_VERSION and verboseVersion_ = version_ (both set — good, since --help prints verboseVersion_). CMake passes PROJECT_VERSION 2.0.0; fallback define "2.0.0" in src. CITATION.cff 2.0.0, date 2026-09-08 ✓. Risks:
+     - ini round trip: TOPPBase writes version into ini; loading a 1.x-era ini (which carries the OpenMS version string, e.g. "3.6.0-pre-...") will now trigger TOPPBase's version-mismatch warning. Harmless, arguably desired for a breaking release.
+     - mzML software entry now says SpeXtractor 2.0.0 instead of OpenMS x.y — downstream consumers that keyed on "OpenMS" name won't match; but name was already "SpeXtractor". Fine.
+     - official=false handles ToolHandler; comment notes the old name was passing as an official TOPP tool — good fix.
+     - Residual: any OpenMS infrastructure that parses version_ as OpenMS release (e.g., for share-data compatibility or TOPPAS workflow validation) will see "2.0.0" which does not correspond to any OpenMS release — low risk since tool is standalone.
+     - One more: the fallback `#define SPEXTRACTOR_VERSION "2.0.0"` in src (line 62-63) means a build outside CMake (or a stale CMake) silently hardcodes 2.0.0 — version drift risk on future releases (two sources of truth: CMakeLists PROJECT_VERSION and the hardcoded fallback). Minor release-engineering nit. LOW.
+     Conclusion: no correctness bug; compat risks are the intended breaking-change kind. The dual-source-of-version is the main nit.
+
+  8. Also check CONTRIBUTING on disk for stale bits. Read it.
+
+  9. Check "window loop -19% at -9% CPU" in BASELINE. And "22-25% of a 2-hour run" for precursor inference: v21 INFER 438.8/2015 = 21.8%; at v22+ it's less. "22-25%" — v21 21.8%... hmm "22-25%" — close. Check line 1540s.
+
+  Let me do the remaining reads: CONTRIBUTING.md disk, BASELINE 1540-1575, BASELINE 1095-1115 (PXD017703 memory), and grep for "-19%" and "22-25%".
+
+### Computed indices instead of binary searches (2026-09-07)
+
+Two hot loops were binary-searching sorted arrays whose key is, or can be, an integer:
+
+- `best()`, the innermost step of integer tracing, ran a `lower_bound` over its frame's ~25,000
+  sorted flight-time bins on **every frame step of every trace extension**. The bin is an integer
+  the instrument produced, so a per-frame direct-address row (~32 peaks per bucket, one global
+  shift so boundaries align across frames) turns the search start into a subtract and a shift.
+- `findPartner`, in the greedy claim loop, searched 22e6 doubles up to 50 times per seed. The key
+  there is the top bits of the IEEE-754 pattern -- monotone in the value for positive doubles, so
+  it is one load and one shift, and because the exponent leads, the bucket width is RELATIVE,
+  which is the right shape for a ppm tolerance.
+
+Both are exact: the bucket start is at or below the answer and the next bucket start is at or
+above it, so the standard-library search runs on a sub-range that provably contains the same
+position. Measured, byte-identical on both files:
+
+| build | dataset D total | dataset D window loop | TNBC wall | TNBC window loop | TNBC INFER (greedy walk) |
+|---|---:|---:|---:|---:|---:|
+| v25 | 237.5 s | 143.9 s | 15:01 | 467.5 s (69.5x) | 155.7 s (138.3) |
+| v27 (m/z key) | 234.2 s | -- | 14:32 | 459.8 s (70.4x) | 130.0 s (112.8) |
+| **v28 (+ TOF index)** | **205.2 s** | **116.7 s** (CPU -9%) | **14:11** | **412.9 s (74.3x)** | 148.7 s (128.8) |
+
+`PRECURSOR_INFER` replicates to about +-15% on `data` between runs of the same binary (130.0 vs
+148.7 s for the same code), so read that column as a level, not a delta.
+
+### Where the day ended
+
+| | v21 | v28 | change |
+|---|---:|---:|---|
+| dataset D total | 312.1 s | 205.2 s | **-34%** |
+| TNBC 009 wall | 33:38 / 26:45 (see below) | 14:11 | **-58% / -47%** |
+| TNBC window loop | 1150.0 s (31.2x) | 412.9 s (74.3x) | -64% |
+| TNBC MS1_TRACE | 252.5 s (4.8x) | 114.8 s (10.7x) | -55% |
+| TNBC PRECURSOR_INFER | 438.8 s | 148.7 s | -66% |
+| TNBC peak RSS | 181,777 MB | 190,849 MB | +5.0% |
+===
+**Public HeLa (PXD017703), 2020 Evosep sets, shipped defaults, 100 threads, one node each, Sage 1%
+peptides / MSFragger PSM rows (not peptides -- the driver counts rows; peptide/protein counts come with
+the reference comparison):**
+
+| acquisition | spectra | wall | RSS | Sage peptides | MSFragger PSM rows |
+|---|---|---|---|---|---|
+| 100SPD 100 ng S2-C1 (2731) | 136,818 | 0:42 | 16.2 GB | 12,861 | 115,396 |
+| 100SPD 100 ng S2-C5 (2735) | 130,459 | 0:41 | 15.3 GB | 12,520 | 109,406 |
+| 200SPD 200 ng S3-A1 (2737) | 75,462 | 0:30 | 10.8 GB | 6,154 | 63,161 |
+| 200SPD 200 ng S3-A2 (2738) | 74,874 | 0:31 | 10.7 GB | 5,701 | 61,750 |
+| 200SPD 200 ng S3-A4 (2740) | 72,238 | 0:27 | 10.2 GB | 6,364 | 60,366 |
+
+2732 was lost to a SIGBUS at the minute the shared install was republished (see the memory note);
+re-extracted by hand: 131,773 spectra, 0:43. The reference extractor ran on all 27 (exit 0,
+0.4-4.9 GB mzML each, 1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the
+2019 files) but the driver tested the output size in the same second the JVM exited and CephFS had
+not surfaced it: every line says NO OUTPUT and no reference search ran. Driver is now idempotent
+(skips extraction whose output exists, polls the size, skips completed searches); the rerun is queued
+===
+365:   MSFragger it yielded 17.7% fewer." Per-1k-spectra efficiency: spx 13.2 vs dt 16.4 (dt +25%) -- the
+651:under-covered / ~17% hypothesised-not-emitted / ~19% never hypothesised.
+989:| peptide-set symmetric difference | 0.25% of union | | 4.24% of union | |
+993:the two are equivalent (3 peptides on Sage, 2 on MSFragger, 0.25% set churn -- noise). On dataset A,
+1645:| dataset A | 12 -> 24 | 11,218 -> **11,037 (-1.61%)** | 10,689 -> **10,929 (+2.25%)** | 95.56% | 89.66% | 1.12% -> 1.14% |
+• Resolved:
+
+  - "window loop -19% at -9% CPU" (CHANGELOG): BASELINE v28: dataset D window loop 143.9 → 116.7 = -18.9% ✓ "-19%", "CPU -9%" ✓ (dataset D). But CHANGELOG says "window loop -19% at -9% CPU" without saying it's dataset D — fine, accurate. ✓ Not a finding.
+
+  - "22-25% of a 2-hour run" for precursor inference: v21 INFER 438.8 s of 33:35 (2015 s) = 21.8%; of 33:38? ~21.7%. Hmm "22-25%". If wall was 26:45 (1605 s): 438.8/1605 = 27.3%. Between 22-27%. "~22-25%" roughly defensible. Skip.
+
+  - PXD017703 memory: table shows 10.2-16.2 GB for 5 of 9 Evosep files; README says "low-load public files (PXD017703) ran in 10–26 GB". 26 GB not in this table; maybe other files (60SPD or the 18 highsens "2019 files"). The highsens are the C4 files — their SpeXtractor RSS isn't in the excerpt. Can't contradict; "10-26" plausible. Skip.
+
+  - 136,818: first extraction "57 s wall, 28 CPU-min, 16 GB peak" vs campaign table "0:42, 16.2 GB". Two different wall times recorded for the same acquisition/output. The CHANGELOG cites 57 s. The record contradicts itself (57 s vs 42 s) — the changelog picks the slower, earlier one. MEDIUM/LOW. Actually maybe the 57 s was the FIRST extraction (cold), 0:42 the campaign re-run. Not necessarily contradictory — different runs. I'll flag LOW: release docs cite the 57 s figure while the record's campaign table says 0:42 for the same acquisition; neither CHANGELOG nor README explains which.
+
+  - CONTRIBUTING line 46-47: "There is a test for this, because it has been broken before." vs README line 85-87: "The end-to-end suite pins the shipped detector and the charge floor (it passes a few extraction options of its own, so it is NOT a test of the whole default set)." — Direct contradiction between the two release documents about what the test guarantees. MEDIUM.
+
+  - CONTRIBUTING line 26: gate "entrapment FDR inside the previous interval" — v38 dataset D: 1.33% vs previous 1.24% (v35); no interval recorded for either, and the documented six-dataset band tops at 1.31%. So the new default's compliance with the project's own gate is unproven on the record; the Measured section's "Every interval overlaps the nominal 1%" is asserted without a recorded CI for the v38 arms. MEDIUM.
+
+  - src stream_load help "UNMEASURED" stale — MEDIUM. Also src min_charge help "~2.8%" — vs 2.91-2.94. LOW. Also src min_charge help says "14-20%% of Sage peptides" ✓. src im_charge_veto help "measured at ~13% of z=1 calls on a 2-hour file" — 11.3% measured. LOW.
+
+  - Q3 asked: "Any number in the CHANGELOG v2.0.0 section or the README that is inconsistent with another number in the same documents or with the BASELINE excerpt?" — my list covers it.
+
+  One more check: CHANGELOG line 20 "sections dated 2026-09-06 to 2026-09-08" — but the head-to-head numbers and v37/v38 are 2026-09-08 ✓; memory work 09-06 ✓; ms1 bands 09-07 ✓. OK.
+
+  Also CHANGELOG line 85-86: "~2.1 billion records, ~144 GiB at 72 bytes if simultaneous" — but then "less than the 16-24 GiB predicted from the record count" — 24 bytes saved × 2.1e9 = 50.4 GB = 47 GiB, not 16-24 GiB. Hmm: the prediction 16-24 GiB — if not all records resident: ~40-60% resident → 19-28 GiB. BASELINE line 1360 says "measured -10.7 GB of that 11.3 rather than the 16-24 GB predicted". So the changelog matches the record ✓.
+
+  Also "-2.7 GB on dataset D" — not verified in what I read but likely recorded near line 1360. Fine.
+
+  CHANGELOG line 94: "perf:malloc_trim, on by default: 30% less peak memory for 8.5% more wall time" — measured -30.7% / +8.5% ✓ but that was at min_charge 2 (v13/v19, before z=1). Disk line 98 notes "measured at the previous charge default; with z=1 emitted the release peaks at 187.9 GB". Honest. ✓
+
+  Now, is "265 GB to 186 GB" consistent with "138 GB floor"? 265 - 186 = 79 GB freed at peak; trim returned ~99 GB at boundary. "floor is 138 GB" — unsupported. Keep MEDIUM.
+
+  Also Q2 additional: verboseVersion_ set ✓ so --help shows 2.0.0. One more real consideration: TOPPBase's `-ini` write includes "version" = 2.0.0; when the tool later reads an ini whose version ≠ its own it logs a warning but proceeds. Old inis recorded OpenMS version (e.g., "3.6.0-pre-bbd4b895") → warning text may confuse but harmless. Also TOPPBase type "unofficial" — the official=false fix is correct; previously the old name was registered in ToolHandler as official OpenMS tool? The comment says the rename surfaced that the old name "had been passing itself off as an official TOPP tool" — with official=true and a name in ToolHandler's list ("spextract"?? unlikely upstream). Whatever.
+
+  Also: mzML software entry — OpenMS DataProcessing gets tool name + getVersion(); downstream fine.
+
+  Also potential issue: TOPPBase uses version_ in the "--help" header "Version: ..." and for `-test` mode... fine.
+
+  Release-engineering defects list:
+  - No per-push CI compiles the tool: tests.yml builds only SPEXTRACTOR_TESTS_ONLY (calibration header) on 4 platforms; build.yml (the only job that compiles spextractor.cpp) runs weekly/on-demand. So the v2.0.0 tag's compilability is proven at most weekly; a broken default (like the registerFlag_ default-off class of bug, or a compile break) would ship green. Especially acute because v2.0.0 adds a static_assert whose whole point is compile-time enforcement. MEDIUM/HIGH process finding. Also: was build.yml run on the release commit? Unknown — on-demand. The release docs don't say. The "publish step refuses to publish a binary that failed its own suite" (cluster tooling) covers their deploy path, partially mitigating.
+  - Version defined in two places: CMakeLists PROJECT_VERSION 2.0.0 and hardcoded fallback `#define SPEXTRACTOR_VERSION "2.0.0"` in src — drift risk. LOW.
+  - CITATION.cff 2.0.0 + date ✓; CMake 2.0.0 ✓; CHANGELOG ✓; README says v2.0.0 ✓. Consistent.
+  - Semver: fine.
+
+  Also check: README line 25 "CMake 3.21+ (OpenMS's own requirement; the tool itself needs 3.16)" vs CMakeLists "cmake_minimum_required(VERSION 3.16)" ✓ consistent.
+
+  Also README line 41-44 install: applies patches, rebuilds OpenMS, sets OPENMS_DATA_PATH ✓ matches build.yml comment.
+
+  Also: README line 99 ini threads caveat ✓ matches source behavior (argv scan only). But the SOURCE behavior has a subtle bug class: `-threads` given via `--threads` (double dash)? OpenMS accepts both "-param" and "--param"? The scan only matches "-threads". If OpenMS accepts "--threads 1", the scan misses it → user gets all cores despite asking for 1. Minor; README now says "only the command line is inspected" but doesn't mention the double-dash form. OpenMS TOPP conventionally uses single dash; double dash also works in OpenMS (it strips dashes?). Not sure; skip or LOW. I'll mention briefly under Q2-ish? Not asked. Could add as LOW finding: argv scan misses `--threads` spelling and any `-ini` supplied value (documented for ini).
+
+  Also src line 3128-3129 log message ✓.
+
+  Now also double-check "0.61x/0.55x" claims use mean reference vs single SpeX run — LOW methodological.
+
+  Also CHANGELOG "Where it stands" says "at 100 threads" ✓.
+
+  Also CHANGELOG line 46: "MS1 tracing is 2x faster" — 41.7→20.4 = 2.04x on dataset D sub-stage. ✓. But note the gate for ms1_trace_bands=48: dataset A MSFragger +2.03% with overlap 89.33% — CONTRIBUTING gate: both engines (✓ MSFragger didn't DROP... gate says "judged on identified peptides" — a gain passes), entrapment inside previous interval (1.12→1.07 ✓), second acquisition ✓. OK.
+
+  For the trace_bands=48 FAIL: fine.
+
+  Now the "2.8-2.9%" — actually wait: z=1 stratum under pooled cut: 001: 2.91%, 009: 2.94%. CHANGELOG says "2.8-2.9%". Both round to 2.9. "2.8-" lower bound wrong. LOW.
+
+  And "the z=1 stratum at 2.9% under the pooled cut" (Measured, line 219) ✓ correct there — so CHANGELOG contradicts itself: 2.8-2.9% (line 40) vs 2.9% (line 219). LOW.
+
+  Also line 40: "~9% on dataset D" vs v38 8.8% ✓ "~9%" ok, and stratum n=151 ✓ "~150".
+
+  Now assemble the final numbered findings list, ordered roughly by file/severity, then answer Q1-Q3.
+
+  Severity assignments:
+  1. HIGH: "adding 178k / 93k spectra" — calls mislabeled as spectra; record shows 117k/73k. (CHANGELOG line 36-38; also REFERENCE doc line 202.)
+  2. MEDIUM: "5,313 -> 5,322 on run 009" — no BASELINE entry; exists only in a source comment (REFERENCE doc admits). Unsupported by the measurement record cited as "the record".
+  3. MEDIUM: "36.3 s at 8.0x" unsupported; recorded numbers give ~37.5 s (75.9 - 39.0 + 0.55), no 8.0x anywhere.
+  4. MEDIUM: "floor is 138 GB at the loop start" — record says trim returns ~99 GB at the MS1 boundary; 138 GB nowhere in BASELINE.
+  5. MEDIUM: "the tool compiles on a stock OpenMS tree" contradicts the mandatory static_assert (same file lines 6-7, 104-108) and CONTRIBUTING. Intent (no-mzPeak build) is mislabeled "stock".
+  6. MEDIUM: "Whole-run entrapment FDR is at the nominal 1% (0.93-1.03%)" — omits dataset D's 1.33% at this release's defaults (disclosed only later in Measured); headline range cherry-picks the two 2-hour runs.
+  7. MEDIUM: gate compliance: CONTRIBUTING's standing bar requires "entrapment FDR inside the previous interval"; the v38 dataset D whole-run figure (1.33%) exceeds the documented six-dataset band (1.13-1.31%) and no CI is recorded for the v38 arms; "Every interval overlaps the nominal 1%" is asserted without a recorded interval for the 1.33% arm.
+  8. MEDIUM: CONTRIBUTING "There is a test for this" (defaults reproducible) vs README "it is not a test of the whole default set". Contradiction.
+  9. MEDIUM: stale src help: perf:stream_load says "which is closer to the truth is UNMEASURED" — contradicts CHANGELOG Measured (+223/+2.0%, one-shot more sensitive) and README option table. Shipped --help is stale.
+  10. MEDIUM: README "an admission gate sizes concurrency from free RAM at startup" — stale; admission is dynamic, re-decided at every window (src help perf:mem_fraction; CHANGELOG Fixed).
+  11. MEDIUM: "136,818 spectra in 57 s" — BASELINE's own campaign table records 0:42 for the same acquisition; the release cites the first-extraction number without noting the faster campaign figure.
+  12. MEDIUM: v0.3.0 section "which is where the README's stated 80-125 GB requirement comes from" — stale; README states 57 GB / 170-190 GB, never 80-125.
+  13. LOW: "2.8-2.9%" (line 40) vs measured 2.91/2.94 and the same file's own "2.9%" (line 219); src help says ~2.8%.
+  14. LOW: "~13% of z=1 calls" (CHANGELOG line 32, src help) vs measured 11.3% (009) / 11.2% (001) and README's own "11–26%".
+  15. LOW: "112-138 s -> 7.8 s" next to "23.4x": the direct serial arm is 128.8 s → 16.5x; 23.4x is the phase's CPU/wall occupancy, and 112.8/138.3 come from intermediate builds v27/v25, not the serial arm v28. Multiplication doesn't check out (138/7.8 = 17.7).
+  16. LOW: "the sorts (8.5 s), which the next entry removes" — misattribution; the next entry removes binary searches inside the greedy walk (130/128.8 s), not the 8.5 s sorts; the greedy loop itself is parallelized two entries later.
+  17. LOW: REFERENCE doc "4,035,058 (+72%)" vs BASELINE T3 4,035,234 — docs disagree by 176 spectra.
+  18. LOW: v1.1.0 "5:10 vs 5:22" — 5:22 matches a BASELINE line explicitly marked "(SINGLE PAIR -- see the retraction below)"; unretracted support not shown.
+  19. LOW: head-to-head compares SpeXtractor's single v38 run against the reference's 2-rep mean; v35's own two reps spread 8% (11:24.97/10:36.92), so "0.61x" carries single-run noise.
+  20. LOW: README memory-unit disclaimer ("kB ÷ 10⁶") vs BASELINE's "Every figure in this file is GiB" — the 57/188/187.9 figures come from the GiB record; the disclaimer mislabels the unit convention (7% ambiguity).
+  21. LOW: README "~78× (30-min)" window-loop occupancy not in the record (89.2× for 009 is; dataset D v38 occupancy was not recorded in the v38 tables).
+  22. Release-engineering: no per-push CI compiles the tool. tests.yml (4 platforms) builds only SPEXTRACTOR_TESTS_ONLY; build.yml, "the only job that proves the tool compiles," runs weekly/on-demand — so per-push green says nothing about the tool building, acute given v2.0.0's static_assert gating. MEDIUM/HIGH.
+  23. Release-engineering: version truth in two places (CMake PROJECT_VERSION + hardcoded fallback define in src) — drift risk. LOW.
+  24. LOW: -threads argv scan only matches the literal "-threads" token; an ini-provided `threads=1` is documented (README) but the double-dash spelling "--threads" is also silently overridden (if accepted by OpenMS) — actually I shouldn't claim without evidence OpenMS accepts --threads. OpenMS does accept double-dash? I believe OpenMS TOPP accepts both "-opt" and "--opt"? Not sure. I'll fold the ini part (already documented in README — good) and skip double-dash.
+
+  Also finding: CHANGELOG line 9-10 disk: "The public release v1.0.0 (2026-09-04) was cut from the v0.3.0 tree described below, and v1.1.0 (the same day) added the two defaults" ✓ consistent with v1.1.0/v1.0.0 sections.
+
+  Also, excerpt vs disk: several excerpt issues were already fixed on disk (9 GB→6.2 GB, 72×/90×→78×/89×, 0.06–2%→0.01–2%, "greedy claim loop went"→"thread occupancy went", "3.0%/8.5%"→"2.9%/7.9%", added caveat about v0.3.0 thread-determinism). I should note I reviewed the disk versions.
+
+  Q1 answer: Yes. Rename (breaking CLI), mandatory third patch (breaking build), changed defaults (breaking behavior/output). Semver major is not just defensible but required by the rename alone. Caveat: output-not-digest-comparable by itself wouldn't force major (bug fixes change output), but it's moot. Also process note: two majors' worth of churn 4 days after 1.0.0 suggests 1.x was cut prematurely, but that's not a semver violation. Also note the "private and public repository share one version line" — the jump from private v38 to public 2.0.0 is a mapping decision, fine.
+
+  Q2 answer: Implementation is correct as far as it goes: both version_ and verboseVersion_ are set (verboseVersion_ is what --help prints; line 1660-1661), CMake injects PROJECT_VERSION, CITATION.cff matches. Risks: (a) ini round-trip: inis written by 1.x carry the OpenMS version string; TOPPBase will warn on version mismatch — harmless and arguably desirable for a breaking release; (b) the mzML software entry and spx userParams now carry 2.0.0 — any downstream parser expecting an OpenMS version there breaks, but that's the intent; (c) official=false is correctly set (ToolHandler) — the comment documents the old name had been registered as an official TOPP tool; (d) residual: two sources of version truth (hardcoded fallback define vs CMake) can drift; (e) OpenMS-internal version parsing ("x.y.z" format) — "2.0.0" parses cleanly. No correctness bug; the compatibility effects are the intended break and are disclosed in "Why 2.0".
+
+  Q3 answer: the number inconsistencies (list them compactly): 178k/93k vs 117k/73k; 36.3/8.0x unsupported; 138 GB vs ~99 GB; 2.8-2.9 vs 2.91-2.94 vs own 2.9; ~13% vs 11.3% vs README 11-26%; 112-138→7.8 vs 23.4x (16.5x direct); 57 s vs 0:42; 4,035,058 vs 4,035,234; 5,313→5,322 not in record; 80-125 GB stale.
+
+  Write it up.
+
+To resume this session: kimi -r session_86cbe0ee-48ee-45cf-bcbd-f837fa5b8d8b
+exit=0

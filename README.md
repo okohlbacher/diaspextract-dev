@@ -152,7 +152,7 @@ trim shipped; it has not been re-measured with it, so the two are not known to b
 
 Runtime is dominated by the window loop, which is parallel across isolation windows and, within a
 window, across flight-time bands. The loader is 10–14%. Memory, not CPU, sets how many
-windows can be in flight: an admission gate sizes concurrency from free RAM at startup.
+windows can be in flight: an admission gate re-decides concurrency from free RAM at every window admission.
 
 ## Determinism
 
