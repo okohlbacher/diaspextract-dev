@@ -2030,3 +2030,34 @@ fetch `inten` and `tof` at unpredictable offsets. Touching *fewer bytes* is not 
 Taken with the two ablations above, the detector's inner loop is bound by memory traffic that is
 already being prefetched efficiently. Any further work there has to reduce the number of candidates
 visited -- not the cost of visiting one.
+
+### Parallel mzML serialisation, and the key-sort (2026-09-08, night)
+
+Two changes to the serial tail, both byte-identical (dataset D reproduces the reference digest).
+
+**The write.** It was the largest serial block left: 92.9 s of an 822 s run on the 2-hour file
+(10.7%) at 1.0x. It is CPU-bound rather than I/O-bound, which is what made it worth attacking --
+measured, the phase sustains ~400 MB/s while `dd` on the same filesystem does **4.0 GB/s**, a 10x
+headroom. Serialising one spectrum is independent of every other; only the concatenation is ordered.
+Spectra are now encoded in parallel into per-chunk buffers and appended in index order, in waves so
+the buffered text stays bounded.
+
+The obstacle, and why the first three attempts aborted: OpenMS's writer is not reentrant on one
+handler. `writeSpectrum_`'s helpers are non-const, `MzMLHandler::cached_terms_` is a mutable memo of
+CV-term validation written during serialisation, and the validator keeps its own state. A shared
+handler corrupts the heap within seconds -- confirmed under gdb, aborting inside `writePrecursor_`'s
+allocation, which is where the damage is *detected* rather than caused. Freezing `cached_terms_`
+alone was not enough. Giving each thread its own handler and validator -- same members, same
+`PeakFileOptions`, sharing only the read-only experiment -- is what works.
+
+| dataset D, 100 threads | before | after |
+|---|---:|---:|
+| WRITE(mzML) wall | 20.1 s | **5.9 s** |
+| WRITE parallelism | 1.0x | **51.4x** |
+
+**The sort.** `std::sort` moves whatever it is handed, and an `MSSpectrum` object is ~750 bytes
+against 32 for a key. Sorting a key array and permuting once gives the same permutation -- the
+comparator returns exactly what the old one returned for every pair, the rare full tie still defers
+to the peaks, and the keys start in the spectra's order, so introsort makes the same decisions.
+SORT(canonical) 1.9 s -> 0.8 s on dataset D, and the key build parallelises where sorting objects
+could not.
