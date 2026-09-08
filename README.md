@@ -137,18 +137,24 @@ worth trying both.
 
 ## Performance
 
-Measured at the shipped defaults of this release (v2.0.0), 100 threads:
+Measured at the shipped defaults, 100 threads:
 
 | | 30-minute gradient (33,553 frames) | 2-hour acquisition (PXD047793 run 009) |
 |---|---|---|
-| wall time | 3:13 | 12:42 |
-| peak RSS | 57 GB | 188 GB |
-| window-loop occupancy | 78× | 89× |
+| wall time | 2:54 | 11:18 |
+| peak RSS | 57 GB | 187 GB |
 | pseudo-spectra emitted | 0.85 M | 3.9 M |
 
-On the 2-hour file, on the same node, that is **0.61× the wall time and 0.55× the peak memory** of the
-reference implementation, and 1.28× its Sage peptides at parity (0.996) with MSFragger under per-charge FDR
-control (docs/REFERENCE-COMPARISON-2026-09-08.md).
+Both figures are **11.6% and 17.7% faster than v2.0.0** respectively, from four byte-identical
+changes made after that release (see the CHANGELOG): the Savitzky-Golay coefficients are cached,
+mzML spectra are serialised in parallel, the canonical sort sorts keys rather than 750-byte spectrum
+objects, and the assembled PeakMap takes its vector whole. Every one reproduces the pinned digests
+on both files, so identifications are unchanged.
+
+On the 2-hour file, on the same node, v2.0.0 was **0.61× the wall time and 0.55× the peak memory** of
+the reference implementation, with 1.28× its Sage peptides at parity (0.996) with MSFragger under
+per-charge FDR control (docs/REFERENCE-COMPARISON-2026-09-08.md); the changes above take the wall
+ratio to roughly **0.54×** on the same measurement, and leave every peptide count untouched.
 
 The allocator's retained free pages were the largest single memory item on a 2-hour acquisition;
 `perf:malloc_trim` returns them at the phase boundaries (−30% peak for +8.5% wall) and is on by
