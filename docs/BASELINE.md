@@ -1901,3 +1901,38 @@ Extraction on ibminode05 (shared, loaded -- not a timing number): 16:02, 170.1 G
 
 Second file, same shape as 009: the z=1 stratum sits at ~2.9% under the pooled cut and at 0.87%
 under per-charge control, with the gain intact on both engines under both walks.
+
+
+### v38 on TNBC 009, and the new reference T4 (2026-09-08)
+
+**T4 = `057aad4beec52483...`** (`/scratch/kohlbach/v38_009`, the shipped default: min_charge 1, mobility veto,
+3+-band calls dropped). T3 is retired. Extraction on `data`, alone on the node:
+
+| | v35 (T2) | v37 (T3) | **v38 (T4)** |
+|---|---:|---:|---:|
+| spectra | 2,343,822 | 4,035,234 | **3,918,321** |
+| wall, uncontended, same node | 11:24.97 / 10:36.92 | 13:07.40 / 12:36.77 | **12:42.21** |
+| peak RSS | 179.1 / 178.5 GB | 177.4 / 180.0 GB | 187.9 GB |
+| window loop | 412.0 s (80.0x) | 442.4 s (91.1x) | 443.4 s (89.2x) |
+| Sage peptides, pooled | 24,213 | 27,808 | **27,855** |
+| MSFragger peptides, pooled | 24,199 | 26,588 | **26,559** |
+| Sage, per-charge walk | 24,484 | 27,908 | **27,831 (+13.7%)** |
+| MSFragger, per-charge walk | 25,029 | 28,185 | **28,181 (+12.6%)** |
+| entrapment, whole run | 1.01% | 1.00% | 1.03% |
+| entrapment z=1 stratum (pooled / per-charge) | -- | 2.91% / 0.91% | 2.94% / 0.91% |
+
+Emitting the singly charged population costs ~+15% wall on a 2-hour file (12:42 against 11:01 mean
+for v35) and no memory beyond the usual +-10 GB run-to-run spread; the window loop's occupancy rose
+to ~90x because there is more scoring work to fill its tail with.
+
+### Head to head at the new default (2026-09-08, `data`, both tools 100 threads)
+
+| | reference implementation | SpeXtractor v38 | ratio |
+|---|---|---|---|
+| wall | 21:12.24 / 20:41.46 (mean 20:56.9) | **12:42.21** | **0.61x** |
+| peak RSS | 357.7 / 323.4 GB (mean 340.6) | **187.9 GB** | **0.55x** |
+| Sage peptides, per-charge 1% -- 009 | 21,743 | **27,831** | **1.28** |
+| MSFragger peptides, per-charge 1% -- 009 | 28,294 | **28,181** | **1.00** |
+| Sage, per-charge -- 001 | 15,418 | **19,262** | **1.25** |
+| MSFragger, per-charge -- 001 | 19,652 | **19,230** | **0.98** |
+| entrapment FDR, whole run (SpeX) | -- | 1.03% / 0.93% | at nominal 1% |
