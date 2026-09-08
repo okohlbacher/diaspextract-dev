@@ -484,6 +484,52 @@ entrapment FDR at a nominal 1% cut"), which a per-charge walk should undo.
 
 **What would falsify it.** A v38 009 protein count at or above 5,802 under either walk.
 
+### Is Savitzky-Golay the right smoother for elution-peak detection?
+
+**The idea.** `ElutionPeakDetection::smoothData()` smooths every mass trace with a Savitzky-Golay
+filter (polynomial order 2, frame length = max(3, win_size)) before the local-minimum search that
+splits a trace at chromatographic valleys. SG is one choice among several. A discrete wavelet
+smoother -- a stationary (a-trous) B3-spline transform, or a Haar/Daubechies DWT with level-wise
+thresholding -- is the obvious alternative, and the question is open on all three axes: runtime,
+memory and peptide quality.
+
+**Why it is worth asking now.** Caching the SG coefficients (2026-09-08) removed the coefficient
+construction, which was the dominant cost -- MS1 tracing CPU fell 44% and the window loop 10%. What
+remains is the filter *application*: O(n x frame_length) multiply-adds per trace, plus an MSSpectrum
+copy of the trace points on every call. A stationary wavelet transform is O(n x levels) with levels
+~ log2(frame_length), so for the longer frames it is asymptotically cheaper; a Haar DWT is O(n).
+Whether that matters depends on the frame-length distribution, which is not measured.
+
+Quality is the more interesting half. SG preserves peak height and width by construction (that is
+its whole point, and OpenMS's own comment says it fits better than the lowess alternative it
+replaced), but it is a fixed-width linear filter: one frame length is applied to traces whose widths
+vary across the gradient. A wavelet smoother is multi-scale by construction, so it can denoise a
+narrow early-eluting peak and a broad late one with the same parameters. The valley search that
+consumes the smoothed intensities is what decides how traces split, and splitting decides precursor
+and fragment boundaries -- so this is upstream of everything.
+
+**Note on the previous wavelet result, which does NOT settle this.** `trace:wavelet_smooth` (an
+a-trous B3-spline, removed 2026-09-08 as falsified) smoothed the *precursor XIC before correlating
+fragments against it* -- a different signal at a different stage, and it benchmarked flat (-0.03%).
+Its own mechanism note explains why: at 2.6 samples per FWHM the requested scale was below the first
+meaningful a-trous level, so the filter was frequently a no-op. That is a statement about the
+correlation input, not about trace smoothing for valley detection, and the implementation is in the
+git history if a resurrection is wanted.
+
+**How to test.** The smoother is behind one OpenMS function, so this is a contained experiment:
+(1) instrument the frame-length distribution and the fraction of window-loop CPU still inside
+`smoothData()` after the coefficient cache -- if it is under ~3% the runtime case is dead and only
+quality is left; (2) implement the alternative behind a `trace:smoother = savgol | wavelet` option,
+defaulting to savgol; (3) compare on the two gate datasets and both engines, with entrapment FDR,
+plus the split-count and trace-length distributions, which is where a smoother difference shows up
+before the peptides do.
+
+**What would falsify it.** Wavelet smoothing loses peptides on either engine or either dataset (it
+is OUTPUT-CHANGING, so it needs the full gate); or `smoothData()` is a negligible share of CPU after
+the cache, in which case the runtime half is closed and the quality half needs a reason beyond
+"multi-scale sounds better"; or the split-count distribution is indistinguishable, meaning the
+valley search is insensitive to the smoother and the whole question is moot.
+
 ## Memory-work plan status (2026-09-08)
 
 The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
