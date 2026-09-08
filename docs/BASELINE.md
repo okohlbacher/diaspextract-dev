@@ -2061,3 +2061,37 @@ comparator returns exactly what the old one returned for every pair, the rare fu
 to the peaks, and the keys start in the spectra's order, so introsort makes the same decisions.
 SORT(canonical) 1.9 s -> 0.8 s on dataset D, and the key build parallelises where sorting objects
 could not.
+
+### The night's work, measured end to end (2026-09-08 -> 09, TNBC 009)
+
+Interleaved A/B on `data`, arms alternating, 100 threads, against the released v2.0.0. **All four
+runs reproduce the TNBC reference digest**, so the peptide sets are unchanged by construction and no
+search was run.
+
+| | rep 1 | rep 2 | mean |
+|---|---|---|---|
+| v2.0.0 | 13:43.65 / 189.2 GB | 13:42.13 / 188.6 GB | 822.9 s / 188.9 GB |
+| **tonight** | 11:09.22 / 186.7 GB | 11:26.01 / 188.0 GB | **677.6 s / 187.4 GB** |
+| delta | | | **-145.3 s, -17.7%** |
+
+The improved arm ran at node load 59-65 against 17-19 for the baseline, so the figure is if anything
+understated. Peak memory is unchanged within run-to-run spread.
+
+Phase means, wall and CPU:
+
+| phase | v2.0.0 wall | tonight wall | v2.0.0 CPU | tonight CPU |
+|---|---:|---:|---:|---:|
+| LOAD(stream) | 91.0 | 93.5 | 5309 | 5266 |
+| MS1_TRACE | 58.6 | 52.9 | 1489 | **888 (-40%)** |
+| PRECURSOR_INFER | 24.5 | 23.4 | 607 | 602 |
+| WINDOW_LOOP | 491.5 | **432.0** | 44523 | **34491 (-22.5%)** |
+| SORT(canonical) | 9.5 | **3.7** | 9.5 | 5.3 |
+| ASSEMBLE(PeakMap) | 3.8 | **0.0** | 3.8 | 0.0 |
+| WRITE(mzML) | 90.0 | **21.1** | 90 | **1037 at 49x** |
+| total measured | 768.7 | **626.5** | | |
+
+Two things to read from it. The window loop's CPU fell 22.5% -- more than the 10% measured on the
+30-minute file, because longer gradients have longer traces and the coefficient cache pays per
+trace. And its parallelism fell 90.0x -> 81.6x: with less work per window the tail is a larger share,
+so scheduling now has room it did not have before. The write went from 1.0x to ~49x and is no longer
+the serial floor; LOAD, at 93.5 s and 14% of the run, is now the second-largest phase.
