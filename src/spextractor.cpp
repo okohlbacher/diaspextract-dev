@@ -2549,6 +2549,42 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
         ++n_committed;
       }
     }
+    // [z1-diag 2026-09-08] Entrapment FDR stratified by charge put the z=1 stratum at ~2.8% against
+    // ~0.4% for z=2 on two TNBC files. The obvious mechanism is charge halving: a 2+ ion whose M+1
+    // (+0.5017) was missed but whose M+2 (+1.0034) was found reads as a 1+ envelope. This dumps,
+    // for every z=1 call, whether a co-eluting MS1 trace sits at +ISO/2 (a 2+ M+1) or +ISO/3, and
+    // whether that trace had already been claimed -- the direct test, on every precursor.
+    if (const char* dz = std::getenv("SPEXTRACTOR_Z1_DIAG"))
+    {
+      size_t n1 = 0, has2 = 0, has3 = 0, has2_free = 0;
+      FILE* fo = (*dz && std::strcmp(dz, "1") != 0) ? std::fopen(dz, "w") : nullptr;
+      if (fo) std::fprintf(fo, "mono_mz\trt\tim\tn_iso\tp2\tp2_free\tp3\n");
+      for (const auto& pc : out)
+      {
+        if (pc.charge != 1) continue;
+        ++n1;
+        const Trace& sd = ms1[pc.trace_idx];
+        const double tol = sd.mz * mass_ppm * 1e-6;
+        auto has = [&](double target, bool& free_) -> bool {
+          const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
+          for (size_t k = klo; k < khi; ++k)
+          {
+            if (fabs(sorted_rt[k] - sd.rt) > delta_rt || fabs(sorted_im[k] - sd.im) > iso_im_tol) continue;
+            const size_t j = by_mz[k]; if (j == pc.trace_idx) continue;
+            free_ = !used[j]; return true;
+          }
+          return false;
+        };
+        bool f2 = false, f3 = false;
+        const bool p2 = has(pc.mono_mz + ISO / 2.0, f2), p3 = has(pc.mono_mz + ISO / 3.0, f3);
+        has2 += p2; has3 += p3; has2_free += (p2 && f2);
+        if (fo) std::fprintf(fo, "%.5f\t%.3f\t%.5f\t%d\t%d\t%d\t%d\n", pc.mono_mz, pc.rt, pc.im, pc.n_isotopes, (int)p2, (int)f2, (int)p3);
+      }
+      if (fo) std::fclose(fo);
+      writeLogInfo_("[z1-diag] " + String(n1) + " z=1 precursors: " + String(has2) + " (" + String((int)(1000.0 * has2 / std::max<size_t>(n1, 1)) / 10.0)
+                    + "%) have a co-eluting MS1 trace at +ISO/2, i.e. where a 2+ ion's M+1 would be (" + String(has2_free)
+                    + " of those unclaimed); " + String(has3) + " at +ISO/3");
+    }
     {
       auto _pi_t3 = std::chrono::steady_clock::now();
       auto secs_ = [](auto d) { return std::chrono::duration<double>(d).count(); };
@@ -3494,6 +3530,15 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       if (before != precursors.size())
         writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
                       + " precursors below that charge, " + String(precursors.size()) + " remain");
+    }
+    // [z1-unset 2026-09-08] Emit z=1 calls with the charge UNSET, so the engines search their
+    // configured 2-4 range instead of honouring a 1+ that may be a halved 2+. Discriminates the
+    // two hypotheses directly: a real 1+ peptide is lost, a mis-called 2+ comes back at 2+.
+    if (std::getenv("SPEXTRACTOR_Z1_CHARGE_UNSET"))
+    {
+      size_t n = 0;
+      for (auto& pc : precursors) if (pc.charge == 1) { pc.charge = 0; ++n; }
+      writeLogInfo_("SPEXTRACTOR_Z1_CHARGE_UNSET: " + String(n) + " z=1 precursors emitted with the charge unset");
     }
     // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACTOR_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
