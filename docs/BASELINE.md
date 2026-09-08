@@ -2004,3 +2004,29 @@ over windows), so both arms targeted its inner loop. Neither is worth taking:
 
 Together these say the detector is bound by memory traffic over its three parallel arrays and the
 visited bitmap, not by arithmetic -- which is where any further work on it should aim.
+
+### The detector's candidate scan: reordering its predicates LOSES (2026-09-08, night)
+
+`best()` scans a frame's candidates in flight-time order and rejects on two predicates: intensity
+above noise (`inten`, 4 B) and mobility inside the gate (`imq`, 2 B). Testing mobility first, and
+replacing the per-step `tof[k] <= hi_t` condition with one `upper_bound` computed before the loop,
+looks free -- both predicates are pure functions of k, so the candidate set, the visiting order and
+the first-of-equals rule are all unchanged, and the spectrum list is byte-identical (verified).
+
+It is a **10% regression**. Interleaved on an otherwise quiet node at matched load, dataset D:
+
+| | rep 1 | rep 2 | mean wall | mean window-loop CPU |
+|---|---|---|---|---|
+| unchanged | 3:16.82 | 3:09.32 | **3:13.1** | 7,912 |
+| reordered | 3:35.31 | 3:30.22 | 3:32.8 | 8,719 (+10.2%) |
+
+The reason is the hardware prefetcher. The original loop reads `tof[k]` (the loop condition),
+`inten[k]` and `imq[k]` in ascending k, so three sequential streams run and the L2 streamer keeps
+all of them ahead of the loop. Testing the narrow array first and dropping the `tof` read breaks two
+of those streams into dependent, scattered accesses: the ~5% of candidates that pass mobility then
+fetch `inten` and `tof` at unpredictable offsets. Touching *fewer bytes* is not the same as touching
+*fewer cache lines*, and here the sequential access pattern was worth more than the bytes saved.
+
+Taken with the two ablations above, the detector's inner loop is bound by memory traffic that is
+already being prefetched efficiently. Any further work there has to reduce the number of candidates
+visited -- not the cost of visiting one.
