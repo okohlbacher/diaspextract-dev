@@ -21,10 +21,6 @@ unchanged.
   spectrum is independent of every other; only the concatenation is ordered. **WRITE 90.0 s ->
   21.1 s, 1.0x -> 49x.** Each thread needs its own handler and validator -- OpenMS's writer memoises
   CV-term validation in mutable state, and sharing one handler corrupts the heap.
-- **The MS1 mass-trace conversion is parallel.** Converting 22 million OpenMS `MassTrace` objects to
-  the tool's own records was serial, and its per-point cost is a binary search over the frame table.
-  The pure half -- coordinates and the point list -- now runs in parallel in chunks while the arena
-  append stays ordered, so the spans, their order and the arena bytes are unchanged.
 - **The canonical sort sorts keys, not spectra**, and the assembled PeakMap takes the vector whole.
   `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
   **SORT -61%; the ASSEMBLE phase is gone.**
