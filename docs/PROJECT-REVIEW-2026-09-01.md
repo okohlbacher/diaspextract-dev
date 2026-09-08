@@ -60,7 +60,7 @@ experiment. Second: two unreconciled the reference implementation reference sets
     quality → roadmap. Ship regardless.
 03. Public-PXD replication + v0.2.0 as ONE unit (1-2 wks): the reference implementation paper's own public
     diaPASEF data end-to-end (both tools, both engines, corrected estimator); then main FF,
-    README rewrite (dataset D-BASELINE + public numbers), EPD patch + OpenMS pin docs, apportion/
+    README rewrite (BASELINE + public numbers), EPD patch + OpenMS pin docs, apportion/
     rp_max guard, falsified-flag help pass, binary rename to SpeXtractor, build CI + determinism
     smoke test on public-derived fixture, tag v0.2.0 (v0.1.0 burned) + CHANGELOG + CITATION.cff.
 04. R2+R3+R4 runtime batch (3-5 d, low risk): cull span-0 MS2 traces, two-lower_bound band

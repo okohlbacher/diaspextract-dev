@@ -1,37 +1,60 @@
 # Changelog
 
-## [Unreleased]
+## v2.0.0 — 2026-09-08
+
+**Why 2.0.** The interface breaks: the executable is `spextractor`, so every script that called
+`spextract` has to change, and ini files written by 1.x carry the old tool-name section and must be
+regenerated (`-write_ini`). Two more things make a migration deliberate: a third OpenMS patch
+(`MassTrace` move operations) is mandatory and a tree without it does not build the tool, and the
+output is not digest-comparable with 1.x -- the defaults changed (charge floor, mobility veto, MS1
+bands, allocator trim) and three corrections change spectra (the MS1 arena-compaction fix, the `C4`
+calibration term, the window key). The public
+release v1.0.0 (2026-09-04) was cut from the v0.3.0 tree described below, and v1.1.0 (the same day)
+added the two defaults recorded under its own heading; from this release the private and the public
+repository share one
+version line, and the tool reports its own version (`--help`, the ini `version` parameter and the
+output's software entry used to carry the OpenMS version).
+
+**Where it stands.** On a 2-hour public diaPASEF acquisition (PXD047793, run 009; same node, both tools
+at 100 threads) this release runs in **0.61x the reference implementation's wall time at 0.55x its peak
+memory** (12:42 / 187.9 GB against 20:57 / 340.6 GB) and, under per-charge FDR control at 1%, identifies
+**1.28x the peptides with Sage and 1.00x (0.996) with MSFragger** (27,831 / 28,181 against 21,743 / 28,294);
+on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour files is at the nominal
+1% (0.93-1.03% under the engines' pooled cut, 0.98-0.99% under the per-charge walk; dataset D reads
+1.33%). The
+30-minute dataset D runs in 3:13 at 57 GB. The record is docs/BASELINE.md (sections dated 2026-09-06 to
+2026-09-08) and docs/REFERENCE-COMPARISON-2026-09-08.md.
 
 ### Changed
 - **`charge:min_charge` default 2 -> 1, with a new ion-mobility charge veto (`charge:im_charge_veto`,
-  on).** The old default rested on dataset D; on a 2-hour tryptic acquisition it discarded 14-20% of
-  Sage peptides and most of the MSFragger deficit against the reference implementation. Those
-  identifications are physically singly charged: short (7-9 aa), lysine-terminated, single-basic-site
-  tryptic peptides whose 1/K0 sits **+0.29 Vs/cm2 above the 2+ trend line** at the same m/z in
-  99.4-99.9% of cases -- identically in the reference implementation's own 1+ identifications -- and
-  which co-elute with their own 2+ ion where both are seen. Charge halving is nevertheless real: the
-  count walk calls a 2+ envelope z=1 whenever its M+1 is missing or already claimed and its M+2 is
-  present, ~13% of z=1 calls, 60% of them below m/z 750 where a 1+ cannot be scored at all. TIMS
-  resolves it: the 2+/3+ mobility lines are fitted per run from the run's own confident calls and a
-  z=1 whose mobility lies on them is re-called. Two things to know: the z=1 stratum carries ~2.8%
-  entrapment FDR at a nominal 1% *global* cut (short peptides; decoys reproduce it; per-charge FDR
-  downstream is advised), and a whole-run entrapment figure hides that -- report it by charge.
-  The veto's 3+ arm was measured and removed: re-calling a 3+-band z=1 to 3+ identified nothing on
-  either file while adding 4-10% spectra (only ~1.8% of z=1 calls are genuinely on the 3+ band; the
-  2+ and 3+ mobility lines are ~1 sigma apart at low m/z), so such calls are now dropped.
+  on; `charge:im_veto_band`, 2.5 MAD-sigma).** The old default was confirmed on the three 30-60 minute
+  in-house files; on a 2-hour tryptic acquisition emitting z=1 gains 14-20% Sage peptides (12-17% of
+  the larger count) and most of the MSFragger deficit against the reference implementation. Those identifications are physically singly charged: short (7-9 aa),
+  lysine-terminated, single-basic-site tryptic peptides whose 1/K0 sits **+0.29 Vs/cm2 above the 2+
+  trend line** at the same m/z in 99.4-99.9% of cases -- identically in the reference implementation's
+  own 1+ identifications -- and which co-elute with their own 2+ ion where both are seen. Charge
+  halving is nevertheless real: the count walk calls a 2+ envelope z=1 whenever its M+1 is missing or
+  already claimed and its M+2 is present -- 11-26% of z=1 calls depending on the file, 60% of them
+  below m/z 750 where a 1+
+  cannot be scored at all. TIMS resolves it: the 2+ and 3+ mobility lines are fitted per run from the
+  run's own confident calls; a z=1 whose mobility lies on the 2+ line is re-called 2+, and one on the
+  3+ line is dropped. The 3+ arm was measured before it was settled: re-calling those to 3+ identified
+  essentially nothing (z=3 peptides +9 on run 009, +47 on dataset D) while adding 178k / 93k re-called
+  precursors (117k / 73k spectra) -- only ~1.8% of z=1 calls are genuinely on the 3+ band, and the two
+  lines are ~1 sigma apart at low m/z -- so dropping them takes 2.9% / 7.9% off the v37 spectrum list
+  at a cost below 0.3% of peptides on either engine under either walk.
+  Two things to know. Under the engines' pooled 1% cut the z=1 stratum carries more entrapment FDR than
+  the rest -- 2.8-2.9% on the 2-hour files, ~9% on dataset D where the stratum is ~150 peptides -- and
+  a whole-run figure hides it. The mechanism is a lower true-match prior in that stratum under one
+  pooled threshold, not peptide length (at matched score *and* length z=1 is still 3-5x dirtier than
+  z=2; decoys reproduce it). A per-charge FDR walk puts the stratum at 0.87-0.91% on the 2-hour files
+  while keeping the gain (Sage per-charge +20.2% / +13.7% on runs 001 / 009 against the old default), so report FDR by
+  charge downstream.
 - **`perf:ms1_trace_bands` default 12 -> 48: MS1 tracing is 2x faster.** The earlier sweep concluded
   more bands were worse (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a *serial* band
   distribution that grew with the band count. With that step parallel the order inverts:
   **41.7/27.1/20.4 s at 9.8x/18.4x/32.4x**. Gated on both datasets -- Sage 0.9999 / 0.9994,
   MSFragger 1.0002 / 1.0203, entrapment FDR 1.26->1.24% and 1.12->1.07%.
-- **Precursor inference is parallel and exact** (ordered speculation): the greedy claim loop went
-  from 1.0x to **23.4x** on a 2-hour file, 138 s -> 7.8 s, with 0.7% of seeds re-evaluated and a
-  byte-identical spectrum list on three files.
-- **Renamed to SpeXtractor** (the previous name was taken): executable, class, namespace, macros and
-  environment variables, source and test file names, CMake project and target, CI workflows, the
-  OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.
-
-### Changed
 - **Mass-trace detection distributes its bands in parallel, and the seed list is segmented per
   band.** Two serial stages were setting the floor. (1) The MS1 band distribution copied every
   peak into its band's sub-map on ONE thread -- measured at 51% of the MS1 phase (39.0 s of
@@ -43,12 +66,11 @@
   segments independently is exact (`filter_b(sort(all)) == sort(filter_b(all))` for a total
   order) and takes per-window prep from 60.1 s to 27.1 s at the worst window, 904 s to 393 s
   summed. Both are byte-identical on both benchmark files.
-- **`findPartner`'s gate fields are laid out in m/z order.** Precursor inference is
-  single-threaded and was 26% of a 2-hour run; it chased RT and IM through 48-byte records one
+- **`findPartner`'s gate fields are laid out in m/z order.** Precursor inference was
+  single-threaded and 22-25% of a 2-hour run; it chased RT and IM through 48-byte records one
   cache miss at a time. Same values, same order, same first match -- **438.8 s -> 177.2 s**. The
-  phase now logs its three stages: the residue is the greedy claim loop (156.3 s), not the sorts
-  (8.5 s).
-
+  phase logs its three stages; the residue was the greedy claim loop (156.3 s), not the sorts
+  (8.5 s), which the next entry removes.
 - **Two hot loops compute their index instead of searching for it.** `best()`, the innermost step
   of integer tracing, ran a `lower_bound` over its frame's ~25,000 sorted flight-time bins on every
   frame step of every trace extension; the bin is an integer the instrument produced, so a
@@ -59,6 +81,73 @@
   *relative*, matching a ppm tolerance. Both exact -- the sub-range handed to the search provably
   contains the same position. (The natural key for the second is the flight-time bin too, but
   `Trace::tof` is 0 on the OpenMS MS1 path; that needs MS1 through the integer detector.)
+- **Precursor inference is parallel and exact** (ordered speculation, batch `SPEXTRACTOR_SPEC_BATCH`,
+  default 8192): the greedy claim loop's thread occupancy went from 1.0x to **23.4x** on a 2-hour
+  file (112-138 s -> 7.8 s), with 0.7% of seeds re-evaluated and a byte-identical spectrum list on
+  three files.
+- **The trace record is 48 bytes, was 72.** It carried an 8-byte pointer to the store every trace of
+  a vector already shares, an 8-byte copy of a calibration factor the store holds per frame, and an
+  8-byte copy of the apex intensity the arena holds. The span accessors take the store explicitly,
+  the factor is a 4-byte frame index, and the apex intensity is read through the arena (72 -> 56 -> 48).
+  On a 2-hour acquisition this is the largest structure in the tool -- ~2.1 billion records, ~144 GiB
+  at 72 bytes if simultaneous. The 72 -> 56 step measured -10.7 GB there and -2.7 GB on dataset D,
+  less than the 16-24 GiB predicted from the record count because not every window's records are
+  resident at once; the 56 -> 48 step, with the splitter's reserve, a further -5.5 GiB. A
+  `static_assert` pins the size.
+- **Renamed to SpeXtractor** (the previous name was taken): executable, class, namespace, macros and
+  environment variables, source and test file names, CMake project and target, CI workflows, the
+  OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.
+
+### Added
+- **`perf:malloc_trim`, on by default: 30% less peak memory for 8.5% more wall time.** The
+  window loop's allocations stacked on top of everything the loading and MS1 phases had freed but the
+  allocator kept -- measured, that floor is 138 GB at the loop start of a 2-hour acquisition.
+  Returning it first (`malloc_trim(0)` at the two phase boundaries, glibc only) takes the peak from
+  **265 GB to 186 GB** (measured interleaved across the memory pass, v13 -> v19, at the previous charge
+  default; the trim step alone measured -28% peak for +6% wall, and with z=1 emitted the release
+  peaks at 187.9 GB), with a byte-identical spectrum list. It is not free: the loop faults those
+  pages back in cold (minor page faults +26%, window-loop CPU +15% at unchanged concurrency), which
+  costs **+8.5% of wall time** measured interleaved on one node. On by default because memory is what
+  bounds this tool -- it decides how many windows fit at once and whether a run fits the machine at
+  all -- and off is one flag when time is the binding constraint.
+- **Third OpenMS patch: move operations for `MassTrace`.** The class declares a defaulted destructor
+  and copy operations, which suppresses the implicit moves, so every `std::move` of a mass trace --
+  in OpenMS's own vector growth and in the band and split gathering here -- deep-copied its points.
+  Two defaulted moves transfer instead; a `static_assert` on `is_nothrow_move_constructible` means a
+  tree without the patch does not build the tool.
+- **Memory and stage instrumentation**: allocator statistics (`mallinfo2`) at every milestone, so
+  free-but-retained memory is measured rather than inferred; the picked-MS1 peak count; per-window
+  seeds, parents to children, record and arena size and capacity; per-window stage seconds on every
+  exit of the window body; an ordered slab digest under `SPEXTRACTOR_DET`; `[tstage]` MS1-tracing
+  sub-stage seconds; `[tsub]` per-window trace sub-stages (slab / detect / merge / sort); the
+  `[infer]` line now reports the speculation batch and its committed / re-evaluated / already-claimed
+  counts; `[im-veto]` reports the fitted 2+ line, its sigma and the re-call / drop / keep counts.
+- **Diagnostic knobs** (environment, off by default): `SPEXTRACTOR_Z1_DIAG[=path]` dumps the +ISO/2
+  and +ISO/3 evidence for every z=1 call; `SPEXTRACTOR_Z1_CHARGE_UNSET` emits z=1 calls with no
+  charge, so a search engine chooses; `SPEXTRACTOR_SPEC_BATCH=1` runs precursor inference
+  sequentially.
+- **End-to-end checks 9-13**: the shipped detector is the one that runs (9, 10), one isolation m/z in
+  two ion-mobility slices is two windows (11), the MS1 arena compaction self-test (12), and the
+  admission gate's logged high-water mark (13, on a one-window fixture). Thirteen checks; the suite ran every check on the
+  `openms` fallback before 9 and 10 existed.
+- **Build reproducibility.** The OpenMS patches were malformed (not orphaned) and are regenerated as
+  unified diffs against the commit pinned in `patches/openms.lock`; the tool compiles against that
+  upstream commit once the three patches are applied, without the separate mzPeak integration (every
+  mzPeak reference is guarded; `-out_type mzpeak` refuses without a mzPeak build);
+  the sqlite3 tdf reader is its own header (`src/TdfLoad.h`) with an include guard; the weekly CI job
+  builds OpenMS from source at that pin, applies the patches and runs the end-to-end suite.
+- **Cluster tooling**: `bench/launch.sh` starts a long job detached so the ssh channel is released,
+  reserves its tag atomically, refuses a missing work directory and reports started / exited /
+  failed distinctly; the benchmark drivers refuse to overwrite a measured arm and the publish step
+  refuses to publish a binary that failed its own suite. `scripts/sync_cluster.sh` ships the
+  launcher, the tool's headers, the end-to-end suite and its golden calibration file with every
+  deploy and records the
+  MassTrace-patch marker and the OpenMS library hash in the provenance.
+- **Repository hygiene**: acquisition and specimen identifiers are scrubbed from the tracked tree
+  (cohort samples are datasets A-F; the dataset-D baseline file is now `docs/BASELINE.md`; the drivers
+  that need real paths are untracked, with tracked `.example` templates; run-directory names quoted in
+  the record keep their historical labels); `evidence/` left the tree; CONTRIBUTING.md,
+  SECURITY.md, issue and pull-request templates.
 
 ### Fixed
 - **The scoring stage of a large isolation window was silently single-threaded.** libgomp's
@@ -73,50 +162,6 @@
   pull 32-precursor chunks from a shared cursor, so the task count no longer depends on the window
   size at any thread count. Spectrum output is unchanged (results were already written to pre-sized
   per-precursor slots).
-
-### Added
-- **`perf:malloc_trim`, on by default: 30% less peak memory for about 8% more wall time.** The
-  window loop's allocations stacked on top of everything the loading and MS1 phases had freed but the
-  allocator kept -- measured, that floor is 138 GB at the loop start of a 2-hour acquisition.
-  Returning it first (`malloc_trim(0)` at the two phase boundaries, glibc only) takes the peak from
-  **265 GB to 186 GB**, with a byte-identical spectrum list. It is not free: the loop faults those
-  pages back in cold (minor page faults +26%, window-loop CPU +15% at unchanged concurrency), which
-  costs **+8.5% of wall time** measured interleaved on one node. On by default because memory is what
-  bounds this tool -- it decides how many windows fit at once and whether a run fits the machine at
-  all -- and off is one flag when time is the binding constraint.
-- **The trace record is 56 bytes, was 72.** It carried an 8-byte pointer to the store every trace of
-  a vector already shares and an 8-byte copy of a calibration factor the store holds per frame. The
-  span accessors take the store explicitly and the factor is a 4-byte frame index. Measured on a
-  2-hour acquisition this is the largest structure in the tool -- 2.1 billion records, 143.6 GiB at
-  72 bytes if simultaneous -- so 16 bytes off each is worth 16-24 GiB at the peak. A `static_assert`
-  pins the size.
-- **Third OpenMS patch: move operations for `MassTrace`.** The class declares a defaulted destructor
-  and copy operations, which suppresses the implicit moves, so every `std::move` of a mass trace --
-  in OpenMS's own vector growth and in the band and split gathering here -- deep-copied its points.
-  Two defaulted moves transfer instead; a `static_assert` on `is_nothrow_move_constructible` means a
-  tree without the patch does not build the tool.
-- **Memory and stage instrumentation**: allocator statistics (`mallinfo2`) at every milestone, so
-  free-but-retained memory is measured rather than inferred; the picked-MS1 peak count; per-window
-  seeds, parents to children, record and arena size and capacity; per-window stage seconds on every
-  exit of the window body; and an ordered slab digest under `SPEXTRACTOR_DET`.
-
-### Changed
-- **Renamed to SpeXtractor** (the previous name was taken): executable, class, namespace, macros and
-  environment variables, source and test file names, CMake project and target, CI workflows, the
-  OpenMS patches and every document. The GitHub repositories moved with it; the old URLs redirect.
-
-### Added
-- **Third OpenMS patch: move operations for `MassTrace`.** The class declares a defaulted destructor
-  and copy operations, which suppresses the implicit moves, so every `std::move` of a mass trace --
-  in OpenMS's own vector growth and in the band and split gathering here -- deep-copied its points.
-  Two defaulted moves transfer instead; a `static_assert` on `is_nothrow_move_constructible` means a
-  tree without the patch does not build the tool.
-- **Memory and stage instrumentation**: allocator statistics (`mallinfo2`) at every milestone, so
-  free-but-retained memory is measured rather than inferred; the picked-MS1 peak count; per-window
-  seeds, parents to children, record and arena size and capacity; per-window stage seconds on every
-  exit of the window body; and an ordered slab digest under `SPEXTRACTOR_DET`.
-
-### Fixed
 - **MS1 arena compaction overwrote ~1% of precursor XICs.** The compaction that frees the profiles
   of unreferenced MS1 traces walked the trace vector in container order with a monotone write
   cursor, but the vector had been sorted by m/z after its spans were appended in detection order:
@@ -125,8 +170,18 @@
   the kept spans in offset order and validates bounds and disjointness before moving a byte;
   `-diag:selftest_arena` (e2e check 12) presents a fixture that defeats the old walk. Output changes
   (the corrected profiles feed fragment scoring); the digest baselines are re-taken.
-- `bench/semantic_digest.py` missed a closing tag straddling a 4 MiB read boundary and accepted a
-  truncated spectrum list; the e2e digest returned the empty hash for a missing list. New
+- **`perf:max_concurrent_windows` was computed and logged but never checked**; the per-window byte
+  projection booked 160 B/peak against 44 B measured, and the budget added the process's own RSS
+  back into itself. Admission now happens on the master before a window task is spawned, so both
+  bounds hold; the default (every window admitted) is unchanged, and e2e check 13 asserts the logged
+  high-water mark.
+- **Lifetimes.** The peak slab and the seed order are released before the band-arena merge, not
+  after it; the MS1 traces, spans and precursors are released when the window loop joins, not at the
+  end of the run; the retention-time axis is reserved for MS1 + MS2 frames; each `MassTrace` is
+  released as it is converted; the valley splitter reserves its child count.
+- **The determinism digest was blind to the fragment sort's primary key**: it now hashes `im` and
+  `tof` as well. `bench/semantic_digest.py` missed a closing tag straddling a 4 MiB read boundary and
+  accepted a truncated spectrum list; the e2e digest returned the empty hash for a missing list. New
   `bench/mzml_header_diff.py` compares everything outside the spectrum list (completion time masked).
 - **One isolation m/z acquired in two ion-mobility slices is two windows.** The PXD017703 "py3"
   scheme (9 of 27 acquisitions) acquires each m/z window in two window groups with shifted,
@@ -138,29 +193,78 @@
   (firmware 6.0.110; 18 of the 27 public PXD017703 acquisitions) store `C4 = -0.0905`, which the
   model refused as an unmodelled higher-order term. Fitted against the vendor library, the residual
   of the shipped quadratic is closed by exactly one candidate correction -- an additive offset on
-  the root, `m = u^2 - C4` -- and with the temperature term the closed form reproduces the vendor
+  the mass, `m = u^2 - C4` -- and with the temperature term the closed form reproduces the vendor
   library to 0.0000 ppm on the first and the last frame. Dropping it is -53..-938 ppm, worst at low
   mass. Bit-identical on every file with `C4 == 0`; `C3` stays refused (never observed non-zero).
   Both golden tests pin ten vendor probes on two frames and guard the ablation.
 - **Runs on the public diaPASEF HeLa benchmark (PXD017703).** Three defects the in-house cohort never
   exposed: the calibration loader demanded exactly one `MzCalibration` row (these files have two;
-  it now uses the row the frames reference), rejected a stored `C2 == 0` as missing (a real linear
-  calibration on 2020 timsTOF Pro firmware; NULL is now told apart from zero), and -- on a stock
-  OpenMS install -- silently fell back to the `openms` detector because `loadTofAxis` sat behind a
-  `__has_include` for an in-tree OpenMS header. Both tdf readers now use the sqlite3 C API and a
-  missing SQLite is a compile error. First public-data extraction: 136,818 spectra in 57 s.
+  it now uses the row the frames reference, and falls back to the single-row rule when `Frames` has
+  no such column), rejected a stored `C2 == 0` as missing (a real linear calibration on 2020 timsTOF
+  Pro firmware; NULL is now told apart from zero), and -- on a stock OpenMS install -- silently fell
+  back to the `openms` detector because `loadTofAxis` sat behind a `__has_include` for an in-tree
+  OpenMS header. Both tdf readers now use the sqlite3 C API and a missing SQLite is a compile error.
+  First public-data extraction: 136,818 spectra in 57 s.
+- **Calibration fails closed on unmappable frames.** `loadTofAxis` no longer backfills index 0; the
+  integer detector refuses input whose native IDs carry no parseable frame number and falls back to
+  `openms` with a loud warning instead of a silent one.
 
 ### Measured
 - **`perf:stream_load` is a sensitivity/resource trade, not a free default.** Both readers searched
   with both engines on two datasets plus entrapment: equivalent on the smaller file, but on the
   larger one the one-shot reader finds +223 Sage peptides (+2.0%) at unchanged entrapment FDR
-  (1.13% vs 1.15%) -- real signal the streaming path loses, for 1.75x the memory and 1.6x the wall.
+  (1.13% vs 1.15%) -- real signal the streaming path loses, for 1.75x the memory and ~1.7x the wall.
   The default stays `true`; `false` is now documented as the more sensitive setting.
-- **Entrapment FDR on all six datasets, shipping configuration: 1.13-1.31% at a nominal 1%**, every
-  interval overlapping. The peptide counts on record are honest to about a quarter point of FDR.
+- **Entrapment FDR on all six datasets at the v0.3.0 defaults (2026-09-05): 1.13-1.31% at a nominal
+  1%**, every interval overlapping. At this release's defaults the whole-run figure is 1.33% on
+  dataset D and 0.93% / 1.03% on the 2-hour runs 001 / 009, with the z=1 stratum at 2.9% under the
+  pooled cut and 0.87-0.91% under a per-charge walk. Every interval overlaps the nominal 1%; dataset D's
+  whole-run point estimate sits 0.33 points above it.
+- **`SPEXTRACTOR_PICK_BATCH` is fast and rejected.** 256 -> 4096 is -39% on the load phase, but the
+  digest changes with the batch size and 4096 loses 7.2% of Sage and 6.1% of MSFragger peptides: the
+  picker carries per-thread state across frames. The batch stays at 256, and the sensitivity is on the
+  backlog as a correctness question.
+- **Head to head with the reference implementation at this release's defaults** (PXD047793 run 009,
+  the same node, both tools at 100 threads):
 
+  | | reference implementation | SpeXtractor v2.0.0 | ratio |
+  |---|---|---|---|
+  | wall | 21:12.24 / 20:41.46 (mean 20:56.9) | **12:42.21** | **0.61x** |
+  | peak RSS | 357.7 / 323.4 GB (mean 340.6) | **187.9 GB** | **0.55x** |
+  | Sage peptides, per-charge 1% -- 009 | 21,743 | **27,831** | **1.28** |
+  | MSFragger peptides, per-charge 1% -- 009 | 28,294 | **28,181** | **1.00** |
+  | Sage, per-charge -- 001 | 15,418 | **19,262** | **1.25** |
+  | MSFragger, per-charge -- 001 | 19,652 | **19,230** | **0.98** |
+  | Sage peptides, engines' pooled cut -- 009 / 001 | 18,920 / 14,764 | 27,855 / 19,035 | 1.47 / 1.29 |
+  | MSFragger, pooled -- 009 / 001 | 27,427 / 18,745 | 26,559 / 18,212 | 0.97 / 0.97 |
+
+  The reference is a JVM run with `-Xmx400G`, so its peak partly reflects what it was allowed; the
+  honest memory statement is "roughly half, and not sensitive to a heap flag". Before this cycle the
+  same file ran 1.46x *slower* than the reference (31:27 against 21:28).
+
+## v1.1.0 — 2026-09-04 (public release)
+
+### Changed
+- **`-threads` defaults to every core.** TOPPBase's default of 1 was the wrong one for a tool whose
+  window loop is essentially the entire runtime. An explicit `-threads 1` is still honoured: the
+  command line is inspected rather than the value compared. On 224 cores against the benchmark's
+  `-threads 100`: 5:10 vs 5:22 for byte-identical output.
+- **The output format follows the `-out` extension, `.mzpeak` by default in a build with mzPeak; `-out_type` forces it.**
+  mzPeak (Parquet inside a zip) is about a third the size of mzML (2.25 GB against 6.23 GB for the
+  same 655,776 spectra). DDA search engines read mzML, not mzPeak, so write `.mzML` whenever a search
+  comes next; the tool warns on every mzPeak write.
+- CI runs on four platforms per push (Linux GCC 13 and 11, macOS arm64, Windows MSVC) and a weekly
+  job builds the tool against an OpenMS source tree patched by `scripts/apply_openms_patches.sh`.
+
+## v1.0.0 — 2026-09-04 (first public release)
+
+The v0.3.0 tree below, with acquisition and specimen identifiers scrubbed, the six-dataset benchmark,
+CONTRIBUTING.md, SECURITY.md and the issue templates.
 
 ## v0.3.0 — 2026-09-04
+
+Published as v1.0.0 on 2026-09-04. The six-dataset table and the `perf:stream_load` note below were
+added the same day, after the tag.
 
 ### Benchmark, all six datasets, shipped defaults only
 
@@ -193,7 +297,7 @@ which is where the README's stated 80-125 GB requirement comes from.
   OUTPUT** -- checked rather than assumed, and the assumption was wrong: true gives 655,776 spectra
   in 5:11 at 78.4 GB, false gives 656,371 in 10:30 at 121.8 GB, and the spectrum lists are not
   identical. The two readers pick peaks on different frame groupings. (Which one is closer to the
-  truth was settled on 2026-09-05 -- see "Measured" at the top of this file: the one-shot reader is
+  truth was settled on 2026-09-05 -- see "Measured" under v2.0.0: the one-shot reader is
   slightly better on a large file, at unchanged entrapment FDR, for 1.75x the memory.) Every figure
   this project has published used `true`. This is the same class of defect as
   the `ms2_noise_threshold_int` / `ms2_split_valleys` mismatch fixed on 2026-09-03 -- that sweep
@@ -322,7 +426,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 ### Removed
 - The raw apex-frame fragment backfill and the pre-extraction isotope collapse, with all their
   environment gates. Both were measured on all three files and falsified in every configuration;
-  the results are in `docs/dataset D-BASELINE.md` and `docs/ISOTOPE-DUPLICATION-2026-09-03.md`, and the
+  the results are in `docs/BASELINE.md` and `docs/ISOTOPE-DUPLICATION-2026-09-03.md`, and the
   implementations are in the git history. 160 lines.
 - An unused per-window band-count heuristic that a comment described as kept for reference.
 

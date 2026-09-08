@@ -33,6 +33,10 @@ scp -q src/TdfLoad.h src/MzPeakStreamLoad.h "$NODE":/scratch/kohlbach/OpenMS/src
 # The end-to-end suite lives at the deployment point and is what every verification run executes.
 # It drifted once already: a newly added check silently did not run because the copy was stale.
 scp -q test/test_spextractor.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
+# Check 9 reads ../tests/calibration_golden.json relative to the suite; ship it too, or the deployed
+# suite silently runs against whatever copy was there before.
+ssh "$NODE" "mkdir -p /ceph/ibmi/abi/oliver/spextract/tests"
+scp -q tests/calibration_golden.json "$NODE":/ceph/ibmi/abi/oliver/spextract/tests/
 # The remote launcher. Every long job is started through it, so it must not exist only on ceph with
 # no history -- and a stale copy would silently reintroduce the ssh-channel hang it exists to avoid.
 scp -q bench/launch.sh "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/

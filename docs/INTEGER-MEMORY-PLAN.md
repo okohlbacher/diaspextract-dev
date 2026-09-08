@@ -1,4 +1,4 @@
-The plan below is written against the **current** file (`/Users/kohlbach/Claude/speXtractor/src/spextractor.cpp`, 3853 lines), not against the file the eight analyses read. That distinction is load-bearing and is the first thing in the document.
+The plan below is written against the **current** file (`src/spextractor.cpp`, 3853 lines), not against the file the eight analyses read. That distinction is load-bearing and is the first thing in the document.
 
 ---
 

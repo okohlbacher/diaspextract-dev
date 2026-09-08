@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(SpeXtractor VERSION 0.3.0 LANGUAGES CXX)
+project(SpeXtractor VERSION 2.0.0 LANGUAGES CXX)
 
 # SpeXtractor is a STANDALONE application that links against an existing OpenMS
 # installation. It is deliberately not part of the OpenMS source tree: OpenMS is a
@@ -30,19 +30,14 @@ if(SPEXTRACTOR_TESTS_ONLY)
 endif()
 
 find_package(OpenMS REQUIRED)
-find_package(OpenMP)
+find_package(OpenMP REQUIRED)   # the window loop and the picker call omp_* unconditionally
 find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLite is a build error, not a fallback
 
 add_executable(spextractor src/spextractor.cpp)
 target_link_libraries(spextractor PRIVATE OpenMS SQLite::SQLite3)
+target_compile_definitions(spextractor PRIVATE SPEXTRACTOR_VERSION="${PROJECT_VERSION}")
 
-if(OpenMP_CXX_FOUND)
-  # The window/band loop is OpenMP-parallel; without it the tool still builds and runs,
-  # but serially -- and the memory-admission logic degrades to one window at a time.
-  target_link_libraries(spextractor PRIVATE OpenMP::OpenMP_CXX)
-else()
-  message(WARNING "OpenMP not found: spextractor will run single-threaded.")
-endif()
+target_link_libraries(spextractor PRIVATE OpenMP::OpenMP_CXX)
 
 install(TARGETS spextractor RUNTIME DESTINATION bin)
 

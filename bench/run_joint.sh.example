@@ -12,8 +12,8 @@ set -u
 B=/path/to/scratch/bench
 cd $B
 SAGE=$B/sage-v0.14.7-x86_64-unknown-linux-gnu/sage
-MSF=/scratch/agxt-liver/work/fp-tools/MSFragger-4.4.1.jar
-DTP=/scratch/agxt-liver/work/mzml-reference-patched
+MSF=/path/to/fp-tools/MSFragger-4.4.1.jar
+DTP=/path/to/mzml-reference-patched
 L=$B/joint.log
 J=$B/joint_results.json
 echo "=== joint benchmark $(date) ===" > $L

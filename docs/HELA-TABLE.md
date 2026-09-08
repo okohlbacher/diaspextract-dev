@@ -1,3 +1,18 @@
+# Public HeLa (PXD017703), 27 acquisitions
+
+Measured 2026-09-05 on the build published that day at 15:42 (v0.3.0 + calibration-row / C2==0 / C4 /
+WindowGroup fixes, commits 07609d6..08a84eb; dataset D digest `ca609dc4...`, the digest the memory-work
+v11 arm later reproduced -- BASELINE.md:1077, 1130, 1264). Shipped defaults of that build:
+`charge:min_charge=2`, `perf:ms1_trace_bands=12`, 72-byte trace record, no `perf:malloc_trim`;
+`-threads 100`, one node per chain. Table committed a6c9003, 2026-09-05 18:30.
+
+Definitions: Sage = unique peptides at rank 1, peptide q <= 0.01; MSFragger = peptide-level
+target-decoy walk on the raw tables (best hyperscore per peptide+mods, decoys `rev_`); the reference
+Sage column is from the selected-ion-patched pass (BASELINE.md:1150-1155).
+
+Not re-measured on v38 (min_charge 1 + mobility veto); regenerate with `tools/hela_table.py` on the
+cluster (the script BASELINE.md names; it is not part of this repository).
+
 | scheme | load | run | SpeXtractor spectra | SpeX wall | SpeX RSS | ref wall | ref RSS | Sage SpeX | Sage ref | MSFragger SpeX | MSFragger ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2019 25pc | 100ng | 31 | 1,182,808 | 46:45.89 | 113.5 | 5:47.54 | 174.4 | 18,540 | 13,724 | 14,675 | 15,871 |

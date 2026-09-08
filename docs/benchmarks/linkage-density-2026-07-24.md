@@ -129,7 +129,7 @@ against the source. The **measurements stand; several interpretive claims do not
    neither overrides the other.
 2. **Config mixing (codex #15).** The linkage ran on `rebase_s30` = `sage_closed_s30.json`
    (9,966 peptides / 90,159 PSMs). The FROZEN dataset D baseline is **10,072 peptides** under
-   `sage_deiso.json` (`docs/dataset D-BASELINE.md`). Calling 90,159 the "reference" for a `sage_deiso`
+   `sage_deiso.json` (`docs/BASELINE.md`). Calling 90,159 the "reference" for a `sage_deiso`
    base arm was wrong. All linkage rates are `sage_closed_s30.json`; re-run on the base arm's
    `sage_deiso` pair when the cluster returns.
 3. **`max_fragments` falsification not airtight (codex #6).** SpeXtractor ranks the top-500 by
@@ -396,10 +396,10 @@ Compounding methodological faults the reviewers caught, all valid:
 * **Winner's curse.** Seven swept points, optimum chosen on the same sample used to evaluate it, and
   the 0.60/0.70/0.80 pre-registration was written *after* watching 0.12→0.50 rise. Only `base` has
   replicates (n=4); every swept arm is n=1.
-* **Wrong engine for the headline.** `docs/dataset D-BASELINE.md` already records the MSFragger gap as
+* **Wrong engine for the headline.** `docs/BASELINE.md` already records the MSFragger gap as
   **−19.5%** (10,470 vs 13,014), not the −12% I quoted from Sage. Project policy says Sage flatters
   SpeXtractor; I published the flattered number.
-* **`rp_max=1` re-tested a closed lever.** `dataset D-BASELINE.md` lists `competitive` and `rp_max` 2/4/8
+* **`rp_max=1` re-tested a closed lever.** `BASELINE.md` lists `competitive` and `rp_max` 2/4/8
   as already falsified. ~1.5 h spent re-deriving a known result.
 
 ### MS1 sensitivity arm: BLOCKED BY IMPLEMENTATION, not answered

@@ -7,7 +7,7 @@ Security tab, rather than opening a public issue.
 
 ## Scope
 
-SpeXtractor is a batch command-line tool. It reads instrument data and writes mzML; it opens no
+SpeXtractor is a batch command-line tool. It reads instrument data and writes mzML or mzPeak; it opens no
 sockets, runs no server, and requires no credentials. The realistic security surface is therefore
 **untrusted input files**: a malformed or hostile Bruker `.d`, `.mzML` or `.mzpeak` reaching the
 parser. Reports of crashes, out-of-bounds reads or unbounded allocation triggered by an input file

@@ -1,10 +1,18 @@
 # SpeXtractor on TNBC (PXD047793): runtime and memory by phase and data structure
 
-Sixteen 130-min diaPASEF runs, shipped defaults, `-threads 100`, medians unless noted. Sources: the
+Sixteen 130-min diaPASEF runs, the defaults of the build stated below, `-threads 100`, medians unless
+noted. Sources: the
 tool's own `[perf]` phase table and RSS milestones in every `extract.log`, `/usr/bin/time -v`, the
 code (`src/spextractor.cpp`), and a three-agent reconciliation (two independent analyses, one refuter)
 whose accounting closes each RSS milestone within ~10%. Basis is marked: **measured** (in a log),
 **predicted** (from a struct + a logged count), **inferred** (from a fit to the milestones).
+
+Build: the 30.3 min / 264 GB profile below (the runtime and memory sections) is the TNBC-table build
+of 2026-09-06 (docs/TNBC-TABLE.md, committed 0f5440d at 07:13; before the memory work:
+`charge:min_charge=2`, 72-byte trace record, no trim). The 'Measured, not inferred' section is v13
+(the step-2 instrumentation); the CORRECTION section is the same v13 run read over all 28 windows; the
+allocator experiment is v16 + `malloc_trim`. Superseded for the shipped build: v35 and v38 phase
+tables are at BASELINE.md:1745-1752 and 1911-1917 (11:36 -> 12:42 wall, 188-191 GB peak).
 
 Per run: 139,311 frames (4,804 MS1), 28 isolation windows, 4.27e9 picked MS2 peaks, 21.4 M MS1
 traces, 8.7 M isotope seeds -> 3.0 M precursor hypotheses, 2.30 M pseudo-spectra, 19-20 GB mzML.
@@ -95,7 +103,7 @@ and the fragment-trace count per window. Both are one `String(...)` each.
 
 Two quantities this document could only bound, and one mechanism it could only assert, are now log
 lines (`[mem]`, `mallinfo2` at every milestone, per-window stage times). First numbers, from the
-30-min in-house file (S30; the TNBC file is 2-3x larger on every count):
+30-min in-house file (dataset D; the TNBC file is 2-3x larger on every count):
 
 | quantity | measured |
 |---|---|
@@ -139,8 +147,10 @@ windows are equal, and these are not. Scale by peaks, never by window count.
 ## The allocator experiment (2026-09-06): one line returns 75 GB of the peak
 
 `malloc_trim(0)` at the two phase boundaries, behind `SPEXTRACTOR_MALLOC_TRIM`, on TNBC run 009.
-Output digest **identical**; the run is not slower (30:27 against 31:16 for the same build without it,
-different node load, so treat the wall as unchanged rather than improved).
+Output digest **identical**. The wall figure first quoted here (30:27 against 31:16, one unpaired run
+on a shared node) was retracted the same day: the interleaved A/B measured the trim at **+8.5% wall
+(+2:37)** for -30.7% peak, minor faults +26%, window-loop CPU +15% (BASELINE.md:1383-1409,
+'CORRECTION (2026-09-06, 19:55): the trim is NOT free').
 
 | boundary | RSS before | RSS after | returned | cost |
 |---|---|---|---|---|
@@ -159,4 +169,6 @@ milestone came back.
 
 What it does NOT do on its own is admit more windows: `availableBytes_()` adds the process's own RSS
 back into its budget, so the admission gate sees roughly the same number either way. Pairing a trim
-with a corrected admission budget is what would turn the freed memory into concurrency.
+with a corrected admission budget is what would turn the freed memory into concurrency (fixed
+2026-09-06, v19 -- BASELINE.md:1372-1376: `availableBytes_()` no longer adds RSS back,
+`perf:max_concurrent_windows` is enforced, the per-peak projection is 44 B).

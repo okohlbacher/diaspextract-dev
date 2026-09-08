@@ -17,24 +17,24 @@ samples:
     fingerprint: "<fingerprint-A>"
     references:
       reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-A>
-      diann_report:   /path/to/scratch/bench/s08/diann/report.parquet
-      diann_lib:      /path/to/scratch/bench/s08/diann/report-lib.parquet
+      diann_report:   /path/to/scratch/bench/<dataset-A>/diann/report.parquet
+      diann_lib:      /path/to/scratch/bench/<dataset-A>/diann/report-lib.parquet
 
   dataset_B:
     raw: /path/to/scratch/rawd/<acquisition-B>.d
     fingerprint: "<fingerprint-B>"
     references:
       reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-B>
-      diann_report:   /path/to/scratch/bench/s23_diann/report.parquet
-      diann_lib:      /path/to/scratch/bench/s23_diann/report-lib.parquet
+      diann_report:   /path/to/scratch/bench/<dataset-B>_diann/report.parquet
+      diann_lib:      /path/to/scratch/bench/<dataset-B>_diann/report-lib.parquet
 
   dataset_D:
     raw: /path/to/scratch/rawd/<acquisition-D>.d
     fingerprint: "<fingerprint-D>"
     references:
       reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-D>
-      diann_report:   /path/to/scratch/bench/s30_diann/report.parquet
-      diann_lib:      /path/to/scratch/bench/s30_diann/report-lib.parquet
+      diann_report:   /path/to/scratch/bench/<dataset-D>_diann/report.parquet
+      diann_lib:      /path/to/scratch/bench/<dataset-D>_diann/report-lib.parquet
 
   # Present in mzml_reference/ but never used. Listed so they are visible rather than
   # rediscovered; raw/diann must be filled in before they can be run.
@@ -47,4 +47,4 @@ search:
   sage_config: /path/to/scratch/bench/sage_deiso.json
   fasta:       /path/to/scratch/bench/human.fasta
 
-vault: /Users/kohlbach/Claude/speXtractor/docs/benchmarks
+vault: /path/to/speXtractor/docs/benchmarks

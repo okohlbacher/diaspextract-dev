@@ -6,11 +6,13 @@ Thanks for your interest. A few things are specific to this project and will sav
 
 **SpeXtractor cannot be built against a released OpenMS package.** It includes a header that
 `scripts/apply_openms_patches.sh` installs *into* the OpenMS tree, calls an OpenMS method the same
-patch *adds*, and uses APIs that postdate the newest OpenMS release. You need an OpenMS source tree
-at 3.6, patched by that script. `.github/workflows/build.yml` does exactly this and is the reference
+patch *adds*, uses APIs that postdate the newest OpenMS release, and refuses to compile against a
+`MassTrace` without move operations (the third patch). You need an OpenMS source tree at the commit
+pinned in `patches/openms.lock` (develop, 2026-04-24), patched by that script — the patches are cut
+against exactly that commit. `.github/workflows/build.yml` does exactly this and is the reference
 recipe.
 
-**It needs a large machine.** Peak memory is 68–110 GB on real acquisitions. The test suite runs on
+**It needs a large machine.** Peak memory is ~57 GB on a 30-minute acquisition and ~170–190 GB on a 2-hour one at the shipped defaults (docs/BASELINE.md). The test suite runs on
 a synthetic input and needs none of that.
 
 ## The one rule that matters
@@ -31,11 +33,11 @@ arithmetic difference, so equal counts are not equality.
 ## Running the tests
 
 ```bash
-python3 test/test_spextractor.py /path/to/spextractor     # 10 end-to-end checks, synthetic input
+python3 test/test_spextractor.py /path/to/spextractor     # 13 end-to-end checks, synthetic input
 cmake -B build -DSPEXTRACTOR_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build
 ```
 
-The second form needs no OpenMS and is what CI runs on five platforms.
+The second form needs no OpenMS and is what CI runs on four platforms.
 
 ## Pull requests
 

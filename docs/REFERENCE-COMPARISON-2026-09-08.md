@@ -1,7 +1,9 @@
 # SpeXtractor vs the reference implementation, measured 2026-09-07/08
 
-Everything here was measured on the current default build (**v35**, `perf:ms1_trace_bands=48`) against
-the reference implementation's own output, using one scoring definition applied to BOTH sides:
+The first three sections (runtime, quality, the MSFragger deficit) were measured on **v35** -- the
+previous default, `charge:min_charge=2`, `perf:ms1_trace_bands=48`; the Decision section on v37/v38;
+the shipped default is **v38** (T4). Every figure is against the reference implementation's own
+output, using one scoring definition applied to BOTH sides:
 Sage = unique peptides at rank 1 with `peptide_q <= 0.01`; MSFragger = the peptide-level target-decoy
 walk. Entrapment FDR uses the human-target + Arabidopsis-entrapment search with the peptide-hypothesis
 ratio 0.6805.
@@ -11,18 +13,24 @@ ratio 0.6805.
 | | rep 1 | rep 2 | mean |
 |---|---|---|---|
 | reference implementation | 21:12.24 / 357.7 GB | 20:41.46 / 323.4 GB | 20:56.9 / 340.6 GB |
-| **SpeXtractor v35** | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
-| ratio | | | **0.53x wall, 0.53x RSS** |
+| **SpeXtractor v35** (min_charge 2) | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
+| ratio, v35 | | | **0.53x wall, 0.53x RSS** |
+| **SpeXtractor v38** (shipped default, one run) | 12:42.21 / 187.9 GB | | 12:42.21 / 187.9 GB |
+| ratio, v38 | | | **0.61x wall, 0.55x RSS** |
 
 Re-measured rather than taken from the earlier campaign, because `head2head.sh` records that a
 cross-time comparison is what produced one withdrawn claim. Before this week's work the same file ran
-**31:26.98** against the reference's 21:28.00, i.e. 1.46x SLOWER; it is now 1.90x faster.
+**31:26.98** against the reference's 21:28.00, i.e. 1.46x SLOWER; at v35 it was 1.90x faster, and at
+the shipped v38 default (z=1 emitted, +67% spectra) it is 1.65x faster (20:56.9 / 12:42.21).
 
 Caveat on the memory ratio: the reference is a JVM run with `-Xmx400G`, so its peak RSS partly
 reflects what it was allowed rather than what it needs (the same flags gave 268.2 GB in the earlier
-campaign). SpeXtractor's 179 GB is a genuine requirement and is not sensitive to a heap flag.
+campaign). SpeXtractor's 179 GB (v35) / 188 GB (v38) is a genuine requirement and is not sensitive
+to a heap flag.
 
 ## Quality, two files
+
+v35 (min_charge 2, the previous default):
 
 | | TNBC 009 | | | TNBC 001 | | |
 |---|---:|---:|---|---:|---:|---|
@@ -32,13 +40,30 @@ campaign). SpeXtractor's 179 GB is a genuine requirement and is not sensitive to
 | MSFragger peptides | 24,199 | 27,427 | **0.882** | 15,976 | 18,745 | **0.852** |
 | entrapment FDR (SpeX) | 1.01% (0.86-1.20) | | | 0.98% (0.80-1.19) | | |
 
+v38 (the shipped default, min_charge 1 + mobility veto), each engine's own pooled cut:
+
+| | TNBC 009 | | | TNBC 001 | | |
+|---|---:|---:|---|---:|---:|---|
+| | SpeX | ref | ratio | SpeX | ref | ratio |
+| Sage peptides | 27,855 | 18,920 | **1.472** | 19,035 | 14,764 | **1.289** |
+| Sage proteins | not on record | 4,944 | | 4,142 | 3,802 | **1.089** |
+| MSFragger peptides | 26,559 | 27,427 | **0.968** | 18,212 | 18,745 | **0.972** |
+| entrapment FDR (SpeX) | 1.03% | | | 0.93% | | |
+
+No v38 Sage protein count for 009 is on record. The v35 009 protein figure of 5,813 above appears
+only in this file -- it is in neither BASELINE.md nor docs/TNBC-TABLE.md -- so treat it as
+unverified.
+
 The direction is consistent across both files and the magnitude is not: SpeXtractor finds more with
-Sage and fewer with MSFragger, and the Sage advantage is 1.28 on one file and 1.06 on the other.
-Entrapment FDR is controlled at the nominal 1% in both, so the Sage advantage is not FDR inflation.
+Sage and fewer with MSFragger, and at v35 the Sage advantage was 1.28 on one file and 1.06 on the
+other. At v38 the pooled Sage ratios are 1.47 (009) and 1.29 (001), per-charge 1.28 and 1.25 (Decision
+section below). Entrapment FDR is controlled at the nominal 1% in both, so the Sage advantage is not
+FDR inflation.
 
 ## Where the MSFragger deficit comes from
 
-Characterising the 6,749 MSFragger peptides the reference finds on 009 and we do not:
+Characterising the 6,749 MSFragger peptides the reference finds on 009 and we do not (v35 arm,
+min_charge 2):
 
 | set | n | median hyperscore | z=1 | z=2 | z>=3 |
 |---|---:|---:|---:|---:|---:|
@@ -49,11 +74,14 @@ Characterising the 6,749 MSFragger peptides the reference finds on 009 and we do
 Two things. First, both exclusive sets are **marginal** -- median hyperscore ~18 against ~26 for the
 peptides both tools find -- so a large part of the "gap" is churn at the acceptance boundary rather
 than signal we never emitted. Second, **21.1% of what we miss is charge 1**, against essentially none
-of what we share: a class `charge:min_charge=2` never emits.
+of what we share: a class `charge:min_charge=2` never emits. The 21.1% z=1 component of this set is
+what the v38 default now emits; the residual MSFragger deficit at v38 (0.968 pooled, 1.00 per-charge)
+has not been re-characterised.
 
-Confirmed by measurement, on 009:
+Confirmed by measurement, on 009 (both arms the v35 binary; the z>=1 arm is min_charge 1 without the
+veto, so its figures are not the shipped v38 ones, which are in the Decision section):
 
-| | z>=2 (shipped default) | z>=1 |
+| | z>=2 (the v35 default) | z>=1 (v35 binary, min_charge 1, no veto) |
 |---|---:|---:|
 | Sage peptides | 24,245 | **27,685 (+14.2%)** |
 | MSFragger peptides | 24,121 | **26,332 (+9.2%)** |
@@ -64,7 +92,7 @@ Confirmed by measurement, on 009:
 
 Repeated on a second file, and it is stronger there:
 
-| | TNBC 009 z>=2 -> z>=1 | TNBC 001 z>=2 -> z>=1 |
+| | TNBC 009 z>=2 -> z>=1 (v35, no veto) | TNBC 001 z>=2 -> z>=1 (v35, no veto) |
 |---|---|---|
 | Sage peptides | 24,245 -> 27,685 (**+14.2%**) | 15,694 -> 18,854 (**+20.1%**) |
 | Sage ratio vs ref | 1.280 -> **1.463** | 1.063 -> **1.277** |
@@ -76,11 +104,13 @@ Repeated on a second file, and it is stronger there:
 | wall | +11% | +20% |
 
 So on this dataset class the z>=2 default costs 14-20% of Sage peptides and most of the MSFragger
-deficit, with entrapment FDR unchanged or better on both files. That directly contradicts the S30
+deficit, with entrapment FDR unchanged or better on both files. That directly contradicts the dataset D
 measurement that established the default (where dropping z=1 GAINED peptides on both engines), so
-`charge:min_charge` is dataset-dependent, not settled. Two things to resolve before changing it: the
-protein count fell 2.8% on 009 while rising 1.1% on 001, and the cost is a 64-72% larger spectrum
-file for 11-20% more wall.
+`charge:min_charge` is dataset-dependent. Resolved below: the default changed to 1 (v37/v38). Cost at
+v38 on 009: +67% spectra (2,343,822 -> 3,918,321), +15% wall (12:42 against the 11:01 v35 mean), no
+memory beyond run-to-run spread. The 009 protein-count drop (-2.8% in the v35 arm above) was NOT
+re-measured at v38 -- no 009 protein figure is on record for the shipped build; on 001 the protein
+count rose 4,074 -> 4,142.
 
 
 ## What the charge-1 spectra are (resolved 2026-09-08)
@@ -99,7 +129,7 @@ inside the z=1 stratum, and the whole-run entrapment figure hid one of them.
 | sequence chemistry | 92% are 7-9 residues, ~920 Da, 86% end in K, only ~12% carry any internal K/R/H (69% for z=2): single-basic-site tryptic peptides, the class that flies as 1+ |
 | same sequence seen at both charges | 570 (009) / 422 (001) peptides: co-elute at dRT = 0, with the 1+ ion 0.65 1/K0 above its own 2+ in 100% of pairs |
 | match quality | MSFragger matches 75% of theoretical b/y for z=1 (55% for z=2, 33% for decoys); extracted DTAs show mono m/z within ~5 ppm and b/y ladders at 1+ |
-| the discriminating experiment | same spectra emitted with the charge UNSET so the engines search 2-4: **only 319 of 5,947 (5.4%) come back**, all at 2+ -- the dual-charge minority -- and the arm falls below the default (23,938 vs 24,245) |
+| the discriminating experiment | same spectra emitted with the charge UNSET so the engines search 2-4: **only 319 of 5,947 (5.4%) come back**, all at 2+ -- the dual-charge minority -- and the arm falls below the v35 default arm (23,938 vs 24,245) |
 | why the engines report 1+ at all | `precursor_charge 2-4` / `override_charge 0` is the fallback when the file carries no charge; both tools write charge 1 on these spectra and both engines honour it |
 
 Neither tool has 1+ identifications below m/z 700, because a 1+ there is under the engines' mass
@@ -114,17 +144,22 @@ a 2.3% chance rate on the 1+ band), 60% of them below m/z 750 where a 1+ cannot 
 dead emission, and a lost 2+. Dropping z=1 (the old default) did not undo it: the walk had already
 consumed the 2+ envelope's peaks, so the old default lost those 2+ ions too. **Fix:**
 `charge:im_charge_veto` fits the 2+/3+ mobility lines per run from the run's own confident calls
-(>= 3 isotopes, 25-Th bin medians, MAD residual scale) and re-calls any z=1 whose mobility lies within
-2.5 sigma of them. Genuine 1+ ions are 7-8 sigma away and untouched.
+(>= 3 isotopes, 25-Th bin medians, MAD residual scale) and, at the shipped v38, re-calls a z=1 whose
+mobility lies within 2.5 sigma of the 2+ line to 2+ and drops a z=1 on the 3+ line (its charge is
+unset and `require_isotope_support` removes it; v37 re-called both, see the Decision section).
+Genuine 1+ ions are 7-8 sigma away and untouched.
 
 ### 3. The z=1 stratum runs ~2.8% entrapment FDR at a nominal 1% cut -- and the whole-run figure hid it
 
-| stratum | 009, z>=1 arm | 001, z>=1 arm |
+| stratum | 009, v35 z>=1 arm (no veto) | 001, v35 z>=1 arm (no veto) |
 |---|---|---|
 | z=1 | 5,145 peptides, **2.80%** (CI 2.25-3.30) | 3,465, **2.84%** (2.24-3.49) |
 | z=2 | 0.43% | 0.39% |
 | z=3 | 0.91% | 0.52% |
 | whole run | 1.01% | 0.90% |
+
+At the shipped v38 the record is: 009 z=1 2.94% pooled / 0.91% per-charge; 001 z=1 2.91% (n=3,481)
+pooled / 0.87% per-charge, z=2 0.41%, z=3 0.57%, whole run 0.93%.
 
 This is not an extraction artefact: decoys reproduce it (3.3-4.0% of z=1 targets clear the global
 threshold against 0.3% of z=2; z=1 is in fact the best-calibrated stratum, entrapment/decoy ratio
@@ -142,15 +177,17 @@ shared z>=2 PSMs) and *lowered* the z>=2 strata (0.85 -> 0.43%), which is exactl
 1.01% looked clean. The reference implementation's own 1+ stratum shows the same thing (decoy FDR
 1.4% on 009, 7.6% on 001), so it is an engine-side calibration property of the class.
 
-**Remedy, measured:** a per-charge FDR walk puts z=1 at 0.87%, z=2 at 1.09%, whole run 0.97% on
-001, while keeping the gain -- 19,236 Sage peptides per-charge against 16,029 for the default arm
-under the same walk (**+20.0%**). The SpeX-only z=1 peptides carry protein co-support (another
-accepted z>=2 peptide on the same protein) in 92.9% of cases, against 39% for accepted decoys.
+**Remedy, measured (v38 on 001):** a per-charge FDR walk puts z=1 at 0.87%, z=2 at 1.14%, z=3 at
+0.68%, whole run 0.99%, while keeping the gain -- 19,262 Sage peptides per-charge against 16,029 for
+the v35 default arm under the same walk (**+20.2%**). The SpeX-only z=1 peptides carry protein
+co-support (another accepted z>=2 peptide on the same protein) in 92.9% of cases, against 39% for
+accepted decoys.
 **A whole-run entrapment figure must never again be quoted without its charge strata.**
 
-One caveat on the 001 MSFragger numbers: MSFragger's parameter optimisation chose
+One caveat on the 001 MSFragger numbers (v35 arms): MSFragger's parameter optimisation chose
 `intensity_transform=1` for the default arm and `0` for the z>=1 arm, so its +6.8% on 001 mixes the
 z=1 effect with an engine-parameter flip triggered by the changed spectrum population; 009 is clean.
+Whether the same flip occurred between the v35 and v38 001 arms (15,976 -> 18,212) is not recorded.
 
 ### Decision
 
@@ -162,17 +199,20 @@ now documented rather than hidden.
 One refinement after the first measurement (v37 -> v38): the veto's 3+ arm was re-calling 7% of z=1
 calls to 3+, but only ~1.8% of z=1 calls are genuinely on the 3+ band (the 2+ and 3+ mobility lines
 are ~1 sigma apart at low m/z), and the re-calls identified nothing on either file (z=3 peptides
-5,313 -> 5,322 on 009, 3,888 -> 3,935 on S30) while adding 178k / 93k spectra. A z=1 call on the
-3+ band is now dropped rather than re-labelled.
+5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k spectra. A z=1 call on
+the 3+ band is now dropped rather than re-labelled. The dataset D pair is on record in BASELINE.md;
+the 009 pair exists only in the source comment beside the veto's 3+ branch in `src/spextractor.cpp`
+(the `[2026-09-08]` note) and in no BASELINE.md entry.
 
-The like-for-like comparison, both tools under the same per-charge FDR walk, on 009:
+The like-for-like comparison, both tools under the same per-charge FDR walk, on 009 (v38, the
+shipped build):
 
-| | SpeXtractor v37 | reference | ratio |
+| | SpeXtractor v38 | reference | ratio |
 |---|---:|---:|---|
-| Sage peptides, per-charge 1% | 27,908 | 21,743 | **1.28** |
-| MSFragger peptides, per-charge 1% | 28,185 | 28,294 | **1.00** |
-| Sage, each engine's own pooled cut | 27,808 | 18,920 | 1.47 |
-| MSFragger, pooled cut | 26,588 | 27,427 | 0.97 |
+| Sage peptides, per-charge 1% | 27,831 | 21,743 | **1.28** |
+| MSFragger peptides, per-charge 1% | 28,181 | 28,294 | **1.00** |
+| Sage, each engine's own pooled cut | 27,855 | 18,920 | 1.47 |
+| MSFragger, pooled cut | 26,559 | 27,427 | 0.97 |
 
 Per-charge control moves the reference more than us on Sage (its z>=2 strata sat below 1% under its
 pooled cut), which is why the honest Sage ratio is 1.28 rather than 1.47. On MSFragger the two tools
@@ -187,5 +227,5 @@ The same on the second file, v38 (the 3+ arm dropped) against the reference on 0
 | Sage, pooled cut | 19,035 | 14,764 | 1.29 |
 | MSFragger, pooled cut | 18,212 | 18,745 | 0.97 |
 
-Two files, two engines, two walks: +25-28% on Sage and within 2% of parity on MSFragger, with the
-per-charge z=1 stratum at 0.87-0.91% and whole-run entrapment at 0.93-1.01%.
+Two files, two engines, two walks: +25-28% on Sage and within 2.2% of parity on MSFragger, with the
+per-charge z=1 stratum at 0.87-0.91% and whole-run entrapment at 0.93-1.03%.

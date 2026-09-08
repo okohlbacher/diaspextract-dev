@@ -2,7 +2,7 @@
 
 Scope: `src/spextractor.cpp:1526-1720` (the `#pragma omp parallel for` over the 24 diaPASEF
 isolation tiles) and everything it calls, including OpenMS
-(`/Users/kohlbach/Claude/OpenMS/src/openms/`).
+(an OpenMS source checkout, `<OpenMS>/src/openms/`).
 
 Every line reference below was checked against the working tree at `787441a`
 (`src/spextractor.cpp`, 1,932 lines) and against the OpenMS source on this machine. Claims
@@ -11,7 +11,7 @@ structure plus arithmetic). The distinction is the point of this document: almos
 previously asserted about the inside of the window loop is inferred, and one widely repeated
 "measurement" is not a measurement at all.
 
-Quality constraint: the dataset D baseline is **10,072 peptides** (`docs/dataset D-BASELINE.md:11`), noise
+Quality constraint: the dataset D baseline is **10,072 peptides** (`docs/BASELINE.md:11`), noise
 floor 0.06% same-node, "differences below ~0.2% mean nothing". A speedup that costs peptides is
 not a speedup.
 
@@ -83,7 +83,7 @@ i.e. below one busy thread per window. The wall sits in code running at ~one thr
 
 **(b) Scoring cannot be the bottleneck.** `scoreCandidates_` is one call per precursor on the
 default path (`:1648` → `:1168`); the apportion (`:1616`/`:1627`) and `rp_max` (`:1663`) paths are
-default-off (`:496-497`) and both are on the falsified list (`docs/dataset D-BASELINE.md:35-36`). At
+default-off (`:496-497`) and both are on the falsified list (`docs/BASELINE.md:35-36`). At
 ~2.2 ms/precursor × ~40 k precursors that is **~90-170 s of a ~3,805 s per-window wall = 2-4%**.
 Independently: the claimed ~22 TB of gate-scan traffic over 3,805 s is 5.8 GB/s aggregate on a
 node that sustains ≥100 GB/s, capping the whole scan at ~12% even in the worst case.
@@ -107,7 +107,7 @@ mechanism, not a budget.
 Six facts, each verified at a cited line, compose into one mechanism:
 
 1. **MS2 valley splitting is ON.** `trace:ms2_split_valleys` registers a default of `0.0`
-   (`:514`), but `bench/run_open.sh:42` and `docs/dataset D-BASELINE.md:21-22` pass **7.0**. So
+   (`:514`), but `bench/run_open.sh:42` and `docs/BASELINE.md:21-22` pass **7.0**. So
    `:684` (`split_valleys > 0.0 && !mts.empty()`) is true on every window and
    `ElutionPeakDetection::detectPeaks` runs *inside* the window body.
 
@@ -119,7 +119,7 @@ Six facts, each verified at a cited line, compose into one mechanism:
    `epd.detectPeaks(chunk, part)` is at `:708`, inside the window loop but outside the band loop.
 
 4. **EPD's parallel region has no thread cap.**
-   `/Users/kohlbach/Claude/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp:326-329`:
+   `<OpenMS>/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp:326-329`:
    ```cpp
    #ifdef _OPENMP
    #pragma omp parallel for

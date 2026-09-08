@@ -1,6 +1,6 @@
 # Full benchmark matrix: all tools x all datasets x all calibration methods x both engines
 
-dataset D/dataset A/dataset B (AGXT PH1 liver diaPASEF, same cohort/instrument). Both engines deterministic (sigma=0),
+dataset D/dataset A/dataset B (in-house diaPASEF, same cohort/instrument). Both engines deterministic (sigma=0),
 so counts are exact. SpeXtractor config throughout: isotope-support gate + corr_power=2 (current
 defaults); only the TOF->m/z calibration path varies. the reference implementation references for dataset A/dataset B created
 2026-09-01 (previously dataset D-only).

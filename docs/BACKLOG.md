@@ -8,6 +8,12 @@ knowing what does not work is most of what this project has established.
 
 ## 1. Unmix fragment XICs onto the co-eluting MS1 precursor basis (NNLS)
 
+**Status: CUT 2026-09-02.** The prerequisite failed under the correct measurement: `assembly:apportion`,
+re-run with the emit weights actually applied, lost 3.9% of Sage peptides (11,742 vs 12,217 share-all;
+docs/BASELINE.md:457-463, C7), and NNLS was cut on that result (CHANGELOG.md v0.3.0, "First clean
+apportion run: -3.9% peptides (falsified again; NNLS cut)"; docs/BACKLOG-ANALYSIS-2026-09-02.md). The
+reasoning below is kept as written; do not re-propose without a new prerequisite.
+
 **The idea.** Today `scoreCandidates_` asks a *pairwise* question, one precursor at a time:
 does fragment `f`'s elution profile correlate with precursor `p`'s? Every co-eluting precursor
 asks independently, so under share-all a fragment is emitted into all of them at full intensity
@@ -33,8 +39,9 @@ whole difference, and it is why this deserves a test where blind NMF did not.
 **Relation to what exists.** `assembly:apportion` already splits intensity by `corr^p / sum(corr^p)`.
 That is a crude, coordinate-wise stand-in for the same intent — it never solves a joint fit, so two
 precursors with similar profiles both get high weight instead of competing. NNLS is the principled
-version and subsumes it. `assembly:apportion` is currently **untested**, so measure it first: if the
-heuristic already captures most of the gain, NNLS is not worth the complexity.
+version and subsumes it. `assembly:apportion` was measured first, on 2026-09-02, with the emit weights
+actually applied (every earlier apportion A/B had bypassed them): it lost 3.9% of Sage peptides
+(docs/BASELINE.md:457-463, C7). The heuristic captured no gain, so NNLS was cut on its prerequisite.
 
 **Why it should help, in terms of measured defects.**
 - Redundancy: we lose 14-16% of peptides at peptide-level FDR against the reference implementation's 5-7%, because we
@@ -69,11 +76,18 @@ a small dense NNLS (~50 unknowns, grid-length equations) per fragment. Warm-star
 parallel across fragments, but it sits in the inner loop, so runtime must be measured too.
 
 **Prerequisite ordering.** Measure `assembly:apportion` -> measure conditioning of `P` -> only then
-implement NNLS.
+implement NNLS. The chain stopped at the first step (2026-09-02); the conditioning of `P` was never
+measured and NNLS was never implemented.
 
 ---
 
 ## N. Decompose the whole cycle jointly, using our own redundancy as the data
+
+**Status: KILLED 2026-07-28.** The third kill condition fired: within-cycle duplicates carry
+information. The `consolidate:delta_rt` sweep lost peptides at every setting (0.7 -> -12.7%,
+3.0 -> -24.0%; docs/BASELINE.md:139-142, on the do-not-re-propose list), and the named prerequisite,
+item 1, was cut on 2026-09-02 (docs/BASELINE.md:461). What the duplicates actually are is worked out
+in docs/ISOTOPE-DUPLICATION-2026-09-03.md.
 
 **Origin.** User proposal, 2026-07-22: *"use the large number of spectra to cluster the peaks in
 the cycle (e.g. SVD/NNLS) to decompose everything"* — framed as **data cleanup**.
@@ -112,8 +126,8 @@ row count is empirically large and the rank question is bounded by something obs
 reports ~50 co-isolated precursors per spectrum, and MS1 supplies candidate precursors for that
 cell. It is closer to codex's recommendation of **anchored / coupled factorisation using
 MS1-derived profiles as partial known factors** than to blind PARAFAC. It also overlaps
-substantially with backlog item 1 (NNLS onto the MS1 basis) — **item 1 should be tried first**,
-since it needs no rank estimate at all.
+substantially with backlog item 1 (NNLS onto the MS1 basis) — **item 1 was to be tried first**,
+since it needs no rank estimate at all; item 1 has since been cut (2026-09-02).
 
 **Cheap falsification, before any implementation.** Take the ~31,621 duplicated (peptide, cycle)
 groups already identified. For the ~56% whose members agree to ~15 ppm, ask offline: does a rank-1
@@ -122,29 +136,42 @@ decomposition is justified. If the members need rank ≥ 2 to reconstruct, they 
 information and merging them — by NMF *or* by `consolidate` — destroys signal. **That test is a
 few hours on existing output and needs no new extraction run.**
 
-**What would kill it.** Rank-1 reconstruction fails on the tight-m/z duplicates; or item 1 (NNLS)
-already captures the gain, making the extra machinery unjustified; or the peptide count falls in
-the `consolidate:delta_rt` sweep now running, which would show that within-cycle duplicates carry
-information after all.
+**What would kill it — and did.** Rank-1 reconstruction fails on the tight-m/z duplicates; or item 1
+(NNLS) already captures the gain, making the extra machinery unjustified; or the peptide count falls
+in the `consolidate:delta_rt` sweep. The sweep finished with 0.7 -> -12.7% and 3.0 -> -24.0%
+(docs/BASELINE.md:142), which showed that within-cycle duplicates carry information after all; the
+item was killed on that result (2026-07-28). Item 1 was later cut as well.
 
 ---
 
 ## N+1. Learned monoisotope/charge predictor from MS1 + fragment features
 
+**Status 2026-09-08: premise rewritten; one head still open.** Every charge number in this item
+belonged to the retired `envelope` algorithm, and the (m/z, IM) prior it proposed to learn now ships
+as physics (`charge:im_charge_veto`). The open head is the learned monoisotope offset for open
+search; the charge head cannot be sized until its baselines are re-measured on the shipped
+`count` + veto arm.
+
 **Origin.** User proposal, 2026-07-22: *"correlate with MS1 precursor masses, perhaps in an ML
 based predictor including these features."*
 
-**Why this is now well-posed, when it was not this morning.** Three things changed today:
+**Why this looked well-posed on 2026-07-22, and what has changed since.** Three things changed that
+day; two of them have since been overtaken:
 
-1. **The target is quantified.** Charge agreement is **74.6%** against a majority-class baseline
-   of **69.6%** — inference beats "always answer z=2" by 5.0 points. That is the headroom, and
-   it is large.
-2. **Ion mobility is back in play.** The IM lever was retired on a statistics error: a
-   *share-a-label* rate was compared against `max p_z` (69.6%) instead of `sum p_z^2` (55.8%).
-   Corrected, (m/z, IM) carries **+19.2 points** of charge information over chance, not +5.4.
-   See [charge-inference.md](charge-inference.md). A *monotonic* IM prior still fails — z=4 lies
-   between z=2 and z=3 — but a **learned 2-D prior does not**, and that is precisely what a model
-   can represent and a threshold cannot.
+1. **The target was quantified — for the wrong arm.** Charge agreement of **74.6%** against a
+   majority-class baseline of **69.6%** was measured on the retired `envelope` algorithm, whose
+   tie-break is the opposite of the shipped one; the shipped arm's confusion cells have never been
+   measured (docs/charge-inference.md:12-16). The headroom on the shipped `count` + veto arm is
+   unknown until it is re-measured.
+2. **Ion mobility is back in play — and now ships as physics, not as a learned prior.** The IM
+   lever was retired on a statistics error: a *share-a-label* rate was compared against `max p_z`
+   (69.6%) instead of `sum p_z^2` (55.8%). Corrected, (m/z, IM) carries **+19.2 points** of charge
+   information over chance, not +5.4. See [charge-inference.md](charge-inference.md). A *monotonic*
+   IM prior still fails — z=4 lies between z=2 and z=3 — but a 2-D prior does not. Since the
+   `charge:min_charge` 2 -> 1 change, `charge:im_charge_veto` fits per-run 2+/3+ mobility lines from
+   the run's own confident calls and re-calls a z=1 lying on the 2+ line, or drops one on the 3+
+   band (CHANGELOG.md v2.0.0, "`charge:min_charge` default 2 -> 1"; src/spextractor.cpp:1830,
+   3548-3568). What a learned 2-D prior would add on top of the veto is unmeasured.
 3. **The failure mode is localised.** ~44% of within-cycle duplicates are separated by ~1000 ppm
    ≈ one isotope spacing: the same peptide assigned to different monoisotopes. That is the thing
    to predict.
@@ -172,22 +199,41 @@ recommendation. Start with gradient-boosted trees or an MLP of that size.
 one joint class.
 
 **Falsification, pre-registered.** The model must beat **both** baselines:
-* the 69.6% majority-class constant, and
-* the 74.6% shipped `count` heuristic,
+* the majority-class constant, and
+* the shipped `count` + `im_charge_veto` heuristic,
 by more than the 0.17% replicate spread, on a **held-out sample** — train on dataset A+dataset D, test on
 dataset B. Training and testing on one sample would measure memorisation, and this project's
-characteristic failure is exactly a metric that cannot tell the two apart.
+characteristic failure is exactly a metric that cannot tell the two apart. The 69.6% / 74.6%
+figures written here on 2026-07-22 are `envelope`-arm numbers and cannot serve as these baselines;
+both must be re-measured on the shipped arm first (docs/charge-inference.md:12-16).
 
-**What would kill it.** Held-out charge accuracy does not beat 74.6%; or it does, but the peptide
-count does not move — which would mean charge was never the binding constraint and the real limit
-is elsewhere.
+**What would kill it.** Held-out charge accuracy does not beat the re-measured shipped-arm figure;
+or it does, but the peptide count does not move — which would mean charge was never the binding
+constraint and the real limit is elsewhere.
 
-**Do first.** The `isotope_errors [0,0]` experiment now running measures how much the *search
-engine* is already repairing our monoisotope errors. If Sage's correction fully absorbs them, a
-predictor buys little for closed search and its value is confined to open search — which is the
-stated purpose, but changes the cost/benefit.
+**Do first — answered 2026-07-28/29.** The `isotope_errors [0,0]` experiment measured how much the
+*search engine* was already repairing our monoisotope errors: closed search hides the error
+entirely (Sage enumerates `isotope_errors [-1,2]` and corrects it for free, docs/BASELINE.md:181),
+and in open search the -1 Da artefact is a PTM-interpretation problem, not a recall lever — a
+-1-shifted precursor is still identified, mislabelled with a phantom modification
+(docs/BASELINE.md:222-229). So a predictor buys nothing for closed search; its value is confined to
+the monoisotope head in open search, where a phantom -1.003 Da modification is a correctness defect
+for blind-PTM work. That is the stated purpose, but it changes the cost/benefit.
 
 ## N+2. Adjudicate charge head-to-head on co-identified spectra: who is actually right?
+
+**Status: resolved in part, 2026-09-08.** docs/REFERENCE-COMPARISON-2026-09-08.md, "What the
+charge-1 spectra are (resolved)", did most of what this item asked without the enumerated search:
+our z=1 calls were compared against the reference's own 1+ identifications (identical +0.28-0.30
+1/K0 offset above the 2+ line); the charge-unset discriminating experiment was run (only 319 of
+5,947 come back, all at 2+); the trap below was confirmed (both engines honour the declared charge);
+and the question the item was written to decide — whether the MSFragger deficit is recoverable by
+fixing the call — is answered: emitting z=1 with the mobility veto took it from 0.882 to 0.97 pooled
+/ 1.00 per-charge on 009 and from 0.852 to 0.97 / 0.98 on 001 (same doc, "Decision";
+docs/BASELINE.md:1895, 1935-1937). **What remains** is the enumerated-charge adjudication as
+designed — `override_charge = 1, z = 1..5` on both tools' outputs at q <= 0.001, and the joint
+(ours, theirs) table on PXD017703 — of which no run is recorded after
+docs/BENCHMARK-MATRIX-2026-09-01.md:120-121.
 
 **The question.** For every spectrum the reference tool has confidently identified, find our
 spectrum for the same precursor and compare the two charge calls. Where they disagree, decide from
@@ -195,8 +241,9 @@ the spectra themselves which call is correct — rather than assuming either too
 
 **Why this beats what we have.** Every charge number on record is scored against a DIA-NN report,
 and that reference has three problems established on 2026-09-05: it is stale (it predates
-`charge:min_charge=2`, `require_isotope_support=true`, the apex estimator, the integer detector and
-`perf:stream_load`, so the measured population is disjoint from the shipped one); it is
+`require_isotope_support=true`, the apex estimator, the integer detector, `perf:stream_load` and both
+moves of `charge:min_charge` — to 2, and back to 1 with the mobility veto (CHANGELOG.md v2.0.0;
+src/spextractor.cpp:1810) — so the measured population is disjoint from the shipped one); it is
 structurally blind (tryptic, <=2 mods, z2-4 — exactly the space this tool exists to look outside);
 and the confusion table it produced belongs to a retired algorithm whose tie-break is the opposite
 of the shipped one. This experiment replaces a library-shaped oracle with **identification as
@@ -245,79 +292,248 @@ useful answers.
 **Cost.** Two extractions plus four searches on one acquisition, roughly half a day, plus the
 pairing script. No new tooling beyond the pairing; the enumerated-charge search arm already exists.
 
-**What it decides.** Whether our charge calls are worse, equal or merely *different*; the true
-direction of the error on the shipped algorithm (currently unknown — see the note at the head of
-`docs/charge-inference.md`); and whether the ~10% of the MSFragger deficit attributed to charge
-labels is recoverable by fixing the call, or only by not declaring one.
+**What it decides.** Whether our charge calls are worse, equal or merely *different*, and the true
+direction of the error on the shipped algorithm (still unmeasured — see the note at the head of
+`docs/charge-inference.md`). The third question it was written for — whether the ~10% of the
+MSFragger deficit attributed to charge labels is recoverable by fixing the call, or only by not
+declaring one — was answered on 2026-09-08 without it: the deficit was the z=1 class itself, and
+emitting it with the veto closed the gap to 0.97 pooled / 0.98-1.00 per-charge (see the status line
+above).
 
 ## From the public HeLa table (2026-09-05, docs/HELA-TABLE.md)
 
-- **Low-load A/B on public data.** At 10 ng SpeXtractor loses on both engines and both 2019 schemes
-  (py3: Sage 4.8k vs 9.2k). The isotope-support gate and the z>=2 floor were adopted at 200 ng
-  in-house; re-measure both on the six 10 ng files (1.5-5 min per extraction, both engines already
-  wired) and on one 100 ng file as the control. Both-engines + entrapment gate applies before any
-  default moves.
-- **MSFragger content gap on py3.** MSFragger gets 1.9x more peptides from the reference's py3
-  spectra than from ours while Sage is at 0.85. Same content-candidate machinery as before
-  (matched fragment ions per co-identified precursor), now on public data where the gap is widest.
+- **Low-load A/B on public data.** *Status 2026-09-08: half moot, nothing re-measured.* At 10 ng
+  SpeXtractor loses on both engines and both 2019 schemes (py3: Sage 4.8k vs 9.2k). The
+  isotope-support gate and the z>=2 floor were adopted at 200 ng in-house; the floor is since gone
+  (`charge:min_charge` default is 1 with the mobility veto, CHANGELOG.md v2.0.0;
+  src/spextractor.cpp:1810), and nothing at 10 ng has been re-measured (no 10 ng / HeLa / PXD017703
+  entry in docs/BASELINE.md after line 1196). Do: (1) re-measure `assembly:require_isotope_support`
+  on the six 10 ng files at the v38 default (1.5-5 min per extraction, both engines already wired);
+  (2) measure the v38 default (z=1 + veto) on the 10 ng files and on one 100 ng HeLa file as the
+  control — the whole of docs/HELA-TABLE.md was measured at `min_charge` 2, and the z=1 gain
+  (+14-20% Sage on TNBC) has never been checked on a HeLa file. Both-engines + entrapment gate
+  applies before any default moves.
+- **MSFragger content gap on py3.** *Status 2026-09-08: measured at `min_charge` 2; re-measure
+  first.* MSFragger got 1.9x more peptides from the reference's py3 spectra than from ours while
+  Sage was at 0.85 (docs/HELA-TABLE.md, py3 MSFragger ratio 0.54). On TNBC the MSFragger deficit
+  closed from 0.85-0.88 to 0.97 pooled / 0.98-1.00 per-charge once z=1 was emitted
+  (docs/REFERENCE-COMPARISON-2026-09-08.md, "Decision"; docs/BASELINE.md:1895, 1935-1937), and
+  21.1% of the only-reference MSFragger peptides were z=1 (same doc, "Where the MSFragger deficit
+  comes from"). Re-measure the py3 gap at v38 before any content work; the HeLa table predates the
+  z=1 change and no HeLa re-run is recorded. If a gap remains: same content-candidate machinery as
+  before (matched fragment ions per co-identified precursor), now on public data where the gap is
+  widest.
 
-## Cluster launch discipline (2026-09-07)
+## Operational notes moved
 
-Launching a long job as `ssh HOST 'cd DIR && setsid CMD > log 2>&1 </dev/null & ...'` blocks ssh for
-the **entire job**. The `&` binds to the whole AND-list, so bash forks a subshell to run it; the
-redirections apply only to the inner simple command, so the subshell keeps sshd's stdout/stderr pipes
-and waits, and sshd cannot close a non-PTY channel until the last writer of those pipes closes them.
-Measured on spock with a 6 s payload: **7.0-7.3 s held vs 0.8-1.0 s released.**
+The "Cluster launch discipline (2026-09-07)" section — `bench/launch.sh`, `verify_publish.sh` and the
+ssh-channel / `exit 255` findings — is finished procedure rather than an untested idea and now lives
+in [bench/README.md](../bench/README.md) under the same heading.
 
-The invariant is **not** "avoid `cd &&`" -- `true && setsid ... &` also holds, and so do `( ... ) &`
-and `{ ...; } &`. It is: *no process that outlives the foreground command may still hold the
-session's stdout/stderr*, and bash only avoids leaving one when the backgrounded unit reduces to a
-single redirected simple command it can `exec` in place. So `[ -e "$D" ] && setsid ... &` is unsafe
-too. The obvious alternatives are worse: `cd DIR; setsid ... &` runs the job in quota-limited `$HOME`
-if the `cd` fails, and `{ cd DIR && setsid ...; } &` buries a failed `cd` in a remote log.
+## Routes (2026-09-08)
 
-Use `bench/launch.sh` (shipped to the cluster by `sync_cluster.sh`):
+docs/BASELINE.md refers to "the routes list"; this is it.
 
-```
-ssh -n HOST 'bash /ceph/ibmi/abi/oliver/spextract/tools/launch.sh TAG WORKDIR CMD [ARGS...]'
-```
+### Per-charge FDR as the shipped readout
 
-One ssh per Bash call; never `2>/dev/null` on a launch. Confirmation is a pid the payload stamps
-itself -- `pgrep -f ... | wc -l` reported 3 for one job and 1 for a job that had already exited.
+**The idea.** Report every peptide count under a per-charge 1% walk and make the harness default
+per-charge, keeping the pooled cut as a secondary column.
 
-Separately: `exit 255` on a long-lived ssh was the laptop clamshell-sleeping, not the job failing.
-Three incidents separate perfectly on "was the connection open across a lid-close"; a 24-second sleep
-sufficed, while a 28-minute connection with no sleep exited 0. macOS reports it only after
-`net.inet.tcp.keepidle` (2 h) unless `ServerAliveInterval` is set, which is now 15 s for the cluster
-hosts. **Not** ControlMaster: one shared connection means one lid-close kills every concurrent
-session instead of one.
+**Why.** With `charge:min_charge=1` the z=1 stratum runs 2.9% entrapment under the engines' pooled 1%
+cut (009 2.94%, 001 2.91%) while the whole-run figure reads 0.93-1.03%; under a per-charge walk z=1
+sits at 0.87-0.91% and the gain survives (009 Sage 27,831 vs 24,484 for the v35 arm; 001 19,262 vs
+16,029) — docs/BASELINE.md:1896-1900 (v38 on TNBC 001), 1919-1922 (v38 on TNBC 009);
+docs/REFERENCE-COMPARISON-2026-09-08.md, "The z=1 stratum runs ~2.8% entrapment FDR at a nominal 1%
+cut". The reference tool's own 1+ stratum shows the same (decoy FDR 1.4% on 009, 7.6% on 001, same
+section), so it is an engine-calibration property, and a pooled cut penalises whichever tool emits
+more 1+.
 
-`baseline_run.sh` now refuses a pre-existing arm directory, as `gate_bands.sh`/`gateA.sh` already
-did -- a launch that merely *looked* failed was relaunched by hand once, and nothing would have
-flagged an overwrite. `gateA.sh` also had a stale `bin/spextract` path, broken since the rename to
-`spextractor`.
+**What would falsify it.** A per-charge walk that pushes a z>=2 stratum above 1% entrapment on either
+file (001 z=2 already reads 1.14% per-charge, docs/BASELINE.md:1900), or a per-length stratification
+that controls z=1 better than per-charge — then the readout should be per-length.
 
-An adversarial review of that first pass found four defects in it, all reproduced and since fixed:
+### The MSFragger residual: 0.97 pooled, 0.98-1.00 per-charge
 
-- **`verify_publish.sh`'s guard was on the wrong object.** It protected the node-local scratch e2e
-  directory; the thing that must be immutable is the *published* install `$SPX/$1` on shared `/ceph`,
-  which the script rewrites **in place on the same inode** -- the SIGBUS hazard. v22-v28 were all
-  published with no scratch directory present, so the guard would have passed straight through and
-  overwritten a live install. It now guards `$V`, validates the version name, leaves the scratch
-  workdir unguarded so a failed e2e can be retried, and **refuses to publish when e2e fails** (the
-  exit status used to be printed and then ignored).
-- **`launch.sh`'s duplicate-tag check was a TOCTOU race.** The stamp is written by the payload only
-  after fork+exec, so simultaneous launches all passed the `[ -e ]` test: measured, three concurrent
-  same-tag launches started **two** payloads and printed the *same* pid twice, leaving one untracked.
-  The tag is now reserved atomically (`set -C`) before the fork -- 1 payload from 3.
-- **A short-lived payload was reported as a launch failure and poisoned its tag.** `baseline_run.sh`'s
-  own REFUSED guard exits in milliseconds, so *every refused arm* would have become unlaunchable.
-  Now `LAUNCH_EXITED` (rc 8), tag reusable; a genuine never-started payload is rc 7.
-- **Three drivers silently lost their execute bit.** The tools directory carries a default ACL
-  (`default:group::rwx`, `other:---`), so a file written by a redirect lands 0660 with no `x`
-  regardless of umask. Deploys now `chmod 771` explicitly.
+**The idea.** The content-gap line was scoped when the ratio was 0.85-0.88; emitting z=1 took it to
+0.968/0.972 pooled and 1.00/0.98 per-charge on 009/001 (docs/REFERENCE-COMPARISON-2026-09-08.md,
+"Decision"; docs/BASELINE.md:1895, 1935-1937). Re-characterise the only-reference MSFragger set at
+v38 (T4) before any content work: is what remains still the faint-tail content class (median
+hyperscore ~18; docs/BASELINE.md:597-615, content candidate 2) or churn at the acceptance boundary?
 
-Known and accepted: `LAUNCH_OK` means *started*, not *healthy* -- a payload that dies after the
-~0.5 s confirmation window still reports OK. Check the log once at ~60 s. `LAUNCH_DIR` is node-local,
-so the same tag can be launched on two different hosts; the damage is a wasted job, not corruption,
-since arm directories are node-local and publishing only works on ibminode05.
+**Why.** The 6,749-peptide characterisation (docs/REFERENCE-COMPARISON-2026-09-08.md, "Where the
+MSFragger deficit comes from") is v35 and its 21.1% z=1 component is gone; the raw-apex backfill that
+lifted MSFragger to 90% was falsified on its 2.6% Sage cost (docs/BASELINE.md:660-676, 756-780), and
+that trade may now differ.
+
+**What would falsify it.** A v38 only-reference set under ~2% of the common set with its median
+hyperscore at the boundary — then there is no content gap left and the item closes.
+
+### `require_isotope_support` and genuine 1+ singletons
+
+**The idea — a hypothesis to measure, not a recorded observation.** A 1+ hypothesis whose M+1 was not
+traced becomes a `guessed` precursor, and `assembly:require_isotope_support=true` erases it
+(docs/charge-inference.md:37-40; CHANGELOG.md v0.3.0, "`assembly:require_isotope_support` and
+`perf:stream_load` now default to TRUE"; src/spextractor.cpp:3562). Whether the gate drops genuine 1+
+singletons is not established anywhere in the repository — the only in-repo link between the two is
+src/spextractor.cpp:3562, which uses the gate to *drop* 3+-band z=1 calls. Count, on 009 and 001, how
+many of the reference tool's 1+ identifications we emit only as `guessed`.
+
+**Why.** The gate was adopted at `min_charge` 2 on dataset D (6.9x slower and worse with it off,
+same CHANGELOG entry) and has never been re-measured with z=1 emission on; on the 10 ng public file
+it dropped 2.09 M guessed precursors and kept 466 k (docs/BASELINE.md:1171-1174), and z=1 IDs are
+7-9-mers around 920 Da (docs/REFERENCE-COMPARISON-2026-09-08.md, "The identifications are genuine
+singly charged peptides") whose M+1 is the faint-tail case.
+
+**What would falsify it.** Fewer than ~1% of the reference tool's 1+ identifications in our guessed
+z=1 population, or a z=1-only relaxation of the gate that adds no peptides while moving the z=1
+stratum above 1% per-charge entrapment.
+
+### MS1 through the integer detector (plan step 13), then tof-keyed precursor inference
+
+**The idea.** `trace:ms1_detector = openms | integer`: MS1 compact frames in tof mode -> PeakSlab ->
+`detectTracesInteger_` + `splitIntegerTraces` with the MS1 parameters, gated (gate C) against the
+OpenMS MS1 path; then key `findPartner` on the flight-time bin instead of the IEEE-754 m/z stand-in.
+
+**Why.** MS1 tracing is the last OpenMS-detector path; `Trace::tof` is 0 there, so the natural integer
+key is unavailable (CHANGELOG.md v2.0.0, "`Trace::tof` is 0 on the OpenMS MS1 path";
+docs/BASELINE.md:1593-1597), and the MS1 PeakMap (13.8 GB on dataset D at 20 B/peak, 44.5 GiB on TNBC) plus
+its 48 band sub-maps is the largest structure outside the window loop (docs/TNBC-PROFILE.md:102,
+131-132; docs/BASELINE.md:1512-1513). No `ms1_detector` option exists yet (grep src/spextractor.cpp).
+
+**What would falsify it.** Gate C showing >= 1% peptide loss in either engine, or the engines
+contradicting each other — the MS2 integer detector agrees with OpenMS on only ~85% of the union
+(CHANGELOG.md v0.3.0, "`trace:detector` now defaults to `integer`"), so equal churn on MS1 would make
+it a memory-only trade.
+
+### Band-independent tracing: make `perf:trace_bands` a free speed knob
+
+**The idea.** Each MS2 band carries its own `visited` bitset over the whole window
+(src/spextractor.cpp:1074; comment at 4046), so a trace grown by one band consumes peaks in another
+band's core, and ownership at band edges depends on the band count. Make ownership band-independent
+(a shared claim set with deterministic order, or the halo + core-ownership scheme the MS1 path uses,
+docs/BASELINE.md:1673-1675) so that every band count yields the same spectrum list.
+
+**Why.** 24 and 48 bands are -30% window-loop wall at 7% lower CPU, but they move 4-10% of the
+peptide set with the engines disagreeing in sign on dataset A (Sage -1.6/-1.7%, MSFragger +2.2%; overlap
+95.5%/89.7%) and were rejected twice (docs/BASELINE.md:1520-1536, 1639-1658); the loop is 60-64% of
+the run, and 94% of its critical window is the band taskloop (docs/BASELINE.md:1633-1636, 1712-1714).
+
+**What would falsify it.** A band-independent partition whose 12-band output is not byte-identical
+(then it is a gated G change), or one that is exact but whose 48-band wall is no better than 12
+because the churn was where the speed came from.
+
+### Ordered speculation inside the band trace detector: recorded, not open now
+
+**The idea.** The ordered-speculation scheme that made precursor inference 23x exact-parallel
+(docs/BASELINE.md:1599-1620), applied to the greedy claim loop of `detectTracesInteger_`. Implemented
+(commits 913bd91..0337663), measured, removed (438ef84): a fixed width of 8 cost +31% window-loop CPU
+and +11% wall; adaptive width on live occupancy removed the penalty but barely engaged, because the
+window whose detect is the critical path is the last one and sees idle threads only in its final
+~20% (docs/BASELINE.md:1716-1738).
+
+**Why keep it.** It becomes worthwhile the moment the loop stops being tail-bound — after
+band-independent tracing, or a cap that leaves threads idle.
+
+**What would falsify it.** An interleaved dataset D A/B, with the loop no longer tail-bound, where the
+control spread (133.0 vs 121.7 s) still exceeds the effect.
+
+### The peak picker is sensitive to how frames are grouped across threads
+
+**The idea.** `SPEXTRACTOR_PICK_BATCH` 256 -> 4096 is -39% LOAD wall but changes the digest and costs
+7.2% Sage / 6.1% MSFragger peptides on dataset D (overlap 91.7% / 81.3%), and `perf:stream_load=false` —
+another frame grouping — also changes the output (docs/BASELINE.md:1762-1790; CHANGELOG.md v2.0.0
+Measured, "`SPEXTRACTOR_PICK_BATCH` is fast and rejected" and "`perf:stream_load` is a
+sensitivity/resource trade"). A picker whose output depends on which thread saw which frames carries
+per-thread state it should not; find it in the pick consumer (`PickCompactConsumer`/`FrameCentroider`,
+src/spextractor.cpp:3169; CHANGELOG.md v0.3.0 Runtime, "MS1 path parallelised") and make the pick
+frame-local.
+
+**Why.** A correctness smell in the first stage, and it blocks a free 1.6x on LOAD (13.7% of a 2-h run).
+
+**What would falsify it.** A frame-local picker that is byte-identical across batch sizes but loses
+peptides against today's 256 — then the state is a real cross-frame feature, and the item becomes a
+documented parameter, not a bug.
+
+### The 2+/3+ tie-breaker for the mobility veto
+
+**The idea.** The fitted 2+ and 3+ lines are ~1 sigma apart at low m/z (at m/z 500: 0.867 vs 0.822
+1/K0 against a 3+ sigma of 0.051), so v38 drops a z=1 on the 3+ band instead of re-labelling it
+(src/spextractor.cpp:3556-3563). The principled arbiter is the intermediate-isotope test — a
+co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 3+ — which the `SPEXTRACTOR_Z1_DIAG` machinery
+already computes (docs/BASELINE.md:1839-1841); it is not yet wired in.
+
+**Why.** ~1.8% of z=1 calls are genuinely 3+ and are now discarded; recovering them is the only
+upside left in the veto.
+
+**What would falsify it.** z=3 peptides not moving on 009 or dataset D with the tie-breaker on — re-calling
+178k/93k spectra to 3+ already identified nothing (5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D;
+src/spextractor.cpp:3557-3559, docs/BASELINE.md:1835-1836) — meaning dropping is final.
+
+### The 009 Sage protein count under z=1
+
+**The idea.** Emitting z=1 on the v35 binary moved 009 protein groups 5,802 -> 5,641 (-2.8%) while 001
+rose 4,074 -> 4,118 (docs/REFERENCE-COMPARISON-2026-09-08.md, "Where the MSFragger deficit comes
+from", which named it as one of two things to resolve before changing the default). The default
+changed; at v38 the 001 figure is 4,142 (docs/BASELINE.md:1894) and no 009 protein count is recorded
+(docs/BASELINE.md:1906-1938, "v38 on TNBC 009", has none). Measure it under both walks and, if the
+drop persists, list the protein groups that lose their last peptide.
+
+**Why.** The candidate mechanism is the z=1 stratum's lower prior under the pooled cut (63% of z=1
+spectra produce no rank-1 row; docs/REFERENCE-COMPARISON-2026-09-08.md, "The z=1 stratum runs ~2.8%
+entrapment FDR at a nominal 1% cut"), which a per-charge walk should undo.
+
+**What would falsify it.** A v38 009 protein count at or above 5,802 under either walk.
+
+## Memory-work plan status (2026-09-08)
+
+The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
+skipped. Status of each step at the v2.0.0 release, from CHANGELOG.md, docs/BASELINE.md and the
+source (`src` = src/spextractor.cpp; CHANGELOG entries are cited by title because the file is being
+re-cut for the release):
+
+| step | status | evidence |
+|---|---|---|
+| 0 tooling (digest fix, header diff) | DONE | CHANGELOG v2.0.0 Fixed, "The determinism digest was blind to the fragment sort's primary key"; bench/semantic_digest.py and bench/mzml_header_diff.py exist (the plan said tools/) |
+| 1 MS1 arena compaction fix (G) | DONE, gate A passed | CHANGELOG v2.0.0 Fixed, "MS1 arena compaction overwrote ~1% of precursor XICs"; BASELINE.md:1230-1240, 1261-1309; src:413 `compactUnreferenced`, src:1725 `diag:selftest_arena`; B1/T1 taken |
+| 2 instrumentation | DONE | CHANGELOG v2.0.0 Added, "Memory and stage instrumentation"; BASELINE.md:1242-1255; src:48, 185 `mallinfo2`; 13 e2e checks (BASELINE.md:1583) |
+| 3 MassTrace move patch | DONE | patches/openms-masstrace-move.patch; CHANGELOG v2.0.0 Added, "Third OpenMS patch: move operations for `MassTrace`"; BASELINE.md:1247, 1316, 1353 |
+| 4 lifetime releases | DONE | CHANGELOG v2.0.0 Fixed, "Lifetimes"; BASELINE.md:1317, 1323-1329 (v15) |
+| 5 SpecRec + streaming mzML write | NOT STARTED | src:4737 `FileHandler().storeExperiment` (whole experiment); no SpecRec / MSDataWritingConsumer in src; WRITE still 52.4 s at 1.0x (BASELINE.md:1751, 1589) |
+| 6 enforce `max_concurrent_windows` + admission budget | DONE | BASELINE.md:1364-1376 (v19); src:3779-3830, 3946; CHANGELOG v2.0.0 Fixed, "`perf:max_concurrent_windows` was computed and logged but never checked" (the audit found no entry; one is now present) |
+| 7 chunked tof slab replaces the CompactFrame store | NOT STARTED | src:712 `CompactFrame` still mzq; src:820 `PeakSlab` is flat vectors; src:852 `toSlab` still converts per window, called at src:3991 |
+| 8 Trace 72 -> 56 B | DONE and exceeded: 48 B | src:329 `static_assert(sizeof(Trace) == 48)`; BASELINE.md:1411-1425 (v20); CHANGELOG v2.0.0 Changed, "The trace record is 48 bytes, was 72" (the audit found it reading 56; corrected) |
+| 9 segmented arenas, no absorb | NOT STARTED; measured as not worth it | src:314 `absorb()`, called at 1324, 4113, 4119; BASELINE.md:1634-1636, 1652-1653 (merge 5.3 s, "too small to matter"); only the reserve fix landed (CHANGELOG v0.3.0, "Trace arenas are reserved before merging") |
+| 10a delete `frag_im` | NOT STARTED | src:4170-4171 still copies `frag_traces[i].im` into `vector<double> frag_im` |
+| 10b delete `FragRt::rt` | NOT STARTED | src:2672-2677 `FragRt` still holds `vector<double> rt` |
+| 11a per-band MS1 (PickedFrame, `ms1_map` gone) | PARTIAL, by a different mechanism | `ms1_map` still a PeakMap (src:3146); the serial band distribution was parallelised by chunking instead (CHANGELOG v2.0.0 Changed, "Mass-trace detection distributes its bands in parallel"; BASELINE.md:1499, 1509, v25: MS1_TRACE 252.5 -> 106.2 s; +3.4% peak RSS from chunked sub-maps, 1512-1513); `ms1_trace_bands` 12 -> 48 adopted (CHANGELOG v2.0.0 Changed, "`perf:ms1_trace_bands` default 12 -> 48"; BASELINE.md:1685-1694) |
+| 11b MS1 as compact frames (G), gate B, B2/T2 | NOT STARTED | no MS1 compact path; T2 exists but was re-taken for `ms1_trace_bands=48`, not for 11b (BASELINE.md:1740-1743) |
+| 12 band-local `visited` bitsets | NOT STARTED | src:1074 `visited` sized by `P = sl.tof.size()` (whole window) per band call; src:4046 |
+| 13 MS1 through the integer detector, gate C | NOT STARTED | no `trace:ms1_detector` in src; CHANGELOG v2.0.0 Changed, "`Trace::tof` is 0 on the OpenMS MS1 path"; BASELINE.md:1594-1597 ("plan step 13") |
+
+Still open from the plan: step 12 (band-local visited sets — see "Band-independent tracing" above),
+comparator strengthening, the streaming mzPeak write, and steps 5, 7, 9, 10a/10b, 11b and 13 (see
+"MS1 through the integer detector" above). Allocator hygiene and the admission budget are no longer
+skipped: they shipped as `perf:malloc_trim` (CHANGELOG v2.0.0 Added) and v19 respectively. Release
+notes may claim steps 0-4, 6, 8 (at 48 B) and the parallel band distribution; they may not claim a
+streaming writer, a chunked slab, segmented arenas, a single scoring set, per-band MS1
+materialisation, band-local visited sets, or an integer MS1 detector.
+
+## Open items from the release review (2026-09-08, codex/kimi/vibe on v2.0.0)
+
+Not fixed in the release; each is a measured gap, not a guess.
+
+- **e2e coverage.** The gap-extension checks and the thread-count check run without a calibration
+  sidecar and therefore exercise the `openms` fallback, not the shipped integer detector; check 13
+  (admission high-water mark) uses a one-window fixture, so a cap of one cannot distinguish enforced
+  from unrestricted admission; the mobility veto's branches (re-call, 3+ drop, insufficient fitting
+  data) have no coverage because the fixture is too small to fit a line. No real-data thread-count
+  digest pair has been taken since the compaction fix.
+- **`threads = 1` in an ini file is overridden** to all cores: only argv is inspected, and the
+  effective thread count is not written back into the tool's parameters, so provenance can record 1.
+- **`scripts/sync_cluster.sh`** stages the source and copies headers before taking the remote lock,
+  and restores only the `.cpp` on a failed build; two concurrent deploys can interleave their inputs.
+- **Units.** Memory figures are `/usr/bin/time` RSS in kB / 10^6 and are labelled GB throughout;
+  docs/BASELINE.md calls its figures GiB. Reconcile before any of them becomes a hardware requirement.
+- **`perf:malloc_trim` in isolation at the shipped default**: the -30% / +8.5% pair is the whole
+  memory pass (v13 -> v19) measured interleaved; the trim step alone was -28% / +6%. One trim-on/off
+  A/B on v2.0.0 would settle the attribution.

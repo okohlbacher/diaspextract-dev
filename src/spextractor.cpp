@@ -58,6 +58,12 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 #include <omp.h>
 #endif
 
+// The release version. The standalone CMake build passes it from project(VERSION); the in-tree
+// OpenMS build (scripts/sync_cluster.sh) does not, so the fallback here is the same number.
+#ifndef SPEXTRACTOR_VERSION
+#define SPEXTRACTOR_VERSION "2.0.0"
+#endif
+
 using namespace OpenMS;
 using namespace std;
 
@@ -81,8 +87,7 @@ using namespace std;
   front-end (enables open / semi-tryptic / PTM searches); it does not perform the database
   search, FDR, library building or quantification.
 
-  See docs/dataset D-BASELINE.md for the measured decisions behind every default, and docs/reviews/
-  for the adversarial reviews.
+  See docs/BASELINE.md for the measured decisions behind every default.
 
   <B>The command line parameters of this tool are:</B>
   @verbinclude TOPP_SpeXtractor.cli
@@ -508,7 +513,7 @@ namespace
     Trace t;
     // Reported m/z of a mass trace. "apex" (the default) takes the m/z of the most intense peak;
     // "mean" is the OpenMS intensity-weighted centroid; "median" the median m/z. Set by
-    // `trace:mz_estimator` -- see docs/dataset D-BASELINE.md for the comparison that chose apex.
+    // `trace:mz_estimator` -- see docs/BASELINE.md for the comparison that chose apex.
     const std::string& mz_est = mzEstimator();
     if (mz_est == "apex" && mt.getSize() > 0) t.mz = mt[mt.findMaxByIntPeak(false)].getMZ();
     else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); t.mz = m2.getCentroidMZ(); }
@@ -912,7 +917,7 @@ namespace
   /// Mass-trace detection on integer arrays, following OpenMS `MassTraceDetection::run_` step for
   /// step -- written from that source, not from a description of it. The first version was written
   /// from a description and lost 92% of the peptides; the review that found why is in
-  /// docs/reviews/integer-tracing-2026-09-03/ and the corrected semantics are:
+  /// the adversarial review of 2026-09-03 (integer tracing) and the corrected semantics are:
   ///   * seeds in intensity order, ties later-index-first (stable ascending sort, reverse walk);
   ///   * the two directions extend INTERLEAVED, one frame down then one up, sharing one centroid;
   ///   * acceptance is the CLOSEST peak within +-3 sd of the running m/z centroid and within the
@@ -1649,6 +1654,11 @@ public:
     // old name had been passing itself off as an official TOPP tool.
     TOPPBase("SpeXtractor", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
   {
+    // TOPPBase reports the OpenMS version as the tool's own (--help, the ini `version` parameter,
+    // the output's software entry) unless the tool sets its own. --help prints verboseVersion_,
+    // which the base constructor derives from the OpenMS version, so both are set.
+    version_ = SPEXTRACTOR_VERSION;
+    verboseVersion_ = version_;
   }
 
 protected:
@@ -1717,7 +1727,7 @@ protected:
     registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace. "
                           "'apex' (default) uses the most intense peak's m/z; 'mean' the OpenMS intensity-weighted "
                           "centroid; 'median' the median. apex was chosen on measured identifications with both "
-                          "search engines -- see docs/dataset D-BASELINE.md. Affects EVERY reported precursor and "
+                          "search engines -- see docs/BASELINE.md. Affects EVERY reported precursor and "
                           "fragment m/z.", false);
     setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "[way-2] Split MS2 mass traces at chromatographic local minima via ElutionPeakDetection (which MassTraceDetection never does - it only terminates on outliers, so two peptides 25 s apart within the m/z tolerance MERGE). Value is chrom_fwhm in seconds; it sets both the Savitzky-Golay window and the local-extrema half-window. 0 = OFF. Try 6-8 (peaks here are 5-30 s). width_filtering is forced off so this only SPLITS, never deletes.", false);
@@ -1785,7 +1795,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                           "true = 655,776 spectra in 5:11 at 78.4 GB, false = 656,371 in 10:30 at 121.8 GB, "
                           "spectrum lists NOT identical (0.09% more spectra with the one-shot reader). The two "
                           "readers pick peaks on different frame groupings; which is closer to the truth is "
-                          "UNMEASURED. Everything this project has benchmarked used true.", false);
+                          "measured 2026-09-05: false is slightly MORE sensitive on a large file (+2.0%% Sage peptides at unchanged entrapment FDR) for 1.75x the memory and ~1.7x the wall. Every benchmark figure used true.", false);
     setValidStrings_("perf:stream_load", {"true", "false"});
     registerIntOption_("trace:native_ms2_neighbors", "<n>", 0, "[stream] NATIVE cross-frame aggregation in the READER (BrukerTimsFile Config dia_ms2_n_neighbors): adjacent frames each side, 0=off, 1=3-frame sum, 2=5-frame sum. This sums RAW frames BEFORE centroiding, which is what the reference implementation does; the tool-level frame_aggregation_n sums AFTER centroiding and lost 26% of peptides. Requires perf:stream_load.", false);
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "[stream] Same, for MS1 frames (BrukerTimsFile Config ms1_n_neighbors). Requires perf:stream_load.", false);
@@ -1796,7 +1806,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     registerFlag_("gate:variance_support", "[Q1] Compute the Pearson co-elution variance over the UNION SUPPORT of the precursor and fragment profiles (points where either is non-zero) rather than the full RT grid G (~1300). Fixes the [B0] zero-padding: a fragment present in a handful of grid points is no longer scored against ~1300 implicit zeros, and the score no longer depends on grid size. Only affects gate:coelution=pearson. Retune gate:min_correlation when enabling -- the score scale changes. [bench]");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "[parallel] Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. DEFAULT RAISED 12 -> 48 on 2026-09-07: the earlier sweep found more bands to be WORSE (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a SERIAL band distribution that grew with band count; with that step parallel the order inverts (41.7/27.1/20.4 s at 9.8x/18.4x/32.4x) and 48 was gated on both datasets -- Sage 0.9999 and 0.9994, MSFragger 1.0002 and 1.0203, entrapment FDR 1.26->1.24%% and 1.12->1.07%%. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
     registerIntOption_("perf:trace_bands", "<n>", 12, "[parallel] Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
-    registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable + our own RSS) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
+    registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "[dyn-mem] Fraction of currently-FREE RAM (/proc/meminfo MemAvailable) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
 
     registerTOPPSubsection_("diag", "Diagnostics ('debug' is reserved by TOPP)");
@@ -1815,7 +1825,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
                        "single-basic-site tryptic peptides whose ion mobility sits +0.29 Vs/cm2 above the 2+ trend line at "
                        "the same m/z in 99.4-99.9%% of cases -- a halved 2+ ion would carry the 2+ mobility. The halved 2+ "
                        "ions that DO occur (~13%% of z=1 calls, sitting on the 2+ band) are re-called by charge:im_charge_veto. "
-                       "The z=1 stratum carries ~2.8%% entrapment FDR at a nominal 1%% global cut (short peptides; decoys "
+                       "The z=1 stratum carries ~2.8%% entrapment FDR at a nominal 1%% global cut (a lower true-match prior in that stratum under one pooled threshold, not peptide length; decoys "
                        "reproduce it), so per-charge FDR control downstream is advised. Old text: "
                        "docs/ISOTOPE-DUPLICATION-2026-09-03.md.", false);
     // [route-1] Only 25.7%% of the reference implementation's precursors are matched by us with the RIGHT m/z AND charge;
@@ -1963,7 +1973,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
       tt_edge = tt_s(_te0, tt_now());
       auto _td0 = tt_now();
       // [dist-par 2026-09-07] The distribution was SERIAL and, measured, 51% of this phase
-      // (S30: 39.0 s of 75.9 s; and raising the band count made the phase strictly worse --
+      // (dataset D: 39.0 s of 75.9 s; and raising the band count made the phase strictly worse --
       // 12/24/48 bands -> 75.0/93.7/147.9 s -- because more bands means more of exactly this
       // copy). Split the SPECTRA into chunks instead: each chunk builds its own per-band maps
       // and releases its source spectra as it goes, then the chunks are concatenated in chunk
@@ -3556,7 +3566,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
           if (r2 <= kband && r2 <= r3) { pc.charge = 2; ++to2; }
           // [2026-09-08] A z=1 call on the 3+ band is not a 1+ ion, but re-calling it 3+ produced
           // NOTHING on either benchmark file (z=3 peptides 5,313 -> 5,322 on TNBC 009, 3,888 ->
-          // 3,935 on S30) while adding 178k / 93k spectra -- and the emitted-population split
+          // 3,935 on dataset D) while adding 178k / 93k spectra -- and the emitted-population split
           // puts only ~1.8% of z=1 calls genuinely on the 3+ band against the 7% this branch was
           // catching, because the 2+ and 3+ lines are ~1 sigma apart at low m/z. Unset the charge
           // instead: the call becomes a guessed precursor and require_isotope_support removes it.
@@ -3616,7 +3626,7 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
     // [step-02 emission-controlled arm, 2026-09-02] SPEXTRACTOR_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
-    // emission without touching fragment sharing. Pre-registered falsifier in dataset D-BASELINE.
+    // emission without touching fragment sharing. Pre-registered falsifier in BASELINE.md.
     if (const char* mi = std::getenv("SPEXTRACTOR_MIN_ISOTOPES"))
     {
       const int k = std::atoi(mi); const size_t before = precursors.size();
