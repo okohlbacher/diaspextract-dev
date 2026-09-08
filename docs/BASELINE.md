@@ -1880,3 +1880,24 @@ The 93,008 dropped calls were pure emission: peptide counts are unchanged or bet
 inside the gate's 1% rule under the engines' own pooled cut and positive on both engines under
 per-charge control; the z=1 stratum here is tiny (~150 peptides) and dirty, which is what per-charge
 FDR is for.
+
+
+### v38 on TNBC 001 (2026-09-08)
+
+v35 default arm = `qual_001` (min_charge 2); v38 = min_charge 1 + mobility veto with the 3+ arm dropped.
+Extraction on ibminode05 (shared, loaded -- not a timing number): 16:02, 170.1 GB, 3,409,189 spectra
+(v35: 2,135,267). Veto: of 2,137,636 z=1 calls, 241,062 (11.2%) re-called 2+, 157,532 dropped, 1,739,042 kept.
+
+| | v35 default | **v38** | vs reference (v38) |
+|---|---:|---:|---|
+| Sage peptides, engine's pooled cut | 15,694 | **19,035 (+21.3%)** | 14,764 -> **1.289** |
+| Sage proteins | 4,074 | 4,142 | 3,802 -> 1.089 |
+| MSFragger peptides, pooled cut | 15,976 | **18,212 (+14.0%)** | 18,745 -> 0.972 |
+| Sage, per-charge walk | 16,029 | **19,262 (+20.2%)** | |
+| MSFragger, per-charge walk | 16,727 | **19,230 (+15.0%)** | |
+| entrapment, whole run | 0.98% | 0.93% | |
+| entrapment by stratum (v38) | | z=1 2.91% (n=3,481), z=2 0.41%, z=3 0.57% | |
+| per-charge walk entrapment (v38) | | z=1 **0.87%**, z=2 1.14%, z=3 0.68%, whole 0.99% | |
+
+Second file, same shape as 009: the z=1 stratum sits at ~2.9% under the pooled cut and at 0.87%
+under per-charge control, with the gain intact on both engines under both walks.
