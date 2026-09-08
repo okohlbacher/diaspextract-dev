@@ -484,6 +484,41 @@ entrapment FDR at a nominal 1% cut"), which a per-charge walk should undo.
 
 **What would falsify it.** A v38 009 protein count at or above 5,802 under either walk.
 
+### Overlap the loader's decode with its peak picking
+
+**The idea.** LOAD is now the second-largest phase (93.5 s of a 677 s run, 14%, after tonight's
+work). It alternates: the streaming reader fills a 256-frame buffer, then `PickCompactConsumer::
+flush_()` picks and compacts that buffer in parallel, then the reader fills the next one. The two
+never overlap. Measured on the 2-hour file: picking is 45.7 s of the 93.5 s, so decoding is the
+other ~48 s, and it runs at far lower parallelism than the pick does (LOAD averages 56x while the
+pick alone is near-saturating). Double-buffering -- hand the full buffer to a worker and let the
+reader carry on filling the next -- would hide the smaller of the two, worth up to ~40 s, ~6% of the
+run.
+
+**Why it should be output-identical.** The frame grouping is what the picker is sensitive to, and
+double-buffering does not change it: batch i is still frames [256i, 256i+256), picked by the same
+code with the same per-thread scheduling. Only *when* the pick runs changes. That distinction
+matters here because the batch size itself is frozen -- `SPEXTRACTOR_PICK_BATCH` 256 -> 4096 is
+-39% on the load phase but changes the digest and loses 7.2% of Sage peptides, so the picker carries
+per-thread state across frames and the grouping is load-bearing.
+
+**What would falsify it.** The decode is already internally parallel and saturating, in which case
+there is nothing to overlap and the two phases are simply competing for the same cores -- check by
+instrumenting decode wall and CPU separately before building anything. Or the reader cannot release
+a buffer without stalling (it owns the frames it hands over), making the hand-off a copy that costs
+what the overlap saves.
+
+### `perf:ms1_trace_bands` 96: faster, and output-changing
+
+Measured 2026-09-08 on dataset D: 48 -> 96 bands takes MS1 band detection from 7.04 s to 3.96 s
+(-44%) and the whole MS1 phase from 15.1 s to 11.4 s (-25%), because detection is capped at
+band-count parallelism and 48 bands cannot fill 100 threads. **It changes the spectrum list**
+(4,905,492 -> 4,905,486 traces; digest differs), so it is not a free knob: band edges move trace
+ownership, exactly as `perf:trace_bands` does. On the 2-hour file the phase is 52.9 s, so the prize
+is ~13 s (~2% of the run) against a full two-engine, two-dataset, entrapment-controlled gate -- and
+the record already shows the 12 -> 48 move shifted MSFragger by 2% on one dataset. Not worth it at
+that price, but worth knowing the knob is there if MS1 tracing ever becomes the critical path.
+
 ### Parallel mzML serialisation: the win is real, OpenMS's writer is not thread-safe
 
 **The idea.** WRITE is the largest serial block left: 92.9 s of an 822 s run on a 2-hour
