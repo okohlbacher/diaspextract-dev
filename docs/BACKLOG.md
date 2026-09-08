@@ -548,10 +548,21 @@ meaningful a-trous level, so the filter was frequently a no-op. That is a statem
 correlation input, not about trace smoothing for valley detection, and the implementation is in the
 git history if a resurrection is wanted.
 
+**Measured 2026-09-08: the smoother is load-bearing for the OUTPUT, and its cost cannot be priced
+by removing it.** An ablation that returns the raw intensities instead of smoothed ones was not
+faster but **slower** -- dataset D, same node, back to back: wall 5:35.95 -> 6:34.52 (+18%),
+window-loop CPU 14,253 -> 18,279 (+28%) -- and emitted **1,122,695 spectra against 854,817 (+31%)**.
+The reason is the consumer: the smoothed intensities feed a local-minimum search, and unsmoothed
+noise manufactures spurious minima, so traces over-split and every downstream stage does more work.
+Two consequences. The runtime question cannot be answered by ablation, because removing the
+smoother changes the workload rather than isolating its cost -- it needs a timer inside
+`smoothData()`. And the quality question is now the load-bearing one: a replacement smoother is not
+a drop-in, it moves the split count directly, so it must be gated on peptides and on the split-count
+distribution, not on speed.
+
 **How to test.** The smoother is behind one OpenMS function, so this is a contained experiment:
-(1) instrument the frame-length distribution and the fraction of window-loop CPU still inside
-`smoothData()` after the coefficient cache -- if it is under ~3% the runtime case is dead and only
-quality is left; (2) implement the alternative behind a `trace:smoother = savgol | wavelet` option,
+(1) instrument `smoothData()` directly -- accumulate its wall time per thread and report the share
+of window-loop CPU -- if it is under ~3% the runtime case is dead and only quality is left; (2) implement the alternative behind a `trace:smoother = savgol | wavelet` option,
 defaulting to savgol; (3) compare on the two gate datasets and both engines, with entrapment FDR,
 plus the split-count and trace-length distributions, which is where a smoother difference shows up
 before the peptides do.
