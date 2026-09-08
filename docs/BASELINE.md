@@ -2119,3 +2119,19 @@ move from one thread into all of them and contend in the allocator, and the para
 adjacent doubles in three coordinate arrays. A version that pre-sized one flat buffer and avoided
 per-trace allocation might come out differently; this one does not, and the serial loop keeps a
 comment saying so.
+
+### Second file: the same work on the 30-minute acquisition (2026-09-09)
+
+Interleaved, three reps each, arms alternating; every run reproduces the dataset D reference digest.
+
+| | rep 1 | rep 2 | rep 3 | mean | peak RSS |
+|---|---|---|---|---|---|
+| v2.0.0 | 3:17.31 | 3:16.67 | 3:15.34 | 196.4 s | 57.5 GB |
+| **tonight** | 2:53.79 | 2:56.19 | 2:51.12 | **173.7 s** | 57.2 GB |
+| delta | | | | **-22.7 s, -11.6%** | unchanged |
+
+Less than the -17.7% on the 2-hour file, and the difference is explained rather than noise: the
+Savitzky-Golay cache pays once per mass trace, and a 2-hour gradient carries 22.2 M MS1 traces
+against 4.9 M here, with longer spans. The write parallelisation scales the same way -- 20.1 s of a
+196 s run against 90 s of an 822 s one. Both files gain, the longer one gains more, and neither
+changes a byte of output.
