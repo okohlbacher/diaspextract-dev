@@ -503,6 +503,17 @@ reference, but the path underneath it mutates shared state in at least two place
 it serially on the first spectrum, then only reading it -- removed one race and the corruption
 persisted, so the validator has its own.
 
+**Where the corruption actually is (backtrace, 2026-09-08).** Under gdb the abort lands in
+`MzMLHandler::writePrecursor_`, in `operator new` taking the malloc arena lock -- i.e. that frame is
+where a corrupted heap was *detected*, not where it was corrupted. Ruling out by inspection since:
+`writePrecursor_` only reads `options_`; `SemanticValidator::locateTerm` is `const` and reads
+`rules_` and the CV; and freezing `cached_terms_` (warm serially, then read-only) did not stop it.
+So a fourth writer is still unaccounted for. Note that `writePrecursor_`, `writeSoftware_`,
+`writeSourceFile_` and `writeDataProcessing_` are all NON-const members, unlike `writeSpectrum_` and
+`writeUserParam_` -- that asymmetry is the place to look next, together with the
+`ControlledVocabulary` singleton's lookup paths (`checkAndGetTermByName`, `iterateAllChildren`),
+which are the remaining shared objects on the path.
+
 **What would actually work.** Give each encoding thread its own `MzMLHandler` and its own
 validator, so nothing is shared: the per-thread construction cost is paid once per wave, not per
 spectrum. That is a larger change inside OpenMS than it first appears, and it needs its own

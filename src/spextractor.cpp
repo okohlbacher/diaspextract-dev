@@ -3907,23 +3907,42 @@ protected:
     // Canonical total-order sort (RT, precursor m/z, charge): thread-count-independent and free of
     // RT-tie ambiguity (RT-only sortSpectra is NOT canonical). [par-Crit-2]
     { Phase _ph("SORT(canonical)");
-    sort(all_out.begin(), all_out.end(), [](const MSSpectrum& a, const MSSpectrum& b) {
-      if (a.getRT() != b.getRT()) return a.getRT() < b.getRT();
-      const double amz = a.getPrecursors().empty() ? 0.0 : a.getPrecursors()[0].getMZ();
-      const double bmz = b.getPrecursors().empty() ? 0.0 : b.getPrecursors()[0].getMZ();
-      if (amz != bmz) return amz < bmz;
-      const int ac = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
-      const int bc = b.getPrecursors().empty() ? 0 : b.getPrecursors()[0].getCharge();
-      if (ac != bc) return ac < bc;
+    // Sort a compact key array and permute once, rather than sorting the spectra themselves:
+    // std::sort moves whatever it is given, and an MSSpectrum object is ~750 bytes against 32 for a
+    // key. The comparator returns exactly what the old one returned for every pair -- the cheap
+    // fields live in the key, the rare full tie defers to the peaks -- and the keys start in the
+    // order the spectra were in, so introsort makes the same decisions and yields the same
+    // permutation, ties included.
+    struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
+    vector<SortKey> keys(all_out.size());
+#pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)all_out.size(); ++i)
+    {
+      const MSSpectrum& a = all_out[i];
+      keys[i].rt = a.getRT();
+      keys[i].mz = a.getPrecursors().empty() ? 0.0 : a.getPrecursors()[0].getMZ();
+      keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
+      keys[i].n = (uint32_t)a.size();
+      keys[i].idx = (uint32_t)i;
+    }
+    sort(keys.begin(), keys.end(), [&all_out](const SortKey& ka, const SortKey& kb) {
+      if (ka.rt != kb.rt) return ka.rt < kb.rt;
+      if (ka.mz != kb.mz) return ka.mz < kb.mz;
+      if (ka.charge != kb.charge) return ka.charge < kb.charge;
       // fragment-sequence tiebreaks so equal-precursor spectra have a canonical order
-      if (a.size() != b.size()) return a.size() < b.size();
+      if (ka.n != kb.n) return ka.n < kb.n;
+      const MSSpectrum& a = all_out[ka.idx];
+      const MSSpectrum& b = all_out[kb.idx];
       for (Size i = 0; i < a.size(); ++i)
       {
         if (a[i].getMZ() != b[i].getMZ()) return a[i].getMZ() < b[i].getMZ();
         if (a[i].getIntensity() != b[i].getIntensity()) return a[i].getIntensity() < b[i].getIntensity();
       }
       return false;
-    }); }
+    });
+    { vector<MSSpectrum> ord; ord.reserve(all_out.size());
+      for (const SortKey& k : keys) ord.push_back(std::move(all_out[k.idx]));
+      all_out.swap(ord); } }
 
     PeakMap out_exp;
     { Phase _ph("ASSEMBLE(PeakMap)");
