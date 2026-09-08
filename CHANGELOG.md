@@ -1,5 +1,54 @@
 # Changelog
 
+## [Unreleased]
+
+### Performance (2026-09-08/09) -- all of it byte-identical
+
+Four changes, verified on both benchmark files against the pinned digests, so the peptide sets are
+unchanged by construction and no search was needed. Interleaved A/B on a 2-hour diaPASEF
+acquisition, arms alternating on one node: **13:42.9 -> 11:17.6 mean wall, -17.7%**, peak memory
+unchanged.
+
+- **The Savitzky-Golay coefficients are cached (OpenMS patch).** `ElutionPeakDetection::smoothData()`
+  constructed a filter and called `setParameters()` on every mass trace, and `updateMembers_()`
+  recomputes the coefficients with one Eigen SVD per half-window each time. They depend only on
+  (frame_length, polynomial_order) -- a handful of values in a run -- while smoothData() runs once
+  per trace, hundreds of millions of times. A thread_local cache leaves the coefficients, the
+  filtering loop and every float conversion untouched. **MS1 tracing CPU -40%, window loop -22.5%.**
+- **mzML spectra are encoded in parallel and written in order (fourth OpenMS patch).** Writing was
+  the largest serial block left, 10.7% of the run at 1.0x, and it is CPU-bound rather than
+  I/O-bound: it sustained ~400 MB/s against a filesystem measured at 4.0 GB/s. Serialising one
+  spectrum is independent of every other; only the concatenation is ordered. **WRITE 90.0 s ->
+  21.1 s, 1.0x -> 49x.** Each thread needs its own handler and validator -- OpenMS's writer memoises
+  CV-term validation in mutable state, and sharing one handler corrupts the heap.
+- **The MS1 mass-trace conversion is parallel.** Converting 22 million OpenMS `MassTrace` objects to
+  the tool's own records was serial, and its per-point cost is a binary search over the frame table.
+  The pure half -- coordinates and the point list -- now runs in parallel in chunks while the arena
+  append stays ordered, so the spans, their order and the arena bytes are unchanged.
+- **The canonical sort sorts keys, not spectra**, and the assembled PeakMap takes the vector whole.
+  `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
+  **SORT -61%; the ASSEMBLE phase is gone.**
+
+### Changed
+- **Twenty-four falsified options removed** (from 71 to 47; 21 fewer in the plain `--help`). Each
+  either carried a falsification verdict in its own help text or had no measurement on record, and
+  each defaulted to its no-op value, so output is unchanged: the `merge:` and `consolidate:` groups,
+  the cross-precursor redistribution family (`rp_max`, `competitive`, `apportion`), the wavelet
+  smoother and its selftest, post-centroiding frame aggregation, `open_search_safe` (a documented
+  no-op), `rank_by`, `ambiguity_margin`, `max_trace_length_sec`, `dedup_precursors` and
+  `split_valleys_fwhm`. `gate:variance_support`, `gate:coelution`, the two averagine-monoisotope
+  flags and `charge:scoring=envelope` are deliberately kept: the record says to keep them.
+- Four finished experiment knobs, a never-called accessor, an orphaned doc comment, a duplicate
+  option read and a struct member with no reader are gone with them.
+
+### Fixed
+- The one-shot-load peak picker no longer runs, and no longer logs "Loaded 0 frames.", on the
+  streaming default; the compact-store digest no longer hashes an empty map on the integer path.
+- The eight benchmark plans had aborted on their first pre-flight since the identifier scrub gave
+  the sample ids a space here and an underscore in the registry.
+- CI syntax-checks every tracked Python file rather than an arbitrary fifth of them, and
+  `apply_openms_patches.sh` checks the OpenMS pin it documents.
+
 ## v2.0.0 — 2026-09-08
 
 **Why 2.0.** The interface breaks: the executable is `spextractor`, so every script that called

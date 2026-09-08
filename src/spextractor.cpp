@@ -1914,10 +1914,49 @@ protected:
     }
     vector<Trace> out;
     out.reserve(mts.size());
-    // toTrace only reads, so each MassTrace is dead the moment it is converted. Releasing it here
-    // keeps the peak at one MassTrace instead of the whole vector plus the whole Trace vector; the
-    // same discipline is already applied to the band and chunk vectors above.
-    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); mts[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
+    // toTrace's work splits in two. Computing a trace's coordinates and its (frame, intensity)
+    // point list is PURE -- it only reads the store's frame table, through one binary search per
+    // point, 22 million traces deep -- while appending the span MUTATES the arena and has to stay
+    // in order, because the offsets it hands out are the trace's identity. So the first half runs
+    // in parallel over a chunk and the second half appends that chunk serially: same spans, same
+    // order, same arena bytes. Chunked so the point lists in flight stay bounded.
+    // Each MassTrace is dead the moment its points are read, and is released inside the parallel
+    // half -- that keeps the peak at one chunk rather than the whole vector plus the whole Trace
+    // vector, and parallelises 22 million deallocations along with the lookups.
+    {
+      const std::string& mz_est = mzEstimator();
+      const size_t CH = 65536;
+      const size_t n_buf = std::min(CH, mts.size());
+      vector<vector<pair<uint32_t, float>>> pts(n_buf);
+      vector<double> pmz(n_buf, 0.0), prt(n_buf, 0.0), pim(n_buf, 0.0);
+      for (size_t base = 0; base < mts.size(); base += CH)
+      {
+        const size_t n_c = std::min(CH, mts.size() - base);
+#pragma omp parallel for schedule(dynamic, 256)
+        for (long j = 0; j < (long)n_c; ++j)
+        {
+          MassTrace& mt = mts[base + (size_t)j];
+          if (mz_est == "apex" && mt.getSize() > 0) pmz[j] = mt[mt.findMaxByIntPeak(false)].getMZ();
+          else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); pmz[j] = m2.getCentroidMZ(); }
+          else pmz[j] = mt.getCentroidMZ();
+          prt[j] = mt.getCentroidRT();
+          pim[j] = mt.getCentroidIM();
+          auto& p = pts[(size_t)j];
+          p.clear(); p.reserve(mt.getSize());
+          for (Size i = 0; i < mt.getSize(); ++i)
+          {
+            p.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
+          }
+          mt = MassTrace();   // the payload goes now, not at return
+        }
+        for (size_t j = 0; j < n_c; ++j)
+        {
+          Trace sp = makeSpan(pts[j], store);
+          sp.mz = pmz[j]; sp.rt = prt[j]; sp.im = pim[j];
+          out.push_back(sp);
+        }
+      }
+    }
     return out;
   }
 
