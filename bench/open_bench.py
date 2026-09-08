@@ -23,7 +23,7 @@ Three measurements, in increasing order of how much they depend on assumptions
    (PROTON, 0) with integer slopes +-1, +-2, ... A real modification is a constant mass shift and
    forms a HORIZONTAL BAND. The two are geometrically separable by construction, so the sloped-ray
    mass fraction measures charge error IN THE ACTUAL USE CASE -- strictly better than the
-   DIA-NN-anchored proxy, which was retracted for a 91.9% decoy floor.
+   DIA-NN-anchored proxy, whose decoy floor reached 91.9%.
 
 2. ENTRAPMENT FDR -- needs a foreign proteome but no target-decoy assumption.
    Open search grows the candidate space ~10^3x and decoy-based FDR degrades accordingly
@@ -50,8 +50,8 @@ ratio difference below ~0.2% is noise.
 POSITIVE CONTROL, non-negotiable. The envelope arm has 10,199 known 4->2 confusions. They MUST
 appear as slope -2 ray mass in sage_open_wide.json, and must be markedly weaker in the count arm.
 If the control does not fire, the instrument is not measuring charge error and NO other number
-from this script may be quoted -- the same mistake as the retracted MS1 funnel, which reported a
-confident result from an assay whose control was never run.
+from this script may be quoted -- that is the same mistake as reporting a confident result from an
+assay whose control was never run.
 """
 import argparse, collections, csv, json, math, os, subprocess, sys
 from pathlib import Path
@@ -149,8 +149,8 @@ def ray_decomposition(psms, max_slope=4, band_tol=0.02, ray_tol_ppm=None, ray_to
     out["shifted"] = shifted
     out["ray_fraction"] = (sum(out["rays"].values()) / shifted) if shifted else None
 
-    # CHANCE FLOOR for ray_fraction. Every metric in this project that shipped without a null
-    # has been retracted (the MS1 funnel reported a 97.8% ceiling against a 91.9% floor). A PSM
+    # CHANCE FLOOR for ray_fraction. A metric that ships without a null is unsupported: a 97.8%
+    # ceiling against a 91.9% floor means nothing. A PSM
     # with an arbitrary dM lands on SOME ray by coincidence: 2*max_slope lines, each 2*ray_tol_da
     # wide, inside the searched dM range. Reported alongside, never subtracted silently.
     dms = [p["dm"] for p in psms if abs(p["dm"]) >= 0.1]

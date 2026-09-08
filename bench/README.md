@@ -2,9 +2,7 @@
 
 ## `sage_closed.json` — the closed metric (what every README number came from)
 
-Byte-for-byte the configuration behind every `peptide_q` figure in the repo. It previously
-existed **only** at `/scratch/kohlbach/bench/sage_deiso.json`, untracked — a reproducibility
-hole in the single file that *defines* the project's metric.
+Byte-for-byte the configuration behind every `peptide_q` figure in the repo.
 
 What it structurally cannot see: `precursor_tol` is ±25 ppm. A charge error fabricates
 ΔM = (z′−z)(m/z − 1.00728) — hundreds of Da — so those PSMs are never reported. **Closed search
@@ -24,8 +22,7 @@ Three measurements, ordered by how much they assume:
    *linear in m/z* and form **rays** through (1.00728, 0) with integer slopes; real
    modifications are constant shifts and form **horizontal bands**. Separable by construction.
    Validated on synthetic data: 300/300 slope −2 rays recovered, 125× over the chance floor,
-   pure-noise control at 0.0000 vs a 0.0123 floor. **Reports its own chance floor** — the
-   omission that got the MS1 funnel retracted.
+   pure-noise control at 0.0000 vs a 0.0123 floor. **Reports its own chance floor.**
 2. **Entrapment FDR** — 16,343 *A. thaliana* proteins vs 20,416 human (ratio 0.800). Independent
    of the decoy model, which degrades as open search grows the candidate space ~10³×
    (Kong 2017; Chick 2015; Wen et al., *Nat Methods* 2025).
@@ -111,64 +108,3 @@ python3 joint_bench.py decoydb --target human.fasta --out human_decoy.fasta
 ./run_joint.sh
 python3 joint_bench.py collate joint_results.json
 ```
-
-## Cluster launch discipline (2026-09-07)
-
-Launching a long job as `ssh HOST 'cd DIR && setsid CMD > log 2>&1 </dev/null & ...'` blocks ssh for
-the **entire job**. The `&` binds to the whole AND-list, so bash forks a subshell to run it; the
-redirections apply only to the inner simple command, so the subshell keeps sshd's stdout/stderr pipes
-and waits, and sshd cannot close a non-PTY channel until the last writer of those pipes closes them.
-Measured on spock with a 6 s payload: **7.0-7.3 s held vs 0.8-1.0 s released.**
-
-The invariant is **not** "avoid `cd &&`" -- `true && setsid ... &` also holds, and so do `( ... ) &`
-and `{ ...; } &`. It is: *no process that outlives the foreground command may still hold the
-session's stdout/stderr*, and bash only avoids leaving one when the backgrounded unit reduces to a
-single redirected simple command it can `exec` in place. So `[ -e "$D" ] && setsid ... &` is unsafe
-too. The obvious alternatives are worse: `cd DIR; setsid ... &` runs the job in quota-limited `$HOME`
-if the `cd` fails, and `{ cd DIR && setsid ...; } &` buries a failed `cd` in a remote log.
-
-Use `bench/launch.sh` (shipped to the cluster by `sync_cluster.sh`):
-
-```
-ssh -n HOST 'bash /ceph/ibmi/abi/oliver/spextract/tools/launch.sh TAG WORKDIR CMD [ARGS...]'
-```
-
-One ssh per Bash call; never `2>/dev/null` on a launch. Confirmation is a pid the payload stamps
-itself -- `pgrep -f ... | wc -l` reported 3 for one job and 1 for a job that had already exited.
-
-Separately: `exit 255` on a long-lived ssh was the laptop clamshell-sleeping, not the job failing.
-Three incidents separate perfectly on "was the connection open across a lid-close"; a 24-second sleep
-sufficed, while a 28-minute connection with no sleep exited 0. macOS reports it only after
-`net.inet.tcp.keepidle` (2 h) unless `ServerAliveInterval` is set, which is now 15 s for the cluster
-hosts. **Not** ControlMaster: one shared connection means one lid-close kills every concurrent
-session instead of one.
-
-`baseline_run.sh` now refuses a pre-existing arm directory, as `gate_bands.sh`/`gateA.sh` already
-did -- a launch that merely *looked* failed was relaunched by hand once, and nothing would have
-flagged an overwrite. `gateA.sh` also had a stale `bin/spextract` path, broken since the rename to
-`spextractor`.
-
-An adversarial review of that first pass found four defects in it, all reproduced and since fixed:
-
-- **`verify_publish.sh`'s guard was on the wrong object.** It protected the node-local scratch e2e
-  directory; the thing that must be immutable is the *published* install `$SPX/$1` on shared `/ceph`,
-  which the script rewrites **in place on the same inode** -- the SIGBUS hazard. v22-v28 were all
-  published with no scratch directory present, so the guard would have passed straight through and
-  overwritten a live install. It now guards `$V`, validates the version name, leaves the scratch
-  workdir unguarded so a failed e2e can be retried, and **refuses to publish when e2e fails** (the
-  exit status used to be printed and then ignored).
-- **`launch.sh`'s duplicate-tag check was a TOCTOU race.** The stamp is written by the payload only
-  after fork+exec, so simultaneous launches all passed the `[ -e ]` test: measured, three concurrent
-  same-tag launches started **two** payloads and printed the *same* pid twice, leaving one untracked.
-  The tag is now reserved atomically (`set -C`) before the fork -- 1 payload from 3.
-- **A short-lived payload was reported as a launch failure and poisoned its tag.** `baseline_run.sh`'s
-  own REFUSED guard exits in milliseconds, so *every refused arm* would have become unlaunchable.
-  Now `LAUNCH_EXITED` (rc 8), tag reusable; a genuine never-started payload is rc 7.
-- **Three drivers silently lost their execute bit.** The tools directory carries a default ACL
-  (`default:group::rwx`, `other:---`), so a file written by a redirect lands 0660 with no `x`
-  regardless of umask. Deploys now `chmod 771` explicitly.
-
-Known and accepted: `LAUNCH_OK` means *started*, not *healthy* -- a payload that dies after the
-~0.5 s confirmation window still reports OK. Check the log once at ~60 s. `LAUNCH_DIR` is node-local,
-so the same tag can be launched on two different hosts; the damage is a wasted job, not corruption,
-since arm directories are node-local and publishing only works on ibminode05.

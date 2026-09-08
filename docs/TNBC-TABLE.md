@@ -2,13 +2,13 @@
 
 Measured overnight 2026-09-05/06 on the same build as docs/HELA-TABLE.md (published 2026-09-05 15:42;
 `charge:min_charge=2`, `perf:ms1_trace_bands=12`, 72-byte record, no malloc_trim; table committed
-0f5440d, 2026-09-06 07:13). Definitions as in BASELINE.md:1220-1226 (Sage peptides rank 1 q <= 0.01,
-Sage protein groups at 1% protein q, MSFragger peptide-level target-decoy via `tools/bench_table.py`,
-a cluster-side script that is not part of this repository).
+0f5440d, 2026-09-06 07:13). Definitions as in docs/BASELINE.md (Sage peptides rank 1 q <= 0.01,
+Sage protein groups at 1% protein q, MSFragger peptide-level target-decoy via a table script that is
+not part of this repository).
 
 These walls and RSS predate the 2026-09-06/07 memory and speed work: run 009 here is 31:26.98 /
-268.0 GB / Sage 23,063; the same file at the shipped v38 is 12:42.21 / 187.9 GB / Sage 27,855 pooled
-(BASELINE.md:1913-1918). Not re-measured on v38.
+268.0 GB / Sage 23,063; the same file at the shipped v2.0.0 defaults is 12:42.21 / 187.9 GB / Sage
+27,855 pooled (see docs/BASELINE.md). Not re-measured at those defaults.
 
 | scheme | load | run | SpeXtractor spectra | SpeX wall | SpeX RSS | ref wall | ref RSS | Sage SpeX | Sage ref | Sage prot SpeX | Sage prot ref | MSFragger SpeX | MSFragger ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|

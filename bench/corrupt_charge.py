@@ -12,7 +12,7 @@ cannot separate them:
   (b) a wrong precursor mass usually prevents identification entirely, so the errors are real
       but invisible by construction -- only 1,175 of 1.35M raw PSMs survived 1% entrapment FDR
 
-Both reviewers independently said: stop arguing, corrupt a known fraction and measure recovery.
+Independent review made the point: stop arguing, corrupt a known fraction and measure recovery.
 
 What this does
 --------------
@@ -30,7 +30,7 @@ is written by this script:
 
 If recovery is high, reading (a) is dead and the assay is usable. If recovery is near zero, the
 assay cannot detect charge errors at all and NO conclusion from it may be quoted -- including
-the 1.05x modified-peptide ratio, which both reviewers flagged as resting on this control.
+the 1.05x modified-peptide ratio, which rests on this control.
 
 Deliberately NOT done: shifting m/z as well. That would change which peptide matches and confound
 "can the assay see charge errors" with "does the spectrum still identify".

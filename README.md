@@ -71,8 +71,7 @@ conversion instead. It is an independent cross-check, not a requirement, and is 
 
 Build the mzPeak C++ library once against the same Arrow/Parquet/libzip that OpenMS uses
 (`scripts/build_mzpeak_lib.sh`), then configure with `-DMZPEAK_ROOT=<checkout>`. This also needs the
-OpenMS mzPeak integration (the OpenMS/mzpeak fork; `patches/openms-topp-mzpeak-cmake.py` records the
-in-tree wiring), which the pinned commit does not carry; the plain recipe above builds without it,
+OpenMS mzPeak integration (the OpenMS/mzpeak fork), which the pinned commit does not carry; the plain recipe above builds without it,
 reads `.d` and mzML, and writes mzML. `.d` remains the primary input and is faster.
 
 ## Run

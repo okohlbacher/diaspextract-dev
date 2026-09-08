@@ -1,7 +1,7 @@
 {
   "_comment": [
     "CLOSED search config. Byte-for-byte the configuration used for every peptide_q number in",
-    "README.md and docs/. It previously lived only at /scratch/kohlbach/bench/sage_deiso.json,",
+    "README.md and docs/. It previously lived outside the repository,",
     "untracked -- a reproducibility hole in the single file that DEFINES the project's metric.",
     "The `fasta` path is rewritten by open_bench.py at run time; everything else is fixed.",
     "",

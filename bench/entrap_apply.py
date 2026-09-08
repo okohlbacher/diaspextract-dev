@@ -2,7 +2,7 @@
 # Apply the CORRECTED entrapment estimator (peptide ratio + bootstrap CI) to EXISTING entrap TSVs, no re-search.
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # entrapment.py lives beside this file
 from entrapment import peptide_ratio, score
-fa = "/scratch/kohlbach/bench/human_entrap.fasta"
+fa = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("ENTRAP_FASTA", "human_entrap.fasta")
 r = peptide_ratio(fa)
 print(f"peptide-hypothesis ratio = {r:.4f} (1/r = {1/r:.3f})\n")
 print(f"{'arm':14s} {'target':>7s} {'entrap':>6s} {'raw%':>6s} {'FDR%':>6s} {'FDR 95% CI':>16s}")

@@ -16,7 +16,7 @@
 #   { cd DIR && setsid ...; } &   -> releases, but buries a failed cd in a remote log
 # Hence: one simple command, with the cd guarded INSIDE the payload.
 set -u
-LDIR=${LAUNCH_DIR:-/scratch/kohlbach/launch}
+LDIR=${LAUNCH_DIR:-${TMPDIR:-/tmp}/launch}
 [ $# -ge 3 ] || { echo "usage: launch.sh TAG WORKDIR CMD [ARGS...]" >&2; exit 2; }
 TAG=$1; WD=$2; shift 2
 case $TAG in */*|"") echo "LAUNCH_FAIL: TAG must not be empty or contain '/'" >&2; exit 3;; esac

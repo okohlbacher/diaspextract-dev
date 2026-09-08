@@ -55,7 +55,7 @@ if [ ! -s "$SC/pseudo.mzML" ]; then
 fi
 
 declare -A MZ
-MZ[base]=$B/out/m_S23_base/pseudo.mzML
+MZ[base]=$B/out/m_<dataset-B>_base/pseudo.mzML
 MZ[split_count]=$SC/pseudo.mzML
 MZ[envelope]=$B/out/way2_both/pseudo.mzML
 

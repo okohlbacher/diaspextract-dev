@@ -111,9 +111,9 @@ mkdir -p $B/joint
 run_cell reference dataset_A "$DTP/<acquisition-A>"
 run_cell reference dataset_B "$DTP/<acquisition-B>"
 run_cell reference dataset_D "$DTP/<acquisition-D>"
-run_cell spextractor dataset_A "$B/out/m_S08_treat/pseudo.mzML"
+run_cell spextractor dataset_A "$B/out/m_<dataset-A>_treat/pseudo.mzML"
 run_cell spextractor dataset_B "$B/out/open_split_count/pseudo.mzML"
-run_cell spextractor dataset_D "$B/out/m_S30_treat/pseudo.mzML"
+run_cell spextractor dataset_D "$B/out/m_<dataset-D>_treat/pseudo.mzML"
 
 echo "--- TABLE ---" >> $L
 python3 $B/joint_bench.py collate $J >> $L 2>&1

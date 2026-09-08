@@ -168,7 +168,7 @@ def truth_metrics(mzml_path: Path, report: Path, lib: Path, windows: list[tuple[
 
 # the 24 diaPASEF acquisition tiles, recovered from DiaFrameMsMsWindows. FAILURE 8b: this is
 # used INSTEAD of either file's recorded isolation window so both tools are scored identically.
-WINDOWS_S23 = [(327.5,468.8),(467.8,500.6),(499.6,524.3),(523.3,545.8),(544.8,564.6),
+WINDOWS_REF = [(327.5,468.8),(467.8,500.6),(499.6,524.3),(523.3,545.8),(544.8,564.6),
                (563.6,582.9),(581.8,602.8),(601.8,622.4),(621.4,642.6),(641.6,663.3),
                (662.3,685.3),(684.3,708.3),(707.3,733.0),(732.0,759.9),(758.9,789.5),
                (788.5,822.6),(821.6,860.3),(859.3,903.9),(902.9,955.6),(954.6,1018.6),
@@ -178,7 +178,7 @@ WINDOWS_S23 = [(327.5,468.8),(467.8,500.6),(499.6,524.3),(523.3,545.8),(544.8,56
 def cmd_truth(args) -> None:
     reg = yaml.safe_load((HERE / "samples.yaml").read_text())
     plan = yaml.safe_load(Path(args.plan).read_text())
-    root = Path(args.out or f"/scratch/kohlbach/harness/{Path(args.plan).stem}")
+    root = Path(args.out or f"harness-runs/{Path(args.plan).stem}")
     for d in sorted(root.glob("*__*")):
         man = json.loads((d / "manifest.json").read_text())
         entry = reg["samples"][man["sample"]]
@@ -187,7 +187,7 @@ def cmd_truth(args) -> None:
         if not rep.exists():
             print(f"[truth] {d.name}: no DIA-NN reference for {man['sample']} -- skipped")
             continue
-        m = truth_metrics(d / "pseudo.mzML", rep, lib, WINDOWS_S23)
+        m = truth_metrics(d / "pseudo.mzML", rep, lib, WINDOWS_REF)
         (d / "truth.json").write_text(json.dumps(m, indent=2))
         print(f"[truth] {d.name}: recall {m['recall_corrected']}% (raw {m['recall']}, "
               f"floor {m['recall_decoy_floor']})  charge {m['charge_agreement']}% "
@@ -199,7 +199,7 @@ def cmd_collate(args) -> None:
     across samples -- FAILURE 1 was a published number that divided dataset D by dataset A's reference."""
     reg = yaml.safe_load((HERE / "samples.yaml").read_text())
     plan = yaml.safe_load(Path(args.plan).read_text())
-    root = Path(args.out or f"/scratch/kohlbach/harness/{Path(args.plan).stem}")
+    root = Path(args.out or f"harness-runs/{Path(args.plan).stem}")
     rows = []
     for d in sorted(root.glob("*__*")):
         man = json.loads((d / "manifest.json").read_text())

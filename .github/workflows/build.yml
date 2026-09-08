@@ -13,13 +13,13 @@ name: full build
 # job allowed to fail quietly reports green while the tool does not build.
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
     inputs:
       openms_ref:
         description: 'OpenMS ref to build against (default: the pin in patches/openms.lock)'
         required: false
         default: ''
+  push:
+    tags: ['v*']
   schedule:
     - cron: '0 4 * * 1'      # Mondays, 04:00 UTC
 

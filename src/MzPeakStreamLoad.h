@@ -148,7 +148,7 @@ namespace spx
     {
       // Fail rather than fall back to the reference T1: substituting it for an unknown frame stamps
       // masses calibrated at the wrong temperature as "exact", which is silent wrongness the
-      // provenance record would then vouch for. [adv-review codex 2026-09-03]
+      // provenance record would then vouch for.
       if (frame_id < 0 || (size_t)frame_id >= t1_by_frame.size())
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "mzPeak exact calibration: no tdf T1 for frame", std::to_string(frame_id));
@@ -336,7 +336,6 @@ namespace spx
             std::vector<MzPeak::Spectrum> got = tsp.get_spectra_batch(want);
             // A short batch result used to be clamped away with min(), leaving the tail frames as
             // empty spectra: fewer peaks, no warning, and a run that still reports success.
-            // [adv-review codex 2026-09-03]
             if (got.size() != want.size())
               throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                     "mzPeak reader returned fewer frames than requested",

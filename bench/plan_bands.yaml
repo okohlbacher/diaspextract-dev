@@ -14,7 +14,7 @@ title: "topology sweep: does running more windows concurrently (fewer bands) cut
 # 0.34% replicate band of ~10,120; a config that trades peptides for speed is not a win). RAM: 24
 # concurrent windows may hit the admission throttle (~13 GB/window x 24 ~ 300 GB of ~1 TB) -- watch
 # that n_conc actually reaches the target and is not throttled below it.
-samples: [dataset D]
+samples: [dataset_D]
 binary: /scratch/kohlbach/OpenMS/build/bin/spextractor
 threads: 100
 arms:

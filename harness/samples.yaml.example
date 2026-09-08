@@ -11,30 +11,30 @@
 
 samples:
   dataset_A:
-    raw: /path/to/scratch/rawd/<acquisition-A>.d
+    raw: /path/to/rawd/<acquisition-A>.d
     # substring that MUST appear in the raw path and in the output mzML header.
     # Guards against a run being labelled with the wrong sample.
     fingerprint: "<fingerprint-A>"
     references:
       reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-A>
-      diann_report:   /path/to/scratch/bench/<dataset-A>/diann/report.parquet
-      diann_lib:      /path/to/scratch/bench/<dataset-A>/diann/report-lib.parquet
+      diann_report:   /path/to/bench/<dataset-A>/diann/report.parquet
+      diann_lib:      /path/to/bench/<dataset-A>/diann/report-lib.parquet
 
   dataset_B:
-    raw: /path/to/scratch/rawd/<acquisition-B>.d
+    raw: /path/to/rawd/<acquisition-B>.d
     fingerprint: "<fingerprint-B>"
     references:
       reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-B>
-      diann_report:   /path/to/scratch/bench/<dataset-B>_diann/report.parquet
-      diann_lib:      /path/to/scratch/bench/<dataset-B>_diann/report-lib.parquet
+      diann_report:   /path/to/bench/<dataset-B>_diann/report.parquet
+      diann_lib:      /path/to/bench/<dataset-B>_diann/report-lib.parquet
 
   dataset_D:
-    raw: /path/to/scratch/rawd/<acquisition-D>.d
+    raw: /path/to/rawd/<acquisition-D>.d
     fingerprint: "<fingerprint-D>"
     references:
       reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-D>
-      diann_report:   /path/to/scratch/bench/<dataset-D>_diann/report.parquet
-      diann_lib:      /path/to/scratch/bench/<dataset-D>_diann/report-lib.parquet
+      diann_report:   /path/to/bench/<dataset-D>_diann/report.parquet
+      diann_lib:      /path/to/bench/<dataset-D>_diann/report-lib.parquet
 
   # Present in mzml_reference/ but never used. Listed so they are visible rather than
   # rediscovered; raw/diann must be filled in before they can be run.
@@ -43,8 +43,8 @@ samples:
   dataset_F: {raw: null, fingerprint: "<fingerprint-F>", references: {reference_mzml: /path/to/reference-data/mzml_reference/<acquisition-F>}}
 
 search:
-  sage_binary: /path/to/scratch/bench/sage-v0.14.7-x86_64-unknown-linux-gnu/sage
-  sage_config: /path/to/scratch/bench/sage_deiso.json
-  fasta:       /path/to/scratch/bench/human.fasta
+  sage_binary: /path/to/bench/sage-v0.14.7-x86_64-unknown-linux-gnu/sage
+  sage_config: /path/to/bench/sage_deiso.json
+  fasta:       /path/to/bench/human.fasta
 
 vault: /path/to/speXtractor/docs/benchmarks

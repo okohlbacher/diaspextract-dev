@@ -140,7 +140,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
 - **Cluster tooling**: `bench/launch.sh` starts a long job detached so the ssh channel is released,
   reserves its tag atomically, refuses a missing work directory and reports started / exited /
   failed distinctly; the benchmark drivers refuse to overwrite a measured arm and the publish step
-  refuses to publish a binary that failed its own suite. `scripts/sync_cluster.sh` ships the
+  refuses to publish a binary that failed its own suite. `the deploy script` ships the
   launcher, the tool's headers, the end-to-end suite and its golden calibration file with every
   deploy and records the
   MassTrace-patch marker and the OpenMS library hash in the provenance.
@@ -409,7 +409,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   bin as the m/z axis, following OpenMS MassTraceDetection step for step, calibration re-applied only
   at export. Introduced here behind the flag at 6:53 wall / 105 GB against 7:17 / 164 GB for the
   OpenMS path; it became the default later the same day, on the numbers under "Changed" above.
-  See docs/INTEGER-TRACING-DESIGN.md and docs/reviews/integer-tracing-2026-09-03/.
+  See docs/INTEGER-TRACING-DESIGN.md.
 - Band-count sensitivity measured: 4/6/12/25 bands move the peptide set by −0.02% to +0.10% and
   differ in ~2% of spectra's content. Banding is an approximation, not exact as the help had
   claimed; the halo is now sized per edge.
@@ -445,7 +445,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 - **Streaming `.mzpeak` input** (`src/MzPeakStreamLoad.h`, build-optional `-DMZPEAK_ROOT`) on the mzPeak C++ library
   (OpenMS/mzpeak fork trunk); reads ims-compact archives with per-window mobility bands (works around name-only band
   params and NULL `precursor_index`). Benchmarked: not faster (the floor was the MS1 pick), and -11.7% peptides from the
-  archive's two-point TOF transform (fragment error +10 ppm) -- see docs/RUNTIME-PLAN-2026-09-02.md and the converter
+  archive's two-point TOF transform (fragment error +10 ppm) -- see the runtime plan and the converter
   handoff. Output stamps `spx:mz_calibration = mzpeak_two_point_transform ...` for this path.
 - Library build recipe for GCC 13 / Arrow 23 (`scripts/build_mzpeak_lib.sh`, `patches/spx_ranges_to.h`,
   `patches/mzpeak-cpp-arrow23.py`).
@@ -485,8 +485,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   (-2.3%), median/seed/top3 m/z estimators, 48 MS1 trace bands (slower, not output-identical), MALLOC_ARENA_MAX=4.
 
 ### Docs
-- `docs/BACKLOG-ANALYSIS-2026-09-02.md`: every open issue with status, root cause, fix, gate; reviewed by kimi + codex
-  (`docs/reviews/`). Confirmed today: apportion/rp_max bypass corr_power (E5); 28% of spectra carry the precursor M+1 as a
+- an internal backlog register: every open issue with status, root cause, fix and gate. Confirmed: apportion/rp_max bypass corr_power (E5); 28% of spectra carry the precursor M+1 as a
   fragment (C9); false mzPeak calibration provenance (fixed).
 
 ## v0.2.0 — 2026-09-02
@@ -552,7 +551,7 @@ The 0.06% noise floor in the decision rule is a SAME-BINARY figure.
   CIs): actual FDR at nominal 1% is ~1.0-1.45%, not the ~2.3% previously reported.
 - `assembly:corr_power=2` default (validated +8-10%, three files, both engines).
 - Spectrum collapse falsified (-20..-60% peptides at every operating point, intrinsic to both tools).
-- `scripts/apply_openms_patches.sh`; `scripts/sync_cluster.sh` refuses to deploy into an unpatched
+- `scripts/apply_openms_patches.sh`; `the deploy script` refuses to deploy into an unpatched
   tree; evidence chain archived to durable storage.
 
 ### Known limitations

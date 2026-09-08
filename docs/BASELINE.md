@@ -68,11 +68,11 @@ alternative costs 2x the wall and 1.6x the memory. The help text now says CHANGE
   3x: Sage 10,802/10,802/10,802 AND MSFragger 11,560/11,560/11,560. So ALL benchmark peptide counts
   are EXACT; n=1 is justified for both. CONSEQUENCE: the MSFragger k-curve non-monotonicity
   (11,402/11,560/11,482/11,751 across k=1..4) is NOT run-to-run noise -- it is a REAL (non-smooth)
-  response to the different inputs (codex called this in review; now measured). The earlier "MSFragger
+  response to the different inputs (now measured). The earlier "MSFragger
   is a noisy guardrail" framing was WRONG on the noise: MSFragger numbers are exact, just non-monotonic
   in k (its optimum k differs from Sage's). The ONLY stochastic uncertainty in the whole benchmark is
   the entrapment FDR estimate (small n), which the bootstrap CI below now quantifies.
-* **Entrapment estimator was wrong TWO ways (fixed in `bench/entrapment.py`, codex #12):**
+* **Entrapment estimator was wrong TWO ways (fixed in `bench/entrapment.py`):**
   (1) it counted peptides SHARED between human and Arabidopsis as entrapment -> inflated the fraction
   ~2.5x (dataset D base entrap 222 -> correctly 86 foreign-ONLY). (2) it used the PROTEIN ratio (0.800); the
   correct PEPTIDE-hypothesis ratio (in-silico tryptic, Sage rules) is 0.6805, correction 1/r = 1.469.
@@ -97,13 +97,13 @@ alternative costs 2x the wall and 1.6x the memory. The help text now says CHANGE
 
 ## Confirmed WINS post-freeze (gate baseline: Sage 9,989 / MSFragger 11,033 / entrap 9,304 @ 2.33%)
 
-* **`assembly:corr_power` (Q2) + `im_weight_sigma` STACK — WIN on BOTH engines, entrapment-confirmed (2026-07-27).**
+* **`assembly:corr_power` + `im_weight_sigma` STACK — WIN on BOTH engines, entrapment-confirmed (2026-07-27).**
   Emitted fragment intensity *= co-elution^k. corr_power is EMIT-ONLY (excluded from the 500-cap key),
   so the corr_power arms preserve peak MEMBERSHIP (identical 924,255 spectra + same peak m/z set; pure
   intensity re-ranking). im_weight IS in the cap key, so with 73% of spectra at the 500-cap the STACK
   also REORDERS which fragments survive (its intended interferent-removal channel) -- same spectrum +
   peak COUNT, but not the same membership. So the stack's +310 over corr_power=2 has TWO channels
-  (intensity reweight + cap membership), not one [kimi 2026-07-27]. the reference implementation on dataset D: Sage 11,517,
+  (intensity reweight + cap membership), not one. The reference implementation on dataset D: Sage 11,517,
   MSFragger 13,932. MSFragger here is a NOISY guardrail (no replicate variance measured; screen on
   Sage+entrapment). The 2.33->2.13% entrap frac is WITHIN Poisson noise (n~85 entrapment) -- a guardrail
   (it passed: extra targets are not disproportionately entrapment), NOT an FDR win.
@@ -119,7 +119,7 @@ alternative costs 2x the wall and 1.6x the memory. The help text now says CHANGE
   entrap FDR (2.13%) -- the two are COMPLEMENTARY purity axes (RT co-elution vs IM), they ADD not erase.
   Sage 86.7% -> 96.5% of the reference implementation; MSFragger 79.2% -> 84.8%. Mechanism: a true fragment co-elutes with
   its precursor by construction (high c), so c^k down-weights mediocre-c INTERFERENTS. This OVERTURNED a
-  UNANIMOUS 3-CLI review that predicted -2..-5% MSFragger (premise "faint precursor -> low-c fragment"
+  UNANIMOUS prior prediction of -2..-5% MSFragger (premise "faint precursor -> low-c fragment"
   was wrong). MSFragger is NOISY here (non-monotonic) -- screen on Sage+entrapment.
 
   **GENERALISATION TEST PASSED for corr_power (frozen k=2/sigma=0.005 on untouched dataset A, dataset B; 2026-07-27):**
@@ -129,7 +129,7 @@ alternative costs 2x the wall and 1.6x the memory. The help text now says CHANGE
   increment is FILE-VARIABLE (+310 dataset D, +693 dataset A, +127 dataset B over k2; flat on MSFragger) -- a Sage-leaning
   bonus, NOT a robust default increment (dataset B +127 < the pre-registered +200 threshold). The <=1% empirical
   FDR numbers are erratic (k2 dips on dataset A, stack dips on dataset B) = estimator noise at ~50 entrapment n (the
-  <=2% and nominal metrics are clean). **DECISION (pending 3-CLI review of the result): ship corr_power=2
+  <=2% and nominal metrics are clean). **DECISION (pending review of the result): ship corr_power=2
   as the new default; im_weight_sigma=0.005 as a documented optional stack. Caveat: dataset A/dataset B are the same
   study series as dataset D, so this de-risks the dataset D family, not diaPASEF broadly -- a different-cohort file is
   the stronger (unavailable-today) test.**
@@ -141,10 +141,10 @@ Do not re-propose without new evidence: `competitive`, rank-pruning (`rp_max` 2/
 — and it was *unreachable* in count mode, so it is untested rather than falsified),
 `consolidate:delta_rt` (0.7 → −12.7%, 3.0 → −24.0%), **`merge:rt_window` 1.4 → −4.4%**,
 mass recalibration, a monotonic ion-mobility charge prior, AlphaDIA-style log-sum co-elution
-scoring (three implementations), **`gate:variance_support` (Q1, union-support Pearson — 2026-07-27:
-DROP on unanimous 3-CLI analysis; it measures support co-LOCALISATION not co-elution SHAPE and reads
+scoring (three implementations), **`gate:variance_support` (union-support Pearson — 2026-07-27:
+DROP on unanimous analysis; it measures support co-LOCALISATION not co-elution SHAPE and reads
 faint fragments' censored shoulders as anti-correlation, e.g. precursor-8/frag-5/overlap-3 scores
-G-Pearson +0.47 but union −0.50. G-Pearson already ≈ robust cosine, so [B0] was cosmetic).**
+G-Pearson +0.47 but union −0.50. G-Pearson already ≈ robust cosine, so the change was cosmetic).**
 
 ## Spectrum COLLAPSE (same precursor across cycles) — FALSIFIED for quality (2026-07-28)
 Tested on the OPEN-search entrapment results (simulation on existing PSMs, no re-search): group rank-1
@@ -196,7 +196,7 @@ the M+1 peak unconsumed by `used[]`, so it later seeds its OWN precursor one iso
 BOTH the +1 explosion and the +8.8% emission (one cause, two symptoms). Open search did not improve.
 NOTE the closed-search 11,697 (> the reference implementation 11,517) is NOT a quality win to bank: peptides/1k spectra is
 11.7 -> 11.6, i.e. the gain tracks the extra emission -- exactly the over-emission-rewards-closed-search
-corruption the reviewers warned about. Do not ship the guard for it.
+corruption. Do not ship the guard for it.
 
 **Attempt 2 — `charge:mono_averagine_select` (a SCORING decision): under test.** Walk the full run, then
 choose WHICH peak is the mono by averagine cosine of the envelope starting there. Corrects BOTH
@@ -219,7 +219,7 @@ the same evidence weight the envelope scorer uses, (len-1)/3 capped at 1, largel
 Pre-registered criterion was total isotope-shift BELOW 8.20% with both +-1 bins down: **NOT MET (9.48%)**.
 Stopped rather than running a 4th variant. Both flags stay default-OFF, documented, for reproducibility.
 
-**THE FINDING THAT MATTERS — the -1 artefact is NOT the open-search recall lever (my hypothesis was WRONG).**
+**THE FINDING THAT MATTERS — the -1 artefact is NOT the open-search recall lever (the hypothesis was WRONG).**
 Open-search targets are FLAT across all four arms (8,887 / 8,939 / 8,916 / 8,932; every CI overlaps)
 even though the -1 population was cut 47-70%. Reason, obvious in hindsight: **a -1-shifted precursor is
 still IDENTIFIED** -- it appears in the delta-mass histogram AS an identified PSM at -1.003 Da. Open
@@ -256,17 +256,17 @@ re-evaluation in THIS currency; not re-litigated yet. (3) The phantom-mod gap (a
 
 ### B. Denominators reconciled (the "no ratio is citable" blocker)
 - **CANONICAL the reference implementation references from 2026-09-01 on: Sage 11,517** (dt_s30/results.sage.tsv,
-  nominal peptide_q<=0.01 -- re-verified today; TSV archived to ceph) and **MSFragger 13,932**
+  nominal peptide_q<=0.01 -- re-verified today; TSV archived) and **MSFragger 13,932**
   (msf_dt/fixed.tsv via score_msf_td target-decoy; archived).
 - **11,552 / 13,014 are DEPRECATED**: products of the 2026-07-22 joint common-FDR procedure whose
-  primary outputs (joint_results.json et al.) exist in NO file on the cluster -- doc-only numbers.
+  primary outputs (joint_results.json et al.) exist in no file -- doc-only numbers.
   Not to be used in ratios. The frozen table's 86.4%/80.5% ratios are legacy.
 - **Decision-rule re-base:** the frozen threshold 10,072 predates the isotope-support gate AND
   corr_power (superseded twice). New reference for progress/regression: **Sage 10,802** = current
   tool defaults (corr_power=2) + the standard bench config (which passes -assembly:require_isotope_support
   explicitly; that flag remains OFF in the tool). Noise floor and +-1% rules unchanged.
 
-### STEP 01 CLOSURE (v3 scorer, post kimi+codex review, 2026-09-01) — SUPERSEDES the v2 table above
+### STEP 01 CLOSURE (v3 scorer, 2026-09-01) — SUPERSEDES the v2 table above
 The v2 class table is NOT citable (review: Da-constant tolerance made every ratio a mass-accuracy
 measurement biased against spx; per-bin @1% on zero-entrapment slivers vacuous; ontology gaps).
 v3 (bench/open_ptm_score.py @ e9f5b64b): nearest-candidate assignment over {0, iso-lattice k<=15,
@@ -289,9 +289,9 @@ OWN closed search (same scan -> same peptide; 0.7% different -> chimeric explana
 => SpeXtractor's reported precursor masses carry a SYSTEMATIC ~-18 ppm CALIBRATION BIAS introduced by
 our pipeline (same raw data as dt). Fixable (per-run linear recalibration of reported mono m/z);
 distinct from the old falsified "mass recalibration" lever (different target, corrupt metric).
-Scheduled as its own arm AFTER step 02 (both reviewers: do not confound the pre-registered arm).
+Scheduled as its own arm AFTER step 02 (do not confound the pre-registered arm).
 
-**MSFragger denominator reconciled (codex #14):** 13,932/11,560 are PEPTIDOFORM-level (pair them);
+**MSFragger denominator reconciled:** 13,932/11,560 are PEPTIDOFORM-level (pair them);
 sequence-level recount from archived TSVs: dt 12,752 vs spx 11,055 = 86.7%; legacy 13,014 was
 sequence-level and is within 2% of 12,752 — unit mismatch closed, ratios now like-for-like.
 
@@ -314,11 +314,11 @@ a red herring, dC2=0 and dT1 tiny). The loader's SDK branch (OPENMS_BRUKER_SDK_P
 ion-mobility converter -- the m/z converter was never swapped (and the env var was never set anyway).
 **Fix: patches/openms-brukertims-sdk-mz.patch** -- 3 lines: the SDK branch now also installs
 `BrukerTof2MzConverterFactory` (vendor per-frame calibration via tims_index_to_mz). Requires
-OPENMS_BRUKER_SDK_PATH pointing at a local Bruker timsdata .so (present on the cluster from fp-tools;
+OPENMS_BRUKER_SDK_PATH pointing at a local Bruker timsdata .so (if available locally;
 used locally, never redistributed; without it the tool falls back to the open model as before).
 The open-model inaccuracy is itself reportable upstream (opentims; also explains why mzdata disabled
 its own m/z model port).
-**Why mzPeak was NOT the answer (user directive "pull latest mzPeak", researched 2026-09-01):** spec
+**Why mzPeak was NOT the answer (researched 2026-09-01):** spec
 is draft 0.9 / prototype v0.1.0 / breaking layout change 2026-07-14 / no releases; the current
 TDF->mzpeak converter stores RAW TOF indices and its own m/z path uses the same two-point model
 (mzdata implemented the true vendor model 0.66.3 but disabled it 0.66.5 as "not consistently better");
@@ -351,7 +351,7 @@ with mass accuracy; (3) knownPTM ambiguous fraction unchanged (34.7% vs dt 14%) 
 physically separable at +-4 ppm -- the 1,610-unit Amidation bin (1.4% raw entrap) deserves real
 chemical scrutiny rather than automatic dismissal as spill.
 
-### Calibration-step adversarial review verdict (kimi + codex, 2026-09-01) — 12,128 is PROVISIONAL
+### Calibration-step verdict (2026-09-01) — 12,128 is PROVISIONAL
 Convergent verdict: the chord mechanism is the proven DOMINANT cause of the old raw-axis bias, but the
 step over-claimed in four ways, now corrected:
 1. **Attribution not isolated:** setting the env var flipped BOTH converters (m/z AND ion mobility) --
@@ -360,7 +360,7 @@ step over-claimed in four ways, now corrected:
    model. IM-isolation arm required (m/z vendor + IM open).
 2. **12,128 = provisional dataset D/vendor-SDK regression oracle, NOT a validated reference** until: cp0
    ablation (running), the IM-isolation arm, and dataset A/dataset B re-validation under vendor-cal.
-3. **"Leads the reference implementation" is not citable.** Maximum defensible wording (codex): "On dataset D, using Sage and
+3. **"Leads the reference implementation" is not citable.** Maximum defensible wording: "On dataset D, using Sage and
    the vendor-SDK calibration configuration, SpeXtractor yielded 5.3% more closed-search peptides; under
    MSFragger it yielded 17.7% fewer." Per-1k-spectra efficiency: spx 13.2 vs dt 16.4 (dt +25%) -- the
    emission column stays in any public row. MSFragger flatness is UNINFORMATIVE (its default
@@ -413,7 +413,7 @@ the reference implementation had ONLY ever been measured on dataset D; dataset A
 **SpeXtractor reaches 100.9-110.5% of the reference implementation on closed Sage across the three files** -- no vendor
 library, open BSD path. STATISTICALLY (n=3 paired): mean 105.1%, 95% CI [93.0, 117.3] = consistent
 with PARITY, not an advantage; the earlier phrasing "matches or exceeds on ALL THREE files" was
-over-claiming on dataset A's +91. CORRECTION (review F4): the "ours 1.26% [1.00-1.51]" entrapment figure
+over-claiming on dataset A's +91. CORRECTION: the "ours 1.26% [1.00-1.51]" entrapment figure
 quoted here came from the **sdkcal** arm, a different converter -- **the shipping table-model arm's
 entrapment FDR has NOT been measured on any file**; that is an owed measurement, not a passed check.
 CAVEATS THAT STAND: (a) emission is still ~1.32x dt, so per-spectrum efficiency still favours dt --
@@ -423,7 +423,7 @@ still the external-claim gate; (d) our ppm residual (+1.5..+3.2) is 2-4 ppm ABOV
 (-1.4..+0.3) on every file: dt's per-file spread (-1.37/+0.27/-0.60) is small and centred, so the
 residual is OURS (centroiding/mono-reporting, Option I), NOT a per-file instrument property.
 
-### C2 PAIRED m/z bias vs the reference implementation (2026-09-02, 15:14) -- the residual is ours, in BOTH directions
+### PAIRED m/z bias vs the reference implementation (2026-09-02, 15:14) -- the residual is ours, in BOTH directions
 Same (peptide, charge) identified by both tools at 1% (best PSM per tool), so selection bias is excluded:
 | file | shared pairs | precursor ppm ours / dt / **paired ours−dt** | fragment ppm **paired ours−dt** | by charge (paired, precursor) | by m/z tercile |
 |---|---|---|---|---|---|
@@ -437,9 +437,9 @@ MS2 trace m/z estimator), not a calibration offset (which would move both the sa
 discriminant (precursor_ppm, average_ppm) and the 20 ppm fragment tolerance. Next: locate the two estimators
 (`Trace.mz` for MS1 and MS2 traces: intensity-weighted mean over the trace vs apex) and A/B an apex /
 top-k-weighted estimator behind the dataset D set gate, reporting ppm beside the count. dataset D pair running
-Three-file pattern: the precursor bias is z=2-dominated (z3/z4 near zero on dataset D/dataset B) and absent in the lowest m/z tercile -- an isotope/mono-envelope effect (our reported mono for z=2 mid/high-m/z precursors sits a fraction of a ppm-scaled isotope offset high?) rather than a uniform centroid shift; the FRAGMENT bias is uniform −2.0..−2.4 ppm on all three files and is the one that touches the 20 ppm search tolerance and Sage's average_ppm feature (−3 ppm uniform shift cost −165 peptides on 09-01). Estimator A/B (apex / median vs weighted mean) queued behind the E5 gate.
+Three-file pattern: the precursor bias is z=2-dominated (z3/z4 near zero on dataset D/dataset B) and absent in the lowest m/z tercile -- an isotope/mono-envelope effect (our reported mono for z=2 mid/high-m/z precursors sits a fraction of a ppm-scaled isotope offset high?) rather than a uniform centroid shift; the FRAGMENT bias is uniform −2.0..−2.4 ppm on all three files and is the one that touches the 20 ppm search tolerance and Sage's average_ppm feature (−3 ppm uniform shift cost −165 peptides on 09-01). Estimator A/B (apex / median vs weighted mean) queued behind the current gate.
 
-### C3 MEASURED (2026-09-02, 16:41): entrapment FDR of the SHIPPING table-model arm
+### MEASURED (2026-09-02, 16:41): entrapment FDR of the SHIPPING table-model arm
 `entrap_apply.py` (peptide-hypothesis ratio 0.6805, corrected estimator) on a Sage entrapment search of the HEAD
 output (d2_P1, table-model calibration, parallel loader -- byte-identical to every run today):
 | arm | targets @1% | entrapment | raw % | **FDR %** | 95% CI |
@@ -450,19 +450,19 @@ output (d2_P1, table-model calibration, parallel loader -- byte-identical to eve
 | dataset A the reference implementation | 9,953 | 84 | 0.84 | 1.24 | 0.99-1.54 |
 | **dataset B table model (shipping)** | 9,462 | 85 | 0.89 | **1.32** | 1.04-1.59 |
 | dataset B the reference implementation | 8,581 | 71 | 0.82 | 1.22 | 0.96-1.53 |
-The owed measurement (review F4) is now made: the shipping arm's true FDR at nominal 1% is ~1.4%, inside the
+The owed measurement is now made: the shipping arm's true FDR at nominal 1% is ~1.4%, inside the
 same band as the vendor-calibrated arm (CIs overlap), so the open-path calibration gain is not bought with
 FDR. On all three files the shipping arm's true FDR at nominal 1% is 0.95-1.37%, inside the reference implementation's band on the two files where it exists (1.22-1.24%): the 3-file closed-search parity claim now carries its FDR control.
 
-### C7: `assembly:apportion` FALSIFIED CLEANLY (2026-09-02, 16:46) -- the first A/B with corr_power actually applied
+### `assembly:apportion` FALSIFIED CLEANLY (2026-09-02, 16:46) -- the first A/B with corr_power actually applied
 Every earlier apportion/rp_max A/B compared corr_power=2 (share-all) against corr_power=0 (the variant) because those
-branches bypassed the emit weights (E5, fixed 15:05). Re-run with the weights applied: apportion=1.0 -> Sage 11,742
+branches bypassed the emit weights (fixed 15:05). Re-run with the weights applied: apportion=1.0 -> Sage 11,742
 vs 12,217 share-all (**-3.9%**, only-share-all 1,234 / only-apportion 759). Same verdict as July, now clean:
 cross-precursor intensity apportionment loses peptides. Consequence: BACKLOG item 1 (NNLS unmixing onto the MS1
 basis) is cut -- its prerequisite ("apportion shows a signal") failed under the correct measurement. Side note: the
 apportion path ran the window loop at 6.1x (3,658 s) -- an hour-long run -- irrelevant now that it is dead.
 
-### C2 estimator A/B (2026-09-02, 17:22): APEX m/z for traces is +2.6% peptides (same binary, env switch)
+### Trace m/z estimator A/B (2026-09-02, 17:22): APEX m/z is +2.6% peptides (same binary, env switch)
 `SPEXTRACTOR_MZ_ESTIMATOR` selects the reported m/z of every trace in `toTrace()`; default = OpenMS centroid
 (intensity-weighted mean over the trace's members).
 | estimator | spectra | Sage @1% | vs share-all default (12,217) | paired precursor ppm vs dt | paired fragment ppm vs dt |
@@ -485,7 +485,7 @@ MSFragger ratio vs the reference implementation 82.3% -> 85.6%. Same binary (env
 engines move the same way; ppm beside the count improved. Default changed in code (`SPEXTRACTOR_MZ_ESTIMATOR=mean`
 restores the OpenMS centroid). Owed next: dataset A/dataset B apex arms (Sage) and entrapment on the apex arm (queued).
 
-### C9 FALSIFIED (2026-09-02, 19:05): dropping the precursor's M+1..M+3 from fragment lists LOSES peptides
+### FALSIFIED (2026-09-02, 19:05): dropping the precursor's M+1..M+3 from fragment lists LOSES peptides
 `SPEXTRACTOR_DROP_PREC_ISO=1` on the apex-default binary: isotope contamination of the emitted lists falls from
 28.4% / 24.8% (M+1 / M+2 within 10 ppm) to 0.2% / 0.2%, and Sage drops **12,537 -> 12,249 (-2.3%**, only-apex
 1,061 / only-dropiso 773; same binary, env switch). The unfragmented precursor isotopes in a pseudo-MS/MS spectrum are
@@ -516,7 +516,7 @@ dataset D: 11,927 vs 11,463 (+4.1%; 85.6% of the reference implementation's 13,9
 26:51 wall / 156 GB peak; dataset B 15:28 / 109 GB. The apex arm outputs are the new benchmark reference
 (`d7_apex`, `d13_apex_s08`, `d13_apex_s23`); the mean-estimator numbers stay as the 09-01 row.
 
-### C1(b) rescoring A/B, first two attempts (2026-09-02, 21:30)
+### Rescoring A/B, first two attempts (2026-09-02, 21:30)
 FragPipe 24.0 headless (Basic-Search workflow, 25 ppm, our human_decoy FASTA) on the dataset D apex arm and on the reference implementation.
 MSBooster (DIA-NN predictions) aborts on OUR pepXML both with and without spectrum prediction: "Prediction missing
 in file for REM[15.9949]DQTM[15.9949]AANAQK|3" (a PSM whose peptide DIA-NN's predictor does not emit). the reference implementation's
@@ -525,7 +525,7 @@ peptidoforms in the raw-hyperscore walk -- rescoring is worth +34% on the refere
 comparison must be made on both. Third attempt running: MSBooster off, Percolator on MSFragger features only, both
 tools (like-for-like).
 
-### C1(b) RESCORING A/B, like-for-like (2026-09-02, 21:46): rescoring does NOT close the MSFragger gap
+### RESCORING A/B, like-for-like (2026-09-02, 21:46): rescoring does NOT close the MSFragger gap
 FragPipe 24.0 headless, Basic-Search (MSFragger 25 ppm, our human_decoy FASTA) -> Percolator -> Philosopher
 (sequential, picked, 1% peptide), MSBooster OFF for both (it aborts on our pepXML, see above):
 | dataset D arm | peptides @1% | PSMs @1% | PSMs / peptide | ratio spx/dt |
@@ -536,10 +536,10 @@ FragPipe 24.0 headless, Basic-Search (MSFragger 25 ppm, our human_decoy FASTA) -
 | (the reference implementation + MSBooster RT+spectra) | 18,670 | 37,086 | 2.0 | ours unavailable |
 Rescoring lifts both tools (+11% / +14%) and the ratio does not move (85.6 -> 82.8%). So the MSFragger deficit is
 not a scoring-function artefact that a rescorer repairs: the 3,600 the reference implementation-only peptides have no competitive PSM
-in our output at all. Together with H3 (identical scores on shared peptides) this points at CONTENT/coverage of the
+in our output at all. Together with the score comparison (identical scores on shared peptides) this points at CONTENT/coverage of the
 faint tail -- emission competition or missing fragments -- not at search-side handling. Our 8.6 PSMs per peptide vs
 the reference implementation's 2.0 is the over-emission signature: Percolator's peptide-level FDR gives redundancy nothing.
-**Decision (plan step 8):** the next attribution arms are content-side: (c) the emission-controlled arm (pre-registered
+**Decision:** the next attribution arms are content-side: (c) the emission-controlled arm (pre-registered
 step 02: quality-gate 924k -> ~700k + the reference implementation-precursor-matched sub-arm, both engines, full FDR curves) and (d) the
 oracle-fragment arm. The learned charge/mono predictor stays conditional on (d). A MSBooster-tolerant rerun (var mods
 capped identically for both tools) is owed for the +17% predictions bring the reference implementation.
@@ -571,7 +571,7 @@ Pre-registered reading: cutting emission by 39% -- to BELOW the reference implem
 to 84.8%. It does not rise. So the extra spectra are not what costs us on MSFragger (the emission-competition
 hypothesis is refuted for the second time, now with a precursor-quality gate rather than merging), and the gate removes
 real faint peptides on Sage (−6.4%). The deficit is per-precursor CONTENT of the faint tail, consistent with the
-rescoring A/B (ratio unchanged after Percolator) and H3 (identical scores on shared peptides). Sub-arm 2 (matched
+rescoring A/B (ratio unchanged after Percolator) and the score comparison (identical scores on shared peptides). Sub-arm 2 (matched
 precursor population) is the direct test of that and is running. Side result: `SPEXTRACTOR_MIN_ISOTOPES=3` is a
 legitimate speed/emission knob (−39% spectra, −23% wall, −0.9% MSFragger, −6.4% Sage) -- not a default.
 
@@ -584,7 +584,7 @@ Reference: the reference implementation's 700,434 dataset D pseudo-spectra (RT/m
 | **the reference implementation-precursor-matched** | 432,579 | 11,903 (103% of dt's 11,517) | **11,842** | **85.0%** |
 | the reference implementation | 700,434 | 11,517 | 13,932 | — |
 With the precursor POPULATION held to the reference implementation's, the MSFragger ratio does not move (85.0%). Together with sub-arm 1
-(emission −39%: 84.8%), the rescoring A/B (Percolator: 82.8%) and H3 (identical scores on shared peptides), every
+(emission −39%: 84.8%), the rescoring A/B (Percolator: 82.8%) and the score comparison (identical scores on shared peptides), every
 search-side and population-side explanation is now excluded. What is left is the CONTENT of the spectra we emit for the
 precursors the reference implementation also emits: for ~3,600 peptides our spectrum of the same precursor does not reach MSFragger's
 1% threshold while the reference implementation's does, and on Sage it does. Candidates, in test order: (1) the intensity reshaping
@@ -651,7 +651,7 @@ within 30 s) -> hypothesised but no spectrum reached the search (assembly: < min
 under-covered / ~17% hypothesised-not-emitted / ~19% never hypothesised.
 
 ### ASSEMBLY-LOSS ARM -- PRE-REGISTERED (2026-09-03, 04:45): `assembly:min_fragments` 2
-17% of the the reference implementation-only peptides have a precursor hypothesis of ours but no spectrum reached the search. The gate that
+17% of the reference implementation-only peptides have a precursor hypothesis of ours but no spectrum reached the search. The gate that
 drops a hypothesised precursor at assembly is `assembly:min_fragments` (a spectrum with fewer correlated fragments is
 not emitted). Arm: min_fragments 2 (the default is already 3), both engines. Prediction: the dt-only "we have SOME PSM"
 fraction rises from 64% and MSFragger gains if those spectra are identifiable; falsifier: the added spectra are
@@ -672,7 +672,7 @@ tail: `SPEXTRACTOR_BACKFILL_RAW=50` + `SPEXTRACTOR_BACKFILL_MAXFRAGS=K` (apply o
 fragments; K = 50 and 150 -- the first launch of this arm collided with a second chain on the same output paths at
 06:18 and was stopped and relaunched cleanly at 06:19). Prediction: MSFragger keeps most of +5% while Sage returns to ~12,500; falsifier: Sage still
 drops -> the noise cost is in the faint spectra themselves, and the selection must be per-peak (IM/RT co-elution of the
-raw peak, i.e. MS2 aggregation across neighbouring frames, C6).
+raw peak, i.e. MS2 aggregation across neighbouring frames).
 
 ### ASSEMBLY-LOSS ARM FALSIFIED (2026-09-03, 06:16): `min_fragments 2` changes nothing
 928,378 spectra (+565), Sage and MSFragger identical to apex, dt-only PSM coverage unchanged (64%). The hypothesised-
@@ -692,7 +692,7 @@ faint-tail-only backfill arm.
 | K=50 | 12,591 (+0.4%; 6 / 60) | 11,961 (+0.3%) | +2 |
 Reading: the MSFragger gain of the unconditional arm comes from backfilling the RICH spectra (73% of spectra sit at
 the 500-cap; share-all gives even faint precursors hundreds of fragments), which is exactly where Sage pays. Gating by
-fragment count therefore does not reach the the reference implementation-only spectra (deficit still +2). K=150 is a clean small win on
+fragment count therefore does not reach the reference implementation-only spectra (deficit still +2). K=150 is a clean small win on
 both engines (+1.5% / +0.6%, superset-like) -- a candidate default pending dataset A/dataset B + entrapment, not a mechanism.
 **Pre-registered next arm:** gate the backfill by PRECURSOR intensity instead (`SPEXTRACTOR_BACKFILL_MAXQ=q`: only
 precursors below the window's q-quantile of MS1 intensity), N=50, q = 0.5 and 0.25. Prediction: MSFragger keeps most
@@ -714,7 +714,7 @@ Reading: at equal backfill setting the empty arm reproduces the no-empty arm to 
 (12,600 vs 12,539 MSFragger; −2.5% vs −2.6% Sage), and the K-gated empty arm is *worse* than K=150 alone (12,593 vs
 12,724 Sage). The 53k trace-free precursors are not identifiable: the pre-registered falsifier ("counts flat, emission
 up") is met exactly. **Verdict: `SPEXTRACTOR_BACKFILL_EMPTY` stays off and is not a default candidate.** It also
-confirms the assembly-loss finding from the other side -- the the reference implementation-only precursors we never emit are not lost to
+confirms the assembly-loss finding from the other side -- the reference implementation-only precursors we never emit are not lost to
 a fragment-count threshold, they have no correlated MS2 signal for us to find at all.
 
 ### PRECURSOR-INTENSITY-GATED BACKFILL (2026-09-03, 09:05): prediction held; q=0.5 is the best point on the frontier
@@ -738,7 +738,7 @@ mechanism.
 engines but small (+1.5% / +0.6%); q=0.5 is much larger on MSFragger (+4.7%) at a −0.8% Sage cost. Per the both-engines
 rule neither is adopted on one file. **Pre-registered confirmation arm:** both settings on dataset A and dataset B, both engines,
 plus entrapment FDR. Adopt as default only if the dataset D sign holds on both files AND entrapment stays <= 1.4%
-(shipping arm: dataset D 1.37%, dataset A 0.95%, dataset B 1.32%); a Sage regression on dataset A/dataset B larger than dataset D's −0.8% kills q=0.5 and
+(shipping arm: dataset D 1.37%, dataset A 0.95%, dataset B 1.32%); a Sage regression on dataset A/dataset B larger tha dataset D's −0.8% kills q=0.5 and
 leaves K=150 as the only candidate.
 
 ### ISOTOPE DUPLICATION: HYPOTHESIS (a) CONFIRMED, (b) REFUTED (2026-09-03, 09:35)
@@ -809,7 +809,7 @@ that improves both engines while cutting emission AND runtime.
 visited (867 billion visits for 5.5 billion survivors, measured) and read the field it needed out of
 a 96 B record: ~83 TB of memory traffic per run. Set-identical output, replicated three times. The
 task pool alone was a regression only because it amplified that traffic; with the gate fixed it is
-neutral-to-positive, and the in-flight cap I briefly added on the wrong diagnosis is removed again.
+neutral-to-positive, and the in-flight cap added on the earlier diagnosis is removed again.
 **NOT ADOPTED (yet): the integer detector.** Faster and 36% lighter, but −1.4% Sage peptides against
 the reference, with a symmetric ~8% set churn that is the residual of a faithful-not-identical
 reimplementation. The only semantic difference between its 12,650 and 12,466 versions is whether a
@@ -821,12 +821,12 @@ entrapment inside the charge-gate arm's interval, and dataset A replication of t
 ### WINDOW-LOOP PERFORMANCE, ROUND 2 (2026-09-04) -- three output-neutral changes, THREE files
 
 Measured old-vs-new with both arms on the SAME host, three files concurrently on three machines,
-all running one binary from the shared ceph install (`/ceph/ibmi/abi/oliver/spextract`) so the
+all running one binary from a single shared install so the
 arms cannot differ by build. **Every arm is digest-identical to its base**, which is the gate:
 these changes are output-neutral by construction, so peptides are identical by definition and no
 search was run.
 
-| | dataset D (ibminode05, 128c) | dataset A (spock, 224c) | dataset B (data, 224c) |
+| | dataset D (128 cores) | dataset A (224 cores) | dataset B (224 cores) |
 |---|---|---|---|
 | wall base -> perf (SINGLE PAIR -- see the retraction below) | 6:31 -> 6:07 | 8:36 -> 8:09 | 5:40 -> 5:22 |
 | process peak RSS | 85.7 -> 83.3 GB (−2.8%) | 119.6 -> 114.2 GB (−4.5%) | 91.3 -> 88.6 GB (−2.9%) |
@@ -841,7 +841,7 @@ search was run.
 ### RETRACTION (same day): the wall-clock claim does NOT survive replication
 
 The single-pair table above was replicated as an interleaved **base/clean/base/clean** on dataset B,
-`data`, with the load recorded before each run. Four runs, all four digest-identical:
+on one 224-core node, with the load recorded before each run. Four runs, all four digest-identical:
 
 | run | load before | wall | window loop | window-loop CPU | RSS at end of loop |
 |---|---|---|---|---|---|
@@ -867,7 +867,7 @@ in what exists, not a measurement.
 wall-clock change, and possibly ~4% more CPU.** The earlier "−5 to −6% wall on three files" was
 three single pairs taken while another user's load drifted underneath them, and it is withdrawn.
 
-#### THREE-PAIR REPLICATION, dataset D on spock (the settled numbers)
+#### THREE-PAIR REPLICATION, dataset D on the 224-core node (the settled numbers)
 
 Six runs, interleaved base/clean x3, load recorded before each, **all five digest comparisons
 identical**. Every metric below has NON-OVERLAPPING ranges between the arms, which is the bar the
@@ -889,10 +889,9 @@ extra build pass cost CPU that batching did not. **The trade is ~27% of the wind
 for ~5% more CPU at roughly unchanged wall time.** For a tool whose concurrency is bounded by the
 free-RAM admission gate, that is worth taking -- but it is a memory change and must be cited as one.
 
-**THE MACHINES ARE SHARED, AND THIS WAS NEARLY MISREPORTED.** The peer nodes were called "idle"
-on the strength of `nproc` and `free` alone -- load average was never checked. They were not idle:
-ibminode05 was carrying another user's three python jobs at load 42, spock three `jackhmmer` at
-load 21. A later unpaired run of the shipping binary came back at dataset D 6:28 / dataset A 8:40, i.e. back at
+**THE MACHINES ARE SHARED.** The peer nodes were called "idle" on the strength of `nproc` and
+`free` alone -- load average was never checked. They were not idle: the 128-core node was carrying
+another user's three python jobs at load 42, the 224-core node three `jackhmmer` at load 21. A later unpaired run of the shipping binary came back at dataset D 6:28 / dataset A 8:40, i.e. back at
 baseline, purely because it ran in a more contended window than the arms it was being compared to.
 **Rule from here: quote a wall-clock delta only from arms run BACK TO BACK on one node, check
 `uptime` before and after, and prefer the interleaved A/B/A/B below to a single pair.** The table
@@ -921,9 +920,8 @@ The three changes:
    byte-identical between arms (862,781,140,969 visits, 5,467,207,106 survivors), which is the
    gate-level proof the candidate set did not move.
 
-**Adversarial review (codex/kimi/vibe) — all three verdicts OUTPUT-NEUTRAL, with two real defects
-found in change 3 that the safety proof had missed.** vibe's proof assumed finite intermediates;
-codex and kimi independently found that a denormal `delta_rt` gives `1/delta_rt = inf`, fragment
+**Review verdict: OUTPUT-NEUTRAL, with two real defects in change 3 that the first safety proof had
+missed.** That proof assumed finite intermediates; a denormal `delta_rt` gives `1/delta_rt = inf`, fragment
 RTs spanning +/-DBL_MAX give an infinite span, and a NaN `pc.rt` reaches `(int)NaN` -- undefined
 behaviour that on x86 rejects every fragment where the old test passed all of them. Fixed by making
 `bucketOf` NaN-safe and degrading the whole field to disabled (`inv = 0` => every bucket 0 => every
@@ -1027,7 +1025,7 @@ file are therefore honest to within roughly a quarter of a percentage point of F
 
 ## PUBLIC BENCHMARK: PXD017703 (HeLa diaPASEF) RUNS END TO END (2026-09-05)
 
-The standard public diaPASEF reference (Meier et al., Nat Methods 2020) is staged on ceph under
+The standard public diaPASEF reference (Meier et al., Nat Methods 2020) is staged under
 `benchmark/PXD017703/raw`: 9 Evosep acquisitions (60/100/200 SPD, 200 ng HeLa) and 18 "highsens"
 acquisitions, 27 in all. PRIDE's advertised byte sizes were wrong for BOTH archives; `unzip -t`
 CRC is the arbiter, size is only a hint, and a failed CRC resumes rather than unzips.
@@ -1052,7 +1050,7 @@ Making the tool run on it exposed three defects the in-house cohort could never 
 First extraction, 100SPD 100 ng, shipped defaults: **136,818 pseudo-MS2 spectra, 57 s wall, 28 CPU-min,
 16 GB peak**, `spx:mz_calibration=tdf_table_modeltype1`, `spx:detector=integer`.
 
-Two operational lessons, recorded because each cost an hour: the ceph install carries its own
+Two operational lessons, recorded because each cost an hour: the shared install carries its own
 `lib/libOpenMS.so`, so a converter fix in the OpenMS patch is invisible until the LIBRARY is
 republished, not just the executable; and the reference implementation's JVM aborts with
 `locale::facet::_S_create_c_locale name not valid` under a non-interactive environment -- run it
@@ -1072,7 +1070,7 @@ like-for-like comparison; MassIVE was unreachable from this network on every rou
 
 ### 2026-09-05, 15:30 -- calibration port is output-neutral; the C4 term is modelled; first public-data numbers
 
-**Digest arm (spock, back-to-back with the shipping build):** the calibration-row selection
+**Digest arm (back-to-back with the shipping build):** the calibration-row selection
 (`Frames.MzCalibration`, not "exactly one row") plus the sqlite3 C-API port produce a
 **byte-identical spectrum digest** on the in-house 30-min file: `ca609dc4…` for both
 `final_S30/pseudo.mzML` and `digest_port/pseudo.mzML`, 655,776 spectra, 05:30 wall, 81.8 GB peak.
@@ -1089,7 +1087,7 @@ constant on frame 1 without the temperature term, **0.0000 ppm with it** (the co
 `dC1*dT/1e6 = -7.2e-8`), 0.0000 ppm on the last frame. Dropping the term: **-53 .. -938 ppm**, worst
 at low mass (0.0905 Da / 96 = 943 ppm, matches). `C4 == 0` is bit-identical to the old code
 (`u*u - 0.0`), so nothing measured above changes. `C3` stays refused: never observed non-zero.
-Pinned in both golden tests (10 vendor probes, 2 frames, ablation guard > 50 ppm). Cluster build
+Pinned in both golden tests (10 vendor probes, 2 frames, ablation guard > 50 ppm). Build
 pending; the 18 files are then extracted by the idempotent HeLa driver.
 
 **Public HeLa (PXD017703), 2020 Evosep sets, shipped defaults, 100 threads, one node each, Sage 1%
@@ -1104,7 +1102,7 @@ the reference comparison):**
 | 200SPD 200 ng S3-A2 (2738) | 74,874 | 0:31 | 10.7 GB | 5,701 | 61,750 |
 | 200SPD 200 ng S3-A4 (2740) | 72,238 | 0:27 | 10.2 GB | 6,364 | 60,366 |
 
-2732 was lost to a SIGBUS at the minute the shared install was republished (see the memory note);
+2732 was lost to a SIGBUS at the minute the shared install was republished;
 re-extracted by hand: 131,773 spectra, 0:43. The reference extractor ran on all 27 (exit 0,
 0.4-4.9 GB mzML each, 1:02-1:25 wall / 34-57 GB on the Evosep files, 2:17-6:18 / 67-197 GB on the
 2019 files) but the driver tested the output size in the same second the JVM exited and CephFS had
@@ -1129,9 +1127,9 @@ For every other scheme each m/z sits in one group, so partition and order are un
 digest cannot move. e2e check 11 synthesises the scheme. **py3 10 ng file 22: 160,416 spectra,
 1:44 wall, 26 GB, 64 windows.** Published 15:42 under the no-running-spextractor gate.
 
-Operational: the HeLa driver is now idempotent and runs on three nodes (ibminode05 9 files, spock
-11, data 7 heavy 2019 files); spock's first pass ended without its completion marker because the
-driver was edited in place while it ran (see memory), which is why the reruns are process-gated.
+Operational: the HeLa driver is now idempotent and runs on three nodes (9, 11 and 7 files, the last
+being the heavy 2019 acquisitions); one node's first pass ended without its completion marker because
+the driver was edited in place while it ran, which is why the reruns are process-gated.
 
 ### 2026-09-05, 18:25 -- reference-side Sage was silently zero on every public file
 
@@ -1140,16 +1138,16 @@ rows. Cause: the reference extractor's mzML omits the standard "selected ion m/z
 (MS:1000744) and writes only the isolation-window target; Sage 0.14.6 then resolves the precursor
 through `spectrumRef`, finds no MS1 spectrum in the file, and panics ("missing MS1 precursor for
 frame=…"), leaving an empty peptide list that the driver counted as zero. The in-house head-to-head
-had the same problem and patched it (the precursor-patching script in `tools/`: one streaming pass
-injecting the value from the isolation window; 425,061 precursors on a 100 ng file). A separate
-reference-Sage pass with that patch ran all 27 files on `data` in 30 min. Reference Sage peptides at
+had the same problem and patched it (a precursor-patching script that is not part of this
+repository: one streaming pass injecting the value from the isolation window; 425,061 precursors on a
+100 ng file). A separate reference-Sage pass with that patch ran all 27 files on one node in 30 min. Reference Sage peptides at
 1%: 100SPD 100 ng 15,786 / 10,302 / 14,995; 200SPD 200 ng 7,130 / 4,882 / 7,323; 60SPD 200 ng
 22,745 / 22,521 / 15,693; 25pc 100 ng 13,591 / 13,050 / 13,283; py3 100 ng 20,106 / 28,078 / 20,329.
 The MSFragger column is PSM rows until the target-decoy scorer is run over the copied tables.
 
 ### 2026-09-05, 18:45 -- PUBLIC HeLa (PXD017703), all 27 acquisitions, both extractors, both engines
 
-Full table in `docs/HELA-TABLE.md` (regenerate with `tools/hela_table.py` on the cluster). Shipped
+Full table in `docs/HELA-TABLE.md` (the table script is not part of this repository). Shipped
 defaults, `-threads 100`, one node per chain; Sage peptides at 1% (rank 1, peptide q); MSFragger
 peptides at 1% by peptide-level target-decoy on the raw tables (best hyperscore per peptide+mods,
 decoy = all proteins `rev_`). The reference extractor's Sage column comes from the patched pass.
@@ -1177,7 +1175,7 @@ What it says, in order of weight:
    160 k vs 63 k.
 4. **Cost.** SpeXtractor runs in 1/3 to 1/6 of the reference's RSS on every file (2019 100 ng:
    66-114 GB vs 168-197 GB; 10 ng: 27 GB vs 99-147 GB) and is faster on the 2020 files and py3;
-   the 25pc 100 ng walls of 33-47 min are from `data` running three jobs (spock: 13:38).
+   the 25pc 100 ng walls of 33-47 min are from a node running three jobs (uncontended: 13:38).
 5. **Reference-side Sage replicates disagree by up to 35%** (2732: 10,394 vs 15,939/15,140; 2738:
    4,928 vs 7,194/7,391; 35: 28,359 vs 20,302/20,520) while its MSFragger replicates agree within
    5%. A deterministic re-search of 2732 is running; if it reproduces, the variance is in the
@@ -1199,7 +1197,7 @@ All 16 single-shot TNBC diaPASEF runs (72k frames, 130-min gradients, 630 GB sta
 extractors and both engines overnight on three nodes (16 h wall, ~30-38 min per file per extractor,
 230-300 GB RSS on both sides at 100 threads). Reference-side Sage patched inline (selected ion m/z).
 Driver-log numbers, Sage peptides at 1% (the MSFragger column is PSM rows until the peptide-level
-table lands -- `tools/bench_table.py PXD047793 TNBC-TABLE.md` is running):
+table lands -- the peptide-level table script is running):
 
 | | reference | SpeXtractor |
 |---|---|---|
@@ -1225,7 +1223,7 @@ a dataset. Runtime on these 130-min files: SpeXtractor 26-38 min vs 18-30 min (m
 RSS 204-287 vs 238-307 GB (0.9x). The paper's 9,296 proteins/run is a quantified-with-MBR FragPipe
 figure over the cohort and is not the same statistic as identified protein groups at 1% in one run.
 
-### 2026-09-06: memory work, steps 1-4 (see the plan in .claude/plans, and docs/TNBC-PROFILE.md)
+### 2026-09-06: memory work, steps 1-4
 
 **Step 1 (output-changing, the reason for a new baseline).** The MS1 arena compaction walked the
 trace vector in CONTAINER order with a monotone write cursor, but the vector is sorted by m/z
@@ -1235,11 +1233,12 @@ no thread-count digest ever saw it. `compactUnreferenced()` now sorts the kept s
 validates bounds and disjointness before moving a byte, and memmoves down; `-diag:selftest_arena`
 (e2e check 12) fails on the old algorithm. Measured effect on dataset D: **9,040 of 655,776 spectra
 changed (1.4%), every one of them below precursor m/z 500** -- the lowest m/z band, where detection
-order and m/z order disagree most, which is the mechanism's own prediction. New baselines: dataset D
-digest `79f2a733…` (B1), TNBC 009 (T1). The old dataset D digest `ca609dc4…` reproduces exactly on
-the pre-fix binary, which is the control that the gate arms are wired correctly.
+order and m/z order disagree most, which is the mechanism's own prediction. New baselines: the dataset D
+reference digest becomes `79f2a733…`, with a new TNBC 009 reference alongside it. The old dataset D
+digest `ca609dc4…` reproduces exactly on the pre-fix binary, which is the control that the gate arms
+are wired correctly.
 
-**Steps 2-4 (output-identical, dataset D digest == B1 on each).**
+**Steps 2-4 (output-identical, dataset D digest == `79f2a733…` on each).**
 
 | step | what | measured on dataset D |
 |---|---|---|
@@ -1258,20 +1257,20 @@ GB, mmapped 345 MB). Two thirds of RSS at that point is memory nobody is using.
 ran alongside), so only digests and memory milestones are comparable. The step-3 wall effect is
 measured on TNBC, where the MassTrace payloads are 8x larger.
 
-#### GATE A RESULT, dataset D (primary), 2026-09-06 14:10 — the compaction fix PASSES
+#### COMPACTION-FIX GATE, dataset D (primary), 2026-09-06 14:10 — the fix PASSES
 
-v11 (pre-fix) vs v12 (fix + selftest), one node, arms back to back, immutable arm directories,
-binary/library/config/FASTA digests recorded. v11 reproduced the historical digest `ca609dc4…`
-exactly, which is the control that the arms are wired correctly.
+The pre-fix build against the fix (plus its selftest), one node, arms back to back, immutable arm
+directories, binary/library/config/FASTA digests recorded. The pre-fix arm reproduced the historical
+digest `ca609dc4…` exactly, which is the control that the arms are wired correctly.
 
-| | v11 | v12 | ratio |
+| | pre-fix | fixed | ratio |
 |---|---|---|---|
 | spectra | 655,776 | 656,257 | 1.0007 |
 | Sage peptides @1% | 12,605 | 12,594 | **0.9991** |
 | MSFragger peptides @1% | 11,642 | 11,640 | **0.9998** |
 | entrapment FDR | 1.26% [1.01-1.51] | 1.26% [1.03-1.51] | unchanged |
 
-Set overlap: Sage 12,575 common, 30 only-v11, 19 only-v12 (99.61% of the union); MSFragger 11,630
+Set overlap: Sage 12,575 common, 30 only pre-fix, 19 only fixed (99.61% of the union); MSFragger 11,630
 common, 12 and 10 (99.81%). Decision rule (>= 1% loss in either engine on D, or A contradicting D,
 or entrapment more than 0.3 points above the base estimate): **none triggered**.
 
@@ -1280,13 +1279,13 @@ gains 19 and 10 respectively. The corrupted XICs were producing spectra that sco
 the correct ones -- the fix is justified by correctness, not by yield, and nothing downstream was
 silently depending on the corruption. Dataset A is still running; its role is to contradict D or not.
 
-#### GATE A, dataset A: the trigger fired, and what the investigation found (14:15)
+#### COMPACTION-FIX GATE, dataset A: the trigger fired, and what the investigation found (14:15)
 
 Dataset A moves far more than D: Sage 11,016 -> 11,218 (**+1.83%**), MSFragger 10,920 -> 10,689
 (**-2.12%**), set overlap 95.5% and 89.6% of the union (D: 99.6% and 99.8%). The engines disagree in
-sign, which is the plan's "A contradicts D" trigger, so the FDR walk was swept before going on:
+sign, which is the decision rule's "A contradicts D" trigger, so the FDR walk was swept before going on:
 
-| threshold | Sage v11 -> v12 | MSFragger v11 -> v12 |
+| threshold | Sage pre-fix -> fixed | MSFragger pre-fix -> fixed |
 |---|---|---|
 | 0.1% | 8,262 -> 8,641 (**+4.6%**) | 9,768 -> 9,485 (-2.9%) |
 | 0.5% | 10,081 -> 10,453 (**+3.7%**) | 11,210 -> 11,121 (-0.8%) |
@@ -1301,20 +1300,20 @@ lift the best identifications most. **MSFragger's deficit is non-monotone** (-2.
 its hyperscore target-decoy walk rather than a systematic loss. Entrapment FDR is unchanged on both
 arms (1.13% -> 1.12%, intervals overlapping).
 
-**Verdict: the fix stands and the plan continues.** D is flat in both engines, A gains in Sage with a
+**Verdict: the fix stands.** D is flat in both engines, A gains in Sage with a
 gradient and scatters in MSFragger, entrapment is unchanged everywhere, and the change being measured
 is a correctness fix. This is also the engine disagreement the project has recorded before (the sign
 flips by file); it is not evidence against the fix. Dataset A being ~20x more affected than D is
 worth a note of its own: whatever makes A's low-m/z MS1 traces denser also made it the file where the
 corruption cost the most.
 
-#### Steps 3 and 4 measured on dataset D (both output-identical, digest == B1)
+#### Steps 3 and 4 measured on dataset D (both output-identical, digest == `79f2a733…`)
 
 | build | peak RSS | after-MS1 RSS | loop-end RSS |
 |---|---|---|---|
-| v13 (step 2, instrumentation) | 83.11 GB | 48.55 | 48.98 |
-| v14 (step 3, MassTrace moves) | 82.68 GB | 48.09 | 48.91 |
-| v15 (step 4, MS1 state released at the loop join) | **81.73 GB** | 48.09 | 47.85 |
+| step 2 (instrumentation) | 83.11 GB | 48.55 | 48.98 |
+| step 3 (MassTrace moves) | 82.68 GB | 48.09 | 48.91 |
+| step 4 (MS1 state released at the loop join) | **81.73 GB** | 48.09 | 47.85 |
 
 Cumulative -1.38 GB (-1.7%) on this file; the same steps are measured on TNBC separately, where the
 mass-trace payloads are ~8x larger. Wall-clock is NOT quoted from these runs: the node was shared
@@ -1328,13 +1327,13 @@ memory instead of growing on top of it, which is where the 0.9 GB comes from. Th
 mechanism seen from the other side, and it is why "free earlier" and "return to the OS" are two
 different levers.
 
-#### Step 8: the trace record 72 -> 56 bytes (output-identical, dataset D digest == B1)
+#### Step 8: the trace record 72 -> 56 bytes (output-identical, dataset D digest == `79f2a733…`)
 
 | build | peak RSS on dataset D |
 |---|---|
-| v13 (step 2, instrumentation) | 83.11 GB |
-| v15 (step 4) | 81.73 GB |
-| **v17 (step 8, 56-byte record)** | **78.99 GB** |
+| step 2 (instrumentation) | 83.11 GB |
+| step 4 (MS1 state released) | 81.73 GB |
+| **step 8 (56-byte record)** | **78.99 GB** |
 
 -2.74 GB from the record alone on this file, -4.12 GB (-5.0%) cumulative. The record is the largest
 structure in the tool at scale (925 M parent + 1,217 M child traces on a 2-h acquisition = 143.6 GiB
@@ -1349,11 +1348,11 @@ A static_assert pins sizeof(Trace) == 56.
 
 | build | peak RSS | vs step 2 | digest |
 |---|---|---|---|
-| v13 step 2 (instrumentation) | 281.52 GB | -- | == T1 |
-| v14 step 3 (MassTrace moves) | 279.23 GB | -2.29 | == T1 |
-| v17 steps 4 + 8 (lifetimes, 56-byte record) | 270.26 GB | **-11.26** | == T1 |
-| v16 + `malloc_trim` (experiment) | 206.66 GB | **-74.86** | == T1 |
-| v18 steps 4 + 8 + trim as default | running | | |
+| step 2 (instrumentation) | 281.52 GB | -- | == TNBC reference |
+| step 3 (MassTrace moves) | 279.23 GB | -2.29 | == TNBC reference |
+| steps 4 + 8 (lifetimes, 56-byte record) | 270.26 GB | **-11.26** | == TNBC reference |
+| + `malloc_trim` (experiment) | 206.66 GB | **-74.86** | == TNBC reference |
+| steps 4 + 8 + trim as default | running | | |
 
 Every arm is byte-identical to the step-1 baseline. The structural steps together are worth 11.3 GB
 here; the allocator trim alone is worth 74.9 GB, which is the honest ranking and the reason it
@@ -1363,8 +1362,8 @@ applies to the saving as well as to the footprint.
 
 #### Step 6: the admission gate now has bounds it can hold (output-identical)
 
-Dataset D peak RSS: v17 (steps 1-4, 8) 75.3 GiB -> **v19 (plus the trim default and the fixed gate)
-55.6 GiB, -26%**, digest == B1. The admission high-water reached 24 of 24 windows, i.e. neither the
+Dataset D peak RSS: steps 1-4 and 8 give 75.3 GiB -> **plus the trim default and the fixed gate,
+55.6 GiB, -26%**, digest == `79f2a733…`. The admission high-water reached 24 of 24 windows, i.e. neither the
 window cap nor the recalibrated byte budget throttled anything: the default behaviour is unchanged
 and the honest budget does not reject windows spuriously. That is the point -- the gate can now hold
 a limit when one is asked for, without imposing one when it is not.
@@ -1376,24 +1375,24 @@ Admission moved to the master, before the task is spawned, so both bounds hold b
 worker sits in a spin loop holding a thread it cannot use.
 
 **Verification note.** The suite reported 12/12 on a build that should have run 13 checks: the
-cluster executes a copy of `test_spextractor.py` from the deployment point and the copy was stale, so
-the new check silently did not exist. `sync_cluster.sh` now ships the suite with the source it tests.
+deployment point executes its own copy of `test_spextractor.py` and that copy was stale, so the new
+check silently did not exist. The deploy step now ships the suite with the source it tests.
 A green result from a suite that quietly dropped a test is worse than a red one.
 
 #### CORRECTION (2026-09-06, 19:55): the trim is NOT free -- it trades ~8.5% wall for ~30% memory
 
 An earlier note here said the trim ran "not slower". That came from one unpaired run on a shared
-node and was wrong. The interleaved A/B (v13 vs v19, same node, same input, alternating) and the
-build-by-build series agree:
+node and was wrong. The interleaved A/B (baseline vs trim build, same node, same input, alternating)
+and the build-by-build series agree:
 
 | build | wall | user CPU | window-loop CPU | minor faults | peak |
 |---|---|---|---|---|---|
-| v13 baseline | 31:16 | 40,671 s | 33,956 s | 363 M | 268.5 GB |
-| v14 + MassTrace moves | 31:36 | 43,984 | 37,203 | | 266.3 |
-| v17 + lifetimes + 56-byte record | 32:06 | 41,994 | 35,850 | | 257.7 |
-| **v18 + the trim** | **33:59** | 46,662 | **41,092** | | **186.1** |
-| interleaved: v13 r1 | 30:41 | 42,116 | 35,738 | 287 M | 264.9 |
-| interleaved: v19 r1 | 33:18 | 47,553 | 40,988 | 362 M | 186.2 |
+| baseline (instrumented) | 31:16 | 40,671 s | 33,956 s | 363 M | 268.5 GB |
+| + MassTrace moves | 31:36 | 43,984 | 37,203 | | 266.3 |
+| + lifetimes + 56-byte record | 32:06 | 41,994 | 35,850 | | 257.7 |
+| **+ the trim** | **33:59** | 46,662 | **41,092** | | **186.1** |
+| interleaved: baseline r1 | 30:41 | 42,116 | 35,738 | 287 M | 264.9 |
+| interleaved: trim build r1 | 33:18 | 47,553 | 40,988 | 362 M | 186.2 |
 
 **Almost the whole memory win and almost the whole wall cost are the same change.** The trim returns
 ~99 GB at the MS1 boundary; the window loop then has to fault those pages back in (minor faults
@@ -1412,9 +1411,9 @@ constraint, and that is a decision, not a measurement.
 
 | build | peak RSS (GiB) |
 |---|---|
-| v13 baseline | 268.5 |
-| v19 (trim + admission gate + 56-byte record) | 183.0-186.2 |
-| **v20 (48-byte record + the split's reserve fixed)** | **177.5** |
+| baseline (instrumented) | 268.5 |
+| trim + admission gate + 56-byte record | 183.0-186.2 |
+| **48-byte record + the split's reserve fixed** | **177.5** |
 
 Cumulative **-91.0 GiB, -33.9%**, spectrum digest identical throughout.
 
@@ -1437,8 +1436,8 @@ its stages with the machine nearly idle:
 
 | dataset | loop wall | longest window's own chain | that window |
 |---|---:|---:|---|
-| dataset D (v21) | 150.7 s | 147.4 s (98%) | 327-469, trace-bound (98.4 s) |
-| TNBC 009 (v21) | 748.5 s | 741.9 s (99%) | 575-601, **score**-bound (581.0 s) |
+| dataset D | 150.7 s | 147.4 s (98%) | 327-469, trace-bound (98.4 s) |
+| TNBC 009 | 748.5 s | 741.9 s (99%) | 575-601, **score**-bound (581.0 s) |
 
 On TNBC that score figure was not work, it was a scheduler cliff. libgomp's `GOMP_taskloop` runs
 the whole loop inline in the creating thread once `task_count + num_tasks > 64 * nthreads`; at
@@ -1459,8 +1458,8 @@ verified to 10e6 iterations at 99.1x); only a data-dependent `grainsize` is dang
 
 | build | dataset D total | TNBC 009 wall | TNBC window loop | TNBC PRECURSOR_INFER | TNBC peak RSS |
 |---|---:|---:|---:|---:|---:|
-| v21 | 312.1 s | 33:35 | 1150.0 s (31.2x) | 438.8 s (1.0x) | 181,777 MB |
-| **v22** (bounded scoring pool + findPartner SoA) | **266.2 s** | **18:03** | **496.5 s (66.7x)** | **177.2 s** | 181,902 MB |
+| before | 312.1 s | 33:35 | 1150.0 s (31.2x) | 438.8 s (1.0x) | 181,777 MB |
+| **+ bounded scoring pool + findPartner SoA** | **266.2 s** | **18:03** | **496.5 s (66.7x)** | **177.2 s** | 181,902 MB |
 
 **-46% wall on TNBC, -15% on dataset D, at unchanged peak memory and an identical spectrum list on both.**
 The scoring fix is a fixed pool of worker tasks pulling 32-precursor chunks from an atomic cursor,
@@ -1470,7 +1469,7 @@ chased through 48-byte records: same values, same order, same first match. Its t
 logged -- on TNBC, m/z index 1.0 s, intensity sort 7.5 s, **greedy walk 156.3 s**, so the residue is
 the greedy claim loop and not the sorts.
 
-#### `perf:trace_bands` (dataset D, v22) -- output-CHANGING, needs the peptide gate
+#### `perf:trace_bands` (dataset D) -- output-CHANGING, needs the peptide gate
 
 | bands | window loop | total | CPU (loop) | spectra | digest |
 |---:|---:|---:|---:|---:|---|
@@ -1503,10 +1502,10 @@ per-window `prep` on TNBC from 60.1 s to 27.1 s at the worst window (904 -> 393 
 
 | build | change | dataset D total | TNBC wall | TNBC window loop | TNBC MS1_TRACE | TNBC INFER | TNBC peak RSS |
 |---|---|---:|---:|---:|---:|---:|---:|
-| v21 | (before) | 312.1 s | 33:35 | 1150.0 s (31.2x) | 252.5 s (4.8x) | 438.8 s | 181,777 MB |
-| v22 | bounded scoring pool, findPartner SoA | 266.2 s | 18:03 | 496.5 s (66.7x) | 247.3 s (4.8x) | 177.2 s | 181,902 MB |
-| v23 | per-band seed segments | -- | -- | 450.4 s (78.1x) | 248.5 s (4.8x) | 154.0 s | -- |
-| **v25** | parallel band distribution | **237.5 s** | **15:01** | **467.5 s (69.5x)** | **106.2 s (11.2x)** | **155.7 s** | 187,928 MB |
+| 0 | (before) | 312.1 s | 33:35 | 1150.0 s (31.2x) | 252.5 s (4.8x) | 438.8 s | 181,777 MB |
+| 1 | bounded scoring pool, findPartner SoA | 266.2 s | 18:03 | 496.5 s (66.7x) | 247.3 s (4.8x) | 177.2 s | 181,902 MB |
+| 2 | per-band seed segments | -- | -- | 450.4 s (78.1x) | 248.5 s (4.8x) | 154.0 s | -- |
+| **3** | parallel band distribution | **237.5 s** | **15:01** | **467.5 s (69.5x)** | **106.2 s (11.2x)** | **155.7 s** | 187,928 MB |
 
 **TNBC 33:35 -> 15:01 (-55%), dataset D 312.1 -> 237.5 s (-24%)**, spectrum list byte-identical on both
 at every step. Peak memory is +3.4% (the chunked band sub-maps); `perf:malloc_trim` and the record
@@ -1556,16 +1555,16 @@ position. Measured, byte-identical on both files:
 
 | build | dataset D total | dataset D window loop | TNBC wall | TNBC window loop | TNBC INFER (greedy walk) |
 |---|---:|---:|---:|---:|---:|
-| v25 | 237.5 s | 143.9 s | 15:01 | 467.5 s (69.5x) | 155.7 s (138.3) |
-| v27 (m/z key) | 234.2 s | -- | 14:32 | 459.8 s (70.4x) | 130.0 s (112.8) |
-| **v28 (+ TOF index)** | **205.2 s** | **116.7 s** (CPU -9%) | **14:11** | **412.9 s (74.3x)** | 148.7 s (128.8) |
+| before | 237.5 s | 143.9 s | 15:01 | 467.5 s (69.5x) | 155.7 s (138.3) |
+| + m/z key | 234.2 s | -- | 14:32 | 459.8 s (70.4x) | 130.0 s (112.8) |
+| **+ TOF index** | **205.2 s** | **116.7 s** (CPU -9%) | **14:11** | **412.9 s (74.3x)** | 148.7 s (128.8) |
 
-`PRECURSOR_INFER` replicates to about +-15% on `data` between runs of the same binary (130.0 vs
+`PRECURSOR_INFER` replicates to about +-15% on a shared node between runs of the same binary (130.0 vs
 148.7 s for the same code), so read that column as a level, not a delta.
 
 ### Where the day ended
 
-| | v21 | v28 | change |
+| | before | after | change |
 |---|---:|---:|---|
 | dataset D total | 312.1 s | 205.2 s | **-34%** |
 | TNBC 009 wall | 33:38 / 26:45 (see below) | 14:11 | **-58% / -47%** |
@@ -1574,10 +1573,11 @@ position. Measured, byte-identical on both files:
 | TNBC PRECURSOR_INFER | 438.8 s | 148.7 s | -66% |
 | TNBC peak RSS | 181,777 MB | 190,849 MB | +5.0% |
 
-**Read the TNBC delta with care.** Two v21 runs of the SAME binary with IDENTICAL digests measured
-33:38.00 and 26:44.58 -- 26% apart on node load alone, on a shared machine. The tables here quote
-the slower one as the baseline, which flatters the result; against the faster one v28's 14:10.94 is
-**-47%**. Both bracket the same conclusion, but no single-pair wall-clock claim on `data` is worth
+**Read the TNBC delta with care.** Two runs of the SAME baseline binary with IDENTICAL digests
+measured 33:38.00 and 26:44.58 -- 26% apart on node load alone, on a shared machine. The tables here
+quote the slower one as the baseline, which flatters the result; against the faster one the 14:10.94
+of the final build is
+**-47%**. Both bracket the same conclusion, but no single-pair wall-clock claim on a shared node is worth
 more than about +-15% unless the arms are interleaved.
 
 Byte-identical spectrum list on both files at every step, 13/13 e2e throughout. The memory cost is
@@ -1585,7 +1585,7 @@ the chunked band sub-maps and the per-frame TOF index; it is the only regression
 by lowering the chunk count if RAM becomes binding again.
 
 Still serial or thin, on TNBC: the greedy claim loop (~129 s of `PRECURSOR_INFER`, sequential by
-construction -- Astra's ordered-speculation scheme would make it exactly parallel but with unknown
+construction -- an ordered-speculation scheme would make it exactly parallel but with unknown
 replay cost), the mzML write (52 s, one thread), and the window loop's tail, which is one window's
 prep -> trace -> split -> score chain with trace capped at 12 bands. Whole-run occupancy is 45x of
 100 threads, up from 24x.
@@ -1593,10 +1593,10 @@ prep -> trace -> split -> score chain with trace capped at 12 bands. Whole-run o
 The **m/z key is a stand-in**: the natural key is the flight-time bin itself, which needs no
 calibration at all, but `Trace::tof` is 0 on the OpenMS MS1 path (`toTrace` never sets it) and MS1
 tracing still runs that path. Keying precursor inference on tof, and deferring the calibrated m/z
-to the end, becomes available once MS1 goes through the integer detector (plan step 13).
+to the end, becomes available once MS1 goes through the integer detector.
 
 
-### Ordered speculation on the greedy claim loop (v29/v30, 2026-09-07)
+### Ordered speculation on the greedy claim loop (2026-09-07)
 
 Precursor inference was the last single-threaded phase. The loop is greedy -- each seed marks its
 isotope partners used -- but it parallelises EXACTLY, because the only mutable state a seed reads is
@@ -1611,15 +1611,15 @@ be used -- both stable under a monotone bitmap.
 
 | | greedy walk | phase | parallelism | re-evaluated |
 |---|---:|---:|---:|---:|
-| dataset D v28 | 11.9 s | 15.7 s | 1.0x | -- |
-| dataset D v29 | **1.4 s** | **4.9 s** | **23.2x** | 2.5% |
-| TNBC v28 | 128.8 s | 148.7 s | 1.0x | -- |
-| TNBC v30 | **7.8 s** | **26.9 s** | **23.4x** | **0.7%** |
+| dataset D, before | 11.9 s | 15.7 s | 1.0x | -- |
+| dataset D, after | **1.4 s** | **4.9 s** | **23.2x** | 2.5% |
+| TNBC, before | 128.8 s | 148.7 s | 1.0x | -- |
+| TNBC, after | **7.8 s** | **26.9 s** | **23.4x** | **0.7%** |
 
 Byte-identical on dataset D AND on dataset A (the dataset A gate arm reproduced digest `61d57ca2...` exactly against
 the earlier build), and on TNBC 009.
 
-### TNBC 009 at v30
+### TNBC 009 after the speculation change
 
 | phase | wall | % | CPU | par |
 |---|---:|---:|---:|---:|
@@ -1655,7 +1655,7 @@ taskloop itself, with the serial merge (5.3 s) and record sort (10.8 s) too smal
 That sensitivity is itself the finding: band boundaries change trace ownership because each band
 carries its own `visited` set and a trace grown by one band can consume peaks in another band's core.
 Making the partition genuinely band-independent would remove the churn AND turn band count into a
-free speed knob -- see the routes list.
+free speed knob.
 
 
 ### `perf:ms1_trace_bands`: the old sweep was measuring the serial distribute (2026-09-07)
@@ -1678,11 +1678,11 @@ halo + core-ownership scheme its comment claims:
 | dataset D | 12,594 -> 12,593 (0.9999) | 11,640 -> 11,642 (1.0002) | **99.44%** | **99.37%** | 1.26% -> 1.24% |
 
 Compare the same table for `trace_bands` on dataset D at 24: 99.87% / 99.71%, and on dataset A at 24: 95.56% /
-89.66%. **Dataset A is intrinsically far more sensitive to MS2 band boundaries than dataset D is** -- which is
+89.66%. **Dataset A is intrinsically far more sensitive to MS2 band boundaries tha dataset D is** -- which is
 why a knob that looks free on the primary dataset has to be gated on the second one.
 
 
-### v35: `ms1_trace_bands=48` adopted (2026-09-07)
+### `ms1_trace_bands=48` adopted (2026-09-07)
 
 Gate, arms back to back on one node from one binary with only the flag changed:
 
@@ -1698,7 +1698,7 @@ in EVERY gate run today, including pairs where Sage overlaps 99.2-99.6% on the s
 peptide-level target-decoy walk is simply a much noisier statistic on that file than Sage's q-value
 cut, so a 2% MSFragger move on dataset A should not be read as a 2% real gain.
 
-#### dataset D at v35
+#### dataset D with `ms1_trace_bands=48`
 
 | phase | wall | % | par |
 |---|---:|---:|---:|
@@ -1709,7 +1709,7 @@ cut, so a 2% MSFragger move on dataset A should not be read as a 2% real gain.
 | WRITE(mzML) | 15.5 s | 7.6% | 1.0x |
 | **total** | **3:27.48** | | |
 
-Dataset D total 312.1 s (v21) -> 192.5 s measured (v35), **-38%**. The window loop is now 64% of the run
+Dataset D total 312.1 s before the day's work -> 192.5 s measured, **-38%**. The window loop is now 64% of the run
 and is the floor: 94% of the critical window's trace stage is the band taskloop, and band count is
 not adoptable.
 
@@ -1726,23 +1726,23 @@ Interleaved A/B, two rounds, one node, digests identical throughout:
 
 | | round 1 | round 2 | mean |
 |---|---:|---:|---:|
-| v30 window loop | 133.0 s | 121.7 s | 127.4 s |
-| v34 window loop (adaptive speculation) | 121.1 s | 121.1 s | 121.1 s |
-| v30 critical-window detect | 89.7 s | 84.0 s | |
-| v34 critical-window detect | 89.5 s | 94.1 s | |
+| control window loop | 133.0 s | 121.7 s | 127.4 s |
+| window loop with adaptive speculation | 121.1 s | 121.1 s | 121.1 s |
+| control critical-window detect | 89.7 s | 84.0 s | |
+| speculation critical-window detect | 89.5 s | 94.1 s | |
 
 The control's own spread (133.0 vs 121.7) is larger than the difference, and the stage it targets did
 not move. Removed: ~200 lines of speculation machinery in the hottest loop is not worth an
-unmeasurable win. The design is recorded in the routes list, because it becomes worthwhile the
-moment the loop stops being tail-bound.
+unmeasurable win. The design is kept on record, because it becomes worthwhile the moment the loop
+stops being tail-bound.
 
 
-### New TNBC baseline T2 (v35, 2026-09-07)
+### New TNBC 009 reference digest (2026-09-07)
 
-`ms1_trace_bands=48` changes the spectrum list, so T1 is retired. **T2 = `da1b86fb5c38409f...`**
-(TNBC 009, v35, `/scratch/kohlbach/t2_009`). Measured on spock:
+`ms1_trace_bands=48` changes the spectrum list, so the previous TNBC reference is retired.
+**TNBC 009 reference digest = `da1b86fb5c38409f...`**. Measured on a 224-core node:
 
-| phase | wall | % | CPU | par | (v30, same file) |
+| phase | wall | % | CPU | par | (previous build, same file) |
 |---|---:|---:|---:|---:|---:|
 | LOAD(stream) | 94.5 s | 13.7% | 5688.6 | 60.2x | 92.9 s |
 | MS1_TRACE | **59.3 s** | 8.6% | 1596.8 | **26.9x** | 117.9 s (10.0x) |
@@ -1751,7 +1751,7 @@ moment the loop stops being tail-bound.
 | WRITE(mzML) | 52.4 s | 7.6% | 52.2 | 1.0x | 52.4 s |
 | **total** | **11:35.90** | | | | 11:59.75 |
 
-peak RSS 190,852 MB. An independent v35 run of the same file on `data` gave **11:24.97 and 179.1 GB**
+peak RSS 190,852 MB. An independent run of the same build on another node gave **11:24.97 and 179.1 GB**
 -- the two nodes differ by ~6% on RSS and ~2% on wall, which is the usual spread.
 
 Where the time now is, on a 2-hour acquisition: the window loop (60%), and after it the mzML write
@@ -1764,7 +1764,7 @@ Where the time now is, on a 2-hour acquisition: the window loop (60%), and after
 LOAD is 13.7% of a 2-hour run at ~60x of 100 threads: a read (serial) -> pick (parallel) pipeline
 over batches of `kBatch` frames, where a batch not much larger than the thread count caps occupancy
 and the reader between batches is a bubble. The knob is already an env var, so it was free to sweep
-(dataset D, v35):
+(dataset D):
 
 | `PICK_BATCH` | LOAD | par | total | peak RSS | digest |
 |---:|---:|---:|---:|---:|---|
@@ -1786,19 +1786,19 @@ parallel picking.
 A 7% peptide loss for a load-phase speedup is not a trade worth making, and in the gate's own arms
 the wall was not even better (3:12.17 vs 3:13.32). `kBatch` stays at 256. The interesting part is
 what it reveals: **the peak picker is materially sensitive to how frames are grouped across threads**,
-which is a correctness smell worth its own investigation -- see the routes list.
+which is a correctness smell worth its own investigation.
 
 
 ## Head to head with the reference implementation, measured tonight (2026-09-08)
 
-Both tools on TNBC 009, on `data`, within the same hour, both given 100 threads. The recorded
-reference timing for this file was from a previous campaign, and `head2head.sh` carries a warning
-that comparing across time is the error that produced one withdrawn claim -- so it was re-measured.
+Both tools on TNBC 009, on one 224-core node, within the same hour, both given 100 threads. The
+recorded reference timing for this file was from a previous campaign, and comparing across time is
+the error that produced one withdrawn claim -- so it was re-measured.
 
 | | rep 1 | rep 2 | mean |
 |---|---|---|---|
 | reference implementation | 21:12.24 / 357.7 GB | 20:41.46 / 323.4 GB | 20:56.9 / 340.6 GB |
-| **SpeXtractor v35** | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
+| **SpeXtractor (min_charge 2)** | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
 
 **1.90x faster at 0.53x the peak memory.** For context this file was 1.46x SLOWER than the reference
 before this week's work (31:26.98 against 21:28.00).
@@ -1809,12 +1809,12 @@ campaign. SpeXtractor's 179 GB is a genuine requirement. The honest statement is
 not sensitive to a heap flag".
 
 
-### v37: `charge:min_charge` 1 + the ion-mobility charge veto -- dataset D (2026-09-08)
+### `charge:min_charge` 1 + the ion-mobility charge veto -- dataset D (2026-09-08)
 
-See docs/REFERENCE-COMPARISON-2026-09-08.md for why. Arms: v35 default (`gateMs1Bands/b48_S30`, min_charge 2)
-against v37 (min_charge 1, veto on), same file, same engines.
+See docs/REFERENCE-COMPARISON-2026-09-08.md for why. Arms: the previous default (min_charge 2)
+against min_charge 1 with the veto on, same file, same engines.
 
-| | v35 default | v37 | |
+| | previous default | min_charge 1 + veto | |
 |---|---:|---:|---|
 | spectra | 656,257 | 927,712 | +41% |
 | wall / peak RSS | 3:27.48 / 57.6 GB | **3:25.95 / 57.9 GB** | flat |
@@ -1824,11 +1824,12 @@ against v37 (min_charge 1, veto on), same file, same engines.
 | Sage, **per-charge** walk | 12,493 | **12,597** (z=1: 46) | **+0.8%** |
 | MSFragger, **per-charge** walk | 12,360 | **12,700** (z=1: 28) | **+2.8%** |
 | entrapment FDR, whole run | 1.24% | 1.38% | |
-| entrapment by stratum (v37) | | z=1 **9.2%** (n=144, CI 3.9-16), z=2 1.05%, z=3 1.64% | |
+| entrapment by stratum (min_charge 1 + veto) | | z=1 **9.2%** (n=144, CI 3.9-16), z=2 1.05%, z=3 1.64% | |
 
 Dataset D is the case the old default was tuned on, and it is where z=1 is rarest: 202 peptides against
 5,000+ on a 2-hour TNBC file. Under the engines' own pooled cut the arm is -0.5% on both engines --
-inside the gate's 1% rule -- and the loss is the pooled-threshold eviction the refuters demonstrated:
+inside the gate's 1% rule -- and the loss is the pooled-threshold eviction documented in
+docs/REFERENCE-COMPARISON-2026-09-08.md:
 under a per-charge walk the same files give +0.8% and +2.8%. The z=1 stratum's 9% is real but small
 (144 peptides) and is what per-charge control is for.
 
@@ -1841,30 +1842,30 @@ intermediate-isotope test (a co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 
 `SPEXTRACTOR_Z1_DIAG` machinery already computes; not yet wired in.
 
 
-### New TNBC baseline T3 (v37, 2026-09-08)
+### New TNBC 009 reference digest (2026-09-08)
 
-`charge:min_charge` 1 + the mobility veto change the spectrum list, so T2 is retired.
-**T3 = `88f89abad8eca9ca...`** (TNBC 009, v37, `/scratch/kohlbach/v37_009`). Extraction facts:
+`charge:min_charge` 1 + the mobility veto change the spectrum list, so the previous digest is retired.
+**TNBC 009 reference digest = `88f89abad8eca9ca...`**. Extraction facts:
 
-| | T2 (v35) | T3 (v37) |
+| | previous (min_charge 2) | new (min_charge 1 + veto) |
 |---|---:|---:|
 | spectra | 2,343,822 | **4,035,234** (+72%) |
 | veto | -- | 2,548,391 z=1 calls: 287,900 -> 2+, 178,226 -> 3+, 2,082,265 kept as 1+ |
 | peak RSS | 190.9 GB | **190.3 GB** (flat: emission is not what bounds memory) |
 | window loop | 412.0 s (80.0x) | 511.3 s (**90.6x**) |
-| wall | 11:35.90 (spock) | 13:43.10 on `data`, **contended** by a concurrent MSFragger -- not a head-to-head number; a clean rerun follows |
+| wall | 11:35.90 | 13:43.10 on another node, **contended** by a concurrent MSFragger -- not a head-to-head number; a clean rerun follows |
 
 The 72% more spectra cost no memory and ~+11% wall when uncontended (the earlier z>=1 arm ran
 in ~13:20 against 11:59 on the same node); the window loop's occupancy rose to 90.6x because
 more precursors means more scoring work to fill the tail with.
 
 
-### v38: the veto's 3+ arm dropped -- dataset D (2026-09-08)
+### The veto's 3+ arm dropped -- dataset D (2026-09-08)
 
-Same arms as the v37 table above; v38 differs from v37 only in dropping z=1 calls that sit on the 3+
-mobility band instead of re-labelling them 3+.
+Same arms as the table above; the shipped default differs from it only in dropping z=1 calls that sit
+on the 3+ mobility band instead of re-labelling them 3+.
 
-| | v35 default | v37 | **v38** |
+| | previous default | veto, 3+ re-called | **shipped default** |
 |---|---:|---:|---:|
 | spectra | 656,257 | 927,712 | **854,817** |
 | wall / peak RSS | 3:27.48 / 57.6 GB | 3:25.95 / 57.9 GB | **3:12.61 / 57.3 GB** |
@@ -1877,19 +1878,19 @@ mobility band instead of re-labelling them 3+.
 | entrapment z=1 stratum | -- | 9.2% (n=144) | 8.8% (n=151) |
 
 The 93,008 dropped calls were pure emission: peptide counts are unchanged or better on both walks,
-73k fewer spectra than v37, and the fastest dataset D wall measured. On dataset D the new default is
+73k fewer spectra than the 3+-re-calling arm, and the fastest dataset D wall measured. On dataset D the new default is
 inside the gate's 1% rule under the engines' own pooled cut and positive on both engines under
 per-charge control; the z=1 stratum here is tiny (~150 peptides) and dirty, which is what per-charge
 FDR is for.
 
 
-### v38 on TNBC 001 (2026-09-08)
+### The shipped default on TNBC 001 (2026-09-08)
 
-v35 default arm = `qual_001` (min_charge 2); v38 = min_charge 1 + mobility veto with the 3+ arm dropped.
-Extraction on ibminode05 (shared, loaded -- not a timing number): 16:02, 170.1 GB, 3,409,189 spectra
-(v35: 2,135,267). Veto: of 2,137,636 z=1 calls, 241,062 (11.2%) re-called 2+, 157,532 dropped, 1,739,042 kept.
+Previous-default arm = min_charge 2; shipped default = min_charge 1 + mobility veto with the 3+ arm
+dropped. Extraction on a shared, loaded node (not a timing number): 16:02, 170.1 GB, 3,409,189
+spectra (previous default: 2,135,267). Veto: of 2,137,636 z=1 calls, 241,062 (11.2%) re-called 2+, 157,532 dropped, 1,739,042 kept.
 
-| | v35 default | **v38** | vs reference (v38) |
+| | previous default | **shipped default** | vs reference |
 |---|---:|---:|---|
 | Sage peptides, engine's pooled cut | 15,694 | **19,035 (+21.3%)** | 14,764 -> **1.289** |
 | Sage proteins | 4,074 | 4,142 | 3,802 -> 1.089 |
@@ -1897,19 +1898,20 @@ Extraction on ibminode05 (shared, loaded -- not a timing number): 16:02, 170.1 G
 | Sage, per-charge walk | 16,029 | **19,262 (+20.2%)** | |
 | MSFragger, per-charge walk | 16,727 | **19,230 (+15.0%)** | |
 | entrapment, whole run | 0.98% | 0.93% | |
-| entrapment by stratum (v38) | | z=1 2.91% (n=3,481), z=2 0.41%, z=3 0.57% | |
-| per-charge walk entrapment (v38) | | z=1 **0.87%**, z=2 1.14%, z=3 0.68%, whole 0.99% | |
+| entrapment by stratum (shipped) | | z=1 2.91% (n=3,481), z=2 0.41%, z=3 0.57% | |
+| per-charge walk entrapment (shipped) | | z=1 **0.87%**, z=2 1.14%, z=3 0.68%, whole 0.99% | |
 
 Second file, same shape as 009: the z=1 stratum sits at ~2.9% under the pooled cut and at 0.87%
 under per-charge control, with the gain intact on both engines under both walks.
 
 
-### v38 on TNBC 009, and the new reference T4 (2026-09-08)
+### The shipped default on TNBC 009, and the new reference digest (2026-09-08)
 
-**T4 = `057aad4beec52483...`** (`/scratch/kohlbach/v38_009`, the shipped default: min_charge 1, mobility veto,
-3+-band calls dropped). T3 is retired. Extraction on `data`, alone on the node:
+**TNBC 009 reference digest = `057aad4beec52483...`** (the shipped v2.0.0 defaults: min_charge 1,
+mobility veto, 3+-band calls dropped); it supersedes the previous default's digest. Extraction alone
+on the node:
 
-| | v35 (T2) | v37 (T3) | **v38 (T4)** |
+| | previous default | veto, 3+ re-called | **shipped default** |
 |---|---:|---:|---:|
 | spectra | 2,343,822 | 4,035,234 | **3,918,321** |
 | wall, uncontended, same node | 11:24.97 / 10:36.92 | 13:07.40 / 12:36.77 | **12:42.21** |
@@ -1923,12 +1925,12 @@ under per-charge control, with the gain intact on both engines under both walks.
 | entrapment z=1 stratum (pooled / per-charge) | -- | 2.91% / 0.91% | 2.94% / 0.91% |
 
 Emitting the singly charged population costs ~+15% wall on a 2-hour file (12:42 against 11:01 mean
-for v35) and no memory beyond the usual +-10 GB run-to-run spread; the window loop's occupancy rose
+for the previous default) and no memory beyond the usual +-10 GB run-to-run spread; the window loop's occupancy rose
 to ~90x because there is more scoring work to fill its tail with.
 
-### Head to head at the new default (2026-09-08, `data`, both tools 100 threads)
+### Head to head at the new default (2026-09-08, one node, both tools 100 threads)
 
-| | reference implementation | SpeXtractor v38 | ratio |
+| | reference implementation | SpeXtractor | ratio |
 |---|---|---|---|
 | wall | 21:12.24 / 20:41.46 (mean 20:56.9) | **12:42.21** | **0.61x** |
 | peak RSS | 357.7 / 323.4 GB (mean 340.6) | **187.9 GB** | **0.55x** |
@@ -1941,13 +1943,13 @@ to ~90x because there is more scoring work to fill its tail with.
 
 ### v2.0.0 published (2026-09-08)
 
-`/ceph/ibmi/abi/oliver/spextract/v2.0.0`, built from 8d79bbc (`src` sha256 `2a45e5e9...`, binary
+Published to the shared install, built from 8d79bbc (`src` sha256 `2a45e5e9...`, binary
 `0da8cfd7...`); the release tag sits on the doc-only follow-up commit, whose source is byte-identical.
-e2e 13/13. Dataset D on spock (load ~6): **854,817 spectra, 3:17.41, 57.8 GB, window loop 120.6 s at
-78.1x**, digest **`b499027f...`** -- identical to the release candidate built from the same source
-with the old help strings, and the same count as v38. This digest is the dataset-D reference for
-v2.0.0 (**B3**). TNBC 009 with the published binary on `data` (load ~20): **3,918,321 spectra,
-14:36.99, 189.9 GB, window loop 552.6 s at 91.9x**, digest **`057aad4b...` = T4** -- the release
-reproduces the v38 reference exactly (the release candidate built from the same source did too:
-14:19.62 / 189.4 GB / identical). The uncontended wall for this file remains the v38 measurement,
+e2e 13/13. Dataset D on a lightly loaded node: **854,817 spectra, 3:17.41, 57.8 GB, window loop
+120.6 s at 78.1x**, digest **`b499027f...`** -- identical to the release candidate built from the
+same source with the old help strings, and the same count as the pre-release build. That digest is
+the dataset D reference for v2.0.0. TNBC 009 with the published binary on a loaded node:
+**3,918,321 spectra, 14:36.99, 189.9 GB, window loop 552.6 s at 91.9x**, digest **`057aad4b...`** --
+the release reproduces the TNBC 009 reference digest exactly (the release candidate built from the
+same source did too: 14:19.62 / 189.4 GB / identical). The uncontended wall for this file remains
 12:42.21.

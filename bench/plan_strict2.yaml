@@ -10,8 +10,8 @@ title: "co-elution gate: locate the optimum -- the sweep is still rising at 0.50
 # do NOT pick a default -- an unbounded monotone trend means the parameter is standing in for
 # something else (likely: the gate is the only thing suppressing the fragment fan-out that inflates
 # our PSM/peptide ratio) and that mechanism must be understood before shipping a value.
-# Adoption still requires replication on dataset B/dataset A regardless.
-samples: [dataset D]
+# Adoption still requires replication on dataset_B/dataset_A regardless.
+samples: [dataset_D]
 binary: /scratch/kohlbach/rv/opt/bin/spextractor
 threads: 128
 arms:

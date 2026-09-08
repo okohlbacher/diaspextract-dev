@@ -2,9 +2,8 @@
 """Entrapment FDR across arms -- the measurement this project has never made.
 
 WHY THIS EXISTS. Every "1% FDR" number quoted in this project, ours and the reference implementation's, is NOMINAL:
-it is Sage's target-decoy estimate computed from ITS OWN decoys, per run. All three adversarial
-reviewers (codex, vibe, kimi) independently made the same point, and `bench/fdrcheck.py` then
-confirmed it on data already on disk: the min_correlation sweep's "+7.7% peptides" was the q<=0.01
+it is Sage's target-decoy estimate computed from ITS OWN decoys, per run. Independent review made
+the same point, and `bench/fdrcheck.py` then confirmed it on data already on disk: the min_correlation sweep's "+7.7% peptides" was the q<=0.01
 SCORE THRESHOLD sliding down as decoys were deleted, not new signal. A nominal FDR cannot detect
 that, because the thing that moved IS the nominal FDR's own calibration.
 
@@ -17,12 +16,12 @@ WHAT IT SETTLES. Run over the min_correlation arms it answers, without ambiguity
   * does the observed error rate at nominal 1% RISE as the gate tightens?  -> the gain was
     recalibration, and the nominal axis everyone optimised is not 1%
   * does it stay flat while peptides rise?                                 -> the gain is real
-It equally applies to the the reference implementation arm, which bounds how much of the 3,036-peptide "coverage gap"
+It equally applies to the reference implementation arm, which bounds how much of the 3,036-peptide "coverage gap"
 is the reference implementation's own FDR edge rather than peptides we genuinely lose.
 
 ESTIMATOR. A false match distributes over the PEPTIDE search space, so the correction ratio must be
-the ratio of entrapment to target PEPTIDE HYPOTHESES, not proteins (fixed 2026-07-28, codex review
-#12: Arabidopsis vs human proteins differ in length/composition, so the protein ratio 0.800 is the
+the ratio of entrapment to target PEPTIDE HYPOTHESES, not proteins (fixed 2026-07-28: Arabidopsis
+vs human proteins differ in length/composition, so the protein ratio 0.800 is the
 wrong number -- the in-silico-tryptic peptide ratio is 0.6805, giving a 1/r correction of 1.469 vs
 the protein 1.250, i.e. the old estimate was ~18%% too low). Estimated false TARGET IDs = n_entrap /
 r_pep (each foreign hit implies n_target_space/n_entrap_space false target hits); FDR = that / n_target.
@@ -167,7 +166,7 @@ def main():
             n_e = sum(1 for l in open(a.foreign) if l.startswith(">"))
             print("[db] reusing %s (%d target + %d entrapment)" % (fa, n_t, n_e), flush=True)
     prot_ratio = n_e / max(n_t, 1)
-    ratio = peptide_ratio(fa, a.tag)   # PEPTIDE-hypothesis ratio drives the FDR correction (codex #12)
+    ratio = peptide_ratio(fa, a.tag)   # PEPTIDE-hypothesis ratio drives the FDR correction
     print("[db] protein ratio %.3f (reference only); PEPTIDE-hypothesis ratio %.4f (drives FDR)"
           % (prot_ratio, ratio), flush=True)
 

@@ -8,8 +8,7 @@ not an arithmetic one.
 
 WHY THIS FILE EXISTS
 --------------------
-Ad-hoc benchmarking produced eleven data-handling failures in one session. The v1 harness added
-eleven guards. Two independent adversarial reviews found that six of them were THEATRE -- the
+The v1 harness added eleven guards. Review found that six of them were THEATRE -- the
 claimed invariant had no implementing code -- and that the largest hole was one no guard
 addressed: there was no immutable run identity, so a failed converter left a stale mzML that was
 accepted, a failed Sage left an old TSV that was rescored, and the manifest was overwritten with
@@ -74,7 +73,7 @@ CONTRACT_VERSION = 2
 
 # Only these tokens may appear in the converter argv. Everything that can change the output must
 # travel through the INI, because the INI is what gets hashed into the recipe. A parameter passed
-# on the command line would override the INI and be invisible to no-op detection. (FAILURE 5.)
+# on the command line would override the INI and be invisible to no-op detection.
 ALLOWED_CONVERTER_ARGV_FLAGS = ("-ini", "-in", "-out")
 
 ARM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -208,7 +207,7 @@ def assert_same_filesystem(paths):
 
 
 def check_free_space(path, need_gb):
-    """G-B19 -- /scratch quota exhaustion silently kills jobs on this cluster.
+    """G-B19 -- quota exhaustion on the bench filesystem silently kills jobs.
 
     A 6 h convert that dies at 95%% on a full filesystem is indistinguishable, after the fact,
     from a tool bug. Refuse up front.
@@ -635,7 +634,7 @@ def require_pinned(reg, sample):
 
     Pinning converts every later use from an existence PRINT (v1: "[preflight] dataset A.diann_report:
     OK") into a digest COMPARISON. Note the honest limit: pinning makes a reference STABLE, not
-    CORRECT. If dataset A's diann_report already points at an dataset D parquet, pinning freezes that error.
+    CORRECT. If dataset A's diann_report already points at a dataset D parquet, pinning freezes that error.
     The semantic check that actually catches it lives in collate2 (G-C09: the DIA-NN Run column
     must name this sample's raw file).
     """
@@ -847,12 +846,12 @@ def _expand_sweeps(sweeps, seen_names):
         points = sw["points"]
         if not isinstance(points, list):
             die("G-B01", "sweep %r points must be a list" % sw["param"])
-        # FAILURE 6: ambiguity_margin 0.1 was compared at a SINGLE point against an integer
+        # The failure this prevents: ambiguity_margin 0.1 compared at a SINGLE point against an integer
         # partner count. One point cannot distinguish "this parameter does nothing" from "this
         # parameter is on the wrong scale". Three is the minimum that shows a trend.
         if len(points) < 3:
             die("G-B04", "sweep of %r has %d point(s); at least 3 are required.\n"
-                         "       This is FAILURE 6: a single-point comparison of a rescaled "
+                         "       A single-point comparison of a rescaled "
                          "parameter cannot distinguish a null effect from a scale error."
                 % (sw["param"], len(points)))
         vals = [float(x) for x in points]
@@ -875,8 +874,8 @@ def _validate_pairing(arms):
     """G-B03 -- every treatment resolves to a baseline IN THIS PLAN.
 
     v1's preflight did `if not arm.baseline: continue`, which skipped ALL validation for an arm
-    that simply omitted the field -- and then ran it and published it anyway. That is FAILURE 2:
-    "+36.7%/+37.4% confirmed" used three different baseline configs.
+    that simply omitted the field -- and then ran it and published it anyway: a
+    "+36.7%/+37.4% confirmed" that used three different baseline configs.
     """
     by_name = dict((a["name"], a) for a in arms)
     for a in arms:
@@ -917,7 +916,7 @@ def _validate_scaled_params(reg, arms, sweeps):
             if k in scaled and k not in swept:
                 die("G-B04", "arm %r sets scaled parameter %r directly.\n"
                              "       Registry `tool.scaled_params` lists it because its units are "
-                             "not self-evident (FAILURE 6: a 0.1 FRACTION was compared against an "
+                             "not self-evident (a 0.1 FRACTION was compared against an "
                              "integer COUNT). It may only enter through a >=3-point sweep."
                     % (a["name"], k))
 
@@ -1007,7 +1006,7 @@ def validate_converter_argv(argv):
     """G-B16 -- only -ini/-in/-out may appear.
 
     If a parameter could ride on the command line it would override the INI and be invisible to
-    ini_sha256, so no-op detection (FAILURE 5) would be aspirational rather than exact.
+    ini_sha256, so no-op detection would be aspirational rather than exact.
     """
     flags = [tok for tok in argv[1:] if tok.startswith("-")]
     bad = [f for f in flags if f not in ALLOWED_CONVERTER_ARGV_FLAGS]
@@ -1037,15 +1036,15 @@ def assert_binary_unchanged(binary, before):
     v1 hashed once at preflight and stamped that cached value into every manifest. Replace the
     binary between arm 1 and arm 2 and both manifests carry binary A's hash while two different
     binaries executed -- and collate's "one binary across the set" check passes trivially. That
-    is FAILURE 7, and the v1 comment claimed identity was "asserted equal" when no assertion
-    existed anywhere in the file.
+    is the failure this guard exists for, and the v1 comment claimed identity was "asserted
+    equal" when no assertion existed anywhere in the file.
     """
     after = tool_identity(binary)
     for key in ("realpath", "sha256", "ino"):
         if after[key] != before[key]:
             die("G-B09", "the tool changed across this exec: %s %s -> %s\n"
                          "       tar silently skips overwriting a RUNNING executable, which is how "
-                         "a 6 h benchmark ran a 2-day-old build (FAILURE 7)."
+                         "a 6 h benchmark ran a 2-day-old build."
                 % (key, before[key], after[key]))
     return after
 
@@ -1383,7 +1382,7 @@ def do_convert(bench, plan, reg, sample, arm, tool_pre, refs, entry, pinned):
     if ident["content_id"] != pinned["raw_content_id"]:
         die("G-B05", "sample %s raw content digest %s does not match the pin %s.\n"
                      "       Either the .d changed or the path now resolves elsewhere. v1 checked "
-                     "only that the string %r appeared in the path (FAILURE 1)."
+                     "only that the string %r appeared in the path."
             % (sample, short(ident["content_id"]), short(pinned["raw_content_id"]), sample))
     if ident["acquisition_id"] != pinned["acquisition_id"]:
         die("G-B05", "sample %s acquisition identity %s does not match the pin %s"
@@ -1692,7 +1691,7 @@ def detect_noop_arms(cells):
     """G-B14 -- an arm whose OUTPUT BYTES equal its baseline's is a no-op. Exact, zero false
     positives, no help-text parsing.
 
-    FAILURE 5: three arms passed values that were already defaults and burned ~2.5 h producing
+    The failure this prevents: three arms passed values that were already defaults and burned ~2.5 h producing
     byte-identical output. v1 tried to catch this by regexing --helphelp and diffing strings,
     which misses 0.1-vs-0.10, boolean aliases, aliased flags, tool-side clamping, and any
     parameter ignored under another mode.
@@ -1712,13 +1711,13 @@ def detect_noop_arms(cells):
             b = arms[base]
             if cell["produce_sha256"] == b["produce_sha256"]:
                 die("G-B14", "arm %r on %s produced output BYTE-IDENTICAL to its baseline %r "
-                             "(%s).\n       This is FAILURE 5: the arm tested nothing. Output-"
+                             "(%s).\n       The arm tested nothing. Output-"
                              "digest equality is exact -- there is no interpretation in which "
                              "these two runs differ."
                     % (arm, sample, base, short(cell["produce_sha256"])))
             if cell["ini_sha256"] and cell["ini_sha256"] == b["ini_sha256"]:
                 die("G-B14", "arm %r on %s resolved to a configuration identical to baseline %r "
-                             "(ini %s). FAILURE 5."
+                             "(ini %s). The arm tested nothing."
                     % (arm, sample, base, short(cell["ini_sha256"])))
 
 
@@ -2290,9 +2289,9 @@ def selftest_bench(env):
                     match="acquisition identity changed")
 
     # ---- G-B05 cross-sample: the PRODUCTION comparison, not a reimplementation -------------
-    # FAILURE 1 -- a published ratio divided an dataset D result by dataset A's the reference implementation reference; the
-    # class of error occurred 3x. The existing case for this guard copies the comparison into
-    # its own body and calls die() itself, so disabling the production check at :1384 left the
+    # A published ratio divided a dataset D result by dataset A's reference-implementation
+    # figure; the class of error occurred 3x. The existing case for this guard copies the
+    # comparison into its own body and calls die() itself, so disabling the production check left the
     # suite fully green (mutation-verified). These call do_convert / do_adopt directly. The
     # digest check is the first statement after raw_identity(), so the later arguments are
     # never reached and may be None.
@@ -2675,7 +2674,7 @@ def _selftest_end_to_end(st, env):
         finally:
             os.environ["FAKETOOL_MODE"] = "ok"
             st_write_faketool(env["tool"])
-    st.expect_abort("G-B09", "binary changed across the exec (FAILURE 7)", binary_mutated)
+    st.expect_abort("G-B09", "binary changed across the exec", binary_mutated)
 
     def raw_retargeted():
         os.environ["FAKETOOL_MODE"] = "retarget"

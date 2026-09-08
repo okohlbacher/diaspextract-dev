@@ -66,14 +66,14 @@ struct TdfMzCalibration
       if (std::isnan(v)) return "MzCalibration contains NaN";
     if (model_type != 1) return "MzCalibration ModelType " + std::to_string(model_type) + " != 1";
     // A merely-positive C1 is not enough: C1 < ~5.6e-297 overflows b*b to +inf and yields m/z 0.0
-    // for every peak, silently, under an "exact" log line. Real values are ~1e5. [claude review]
+    // for every peak, silently, under an "exact" log line. Real values are ~1e5.
     if (!(C1 > 1.0) || !(C1 < 1e12)) return "MzCalibration C1 outside the plausible range (1, 1e12)";
     if (dC2 != 0.0) return "MzCalibration dC2 != 0 (temperature drift of C2 is not modelled)";
     if (C3 != 0.0) return "MzCalibration C3 != 0 (not modelled; never observed non-zero)";
     // C2 == 0 is NOT a benign degenerate case: the pure-sqrt law it selects is exactly the
     // known-bad open implementation (2-39 ppm on real vectors). The vendor schema declares
     // C0..C4 with no type and no NOT NULL, so a NULL or text C2 arrives here as 0.0 through
-    // sqlite3_column_double -- indistinguishable from a real zero. Reject both. [claude review]
+    // sqlite3_column_double -- indistinguishable from a real zero. Reject both.
     // C2 == 0.0 stored in the file is a real calibration: the 2020 timsTOF Pro firmware behind
     // PXD017703 ships t = C0 + C1_eff*sqrt(m) with no quadratic term, and every frame references
     // it. What must NOT pass is a NULL C2 (the column has no type and no NOT NULL), which the C API

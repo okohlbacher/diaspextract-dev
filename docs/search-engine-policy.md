@@ -1,6 +1,6 @@
 # Search-engine policy
 
-**Develop on Sage. Update the baseline with both engines at every deep adversarial review cycle.**
+**Develop on Sage. Refresh the baseline with both engines before any release or headline claim.**
 
 ## Measured basis (joint benchmark, 6 cells, one common FDR procedure)
 
@@ -19,7 +19,7 @@ Sage never ordered two configurations differently from MSFragger.
 
 * **Iteration / screening → Sage alone.** 4.2× throughput, perfect rank agreement. Reject bad
   ideas cheaply.
-* **Every deep adversarial review of overall status → run BOTH**, and refresh the recorded
+* **Every status refresh → run BOTH**, and refresh the recorded
   baseline from that pair — the whole status table, not just the changed arm.
 * **Never quote a Sage-only ratio as a headline.** MSFragger puts SpeXtractor/the reference implementation **6.4
   points lower** on all three samples. Sage systematically flatters us.
@@ -48,4 +48,4 @@ design removes; adding it to both is the correct fix and is not done.
 
 Operational note: **MSFragger cannot read SpeXtractor mzML** without
 `bench/fix_mzml_cvparams.py` — OpenMS writes valueless cvParams, which is legal mzML but crashes
-batmass-io. See [benchmarks/joint-2026-07-22.md](benchmarks/joint-2026-07-22.md).
+batmass-io.

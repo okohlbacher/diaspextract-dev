@@ -30,7 +30,7 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
 
 ## What the matrix says
 1. **The calibration fix is real and generalises** on Sage: +8.8% mean, 95% CI [+2.7, +15.0] (n=3
-   paired), from the file's own MzCalibration table, no vendor library. IMPORTANT FRAMING (review):
+   paired), from the file's own MzCalibration table, no vendor library. IMPORTANT FRAMING:
    this is an IDENTIFICATION-YIELD effect, not better pseudo-spectra -- emission moved -0.23% and the
    spectra are informationally near-identical; Sage converts a corrected mass axis into yield because
    mass error is a discriminant FEATURE. And since the reference implementation's spectra always carried vendor
@@ -39,7 +39,7 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
 2. **The table model reproduces the vendor SDK** (dataset D 11,976 vs 12,128; the 1.3% delta is the
    vendor IM converter, not m/z) and is exact against the vendor oracle (2.5e-5 ppm, tests/).
 3. **MSFragger is INSENSITIVE to input calibration** (flat across chord/table/SDK on all 3 files).
-   CORRECTED REASON (adversarial review 2026-09-01): NOT "calibrate_mass absorbs it" -- that was
+   CORRECTED REASON: NOT "calibrate_mass absorbs it" -- that was
    inferred from a default we never set (bench/run_joint.sh writes msfragger.params without
    calibrate_mass) and never verified in the engine log. The real reason is our HARNESS: the
    MSFragger arm is scored by a raw-hyperscore target-decoy walk with NO rescoring
@@ -59,21 +59,9 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
    same files with the same engine -> ours, not the instrument (centroiding/mono-reporting).
 6. Emission ~1.32x the reference implementation stands; per-1k-spectra efficiency still favours the reference implementation.
 
-## PRE-TAG FINDINGS (2026-09-01, after the 3-way adversarial review)
+## Further findings (2026-09-01)
 
-### 1. Determinism must be re-scoped: output IS thread-count dependent
-`bench/semantic_digest.py` hashes the mzML from `<spectrumList` onwards, because two runs can never
-be byte-identical for TWO reasons that each already cost this project a false "determinism FAIL":
-OpenMS stamps a wall-clock `MS:1000747 completion time`, AND the header records the run's own
-parameters -- so a threads-8 file and a threads-100 file differ in the header BY CONSTRUCTION.
-That retroactively explains the July r1-vs-imw005 md5 mismatch recorded as unexplained.
-**But with both artefacts removed, the SPECTRUM DATA still differs between threads 8 and 100.** [RETRACTED 2026-09-02: a THIRD artefact -- the trailing `<indexList>` byte offsets, which the digest also hashed -- explains it; with the digest stopped at `</spectrumList>` threads 8 and 100 are identical on two pairs. See RUNTIME-PLAN B3.]
-So: bit-determinism holds (as previously verified) at FIXED thread count; it does NOT hold across
-thread counts. Every benchmark in this project used `-threads 100`, so no published number is
-affected -- but the claim must be stated as "deterministic at fixed thread count", and the
-fixed-thread check is now an explicit gate (running).
-
-### 2. The pipeline is CHAOTICALLY SENSITIVE -- cross-binary comparisons carry ~2% uncertainty
+### The pipeline is CHAOTICALLY SENSITIVE -- cross-binary comparisons carry ~2% uncertainty
 Replacing the quadratic root `(-b+sqrt(disc))/(2c)` with the algebraically identical but
 cancellation-free `2(t-C0)/(b+sqrt(disc))` -- a ~1e-11 relative change, i.e. ~1e-5 ppm -- moved
 emission 921,938 -> 923,713 (+0.19%) and closed Sage 11,976 -> 12,200 (+1.9%). Greedy trace/gate
@@ -83,15 +71,14 @@ calibration (+6-11%) results are far above that; every small lever ever decided 
 not. 11,976 and 12,200 are the same number in this sense; the doc keeps 11,976 (the arm that was
 actually benchmarked end-to-end).
 
-### 3. dPeptides/dppm measured directly (the review's proposed control)
+### dPeptides/dppm measured directly
 A UNIFORM affine m/z rescale changes no peak, no intensity, no count and no mass difference beyond
 1e-6 relative -- the content channel is exactly zero by construction, unlike the nonlinear chord bow.
 FRAGMENT-channel only (an early regex bug shifted arrays but not `selected ion m/z`, which usefully
 isolated the channel): baseline 11,976; -1.5 ppm 11,934 (-42); +1.5 ppm 11,939 (-37); -3.0 ppm
 11,811 (-165). Symmetric and quadratic-ish about zero -- the signature of mass accuracy feeding the
 score, and an independent confirmation that the calibration gain is an identification-yield effect.
-Precursor-channel and both-channel arms running.
-**Governance consequence (review's "thing everybody missed"): peptides@1%FDR is partly a
+**Governance consequence: peptides@1%FDR is partly a
 mass-calibration measurement, so 11,976 is only comparable to future numbers taken at the same
 residual ppm. Any future lever must report its ppm median beside its count.**
 
@@ -102,23 +89,23 @@ Post-hoc on the archived TSVs, same global raw-hyperscore 1% walk that produced 
 | PSM charges searched | 1+ 44,490 · 2+ 326,462 · 3+ 167,203 · 4+ 29,894 · 5+ 4,268 | 1+ 12,969 · 2+ 277,753 · 3+ 161,487 · 4+ 45,030 |
 | accepted @1%, all charges | 11,463 (threshold hyperscore **15.205**, 358,493 distinct keys) | 13,932 (threshold **14.033**, 407,432 keys) |
 | accepted @1%, z in {2,3} only | 11,327 (**-136**) | 13,722 (-210) |
-- **H7 "MSFragger discards our z=1/4/5 spectra": DEAD.** It searched all charges (`precursor_charge` is
+- **"MSFragger discards our z=1/4/5 spectra": DEAD.** It searched all charges (`precursor_charge` is
   a fallback for charge-less spectra only; confirmed by the charge column).
-- **H1 "our extra low-yield spectra broaden the null and raise the threshold": DEAD.** Deleting every
+- **"Our extra low-yield spectra broaden the null and raise the threshold": DEAD.** Deleting every
   z!=2,3 PSM LOWERS our count (-136); a null-broadening tax would have raised it.
-- **H-B/H-C/H-D/H-F (isolation window mode switch, TIC/title/base-peak metadata, 500-peak padding,
-  encoding): DEAD** -- identical MSFragger parameters in both logs; the MSFTBX reader does not even
+- **Isolation-window mode switch, TIC/title/base-peak metadata, 500-peak padding and encoding:
+  all DEAD** -- identical MSFragger parameters in both logs; the MSFTBX reader does not even
   parse the spectrum title; use_topN_peaks=150 caps both.
 - **What survives:** our accepted-hyperscore threshold IS higher (15.2 vs 14.0) with FEWER distinct
   candidates (358k vs 407k) -> the reference implementation's target scores sit higher relative to decoys in the TAIL;
   for the 9,405 shared peptides the scores are identical. I.e. coverage/quality of the faint tail
-  (codex: 53-75% of the gap) plus kimi's reading of H-A as attribute CORRUPTION (a wrong charge label
-  -> wrong precursor mass, invisible to a 25 ppm closed search in either engine; 16-35%). Decisive
-  test for the latter running: MSFragger with override_charge=1, z=1..5, both tools.
+  (estimated 53-75% of the gap) plus attribute CORRUPTION (a wrong charge label -> wrong precursor
+  mass, invisible to a 25 ppm closed search in either engine; estimated 16-35%). The decisive test
+  for the latter is the next bullet.
 - **"Is there additional information MSFragger can use?" -- No.** Nothing the reference implementation writes that we
   do not is consumed by scoring. The deficit is in what we emit, not what we annotate.
 - **Charge-corruption test (override_charge=1, z=1..5 for every spectrum, both tools, 2026-09-02):**
   SpeXtractor 10,750 -> **11,238 (+488, +4.5%)**; the reference implementation 13,004 -> 13,276 (+272, +2.1%). Gap 2,254 ->
-  2,038: **wrong charge labels explain ~10% of the MSFragger gap** (kimi's estimate was 16-35%). They
+  2,038: **wrong charge labels explain ~10% of the MSFragger gap** (the estimate above was 16-35%). They
   cost us twice what they cost the reference implementation, so charge assignment is worth ~+490 peptides on MSFragger
   on its own; the remaining ~2,000 is tail coverage/quality of what we emit for faint precursors.

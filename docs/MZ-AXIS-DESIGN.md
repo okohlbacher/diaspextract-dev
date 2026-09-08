@@ -4,9 +4,6 @@
 discrete at the source. Define one global m/z axis and a spectrum becomes a vector of intensities.
 This follows the global RT axis (already landed) and applies the same idea to the other dimension.
 
-**Status.** Design + implementation on branch `mz-axis` in a separate worktree. To be reintegrated
-and measured against the current head on memory, runtime and parallel occupancy.
-
 ## 1. What is already discrete, and what is thrown away
 
 The compact peak store is *already* on a uniform integer m/z grid:
@@ -145,7 +142,7 @@ These become integer differences against a precomputed span.
 
 **Banding can be made exact, or provably not.** The band edges become index cut points and the halo
 becomes an exact index count. Whether that makes banding exact depends on whether a trace's total
-index span is boundable -- the drifting-centroid question raised in the banding review. If it is
+index span is boundable -- the drifting-centroid question. If it is
 not, the honest outcome is a bound enforced by construction (cap a trace's span in index units), and
 banding becomes exact *by definition of the detector* rather than by hope.
 
@@ -161,9 +158,10 @@ banding becomes exact *by definition of the detector* rather than by hope.
 5. **Banding on index cut points**, with the span bound made explicit.
 
 Steps 1, 2, 4 are output-neutral and can be verified by the semantic digest. Step 3 is a new
-algorithm and must clear the both-engines rule. Step 5 depends on the banding review's verdict.
+algorithm and must clear the both-engines rule. Step 5 depends on whether the span bound of step 4
+holds.
 
-## 6. How it will be measured on reintegration
+## 6. How it is to be measured
 
 Against the current head, on dataset D and dataset A, 100 threads, same node:
 

@@ -11,7 +11,7 @@ A metric is either a Value with a stated sample size and a NAMED denominator pop
 Undefined with a machine-readable reason. There is no third state, no default, no dash.
 Any Undefined that reaches the publish boundary refuses the whole report.
 
-This is the direct answer to the reviewers' inventory of silent fallbacks. v1 contained
+This is the direct answer to an inventory of silent fallbacks. v1 contained
 `.get(col, 1)`, `own or [0]`, `max(tot, 1)`, `i2.sum() or 1.0`, `max(1-recd, 1e-9)` and
 `Path(refs.get("diann_lib", ""))`. Each of them converts an ABSENCE into a plausible number:
 a missing Sage column became "0 peptides at 1% FDR", an absent fragment library became "0%
@@ -100,7 +100,7 @@ def unit_info_of(value):
     """The CV unit attached to a pyteomics value, or None if there is none.
 
     Returning None is not a guess. v1's `getattr(v, "unit_info", "minute")` guessed MINUTES, and
-    RT in seconds read as minutes matched 31 of ~300,000 spectra (FAILURE 8)."""
+    RT in seconds read as minutes matched 31 of ~300,000 spectra."""
     try:
         return value.unit_info
     except AttributeError:
@@ -110,7 +110,7 @@ def unit_info_of(value):
 # =============================================================================================
 # --- BEGIN MEASUREMENT REGION ---
 # Everything between these markers is linted by lint_source() (guard G-C30). The banned
-# constructs are exactly the ones the reviewers found manufacturing numbers out of absences.
+# constructs are exactly the ones found manufacturing numbers out of absences.
 # Plumbing, rendering and the selftest live OUTSIDE the region and are not linted; the README
 # states that scope rather than implying the ban is global.
 # =============================================================================================
@@ -313,8 +313,8 @@ def q_diff(a, b, where):
 class Controlled(object):
     """A measurement and its chance floor, welded together.
 
-    FAILURE 4: a "97.8% detection ceiling" was published, then retracted when a decoy floor
-    showed a precursor that does not exist still matched 91.9% of the time. v1's fix was a
+    A "97.8% detection ceiling" was reported against a decoy floor of 91.9%, i.e. a precursor
+    that does not exist still matched 91.9% of the time. v1's fix was a
     convention ("uncorrected values are never emitted alone"); collate then printed
     recall_corrected without either the raw value or the floor.
 
@@ -346,7 +346,7 @@ class Controlled(object):
                 "shifted_out_of_window_frac": self.shifted_out_of_window_frac}
 
 
-# A control that cannot fire is not a control. Both reviewers independently argued that an
+# A control that cannot fire is not a control. One argument is that an
 # 11.003 Da shift against a 20 ppm tolerance is ~11,000 ppm at m/z 1000 and therefore can never
 # match, making the floor structurally zero and (obs-floor)/(1-floor) the identity function. The
 # counter-argument is that the shifted query is matched against the DIA-NN TRUTH LIST, not
@@ -376,8 +376,8 @@ def abbott(raw, floor, control_candidates, control_matches, shifted_out_frac, wh
         return Undefined("CONTROL_DEGENERATE",
                          "the decoy control was evaluated %d times and matched ZERO times. A "
                          "floor that is structurally incapable of firing makes the correction "
-                         "the identity function -- this is the defect that produced the "
-                         "retracted 97.8%% number." % control_candidates, where)
+                         "the identity function -- this is the degenerate-control case this "
+                         "guard exists for." % control_candidates, where)
     if shifted_out_frac > SHIFTED_OUT_OF_WINDOW_TOL:
         return Undefined("CONTROL_ASYMMETRIC",
                          "%.1f%% of decoy queries were shifted outside their own isolation "
@@ -513,7 +513,7 @@ def opt_float(mapping, key):
     """Explicit None, never a sentinel.
 
     v1 wrote `float(ion.get("charge state", 0) or 0)` and `float(ion.get(..., -1) or -1)`. The
-    second one is the worst bug in the file that NEITHER review found: an absent ion mobility
+    second one is the worst bug in the file, and no review caught it: an absent ion mobility
     became -1, and the co-isolation candidate filter read `im < 0 or abs(...) <= D_IM`, so a
     missing IM SILENTLY DISABLED the ion-mobility gate for that spectrum. The effective tolerance
     changed mid-file and nothing said so.
@@ -576,7 +576,7 @@ class RtUnitState(object):
 
 
 def rt_minutes(scan, state, where):
-    """FAILURE 8: our mzML writes RT in SECONDS, the reference implementation's in MINUTES, DIA-NN reports minutes.
+    """Our mzML writes RT in SECONDS, the reference implementation's in MINUTES, DIA-NN reports minutes.
     Trusting the bare number matched 31 of ~300,000 spectra.
 
     v1 read the CV unit -- which was right -- but then did
@@ -592,7 +592,7 @@ def rt_minutes(scan, state, where):
     if unit is None or str(unit) not in RT_UNITS:
         die("G-C01", "%s: retention time carries unit %r, which is not in the closed accession "
                      "map %s.\n       v1 assumed 'minute' here. RT in seconds read as minutes "
-                     "matched 31 of ~300,000 spectra (FAILURE 8)."
+                     "matched 31 of ~300,000 spectra."
             % (where, unit, sorted(set(RT_UNITS))))
     unit = str(unit)
     if state.unit is None:
@@ -606,7 +606,7 @@ def rt_minutes(scan, state, where):
 def precursor_of(spec):
     """Returns (mz, mz_source, charge_or_None, im_or_None).
 
-    FAILURE 8b: the reference implementation omits 'selected ion m/z' and writes the precursor as its isolation
+    The reference implementation omits 'selected ion m/z' and writes the precursor as its isolation
     window; we write the real acquisition window. v1 handled this with
     `ion.get("selected ion m/z", iso.get("isolation window target m/z", 0))` -- but a .get()
     default only fires on ABSENCE, so a present-but-zero value skipped the fallback entirely and
@@ -735,8 +735,8 @@ def estimand_id(method_id, mz_source_profile):
     """The keystone against cross-comparison.
 
     All cells in one table column must share an estimand_id, and a delta between two Values with
-    different estimand_ids is refused. This generalizes FAILURE 6 (numbers compared under
-    incompatible rules) without having to anticipate each specific mismatch.
+    different estimand_ids is refused. This generalizes the single-point-sweep failure (numbers
+    compared under incompatible rules) without having to anticipate each specific mismatch.
 
     mz_source_profile is BUCKETED, not carried as a continuous fraction. A raw fraction inside an
     equality hash means 0.998 vs 0.997 on two runs mismatches every column forever -- a harness
@@ -776,7 +776,7 @@ SAGE_COLUMN_DOMAIN = {
 def read_sage(tsv_path, expected_mzml_name, header_sha_pin=None):
     """Every failure is an abort; none is a default.
 
-    FAILURE 3 chose peptide_q as the metric, and that part was right. What was not guarded was
+    v1 chose peptide_q as the metric, and that part was right. What was not guarded was
     the schema: `float(x.get("peptide_q", 1))` means a Sage version that renames the column
     silently treats every row as failing and publishes a bold zero. That is a wrong number, not
     an error.
@@ -822,7 +822,7 @@ def read_sage(tsv_path, expected_mzml_name, header_sha_pin=None):
             fn = os.path.basename(row["filename"])
             if fn != expected_mzml_name:
                 die("G-C04", "%s row %d names mzML %r but this cell's artifact is %r.\n"
-                             "       This is a STALE search result being rescored (FAILURE 10)."
+                             "       This is a STALE search result being rescored."
                     % (tsv_path, i, fn, expected_mzml_name))
             rows.append(row)
     if not rows:
@@ -831,7 +831,7 @@ def read_sage(tsv_path, expected_mzml_name, header_sha_pin=None):
 
 
 def search_metrics(rows, eid):
-    """peptide_q is the published metric (FAILURE 3). spectrum_q is computed for diagnostics only
+    """peptide_q is the published metric. spectrum_q is computed for diagnostics only
     and NEVER enters a vault table -- v1 printed it in the headline row, where it was quotable,
     and it inflated every ratio by 9-11 points against the reference implementation."""
     rank1 = [r for r in rows if int(float(r["rank"])) == 1]
@@ -882,7 +882,7 @@ LIB_COLUMNS = ["Precursor.Id", "Product.Mz"]
 def verify_reference(report_path, sample, raw_realpath):
     """Content-derived binding of a reference to a sample.
 
-    FAILURE 9 / codex #9: dataset A's diann_report pointing at an dataset D parquet. v1 printed OK because
+    The failure this catches: dataset A's diann_report pointing at a dataset D parquet. v1 printed OK because
     the file existed. Pinning its digest (bench2 G-B06) makes the WRONG reference stable, not
     correct -- the check that actually catches it is here: the DIA-NN report's own Run /
     File.Name column must name this sample's raw file.
@@ -1152,7 +1152,7 @@ def truth_metrics(mzml_path, precursors, frags, windows, method_id, declared_spe
     charge_agreement = gate("charge", q_ratio(
         Value(float(agree), max(n_z, 1), "count", "charge_observations", eid), z_den,
         "charge_agreement", n_min=N_MIN["charge_agreement"]))
-    # FAILURE 4 extension, fixed: v1 computed agreement over MATCHED SPECTRA and the majority
+    # Fixed here: v1 computed agreement over MATCHED SPECTRA and the majority
     # baseline over ALL TRUTH PRECURSORS -- two different populations, then subtracted. The
     # baseline is now computed over charge_observations, the same population, spectrum-weighted.
     if n_z:
@@ -1207,8 +1207,8 @@ def _q_load(obj):
 class Pair(object):
     """A pair is two cells in ONE runset, in ONE sample.
 
-    FAILURE 1 -- the worst published error this project has made -- was a cross-sample ratio:
-    7,430 was an dataset D result divided by dataset A's the reference implementation reference. A Pair carries a single
+    This guard exists for a cross-sample ratio:
+    7,430 was a dataset D result divided by dataset A's reference-implementation figure. A Pair carries a single
     `sample` and is only ever constructed by build_pairs(), which iterates within a sample. A
     cross-sample pair is not representable, and Delta cannot be built from anything else.
     """
@@ -1217,8 +1217,9 @@ class Pair(object):
 
     def __init__(self, sample, baseline, treatment, kind):
         if baseline["sample"] != sample or treatment["sample"] != sample:
-            die("G-C18", "attempted to build a pair spanning samples %r / %r. FAILURE 1 was "
-                         "exactly this: a published ratio of dataset D's number over dataset A's reference."
+            die("G-C18", "attempted to build a pair spanning samples %r / %r. The failure this "
+                         "guard exists for was exactly this: a published ratio of dataset D's "
+                         "number over dataset A's reference."
                 % (baseline["sample"], treatment["sample"]))
         self.sample = sample
         self.baseline = baseline
@@ -1236,7 +1237,7 @@ def build_pairs(runset, cells):
         if key not in cells:
             die("G-C19", "cell (%s, %s) declares baseline %r, which has no cell in this runset. "
                          "A treatment whose baseline is absent, or in a different runset, or on "
-                         "a different host, cannot be published (FAILURE 2)."
+                         "a different host, cannot be published."
                 % (sample, arm, base_arm))
         kind = "tool_delta" if cell.get("kind") == "reference_mzml" or \
             cells[key].get("kind") == "reference_mzml" else "param_delta"
@@ -1261,10 +1262,10 @@ def validate_pair(runset, pair, stage_meta):
         problems.append("members were produced by different harness code")
     if pair.kind == "param_delta":
         if b["tool_sha256"] != t["tool_sha256"]:
-            problems.append("members used different converter binaries (%s vs %s) -- FAILURE 7"
+            problems.append("members used different converter binaries (%s vs %s)"
                             % (short(b["tool_sha256"] or ""), short(t["tool_sha256"] or "")))
         if b["ini_sha256"] == t["ini_sha256"]:
-            problems.append("members resolved to an IDENTICAL configuration -- FAILURE 5")
+            problems.append("members resolved to an IDENTICAL configuration")
     if b["method_id"] != t["method_id"]:
         problems.append("members were scored against different acquisition geometries "
                         "(%s vs %s)" % (b["method_id"], t["method_id"]))
@@ -1339,7 +1340,7 @@ class RefuseToPublish(Exception):
 def render_controlled(c, digits=1):
     """A controlled metric prints value, floor and correction, or it prints nothing.
 
-    FAILURE 4's guard was "uncorrected values are never emitted alone"; v1's collate then printed
+    v1's guard was "uncorrected values are never emitted alone"; its collate then printed
     recall_corrected with neither its raw value nor its floor. Here the three travel together
     because render_controlled raises unless all three are Values.
     """
@@ -1614,7 +1615,7 @@ def render_report(runset, cells, payloads, stage_meta, pairs, bench):
          "bytes -- see Provenance.", "",
          "All peptide counts are **`peptide_q <= 0.01`**. `spectrum_q` is a diagnostic and does "
          "not appear in any table here; quoting it inflated this project's counts by 9-11 points "
-         "against the reference implementation (FAILURE 3).", ""]
+         "against the reference implementation.", ""]
 
     for sample in sorted(runset["plan_samples"]):
         L += ["## %s" % sample, "",
@@ -1649,8 +1650,7 @@ def render_report(runset, cells, payloads, stage_meta, pairs, bench):
         if sample_pairs:
             L += ["### Paired deltas (%s)" % sample, "",
                   "Each delta names both arms and is computed **within one sample**; there is no "
-                  "function in the harness that divides one sample's number by another's "
-                  "(FAILURE 1).", "",
+                  "function in the harness that divides one sample's number by another's.", "",
                   "| treatment ~ baseline | metric | baseline | treatment | delta |",
                   "|---|---|---|---|---|"]
             for pr in sample_pairs:
@@ -1960,7 +1960,7 @@ def selftest_collate(tmp):
     def cross_sample():
         Pair("dataset A", {"sample": "dataset A", "arm": "base"}, {"sample": "dataset D", "arm": "x"},
              "param_delta")
-    st.expect_abort("G-C18", "a Pair spanning two samples is refused (FAILURE 1)", cross_sample)
+    st.expect_abort("G-C18", "a Pair spanning two samples is refused", cross_sample)
     st.expect_ok("G-C18", "same-sample pair accepted",
                  lambda: Pair("dataset A", {"sample": "dataset A", "arm": "b"},
                               {"sample": "dataset A", "arm": "t"}, "param_delta"))
@@ -2000,7 +2000,7 @@ def selftest_collate(tmp):
                   "param_delta")
         validate_pair({"host_node": "n1"}, pr,
                       {("dataset A", "b"): b, ("dataset A", "t"): t})
-    st.expect_abort("G-C19", "pair with different converter binaries (FAILURE 7)",
+    st.expect_abort("G-C19", "pair with different converter binaries",
                     lambda: pair_case({"tool_sha256": "t2"}))
     st.expect_abort("G-C19", "pair on different hosts",
                     lambda: pair_case({"host": {"node": "n2"}}))
@@ -2010,7 +2010,7 @@ def selftest_collate(tmp):
                     lambda: pair_case({"sage_config_sha256": "c2"}))
     st.expect_abort("G-C19", "pair with different estimands",
                     lambda: pair_case({"estimand_id": "z" * 16}))
-    st.expect_abort("G-C19", "pair whose members resolved identically (FAILURE 5)",
+    st.expect_abort("G-C19", "pair whose members resolved identically",
                     lambda: pair_case({"ini_sha256": "i1"}))
     st.expect_ok("G-C19", "well-formed pair validates", lambda: pair_case({}))
 
@@ -2215,7 +2215,7 @@ def selftest_collate(tmp):
                             [{k: v for k, v in r.items() if k != "Run"}
                              for r in _truth_rows("x", 5)], TRUTH_PARQUET_COLS[1:])
     raw08 = "/raw/dataset-A"
-    st.expect_abort("G-C09", "reference parquet describing ANOTHER sample (codex #9)",
+    st.expect_abort("G-C09", "reference parquet describing ANOTHER sample",
                     lambda: verify_reference(rep_wrong, "dataset A", raw08))
     st.expect_abort("G-C09", "parquet with no Run/File.Name column",
                     lambda: verify_reference(rep_nocol, "dataset A", raw08))

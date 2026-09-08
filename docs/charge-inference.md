@@ -1,25 +1,26 @@
 # READ THIS FIRST (2026-09-05): the confusion table below points the OTHER WAY
 
-A five-lens adversarial analysis, every claim below re-verified by hand in the code, found that
+Re-verified against the code 2026-09-05, every claim below checked by hand:
 **most of this document argues against the wrong failure.**
 
 **1. `4->2` means WE said 4 and the truth was 2 -- an OVERCALL, not an undercall.**
-`harness/collate.py:118` keys the counter `zc[(z, best["Precursor.Charge"])]` with `z` read off OUR
-mzML, and `:164` prints it `f"{a}->{t}"`. So the key is (ours, truth). The delta-mass a search
-engine sees is ours minus truth = **+1198 Da** at m/z 600, not the -1198 quoted in the help string
-at `src/spextractor.cpp:1509` and repeated below. The repository does not agree with itself on this.
+`harness/collate.py` keys the counter `zc[(z, best["Precursor.Charge"])]` with `z` read off OUR
+mzML, and prints it `f"{a}->{t}"`. So the key is (ours, truth). The delta-mass a search
+engine sees is ours minus truth = **+1198 Da** at m/z 600, not the -1198 quoted in the
+`assembly:open_search_safe` help string and repeated below. The repository does not agree with
+itself on this.
 
 **2. That table belongs to a retired algorithm whose tie-break is the OPPOSITE of the shipped one.**
 The table is the `envelope` arm. Envelope breaks score ties toward the HIGHEST z
-(`src/spextractor.cpp:2152`, `if (a.z != b.z) return a.z > b.z;`). The shipping `count` arm breaks
-ties toward the LOWEST z (`:2047-2048`, strict `>` over an ascending z loop from `best_n = 1`).
+(`if (a.z != b.z) return a.z > b.z;` in the envelope comparator). The shipping `count` arm breaks
+ties toward the LOWEST z (strict `>` over an ascending z loop from `best_n = 1`).
 **The shipped arm's confusion cells have never been measured -- they are `--` in the table below.**
 So the structural bias of the code that actually ships is toward UNDERCALL, and the fixes discussed
 in this file are aimed at an overcall produced by a tie-break the shipped code does not contain.
 
 **3. The envelope 49.7% measures a bug, so "averagine cosine cannot break z vs 2z" is unproven.**
-`xicCorr` returns a sentinel `-2.0` when fewer than three frames overlap (`:1905`) or a variance is
-zero (`:1907`). At `:2108` that sentinel is averaged in and then clamped:
+`xicCorr` returns a sentinel `-2.0` when fewer than three frames overlap or a variance is
+zero. That sentinel is then averaged in and clamped:
 `mean_corr = cn ? std::max(0.0, csum / cn) : 0.0`. One isotope with <3 shared frames therefore
 zeroes `cos_sim * mean_corr * evidence` outright, every poisoned hypothesis ties at exactly 0.0, and
 the tie-break hands the seed the HIGHEST charge that found two partners. That is a complete
@@ -28,26 +29,27 @@ against a measured MS1 FWHM of 3.61 s, so MS1 traces routinely sit on the `m < 3
 reference tool reaches 82.6% using exactly the criteria this file concluded were insufficient.
 
 **4. The one unambiguous code defect: the count walk always starts at z=1.**
-`:1970` is `for (int z = 1; z <= max_charge; ++z)` regardless of `charge:min_charge`. A seed won by
-z=1 marks its seed and every partner `used[]` at `:2062-2063`, and only afterwards, at `:3029`, are
-z<zmin precursors erased. **The peaks are spent on a precursor that is then deleted, and no z>=2
-hypothesis is ever formed for that seed.** This is an ownership defect, it is one line, and it is
-live in the shipping default (`charge:min_charge=2`).
+The walk is `for (int z = 1; z <= max_charge; ++z)` regardless of `charge:min_charge`. A seed won by
+z=1 marks its seed and every partner `used[]`, and only afterwards are z<zmin precursors erased.
+**The peaks are spent on a precursor that is then deleted, and no z>=2 hypothesis is ever formed for
+that seed.** This is an ownership defect and it is one line. It is dormant at the shipped default
+(`charge:min_charge=1` emits the z=1 call rather than erasing it) and live whenever `min_charge` is
+raised above 1.
 
-**5. `assembly:open_search_safe` is now a strict no-op, and yesterday's default made it worse.**
-`:3009` sets `pc.charge = 0` only where `pc.charge == 0` already, and marks exactly that set
-`guessed`; `:3013-3017` then erases every `guessed` precursor whenever
+**5. `assembly:open_search_safe` is now a strict no-op, and the 2026-09-04 default made it worse.**
+It sets `pc.charge = 0` only where `pc.charge == 0` already, and marks exactly that set
+`guessed`; the emission path then erases every `guessed` precursor whenever
 `assembly:require_isotope_support == "true"` -- the default since 2026-09-04. The precursors the
 flag exists to protect are deleted before it can act. Its comment still reads "OFF by default".
 
 **6. Charge errors cost CLOSED-search identifications today, in the published numbers.**
 `msfragger.params` has `override_charge = 0`, so MSFragger TRUSTS our annotation. Measured
-2026-09-02 (`docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`): forcing the engine to re-derive charge
+2026-09-02 (the charge-corruption test in `docs/BENCHMARK-MATRIX-2026-09-01.md`): forcing the engine to re-derive charge
 instead (`override_charge=1, z=1..5`) moved SpeXtractor 10,750 -> **11,238 (+4.5%)** against the
 reference tool's 13,004 -> 13,276 (+2.1%), narrowing the gap 2,254 -> 2,038. So roughly 10% of the
-MSFragger deficit is our charge labels, and it is recoverable. The help string's counter-claim at
-`:1509` -- "Closed search barely notices (charge unset cost only 1.3%: 8,123->8,019)" -- has no
-provenance anywhere in the repository.
+MSFragger deficit is our charge labels, and it is recoverable. The counter-claim in the
+`assembly:open_search_safe` help string -- "Closed search barely notices (charge unset cost only
+1.3%: 8,123->8,019)" -- has no provenance anywhere in the repository.
 
 **7. Every published charge number describes a tool that no longer exists.** 74.6% and the arm table
 predate `charge:min_charge=2`, `assembly:require_isotope_support=true`, the apex m/z estimator, the
@@ -56,16 +58,15 @@ population is disjoint from the shipped one, so 74.6% cannot be differenced agai
 nonetheless still quoted as a live adoption gate in `bench/README.md`.
 
 **8. Charge is the only metric in the harness with no chance floor.** The shifted-query control in
-`collate2.py:1044-1052` records `matched_decoy` but not `charge_pairs`. Correcting this can only
+`harness/collate2.py` records `matched_decoy` but not `charge_pairs`. Correcting this can only
 help: on a chance match our z is independent of truth, so chance agreement is
 `sum_z p_ours(z) p_truth(z) <= max_z p_truth(z)` -- chance matches drag the score toward or below
 the constant baseline, so the honest margin over "always answer z=2" is **wider** than +5.0 points.
 
-**THE ADJUDICATION EXPERIMENT** that would settle the direction question empirically -- pair our
-spectra with the reference tool's on co-identified precursors and decide from the spectra who is
-right -- is specified in `docs/BACKLOG.md` under "N+2". Note its central trap: both engines TRUST
-the declared charge, so the adjudicating search must re-derive it or the test merely echoes our own
-annotation back at us.
+**THE ADJUDICATION EXPERIMENT** that would settle the direction question empirically: pair our
+spectra with the reference tool's on co-identified precursors and decide from the spectra which is
+right. Note its central trap -- both engines TRUST the declared charge, so the adjudicating search
+must re-derive it or the test merely echoes our own annotation back at us.
 
 **WHAT TO DO, in order.** (a) Fix the z=1 ownership defect -- start the walk at `min_charge` -- and
 gate it on both engines plus entrapment, since it changes what is emitted. (b) Re-measure the
@@ -79,7 +80,7 @@ model against the 74.6% gate: the number is stale and the gate's 0.17% noise flo
 
 # Charge inference: what the 15.9% is, and what will not fix it
 
-The [[ms1-funnel]] localises **15.9%** of precursor loss to wrong charge assignment and
+The MS1 funnel analysis localises **15.9%** of precursor loss to wrong charge assignment and
 **10.5%** to failed monoisotope identification — against only 2.2% undetected. Truth-set
 charge agreement is **47.8% vs the reference implementation's 82.6%**, dominant confusion `4→2` (15,734 cases).
 

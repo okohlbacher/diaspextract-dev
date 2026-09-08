@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the mzPeak C++ library (github.com/OpenMS/mzpeak; fork okohlbacher/mzpeak-openms trunk) for
 # SpeXtractor's streaming .mzpeak input, against the SAME Arrow/Parquet/libzip OpenMS was built with.
-#   MZPEAK_SRC   checkout of the library                     (default /scratch/kohlbach/mzpeak-cpp)
+#   MZPEAK_SRC   checkout of the library                     (default ${HOME}/mzpeak-cpp)
 #   PKGCONF      pkg-config dir with arrow/parquet/libzip .pc (default OpenMS contrib)
 #   BOOST_ROOT   Boost >= 1.89 (json, compat)                 (default: OpenDIAlyzer env on ceph)
 #   TOOLS        dir with meson + ninja on PATH               (default: same env)
@@ -9,9 +9,9 @@
 # `| spx_to<C>()` and patches/spx_ranges_to.h is force-included. The library pins arrow>=24; OpenMS
 # contrib ships 23.0.0 and the code compiles against it, so the pin is relaxed here.
 set -eu
-MZPEAK_SRC=${MZPEAK_SRC:-/scratch/kohlbach/mzpeak-cpp}
-PKGCONF=${PKGCONF:-/scratch/kohlbach/contrib/build/lib/pkgconfig}
-BOOST_ROOT=${BOOST_ROOT:-/ceph/ibmi/abi/oliver/AI/OpenDIAlyzer/opt/env}
+MZPEAK_SRC=${MZPEAK_SRC:-${HOME}/mzpeak-cpp}
+PKGCONF=${PKGCONF:-${HOME}/contrib/build/lib/pkgconfig}
+BOOST_ROOT=${BOOST_ROOT:-${BOOST_PREFIX:-/usr}}
 TOOLS=${TOOLS:-$BOOST_ROOT/bin}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 export PATH=$TOOLS:$PATH PKG_CONFIG_PATH=$PKGCONF BOOST_ROOT

@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
-"""Delta-mass-family scoring of open-search output, v3 — rebuilt to the 2026-09-01 step-01
-adversarial review (kimi F1-F9, codex #1-#18).
+"""Delta-mass-family scoring of open-search output, v3 — rebuilt 2026-09-01 after independent
+review.
 
 What changed vs v2 and why:
 - NEAREST-CANDIDATE assignment (candidates = 0, isotope lattice +-k*1.0033548 k=1..15, curated KNOWN
   masses) with a ppm-SCALED tolerance, instead of ordered fixed-window checks: kills the
-  didehydro/iso-2 ordering bias [codex #8], the k<=9 cutoff arbitrariness [kimi F2, codex #10] and
-  the Da-constant tolerance mass bias [kimi F4, codex #12].
+  didehydro/iso-2 ordering bias, the k<=9 cutoff arbitrariness and the Da-constant tolerance mass
+  bias.
 - Pooled per-FAMILY walks only (unmod / nearzero / isotope / knownPTM / other), each reporting
   accepted targets AND entrapments, achieved FDR, score cutoff, and a 95% bootstrap CI, with a
-  conservative (e+1)/ratio numerator [codex 'Direct decisions']; tie-GROUPED walk (a cutoff never
-  splits a tied score) [codex #17].
+  conservative (e+1)/ratio numerator; tie-GROUPED walk (a cutoff never splits a tied score).
 - Per-bin numbers are DESCRIPTIVE ONLY and printed with a minimum-evidence rule: an @1% claim
   appears only if the accepted prefix contains >=10 entrapment observations; otherwise units + raw
-  entrap fraction only [kimi F5/F6, codex #3].
+  entrap fraction only.
 - Peptide-level DEDUP union report across unmod+nearzero (a peptide may hold several precursor
-  hypotheses) [kimi B4, codex #11].
-- Provenance header: script+input sha256, invocation, estimator ratio [codex #16].
+  hypotheses).
+- Provenance header: script+input sha256, invocation, estimator ratio.
 CAVEATS the output itself carries: deamidation (+0.9840, shared with citrullination) vs iso+1
 (+1.0034) are 19 mDa apart and NOT robustly separable at this data's precursor accuracy — they are
 reported as one ambiguous pair inside their families; entrapment FDR certifies the PEPTIDE, not the
-DELTA [kimi F6] — no per-bin walk can legitimate a delta value; and no site localization is done, so
-'knownPTM' counts mass-compatible peptide hypotheses, not localized PTM sites [codex #1].
+DELTA — no per-bin walk can legitimate a delta value; and no site localization is done, so
+'knownPTM' counts mass-compatible peptide hypotheses, not localized PTM sites.
 """
 import sys, os, csv, argparse, hashlib, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -98,7 +97,8 @@ def walk(items, ratio, fdr_cut):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fasta", default="/scratch/kohlbach/bench/human_entrap.fasta")
+    ap.add_argument("--fasta",
+                    default=os.path.join(os.environ.get("BENCH_ROOT", "."), "human_entrap.fasta"))
     ap.add_argument("--ppm", type=float, default=12.0)
     ap.add_argument("--floor", type=float, default=0.008)
     ap.add_argument("--fdr", type=float, default=1.0)

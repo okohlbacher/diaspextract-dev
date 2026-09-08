@@ -120,7 +120,7 @@ weakened form: the integer layout does pay, but only once the reimplementation s
 work the original did not have. The memory saving is the larger and the more certain of the two
 gains, and it is what raises the number of windows the admission gate can keep in flight.
 
-## 5. Risks, stated before the review
+## 5. Risks, stated in advance
 
 1. **`min_sample_rate` semantics.** OpenMS computes the hit rate over the frames it has visited in
    that direction. Reimplementing it subtly differently changes which traces survive, and it is the

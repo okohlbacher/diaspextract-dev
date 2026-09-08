@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Is the min_correlation gain REAL SIGNAL or an FDR RECALIBRATION artefact?
 
-The adversarial review's top BLOCKER: peptides rise (+7.7%) while PSMs FALL (-6.6%) and
+The top blocker found in review: peptides rise (+7.7%) while PSMs FALL (-6.6%) and
 fdr_loss_pct shifts. Sage computes peptide_q from ITS OWN decoys per run, so q<=0.01 is a
 DIFFERENT score cut in every arm -- the counts may not be comparable at all.
 
@@ -44,7 +44,7 @@ for arm in sys.argv[1:]:
     if not os.path.exists(tsv):
         continue
     b = load(tsv)
-    name = os.path.basename(arm).replace("S30__", "")
+    name = re.sub(r"^[A-Za-z0-9]+__", "", os.path.basename(arm))
     tgt = [(s, q) for (p, d), (s, q) in b.items() if not d]
     dec = [(s, q) for (p, d), (s, q) in b.items() if d]
     own = sum(1 for s, q in tgt if q <= 0.01)

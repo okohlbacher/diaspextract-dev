@@ -10,6 +10,7 @@ Selection rules:
   apex  = highest ms2_intensity in group            -> REALISTIC (ID-agnostic, an actual tool could do this)
   full  = no collapse (control)
 """
+import os
 import sys, os, csv, argparse, random
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # entrapment.py is a sibling
 from entrapment import peptide_ratio, _bootstrap_fdr
@@ -88,7 +89,7 @@ def targets_at_fdr(rows, ratio, fdr_cut=1.0):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fasta", default="/scratch/kohlbach/bench/human_entrap.fasta")
+    ap.add_argument("--fasta", default=os.environ.get("ENTRAP_FASTA", "human_entrap.fasta"))
     ap.add_argument("--rt-gap", type=float, default=10.0)
     ap.add_argument("arms", nargs="+", help="name=tsv")
     a = ap.parse_args()

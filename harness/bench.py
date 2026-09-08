@@ -322,7 +322,7 @@ HARNESS_VERSION = "1.0"
 
 def cmd_run(args) -> None:
     plan, reg = load_plan(Path(args.plan))
-    outroot = Path(args.out or f"/scratch/kohlbach/harness/{Path(args.plan).stem}")
+    outroot = Path(args.out or f"harness-runs/{Path(args.plan).stem}")
     outroot.mkdir(parents=True, exist_ok=True)
     bmeta = preflight(plan, reg)
 

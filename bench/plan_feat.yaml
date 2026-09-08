@@ -3,7 +3,7 @@ title: "wavelet precursor smoothing + intensity ranking, vs shipped defaults"
 # parameter search -- which matters, because parameter search on this file already produced one
 # retracted result (the min_correlation "+7.7%" was an FDR recalibration artefact).
 #
-#  wl025 / wl050  trace:wavelet_smooth = 0.25 / 0.50 x the MEASURED MS1 FWHM (3.61 s on dataset D, so
+#  wl025 / wl050  trace:wavelet_smooth = 0.25 / 0.50 x the MEASURED MS1 FWHM (3.61 s on dataset_D, so
 #                 0.9 s and 1.8 s). the reference implementation smooths its precursor XIC and THEN thresholds at
 #                 0.3; we copied the 0.3 without the smoothing, and Pearson r between two noisy
 #                 profiles is attenuated toward 0 as S/N falls -- worst at the faint precursors
@@ -19,7 +19,7 @@ title: "wavelet precursor smoothing + intensity ranking, vs shipped defaults"
 # adopted on the q-based count alone. A winner must ALSO (a) hold at a fixed cross-arm
 # discriminant threshold (bench/fdrcheck.py) and (b) not raise the entrapment error rate
 # (bench/entrapment.py). Failing either, it is recorded as another falsified lever.
-samples: [dataset D]
+samples: [dataset_D]
 binary: /scratch/kohlbach/OpenMS/build/bin/spextractor
 threads: 100
 arms:

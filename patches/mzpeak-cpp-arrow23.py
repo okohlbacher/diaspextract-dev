@@ -1,7 +1,7 @@
 # Arrow 23 (OpenMS contrib) has only the out-parameter ReadTable; the fork uses the Arrow-24 Result form
 # at ONE site. Version-guarded so the source stays correct for Arrow >= 24.
 import sys
-p = sys.argv[1] if len(sys.argv) > 1 else "/scratch/kohlbach/mzpeak-cpp/src/util/metadata_model.cpp"
+p = sys.argv[1] if len(sys.argv) > 1 else "mzpeak-cpp/src/util/metadata_model.cpp"
 s = open(p).read()
 if "ARROW_VERSION_MAJOR < 24" in s: print("already applied"); raise SystemExit
 old = """  arrow::Result<std::shared_ptr<arrow::Table>> result =

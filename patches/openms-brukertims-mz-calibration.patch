@@ -393,7 +393,7 @@
 +        // per frame slot: one spectrum per window of the group (empty = skipped)
 +        std::vector<std::vector<MSSpectrum>> out((size_t)n);
 +
-+        // chunk 1: chunk 4 over a 256-frame batch made 64 chunks = 64 workers (codex, plan review).
++        // chunk 1: chunk 4 over a 256-frame batch made 64 chunks = 64 workers.
 +        // The vendor SDK converter's thread-safety is not vouched for here -> serial unless opted in.
 +        static const bool par_ok = (g_mz_calibration.find("sdk") == std::string::npos)
 +                                   || std::getenv("SPEXTRACTOR_SDK_PARALLEL") != nullptr;

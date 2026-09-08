@@ -21,6 +21,12 @@ TREE=${1:?usage: apply_openms_patches.sh /path/to/OpenMS-source-tree}
 install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h"
 echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
 
+PIN=$(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
+HEAD_SHA=$(git -C "$TREE" rev-parse HEAD 2>/dev/null || echo unknown)
+if [ -n "$PIN" ] && [ "$HEAD_SHA" != unknown ] && [ "$HEAD_SHA" != "$PIN" ]; then
+  echo "WARNING: $TREE is at $HEAD_SHA, not the pinned $PIN. The patches may apply with fuzz." >&2
+fi
+
 for p in patches/*.patch; do
   if patch -p1 -N --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then
     patch -p1 -N -d "$TREE" < "$p"; echo "applied  $p"

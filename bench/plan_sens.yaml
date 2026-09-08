@@ -16,7 +16,7 @@ title: "sensitivity floor: does the co-elution gate strip real fragments from FA
 # NOT the sensitivity floor and this lever joins the four already closed (max_fragments, density,
 # charge, de-chimerization). A rise bought by a large PSM/redundancy increase without peptide gain
 # is NOT a win -- peptides at peptide_q<=0.01 is the metric.
-samples: [dataset D]
+samples: [dataset_D]
 binary: /scratch/kohlbach/rv/opt/bin/spextractor
 threads: 128
 arms:
