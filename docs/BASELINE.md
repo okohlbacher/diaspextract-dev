@@ -1839,3 +1839,21 @@ m/z (at m/z 500: 0.867 vs 0.822 1/K0 against a 3+ sigma of 0.051), so a multiply
 overlap is assigned 2 or 3 by whichever residual is smaller. The principled tie-breaker is the
 intermediate-isotope test (a co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 3+), which the
 `SPEXTRACTOR_Z1_DIAG` machinery already computes; not yet wired in.
+
+
+### New TNBC baseline T3 (v37, 2026-09-08)
+
+`charge:min_charge` 1 + the mobility veto change the spectrum list, so T2 is retired.
+**T3 = `88f89abad8eca9ca...`** (TNBC 009, v37, `/scratch/kohlbach/v37_009`). Extraction facts:
+
+| | T2 (v35) | T3 (v37) |
+|---|---:|---:|
+| spectra | 2,343,822 | **4,035,234** (+72%) |
+| veto | -- | 2,548,391 z=1 calls: 287,900 -> 2+, 178,226 -> 3+, 2,082,265 kept as 1+ |
+| peak RSS | 190.9 GB | **190.3 GB** (flat: emission is not what bounds memory) |
+| window loop | 412.0 s (80.0x) | 511.3 s (**90.6x**) |
+| wall | 11:35.90 (spock) | 13:43.10 on `data`, **contended** by a concurrent MSFragger -- not a head-to-head number; a clean rerun follows |
+
+The 72% more spectra cost no memory and ~+11% wall when uncontended (the earlier z>=1 arm ran
+in ~13:20 against 11:59 on the same node); the window loop's occupancy rose to 90.6x because
+more precursors means more scoring work to fill the tail with.
