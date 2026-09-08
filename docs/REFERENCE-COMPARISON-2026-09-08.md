@@ -158,3 +158,22 @@ z=1 effect with an engine-parameter flip triggered by the changed spectrum popul
 reference implementation reports them too; the halved 2+ calls are corrected by physics the
 instrument already measured; the residual stratum FDR is a search-engine calibration matter and is
 now documented rather than hidden.
+
+One refinement after the first measurement (v37 -> v38): the veto's 3+ arm was re-calling 7% of z=1
+calls to 3+, but only ~1.8% of z=1 calls are genuinely on the 3+ band (the 2+ and 3+ mobility lines
+are ~1 sigma apart at low m/z), and the re-calls identified nothing on either file (z=3 peptides
+5,313 -> 5,322 on 009, 3,888 -> 3,935 on S30) while adding 178k / 93k spectra. A z=1 call on the
+3+ band is now dropped rather than re-labelled.
+
+The like-for-like comparison, both tools under the same per-charge FDR walk, on 009:
+
+| | SpeXtractor v37 | reference | ratio |
+|---|---:|---:|---|
+| Sage peptides, per-charge 1% | 27,908 | 21,743 | **1.28** |
+| MSFragger peptides, per-charge 1% | 28,185 | 28,294 | **1.00** |
+| Sage, each engine's own pooled cut | 27,808 | 18,920 | 1.47 |
+| MSFragger, pooled cut | 26,588 | 27,427 | 0.97 |
+
+Per-charge control moves the reference more than us on Sage (its z>=2 strata sat below 1% under its
+pooled cut), which is why the honest Sage ratio is 1.28 rather than 1.47. On MSFragger the two tools
+are now at parity.
