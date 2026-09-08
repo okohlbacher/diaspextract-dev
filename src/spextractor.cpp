@@ -1926,6 +1926,7 @@ protected:
     // 22 million small vector allocations move from one thread to all of them and contend in the
     // allocator, and the parallel halves write adjacent doubles in the coordinate arrays. See
     // docs/BASELINE.md.
+    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); mts[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
     return out;
   }
 
