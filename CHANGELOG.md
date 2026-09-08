@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Changed
+- **`charge:min_charge` default 2 -> 1, with a new ion-mobility charge veto (`charge:im_charge_veto`,
+  on).** The old default rested on dataset D; on a 2-hour tryptic acquisition it discarded 14-20% of
+  Sage peptides and most of the MSFragger deficit against the reference implementation. Those
+  identifications are physically singly charged: short (7-9 aa), lysine-terminated, single-basic-site
+  tryptic peptides whose 1/K0 sits **+0.29 Vs/cm2 above the 2+ trend line** at the same m/z in
+  99.4-99.9% of cases -- identically in the reference implementation's own 1+ identifications -- and
+  which co-elute with their own 2+ ion where both are seen. Charge halving is nevertheless real: the
+  count walk calls a 2+ envelope z=1 whenever its M+1 is missing or already claimed and its M+2 is
+  present, ~13% of z=1 calls, 60% of them below m/z 750 where a 1+ cannot be scored at all. TIMS
+  resolves it: the 2+/3+ mobility lines are fitted per run from the run's own confident calls and a
+  z=1 whose mobility lies on them is re-called. Two things to know: the z=1 stratum carries ~2.8%
+  entrapment FDR at a nominal 1% *global* cut (short peptides; decoys reproduce it; per-charge FDR
+  downstream is advised), and a whole-run entrapment figure hides that -- report it by charge.
 - **`perf:ms1_trace_bands` default 12 -> 48: MS1 tracing is 2x faster.** The earlier sweep concluded
   more bands were worse (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a *serial* band
   distribution that grew with the band count. With that step parallel the order inverts:

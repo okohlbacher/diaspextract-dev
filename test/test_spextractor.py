@@ -7,7 +7,7 @@ checks that fail if the things most likely to break do break:
 
   1. isotope ownership   one z=2 envelope (M, M+1, M+2) must yield ONE precursor at the mono, not
                          three, and the M+1/M+2 peaks must not reseed precursors of their own
-  2. min_charge          a supported z=1 envelope is dropped at the default and kept at 1, while a
+  2. min_charge          a supported z=1 envelope is emitted at the default (1) and dropped at 2, while a
                          z=2 envelope is unaffected either way
   3. parameter bounds    a negative count must be REJECTED, not wrapped through Size into an
                          empty-but-successful run
@@ -241,20 +241,24 @@ def main():
             f"a z=2 precursor is not at the monoisotope {z2_mono}: {z2} -- an M+1/M+2 peak reseeded"
     check("isotope ownership: one z=2 precursor, at the mono", c1)
 
+    # [2026-09-08] The default is min_charge 1: singly charged calls are emitted, because on a 2-hour
+    # tryptic acquisition they are 14-20% of the Sage peptides and physically 1+ by ion mobility.
+    # The synthetic fixture is far too small for the mobility veto to fit a trend line, so the veto
+    # is inert here and the z=1 envelope must come through untouched.
     def c2():
-        assert not [p for p in pd if p[1] == 1], \
-            f"charge:min_charge=2 is the default but a z=1 precursor was emitted: {pd}"
-    check("min_charge default 2 drops the z=1 envelope", c2)
+        assert [p for p in pd if p[1] == 1], \
+            f"charge:min_charge=1 is the default but no z=1 precursor was emitted: {pd}"
+    check("min_charge default 1 emits the z=1 envelope", c2)
 
-    out_z1 = os.path.join(work, "z1.mzML")
-    run(binary, inp, out_z1, extra=["-charge:min_charge", "1"])
-    p1 = precursors(out_z1)
+    out_z2 = os.path.join(work, "z2only.mzML")
+    run(binary, inp, out_z2, extra=["-charge:min_charge", "2"])
+    p2 = precursors(out_z2)
 
     def c3():
-        assert [p for p in p1 if p[1] == 1], f"charge:min_charge=1 must emit the z=1 envelope: {p1}"
-        assert len([p for p in p1 if p[1] == 2]) == len([p for p in pd if p[1] == 2]), \
-            "lowering min_charge changed the z=2 result"
-    check("min_charge 1 restores it and leaves z=2 alone", c3)
+        assert not [p for p in p2 if p[1] == 1], f"charge:min_charge=2 must drop the z=1 envelope: {p2}"
+        assert len([p for p in p2 if p[1] == 2]) == len([p for p in pd if p[1] == 2]), \
+            "raising min_charge changed the z=2 result"
+    check("min_charge 2 drops it and leaves z=2 alone", c3)
 
     # 3: a negative count must be rejected, not wrapped through Size
     def c4():
