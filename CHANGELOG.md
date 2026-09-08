@@ -16,6 +16,9 @@
   z=1 whose mobility lies on them is re-called. Two things to know: the z=1 stratum carries ~2.8%
   entrapment FDR at a nominal 1% *global* cut (short peptides; decoys reproduce it; per-charge FDR
   downstream is advised), and a whole-run entrapment figure hides that -- report it by charge.
+  The veto's 3+ arm was measured and removed: re-calling a 3+-band z=1 to 3+ identified nothing on
+  either file while adding 4-10% spectra (only ~1.8% of z=1 calls are genuinely on the 3+ band; the
+  2+ and 3+ mobility lines are ~1 sigma apart at low m/z), so such calls are now dropped.
 - **`perf:ms1_trace_bands` default 12 -> 48: MS1 tracing is 2x faster.** The earlier sweep concluded
   more bands were worse (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a *serial* band
   distribution that grew with the band count. With that step parallel the order inverts:
