@@ -1807,11 +1807,16 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message. [bugfix]
     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
-    registerIntOption_("charge:min_charge", "<n>", 2, "Minimum precursor charge to emit; hypotheses below it "
-                       "are dropped before extraction. Default 2, because tryptic peptides are essentially never singly "
-                       "charged in ESI: z=1 hypotheses were ~30%% of emission and ~1.7%% of identified peptides, and removing "
-                       "them raised peptide counts on both search engines on all three benchmark files while cutting runtime "
-                       "17%%. Use 1 to emit them. 3 or more removes charge 2 and most of the result. Measurements: "
+    registerIntOption_("charge:min_charge", "<n>", 1, "Minimum precursor charge to emit; hypotheses below it "
+                       "are dropped before extraction. DEFAULT CHANGED 2 -> 1 on 2026-09-08. The old default rested on "
+                       "dataset D, where z=1 was ~30%% of emission and ~1.7%% of peptides; on a 2-hour tryptic acquisition "
+                       "(TNBC) it discards 14-20%% of Sage peptides and most of the MSFragger deficit against the reference "
+                       "implementation. Those identifications are physically singly charged: short (7-9 aa), lysine-terminated, "
+                       "single-basic-site tryptic peptides whose ion mobility sits +0.29 Vs/cm2 above the 2+ trend line at "
+                       "the same m/z in 99.4-99.9%% of cases -- a halved 2+ ion would carry the 2+ mobility. The halved 2+ "
+                       "ions that DO occur (~13%% of z=1 calls, sitting on the 2+ band) are re-called by charge:im_charge_veto. "
+                       "The z=1 stratum carries ~2.8%% entrapment FDR at a nominal 1%% global cut (short peptides; decoys "
+                       "reproduce it), so per-charge FDR control downstream is advised. Old text: "
                        "docs/ISOTOPE-DUPLICATION-2026-09-03.md.", false);
     // [route-1] Only 25.7%% of the reference implementation's precursors are matched by us with the RIGHT m/z AND charge;
     // 17.2%% have the wrong charge and 22.9%% (decoy-corrected) the wrong monoisotope. A wrong charge or
@@ -1822,6 +1827,18 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     setValidStrings_("charge:scoring", {"envelope", "count"});
     registerDoubleOption_("charge:ambiguity_margin", "<x>", 0.0, "If a different-charge hypothesis scores within this margin of the best, emit it too (the reference implementation retains multiple charges when ambiguous). 0 = single charge per precursor. ONLY EFFECTIVE with charge:scoring=envelope -- the default 'count' mode returns before this is consulted, so the value is ignored there.", false);
     registerFlag_("assembly:dedup_precursors", "[route-4] Collapse precursor hypotheses that are the same species (same charge, m/z within ppm, co-eluting RT, co-located IM). Measured redundancy: 4.6 identified spectra per unique peptide vs the reference implementation's 1.46.");
+    registerStringOption_("charge:im_charge_veto", "<true/false>", "true", "[im-veto] Use the ion-mobility charge-state trend "
+                          "lines to correct charge halving. In TIMS, 1+ and 2+ ions of the same m/z sit on separate 1/K0 lines "
+                          "(~+0.29 Vs/cm2 apart). The count walk calls a real 2+ envelope z=1 whenever its M+1 (+0.5017) is "
+                          "missing or already claimed and its M+2 (+1.0034) is present -- measured at ~13%% of z=1 calls on a "
+                          "2-hour file, 60%% of them below m/z 750 where a 1+ cannot be scored at all. The 2+ and 3+ lines are "
+                          "fitted per run from the run's own confident calls (>= 3 isotopes; 25-Th bin medians, MAD residual "
+                          "scale), and a z=1 call whose 1/K0 lies within charge:im_veto_band sigma of the 2+ (3+) line is "
+                          "re-assigned that charge. Genuine 1+ ions are untouched: 0.0-0.6%% of identified z=1 peptides sit on "
+                          "the 2+ band.", false);
+    setValidStrings_("charge:im_charge_veto", {"true", "false"});
+    registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "[im-veto] Half-width of the 2+/3+ mobility band, in MAD-sigma of "
+                          "the confident calls' residuals (measured residual sd ~0.037 1/K0 against a 1+/2+ separation of ~0.29).", false);
     registerStringOption_("assembly:require_isotope_support", "<true/false>", "true",
                           "[emission] Drop precursor hypotheses with NO isotope partner -- the 'guessed' "
                           "singletons. ON BY DEFAULT since 2026-09-04, when the shipped default (off) was "
@@ -3495,6 +3512,57 @@ registerIntOption_("trace:frame_aggregation_ms1_n", "<n>", 1, "[cross-frame] Sam
     }
     // Emulate the reference implementation, which assigns a charge to every precursor: give isotope-unsupported
     // precursors the default charge (0 = keep the strict isotope-only behavior and drop them).
+    // [im-veto 2026-09-08] Charge halving, corrected by ion mobility. See charge:im_charge_veto.
+    if (getStringOption_("charge:im_charge_veto") == "true")
+    {
+      auto fitLine = [&](int z, double& a, double& b, double& sig, size_t& n) -> bool {
+        std::map<int, vector<double>> bins;                           // 25-Th bins of 1/K0, confident calls only
+        for (const auto& pc : precursors)
+          if (pc.charge == z && pc.n_isotopes >= 3 && std::isfinite(pc.im) && pc.mono_mz > 0.0)
+            bins[(int)(pc.mono_mz / 25.0)].push_back(pc.im);
+        vector<double> xs, ys; n = 0;
+        for (auto& kv : bins)
+        {
+          auto& v = kv.second; if (v.size() < 30) continue;
+          std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+          xs.push_back((kv.first + 0.5) * 25.0); ys.push_back(v[v.size() / 2]); n += v.size();
+        }
+        if (xs.size() < 4) return false;
+        double sx = 0, sy = 0, sxx = 0, sxy = 0; const double m = (double)xs.size();
+        for (size_t i = 0; i < xs.size(); ++i) { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
+        const double den = m * sxx - sx * sx; if (den <= 0.0) return false;
+        b = (m * sxy - sx * sy) / den; a = (sy - b * sx) / m;
+        vector<double> res;
+        for (const auto& pc : precursors)
+          if (pc.charge == z && pc.n_isotopes >= 3 && std::isfinite(pc.im) && pc.mono_mz > 0.0)
+            res.push_back(fabs(pc.im - (a + b * pc.mono_mz)));
+        if (res.empty()) return false;
+        std::nth_element(res.begin(), res.begin() + res.size() / 2, res.end());
+        sig = 1.4826 * res[res.size() / 2];
+        return sig > 0.0;
+      };
+      double a2 = 0, b2 = 0, s2 = 0, a3 = 0, b3 = 0, s3 = 0; size_t n2 = 0, n3 = 0;
+      const bool ok2 = fitLine(2, a2, b2, s2, n2), ok3 = fitLine(3, a3, b3, s3, n3);
+      const double kband = getDoubleOption_("charge:im_veto_band");
+      size_t n1 = 0, to2 = 0, to3 = 0;
+      if (ok2)
+      {
+        for (auto& pc : precursors)
+        {
+          if (pc.charge != 1 || !std::isfinite(pc.im)) continue;
+          ++n1;
+          const double r2 = fabs(pc.im - (a2 + b2 * pc.mono_mz)) / s2;
+          const double r3 = ok3 ? fabs(pc.im - (a3 + b3 * pc.mono_mz)) / s3 : 1e9;
+          if (r2 <= kband && r2 <= r3) { pc.charge = 2; ++to2; }
+          else if (ok3 && r3 <= kband) { pc.charge = 3; ++to3; }
+        }
+        writeLogInfo_("[im-veto] 2+ line 1/K0 = " + String(a2) + " + " + String(b2) + " * m/z (n=" + String(n2) + ", sigma "
+                      + String(s2) + ")" + (ok3 ? "; 3+ line " + String(a3) + " + " + String(b3) + " * m/z (n=" + String(n3) + ", sigma " + String(s3) + ")" : String("; no 3+ line"))
+                      + ". Of " + String(n1) + " z=1 calls, " + String(to2) + " (" + String((int)(1000.0 * to2 / std::max<size_t>(n1, 1)) / 10.0)
+                      + "%) sit on the 2+ band and are re-called 2+, " + String(to3) + " re-called 3+, " + String(n1 - to2 - to3) + " kept as 1+");
+      }
+      else writeLogInfo_("[im-veto] too few confident 2+ calls to fit a mobility line; no z=1 re-calls");
+    }
     const int default_charge = getIntOption_("assembly:default_charge");
     // rp_max = per-fragment precursor cap. 0 = share-all (stream, memory-light). competitive flag = rp_max 1.
     int rp_max = getIntOption_("assembly:rp_max");
