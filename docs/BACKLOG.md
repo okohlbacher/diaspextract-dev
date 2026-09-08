@@ -487,13 +487,19 @@ entrapment FDR at a nominal 1% cut"), which a per-charge walk should undo.
 ### Overlap the loader's decode with its peak picking
 
 **The idea.** LOAD is now the second-largest phase (93.5 s of a 677 s run, 14%, after tonight's
-work). It alternates: the streaming reader fills a 256-frame buffer, then `PickCompactConsumer::
-flush_()` picks and compacts that buffer in parallel, then the reader fills the next one. The two
-never overlap. Measured on the 2-hour file: picking is 45.7 s of the 93.5 s, so decoding is the
-other ~48 s, and it runs at far lower parallelism than the pick does (LOAD averages 56x while the
-pick alone is near-saturating). Double-buffering -- hand the full buffer to a worker and let the
-reader carry on filling the next -- would hide the smaller of the two, worth up to ~40 s, ~6% of the
-run.
+work) and it runs at 56x on 100 threads: 5,266 CPU seconds against a 53 s floor, so **~40 s is lost
+to something other than work**. The structure is two parallel stages that ALTERNATE rather than
+overlap: the reader decodes a batch of frames (`BrukerTimsFile.cpp`, frame-major
+`#pragma omp parallel for schedule(dynamic, 1)`), hands the spectra to the consumer one at a time,
+and when the 256-frame buffer fills, `PickCompactConsumer::flush_()` picks and compacts it in a
+second parallel region. Measured: picking is 45.7 s of the 93.5 s. Both stages are already
+internally parallel, so the loss is not a serial stage -- it is the barrier and ramp at every batch
+boundary, plus the serial hand-off between them, repeated across thousands of frames.
+
+Note what this rules out: simply "parallelising the decode" is not the answer, because it already
+is. The candidates are (a) software-pipelining the two stages so batch N's pick overlaps batch N+1's
+decode, filling each other's ramps, and (b) reducing the number of boundaries -- which the batch
+size controls, and that is frozen (below).
 
 **Why it should be output-identical.** The frame grouping is what the picker is sensitive to, and
 double-buffering does not change it: batch i is still frames [256i, 256i+256), picked by the same
@@ -502,11 +508,12 @@ matters here because the batch size itself is frozen -- `SPEXTRACTOR_PICK_BATCH`
 -39% on the load phase but changes the digest and loses 7.2% of Sage peptides, so the picker carries
 per-thread state across frames and the grouping is load-bearing.
 
-**What would falsify it.** The decode is already internally parallel and saturating, in which case
-there is nothing to overlap and the two phases are simply competing for the same cores -- check by
-instrumenting decode wall and CPU separately before building anything. Or the reader cannot release
-a buffer without stalling (it owns the frames it hands over), making the hand-off a copy that costs
-what the overlap saves.
+**What would falsify it.** Both stages already saturate the cores while they run, so overlapping
+them only fills ramps -- if instrumenting decode wall and CPU separately shows each stage near 100x
+inside its own region, the recoverable 40 s is mostly barrier cost and pipelining buys a fraction of
+it, not the lot. Or the reader cannot release a buffer without stalling (it owns the frames it hands
+over), making the hand-off a copy that costs what the overlap saves. Measure the two stages
+separately before building anything.
 
 ### `perf:ms1_trace_bands` 96: faster, and output-changing
 
