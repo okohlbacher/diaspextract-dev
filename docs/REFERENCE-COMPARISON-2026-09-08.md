@@ -127,11 +127,30 @@ consumed the 2+ envelope's peaks, so the old default lost those 2+ ions too. **F
 | whole run | 1.01% | 0.90% |
 
 This is not an extraction artefact: decoys reproduce it (3.3-4.0% of z=1 targets clear the global
-threshold against 0.3% of z=2), and zero z=1 peptides sit on the 2+ band. It is the ordinary
-random-match rate of short peptides under one pooled score threshold subsidised by the strong z>=2
-strata; adding the z=1 search space *lowered* the z>=2 strata (0.85 -> 0.43%), which is exactly why
-the pooled 1.01% looked clean. Remedy is downstream (per-charge or per-length FDR). **A whole-run
-entrapment figure must never again be quoted without its charge strata.**
+threshold against 0.3% of z=2; z=1 is in fact the best-calibrated stratum, entrapment/decoy ratio
+1.3 against 2.2 for z=2), zero z=1 peptides sit on the 2+ band, and the false z=1 hits are themselves
+on the 1+ mobility line -- genuine 1+ ions matched to the wrong sequence, not halved 2+ ions.
+
+It is also NOT "short peptides are intrinsically hard": at matched discriminant score *and* matched
+length, z=1 8-10-mers are 3-5x dirtier than z=2 8-10-mers (009 score octiles: 11.0/2.9/4.1/2.8%
+against 2.2/1.7/1.3/0.0%), and within z=1 at equal score 7-mers are no worse than 8-10-mers. The
+mechanism is a **lower true-match prior in the z=1 stratum under one pooled threshold**: 63% of
+emitted z=1 spectra produce no rank-1 row at all (32% for z>=2) and 7.5% of the rest reach
+spectrum q <= 0.01 (15.9% for z>=2). Any subgroup with a lower prior sits above 1% under a global
+cut. Adding the z=1 search space also refits Sage's LDA (discriminant scores change for 100% of the
+shared z>=2 PSMs) and *lowered* the z>=2 strata (0.85 -> 0.43%), which is exactly why the pooled
+1.01% looked clean. The reference implementation's own 1+ stratum shows the same thing (decoy FDR
+1.4% on 009, 7.6% on 001), so it is an engine-side calibration property of the class.
+
+**Remedy, measured:** a per-charge FDR walk puts z=1 at 0.87%, z=2 at 1.09%, whole run 0.97% on
+001, while keeping the gain -- 19,236 Sage peptides per-charge against 16,029 for the default arm
+under the same walk (**+20.0%**). The SpeX-only z=1 peptides carry protein co-support (another
+accepted z>=2 peptide on the same protein) in 92.9% of cases, against 39% for accepted decoys.
+**A whole-run entrapment figure must never again be quoted without its charge strata.**
+
+One caveat on the 001 MSFragger numbers: MSFragger's parameter optimisation chose
+`intensity_transform=1` for the default arm and `0` for the z>=1 arm, so its +6.8% on 001 mixes the
+z=1 effect with an engine-parameter flip triggered by the changed spectrum population; 009 is clean.
 
 ### Decision
 
