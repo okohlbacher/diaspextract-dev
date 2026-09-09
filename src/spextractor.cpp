@@ -305,7 +305,16 @@ namespace
     vector<double>   b;          ///< frame -> calibration factor (empty on the OpenMS path)
     vector<double>   frame_rt;   ///< frame -> RT value, for toTrace()'s frame lookup
     vector<float>    inten;      ///< arena of spans
-    vector<uint32_t> bins;       ///< arena of per-frame bins (integer path, until EPD)
+    /// [bin-delta] A point's flight-time bin, stored as the SIGNED OFFSET from its trace's own
+    /// bin (`Trace::tof`), not as the absolute bin. A mass trace is assembled within
+    /// `trace:mass_error_ppm` of its seed, and one bin is 6.4 ppm at m/z 600 / 3.8 ppm at 1700, so
+    /// the offsets a real trace produces are single digits; int16 leaves ~30,000 bins of headroom
+    /// and the writer throws rather than truncate. Absolute bins needed 32 bits for a 19-bit
+    /// quantity: 2 B x 5.2e9 arena slots on a 2-hour acquisition.
+    /// Reconstruct with `t.tof + bins[t.off + k]` -- and note that reproduces the old sentinel
+    /// exactly: a point whose absolute bin was 0 still reconstructs to 0, and a trace from a
+    /// binless source has `tof == 0` so its zero-filled slots still reconstruct to 0.
+    vector<int16_t> bins;        ///< arena of per-frame bin OFFSETS (integer path, until EPD)
     size_t frames() const { return rt_index.size(); }
     void setFrames(const vector<uint32_t>& ri, const vector<double>* bb)
     {
@@ -328,12 +337,12 @@ namespace
       if (base + other.inten.size() >= (size_t)std::numeric_limits<uint32_t>::max())
         throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
       inten.insert(inten.end(), other.inten.begin(), other.inten.end());
-      if (!other.bins.empty()) { bins.resize(base, 0u); bins.insert(bins.end(), other.bins.begin(), other.bins.end()); }
+      if (!other.bins.empty()) { bins.resize(base, 0); bins.insert(bins.end(), other.bins.begin(), other.bins.end()); }
       // Once ANY source has contributed bins, keep bins index-parallel to inten: a later binless
       // source would otherwise leave bins short, and a bins[t.off + k] read would run off the end.
       // No current caller mixes the two, which is exactly why this is worth pinning down here.
-      else if (!bins.empty()) bins.resize(inten.size(), 0u);
-      vector<float>().swap(other.inten); vector<uint32_t>().swap(other.bins);
+      else if (!bins.empty()) bins.resize(inten.size(), 0);
+      vector<float>().swap(other.inten); vector<int16_t>().swap(other.bins);
       return (uint32_t)base;
     }
   };
@@ -1155,9 +1164,15 @@ namespace
       for (const auto& g : got) { pts.emplace_back(g.first, sl.inten[g.second]);
                                   if (sl.inten[g.second] > sl.inten[kap]) { kap = g.second; fap = g.first; } }
       Trace t = makeSpan(pts, store);
-      store.bins.resize(store.inten.size(), 0u);
-      for (const auto& g : got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
-      t.tof = sl.tof[kap]; t.bframe = fap;   // got-order first max: the frame the bin was measured on
+      const uint32_t t_tof = sl.tof[kap];             // this trace's own bin: the offsets' origin
+      store.bins.resize(store.inten.size(), 0);
+      for (const auto& g : got)
+      {
+        const int64_t d = (int64_t)sl.tof[g.second] - (int64_t)t_tof;   // [bin-delta]
+        if (d < -32768 || d > 32767) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+        store.bins[t.off + (g.first - t.frame0)] = (int16_t)d;
+      }
+      t.tof = t_tof; t.bframe = fap;   // got-order first max: the frame the bin was measured on
       t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
       t.rt_at = (int16_t)((int64_t)fap - (int64_t)t.frame0);   // [soa-rt] was rtAxis()[sl.rt_index[fap]]
       t.im = IM_LO + cim / IM_Q;
@@ -1225,7 +1240,8 @@ namespace
         {
           if (!real(wst, t, k)) continue;
           Peak2D pt; pt.setRT(rtAtSpan(wst, t, k)); pt.setIntensity(xv(wst, t, k));
-          const uint32_t bin = wst.bins.empty() ? 0u : wst.bins[t.off + k];
+          // [bin-delta] reconstruct the absolute bin; identical to the value this used to store
+          const uint32_t bin = wst.bins.empty() ? 0u : (uint32_t)((int64_t)t.tof + wst.bins[t.off + k]);
           pt.setMZ(ax.ok && bin ? ax.mzOf(bin, wst.b[t.frame0 + k]) : t.mz);
           pk.push_back(pt);
         }
@@ -1256,7 +1272,7 @@ namespace
     }
     // the parents' spans are dead: rebuild the window arena from the chunk arenas
     vector<Trace>().swap(in);
-    vector<float>().swap(wst.inten); vector<uint32_t>().swap(wst.bins);
+    vector<float>().swap(wst.inten); vector<int16_t>().swap(wst.bins);
     size_t tot = 0, arena = 0; bool any_bins = false;
     for (int ci = 0; ci < nchunk; ++ci)
     { tot += parts[ci].size(); arena += stores[ci].inten.size(); any_bins |= !stores[ci].bins.empty(); }
@@ -3750,7 +3766,7 @@ protected:
             frag_traces.reserve(tot);
             wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);   // as in splitIntegerTraces
             writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + " merge: " + String(nb) + " band arenas, "
-                          + String(arena) + " floats (" + String(arena * (any_bins ? 8 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
+                          + String(arena) + " floats (" + String(arena * (any_bins ? 6 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
             for (int b = 0; b < nb; ++b)
             {
               const uint32_t base = wst.absorb(bst[b]);
@@ -3770,7 +3786,7 @@ protected:
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4);
           w_split = secs(std::chrono::steady_clock::now() - _ts);
           if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
-          vector<uint32_t>().swap(wst.bins);
+          vector<int16_t>().swap(wst.bins);
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
                         + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
                         + " -> " + String(frag_traces.size()) + " (cap " + String(frag_traces.capacity()) + ", "
