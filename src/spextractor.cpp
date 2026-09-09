@@ -820,21 +820,36 @@ namespace
     size_t frames() const { return frame_off.empty() ? 0 : frame_off.size() - 1; }
     size_t peaks()  const { return tof.size(); }
     size_t bytes()  const { return tof.size() * 4 + inten.size() * 4 + imq.size() * 2; }
-    /// Append one picked frame. Growth by 1.25x, not the library's 2x: the loader cannot reserve
-    /// exactly (it does not know the picked count up front), and 2x would leave ~40% of the run's
-    /// largest allocation as slack; the remainder is returned by shrink() once the load is done.
-    void append(const CompactFrame& f)
+    /// Append one picked frame. The loader cannot reserve exactly (the picked count is not known up
+    /// front), and geometric growth copies the store several times over (1.25x: ~5x the final
+    /// size, +31 s of LOAD on dataset D). Instead the capacity is projected from the frames seen
+    /// so far and the number of frames EXPECTED (`expected_frames`, the MS1 frame count: one MS2
+    /// frame per window per cycle, and MS1 arrives first on both readers): the running mean
+    /// converges after a few frames, so a window reallocates two or three times, not fifteen.
+    void append(const CompactFrame& f, size_t expected_frames)
     {
       if (frame_off.empty()) frame_off.push_back(0);
-      auto grow = [](auto& v, size_t n) { if (v.size() + n > v.capacity()) v.reserve(std::max(v.size() + n, v.capacity() + v.capacity() / 4)); };
-      grow(tof, f.mzq.size()); grow(inten, f.inten.size()); grow(imq, f.imq.size());
+      const size_t F = frames(), n = f.mzq.size();
+      auto grow = [&](auto& v, size_t add) {
+        if (v.size() + add <= v.capacity()) return;
+        const double per_frame = F ? (double)v.size() / (double)F : (double)add;
+        const size_t want = (size_t)(per_frame * (double)std::max(expected_frames, F + 1) * 1.05) + add;
+        v.reserve(std::max(v.size() + add, std::max(want, v.capacity() + v.capacity() / 4)));
+      };
+      grow(tof, n); grow(inten, f.inten.size()); grow(imq, f.imq.size());
       tof.insert(tof.end(), f.mzq.begin(), f.mzq.end());
       inten.insert(inten.end(), f.inten.begin(), f.inten.end());
       imq.insert(imq.end(), f.imq.begin(), f.imq.end());
       rt.push_back(f.rt); frame_id.push_back(f.frame_id);
       frame_off.push_back((uint32_t)tof.size());
     }
-    void shrink() { tof.shrink_to_fit(); inten.shrink_to_fit(); imq.shrink_to_fit(); }
+    /// Return the slack -- but only when it is worth a full copy of the window (> 1/16).
+    size_t shrink()
+    {
+      const size_t slack = (tof.capacity() - tof.size()) * 4 + (inten.capacity() - inten.size()) * 4 + (imq.capacity() - imq.size()) * 2;
+      if (tof.capacity() - tof.size() > tof.size() / 16) { tof.shrink_to_fit(); inten.shrink_to_fit(); imq.shrink_to_fit(); return slack; }
+      return 0;
+    }
   };
 
   /// Ordered, incremental digest of a window's slab: frame table (rt index, factor bits, count) then
@@ -1474,7 +1489,7 @@ namespace
       {
         if (!TileProbe::get().keepFrame(compacted[(size_t)i].rt)) { ++frames_probe_dropped; continue; }   // [tile-1]
         stats_ += st[(size_t)i];
-        windows_[key_[(size_t)i]].append(compacted[(size_t)i]);   // the frame's vectors die with `compacted`
+        windows_[key_[(size_t)i]].append(compacted[(size_t)i], ms1_.size());   // the frame's vectors die with `compacted`
       }
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
@@ -3197,7 +3212,7 @@ protected:
         const OpenMS::Precursor& pr = s.getPrecursors()[0];
         double lo = pr.getMZ() - pr.getIsolationWindowLowerOffset();
         double hi = pr.getMZ() + pr.getIsolationWindowUpperOffset();
-        ms2_by_window[winKey(lo, hi, windowGroupOf(s.getNativeID()))].append(compactify(s, cstat));
+        ms2_by_window[winKey(lo, hi, windowGroupOf(s.getNativeID()))].append(compactify(s, cstat), ms1_map.size());
         s.clear(true);   // [mem] the picked frame is dead once compacted; waiting for exp.clear()
       }                  // below held the whole picked run (20 B/peak) beside the compact store
     }
@@ -3251,17 +3266,24 @@ protected:
       // [tile-2d] frame times -> axis indices, and the load-time growth slack returned, window by
       // window (one window's copy in flight at a time, not all of them at once).
       const double _ts = phase_clock_(); const long _r0 = rss_mb_();
-      size_t slack = 0;
+      size_t slack = 0, kept = 0;
       for (auto& kv : ms2_by_window)
       {
         PeakSlab& sl = kv.second;
-        slack += (sl.tof.capacity() - sl.tof.size()) * 10;
+        const size_t before = (sl.tof.capacity() - sl.tof.size()) * 10;
         indexRt(sl);
-        sl.shrink();
+        const size_t got = sl.shrink();
+        slack += got; kept += before - got;
       }
-      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis; "
-                    + String(slack / (1024ULL * 1024ULL)) + " MB of growth slack returned in "
-                    + String(phase_clock_() - _ts) + " s [RSS " + String(_r0) + " -> " + String(rss_mb_()) + " MB]");
+      // The picking threads' arenas hold every per-frame temporary the load ever freed (glibc
+      // keeps a thread's high-water mark); return them now, not after the MS1 phase.
+#ifdef __GLIBC__
+      if (trim_on) malloc_trim(0);
+#endif
+      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis; growth slack "
+                    + String(slack / (1024ULL * 1024ULL)) + " MB returned, " + String(kept / (1024ULL * 1024ULL))
+                    + " MB kept (< 1/16), in " + String(phase_clock_() - _ts) + " s [RSS " + String(_r0) + " -> "
+                    + String(rss_mb_()) + " MB]" + mem_());
     }
 
     //-------------------------------------------------------------
