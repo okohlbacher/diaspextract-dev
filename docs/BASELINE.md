@@ -2472,7 +2472,51 @@ whole-process peak stays at 82 GB per tile because the load and the MS1 phase ar
    26,083 common, 1,776 whole-only, 1,848 tiled-only (93.6%). For calibration, the max_span arms
    of step 0c -- a change to 0.1-0.6% of traces -- flip 30-112 of 12.6 k peptides (0.2-0.9%), and
    the project's 2026-09-02 thread-count comparison flipped 20% of the union at a 2% count
-   difference: an FDR-thresholded set is a poor instrument for small perturbations. The
-   per-spectrum comparison (`bench/mzml_specdiff.py`, whole vs concatenated, differing spectra
-   binned by distance to the nearest 600-s boundary) is the instrument; its result is recorded
-   below when it lands.
+   difference: an FDR-thresholded set is a poor instrument for small perturbations. The per-spectrum comparison is the instrument, and it settled it:
+**Per-spectrum attribution (`bench/mzml_specdiff.py`, whole vs tiled, 3,920,295 spectra aligned by
+(RT, m/z, z)):** 0.29% identical, 61.0% differ in the m/z list, 38.7% in the peak count, 0.01% only
+in one file -- and **uniformly in RT**: 99.7% of the spectra more than 123 s from any boundary
+differ, the same as within 30 s of one. Dataset D, one tile [0, 900) at H = 123: 99.7% again,
+including spectra 600-900 s from the only boundary, on a dataset whose longest post-split MS2 trace
+spans 345 s. Per spectrum ~90% of the fragments are identical (same m/z, identical intensities) and
+the rest are DIFFERENT TRACES -- so the split of traces, not their detection, depends on where the
+window is cut. Cause, in the OpenMS source: `ElutionPeakDetection::detectElutionPeaks_` sets the
+Savitzky-Golay window (and the local-extrema neighbourhood) from `chrom_fwhm /
+mt.getAverageMS1CycleTime()`, and the tool hands EPD each parent's REAL points only, so a long
+gappy parent (a background ion seen intermittently across the run) has an inflated cycle time, a
+narrower window, and any sub-range of it -- what a tile sees -- is smoothed and split differently
+from the whole. Parents split 1.25-1.30 ways on TNBC (20.8 M -> 26.0 M, 29.4 M -> 38.2 M on two
+windows); children are short (TNBC, 1.22e9 traces: span p99 44 s, max 421 s; one-sided p99 35 s,
+> 123 s 0.0034%), parents are not bounded at all. Fix (d85c2b4): EPD gains `scan_time` (0 = as
+before) and the tool passes the MS level's median frame spacing (`trace:split_scan_time=frame`,
+default; `trace` = the old behaviour), so the window is the same for every trace and the split is
+local. Review (Codex/GPT-6, docs/reviews/2026-09-09-split-scan-time/): the patch and plumbing are
+correct and `trace` reproduces the old arithmetic; two defects fixed in 86444a5 (an upper median
+of the gaps is 2x the cycle when most frames of a sparse window were skipped -> smallest positive
+gap; `ceil(7 / 1.4)` sits on an integer and flips with the last bit -> backed off by 1e-6 on the
+fixed path). Two findings that stand: (a) EPD's valley DECISIONS compare maxima across the whole
+parent (ElutionPeakDetection.cpp:278-294, the retained-maximum logic), so a fixed window makes the
+smoothing local but not the decision -- a counterexample splits the whole trace and not its
+5-point-shorter crop with identical interior smoothing; full tile invariance therefore needs
+BOUNDED PARENTS (a cap on the detector's extension around the seed), which is a design decision;
+(b) a fixed point count is a fixed time span only on gap-free traces (SG convolves by index), so
+the frame-spacing window over-smooths sparse traces and can merge two separable peaks that the
+per-trace window kept apart -- the default is an empirical change to be judged on peptides, not a
+neutral correction. Gates: the `trace` arm must reproduce `bc3c5ac9`; the `frame` default is
+Sage-gated on D against 12,625; then the probe's tile t6 against the whole run under the new
+default.
+## 2026-09-09: tiling plan step 2 -- the output-identical refactors, each D-gated
+
+Every arm below reproduces the tail-fix pin on dataset D (`bc3c5ac9`, `SPECTRUM DATA IDENTICAL`)
+and passes the e2e suite; the reference is `/scratch/kohlbach/tail_S30/pseudo.mzML`
+(ceph `share/refs/S30_tail_bc3c5ac9.mzML`).
+
+| step | commit | what changed | gate result |
+|---|---|---|---|
+| 2b/2c mzPeak `frame=` + flight-time axis from the archive's embedded tdf | fdb33b6 | `frameIdOf()` returned 0 on every mzPeak spectrum, so the integer detector never ran on that input; the exact-m/z path's calibration now feeds `setTofAxis()` | `.d` identical; mzPeak (S30 v0.9.2 archive + sidecar tdf): **integer detector runs for the first time**, 855,561 spectra, Sage **12,537 vs 12,625 from the .d (-0.7%)**; LOAD 131 s / 63 GB peak against 45 s / 43 GB (the library decode). The July S08 archive carries no per-window IM band and never streamed. |
+| 2e `TileWriter` at one block | 3856893, 371653d | `PlainMSDataWritingConsumer` subclass: header once, blocks appended in canonical order, per-thread encoders, index offsets rebased, exact count when known, same-width placeholder otherwise; native IDs renewed as `spectrum=<rank>` (what the bulk writer emitted for our id-less spectra) | identical; **WRITE 19.6 -> 13.2 s (11.7x -> 29.4x)**; header differs only in completion time and the `out` name; INDEX VALID (855,575 offsets); e2e check 14 (count/id/index/indexList) added, 0f534bd |
+| 2g content-only MS1 trace order | 7cd120f | `(mz, rt, im, intensity, npts, len, first frame time)`, equal-key neighbours logged | **0 equal-key neighbours** on D; identical |
+| 2d-ii the loader builds the slabs directly | 98b34d5, eb04568, a77e089, 9c97b60 | `CompactFrame` store and `toSlab` deleted; frames appended to the window's `PeakSlab` as picked, m/z quanta -> bins in place at window start; one reusable per-batch scratch; 2.5x virtual over-reservation, no shrink; per-window append in parallel | identical, **24/24 per-window slab digests identical**; LOAD on D: 45 s (old) -> 80 (1.25x growth, per-frame temporaries) -> 65 (projected reserve + shrink) -> 59 (scratch) -> see #4; RSS at load end 31.1 -> 40.3 GB (11.7 GB of arena free-list appears during the load and is returned after the slab pass: 39.0 -> 28.3 GB); D peak 43.3 -> 46.2 GB (load-phase, below the loop peak on the 2-h file) |
+
+Not done: 2a (the frame table comes with the tiled reader), 2f (exact by the metadata check --
+frames per window group == non-empty frames on both datasets -- and lands with the reader).
