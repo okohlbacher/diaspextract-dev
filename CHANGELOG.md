@@ -48,6 +48,17 @@ unchanged.
   first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
 
 ### Changed (2026-09-09)
+- **The valley splitter's smoothing window comes from the acquisition's cycle time
+  (`trace:split_scan_time=frame`, new default; `trace` restores the old behaviour).** OpenMS
+  ElutionPeakDetection derives its Savitzky-Golay window from each mass trace's own average cycle
+  time, and the tool hands it a trace's real points only, so a trace with gaps was smoothed with a
+  narrower window than its neighbours and split more. With one run-wide window the traces are
+  fewer and longer -- 37% fewer MS1 traces and 28% fewer spectra on the 30-minute file, 16% fewer
+  spectra on the 2-hour file -- and identify MORE peptides: Sage 12,625 -> 13,388 (+6.0%) and
+  27,859 -> 28,845 (+3.5%), with the entrapment FDR at nominal 1% moving from 1.35% to 1.16% on
+  the 30-minute file (12,496 vs 11,722 target peptides against the entrapment database). Found
+  while measuring RT tiling: the per-trace window made a trace's split depend on where the run was
+  cut. The EPD patch gains an advanced `scan_time` parameter (0 = the OpenMS default).
 - **mzPeak input runs the integer detector.** mzPeak native IDs now carry `frame=<Id>` and the
   flight-time axis is built from the archive's embedded (or sidecar) `analysis.tdf`; before, every
   mzPeak spectrum was unmappable and the tool fell back to the OpenMS detector with a warning. On

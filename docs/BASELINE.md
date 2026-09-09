@@ -2574,8 +2574,17 @@ So the fixed window is a large whole-run change, not a neutral correction (the r
 it splits far less -- most MS1 traces from MassTraceDetection have gaps, their per-trace windows
 were narrow, and the run-wide window is wider -- and the fewer, longer traces identify MORE
 peptides on both files. Whether the +6% / +3.5% is real signal or an FDR-calibration artefact of
-a smaller search space is what the entrapment search and the second engine decide (below, when
-they land); until then the default stays `frame` on the development branch only.
+a smaller search space is what the entrapment search and the second engine decide. **Entrapment
+(Sage, human + Arabidopsis, dataset D, `bench/entrap_apply.py`, peptide-hypothesis ratio 0.6805):**
+
+| arm | target peptides | entrapment hits | raw | FDR at nominal 1% | 95% CI |
+|---|---:|---:|---:|---:|---|
+| `trace` (old) | 11,722 | 108 | 0.91% | 1.35% | 1.11-1.62% |
+| `frame` (new) | **12,496 (+6.6%)** | 99 | 0.79% | **1.16%** | 0.94-1.40% |
+
+More peptides at a lower measured error rate: the gain is signal, not recalibration (the old arm's
+1.35% matches the 1.33% recorded for D at the shipped defaults on 2026-09-05). MSFragger, the
+second engine, is recorded below when it lands; `frame` is the default on the development branch.
 
 **Tile invariance: no.** probe2 (arm `split1`, TNBC 009, core t6 3600-4200 s at H = 123 against
 the whole run under the same default): 314,685 core spectra, 379 identical (0.1%), 210,822 differ
