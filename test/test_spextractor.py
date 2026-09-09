@@ -400,10 +400,18 @@ def main():
     #     fixture into two cells (14 cycles of 1.4 s; pitch 10 s = 7 frames -> 2 cells).
     def c15():
         import re
-        r1 = run(binary, inp, os.path.join(work, "cell1.mzML"), extra=("-tile:rt_sec", "10"), threads=1)
-        r4 = run(binary, inp, os.path.join(work, "cell4.mzML"), extra=("-tile:rt_sec", "10"), threads=4)
+        # the cells exist only on the integer detector: without the tdf the tool falls back to
+        # openms and clears the grid AFTER logging it (the first version of this check passed vacuously)
+        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
+        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        r1 = run(binary, inp, os.path.join(work, "cell1.mzML"), extra=("-tile:rt_sec", "10"), threads=1, env=env)
+        r4 = run(binary, inp, os.path.join(work, "cell4.mzML"), extra=("-tile:rt_sec", "10"), threads=4, env=env)
         m = re.search(r"\[cell\] pitch [0-9.]+ s = (\d+) MS1 frames .*?: (\d+) cells", r1.stdout + r1.stderr)
         assert m and int(m.group(2)) >= 2, "the fixture was not cut into >= 2 cells:\n" + (r1.stdout + r1.stderr)[-800:]
+        assert detector_of(os.path.join(work, "cell1.mzML")) == "integer", "cells need the integer detector; it did not run"
+        hdr = open(os.path.join(work, "cell1.mzML"), encoding="utf-8", errors="replace").read(200000)
+        mb = re.search(r'spx:tile_boundaries"[^>]*value="([^"]*)"', hdr)
+        assert mb and mb.group(1) not in ("", "none"), "the header records no cut lines"
         assert digest(os.path.join(work, "cell1.mzML")) == digest(os.path.join(work, "cell4.mzML")), \
             "tile:rt_sec output differs between 1 and 4 threads"
     check("the cell grid is thread-invariant", c15)
