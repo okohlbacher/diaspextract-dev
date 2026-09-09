@@ -1253,6 +1253,19 @@ namespace
     return out;
   }
 
+  /// The acquisition's frame spacing: the median gap between consecutive frame times. This is the
+  /// scan time the valley splitter's smoothing window is derived from (trace:split_scan_time=frame):
+  /// derived per trace instead, a gappy trace's own average is inflated by its gaps, so its window
+  /// is narrower and a sub-range of it (an RT tile) is split differently from the whole.
+  inline double frameSpacing(const vector<double>& frame_rt)
+  {
+    if (frame_rt.size() < 2) return 0.0;
+    vector<double> d; d.reserve(frame_rt.size() - 1);
+    for (size_t i = 1; i < frame_rt.size(); ++i) d.push_back(frame_rt[i] - frame_rt[i - 1]);
+    std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+    return d[d.size() / 2] > 0.0 ? d[d.size() / 2] : 0.0;
+  }
+
   /// Integer traces -> MassTrace objects for EPD -> Trace again, with the flight-time bin
   /// re-attached from the apex frame's calibration. Only the TRACES become OpenMS objects -- the
   /// peak arrays never do, which is the point of the integer path.
@@ -1265,7 +1278,7 @@ namespace
   /// what was measured -- occupancy 44x against 81x for the OpenMS path, and MORE peak memory,
   /// after the per-band sorts and the per-visit calibration calls had already been removed and
   /// changed nothing.
-  vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, TraceStore& wst, int nchunk)
+  vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, TraceStore& wst, int nchunk, double scan_time)
   {
     if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);   // OpenMS branch: EPD needs > 1
     const TofAxis& ax = tofAxis();
@@ -1296,6 +1309,7 @@ namespace
         ep.setValue("chrom_fwhm", split_valleys);
         ep.setValue("width_filtering", "off");
         ep.setValue("masstrace_snr_filtering", "false");
+        ep.setValue("scan_time", scan_time);                 // 0 = the trace's own average (pre-2026-09-09)
         epd.setParameters(ep);
       }
       vector<Trace>& out = parts[ci];
@@ -1852,6 +1866,8 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
+    registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time the valley splitter's smoothing window (chrom_fwhm / scan time) is derived from. 'frame': the acquisition's frame spacing (the median gap between consecutive frames of the MS level), the same for every trace. 'trace': each mass trace's own average cycle time, as OpenMS ElutionPeakDetection does by default -- which a trace with gaps inflates, so long gappy traces got a narrower window than their neighbours and a sub-range of such a trace was split differently from the whole (the behaviour before 2026-09-09).", false, true);
+    setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' "
                           "(default) works on the global integer m/z axis: it finds a peak's candidate traces by "
                           "arithmetic instead of a tolerance search, and never converts the compact store back "
@@ -2011,8 +2027,18 @@ protected:
   /// window that would otherwise stay resident through the valley-splitting peak. [compact]
   vector<Trace> detectTraces_(PeakMap& map, TraceStore& store, double delta_im, double noise,
                               double snr, double min_len, double min_sample_rate,
-                              double split_valleys, String* span_log = nullptr, int bands = 1)
+                              double split_valleys, String* span_log = nullptr, int bands = 1,
+                              bool split_by_frame = true)
   {
+    // the acquisition's frame spacing for the splitter's smoothing window (0 = per trace)
+    double split_scan_time = 0.0;
+    if (split_by_frame)
+    {
+      vector<double> rts; rts.reserve(map.size());
+      for (const auto& sp : map) rts.push_back(sp.getRT());
+      std::sort(rts.begin(), rts.end());
+      split_scan_time = frameSpacing(rts);
+    }
     MassTraceDetection mtd;
     mtd.setLogType(ProgressLogger::NONE); // quiet + thread-safe (called from the parallel window loop)
     Param p = mtd.getParameters();
@@ -2041,6 +2067,7 @@ protected:
       ep.setValue("chrom_fwhm", split_valleys);
       ep.setValue("width_filtering", "off");
       ep.setValue("masstrace_snr_filtering", "false");
+      ep.setValue("scan_time", split_scan_time);             // 0 = the trace's own average (pre-2026-09-09)
       epd.setParameters(ep);
       vector<MassTrace> out; out.reserve(in.size());
       epd.detectPeaks(in, out);
@@ -3337,6 +3364,7 @@ protected:
     const double ms2_minlen = getDoubleOption_("trace:ms2_min_length_sec");
     const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
     double ms2_split = getDoubleOption_("trace:ms2_split_valleys");
+    const bool split_by_frame = (getStringOption_("trace:split_scan_time") == "frame");
     const double max_span = getDoubleOption_("trace:max_span_sec");
     String ms1_span;
     // [parallel] MS1 tracing was UNBANDED: the call never passed a band count, so it defaulted to
@@ -3360,7 +3388,8 @@ protected:
     #pragma omp parallel
     #pragma omp single
     ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
-                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands);
+                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands,
+                                             split_by_frame);
     { const double cap = max_span;
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
@@ -4113,7 +4142,8 @@ protected:
           // store pointers are set again afterwards; the per-frame bins are dead after it.
           n_parents = frag_traces.size();
           auto _ts = std::chrono::steady_clock::now();
-          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4);
+          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4,
+                                           split_by_frame ? frameSpacing(wst.frame_rt) : 0.0);
           w_split = secs(std::chrono::steady_clock::now() - _ts);
           // [tile-0d] RT extent of fragment traces on the INTEGER path, which `ms2_span` never
           // reports (it is only filled by the OpenMS detector). Two figures per trace: the total
@@ -4154,7 +4184,7 @@ protected:
           { vector<uint32_t> ri; ri.reserve(wmap.size());          // wmap is RT-sorted above
             for (const auto& sp : wmap) ri.push_back(rtIndex(sp.getRT()));
             wst.setFrames(ri, nullptr); }
-          frag_traces = detectTraces_(wmap, wst, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, ms2_split, &ms2_span, w_bands);
+          frag_traces = detectTraces_(wmap, wst, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_msr, ms2_split, &ms2_span, w_bands, split_by_frame);
           if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
         }
         // the window's spans and records, released with the window (the old add-only line was

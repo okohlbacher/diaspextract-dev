@@ -1,4 +1,4 @@
-# SpeXtractor: two changes to OpenMS ElutionPeakDetection.
+# SpeXtractor: three changes to OpenMS ElutionPeakDetection.
 #
 # 1. Make detectPeaks(vector) lock-free for nested parallel callers.
 #
@@ -20,8 +20,16 @@
 # unchanged: MS1 tracing CPU 411 -> 228 s (-44%), the window loop 10,132 -> 9,105 CPU s (-10%),
 # total CPU -11%, spectrum list byte-identical.
 #
+# 3. An optional fixed scan time for the smoothing window (param "scan_time", 0 = as before).
+#
+# win_size = chrom_fwhm / mt.getAverageMS1CycleTime(): a trace's own average cycle time is
+# inflated by its gaps when the caller hands over real points only, so a long gappy trace gets a
+# narrower window than its neighbours, and a sub-range of it (an RT tile) is smoothed and split
+# differently from the whole. A caller that knows the acquisition's frame spacing passes it; the
+# default reproduces the old behaviour byte for byte.
+#
 # Base: OpenMS/OpenMS develop bd4b89555629d68b431b189a4c841efbcc4dfeea (2026-04-24).
-# Regenerated 2026-09-08 against that commit; verified to reproduce the built tree byte-for-byte.
+# Regenerated 2026-09-09 against that commit; verified to reproduce the built tree byte-for-byte.
 # Apply with: patch -p1 -d <OpenMS tree> < this file
 --- a/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
 +++ b/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
@@ -33,7 +41,20 @@
  
  #ifdef _OPENMP
  #include <omp.h>
-@@ -325,23 +326,34 @@
+@@ -38,6 +39,12 @@
+ 
+     defaults_.setValue("masstrace_snr_filtering", "false", "Apply post-filtering by signal-to-noise ratio after smoothing.", {"advanced"});
+     defaults_.setValidStrings("masstrace_snr_filtering", {"true","false"});
++    // [SpeXtractor] The smoothing window is chrom_fwhm / scan time. Derived from the trace's own
++    // points, the scan time of a trace with gaps is inflated by the gaps (the caller may hand over
++    // real points only), so a long, gappy trace gets a NARROWER window than its neighbours and a
++    // sub-range of it is smoothed differently from the whole -- the split is then a function of
++    // where the trace was cut. A caller that knows the acquisition's frame spacing sets it here.
++    defaults_.setValue("scan_time", 0.0, "Scan (cycle) time in seconds used to convert chrom_fwhm into the smoothing window. 0 = derive it from each mass trace's own average cycle time.", {"advanced"});
+ 
+     defaultsToParam_();
+     this->setLogType(CMD);
+@@ -325,23 +332,34 @@
      this->startProgress(0, mt_vec.size(), "elution peak detection");
      Size progress(0);
  #ifdef _OPENMP
@@ -80,7 +101,16 @@
      return;
    }
  
-@@ -456,12 +468,7 @@
+@@ -384,7 +402,7 @@
+     // Step 1: Smooth data
+     // *********************************************************************
+ 
+-    double scan_time(mt.getAverageMS1CycleTime());
++    double scan_time(scan_time_ > 0.0 ? scan_time_ : mt.getAverageMS1CycleTime());
+     Size win_size = std::ceil(chrom_fwhm_ / scan_time);
+ 
+     // add smoothed data (original data is still accessible)
+@@ -456,12 +474,7 @@
            mt.estimateFWHM(true);
          }
  
@@ -94,7 +124,7 @@
  
        }
      }
-@@ -541,12 +548,7 @@
+@@ -541,12 +554,7 @@
              new_mt.estimateFWHM(true);
            }
  
@@ -108,7 +138,7 @@
          }
        }
      }
-@@ -573,16 +575,30 @@
+@@ -573,16 +581,30 @@
      }
  
      MSSpectrum spectrum;
@@ -144,3 +174,21 @@
      sg.filter(spectrum);
      MSSpectrum::iterator iter = spectrum.begin();
      std::vector<double> smoothed_intensities;
+@@ -625,6 +647,7 @@
+     chrom_peak_snr_ = (double)param_.getValue("chrom_peak_snr");
+     min_fwhm_ = (double)param_.getValue("min_fwhm");
+     max_fwhm_ = (double)param_.getValue("max_fwhm");
++    scan_time_ = (double)param_.getValue("scan_time");
+ 
+     pw_filtering_ = param_.getValue("width_filtering").toString();
+     mt_snr_filtering_ = param_.getValue("masstrace_snr_filtering").toBool();
+--- a/src/openms/include/OpenMS/FEATUREFINDER/ElutionPeakDetection.h
++++ b/src/openms/include/OpenMS/FEATUREFINDER/ElutionPeakDetection.h
+@@ -130,6 +130,7 @@
+ 
+     double min_fwhm_;
+     double max_fwhm_;
++    double scan_time_ = 0.0;   ///< [SpeXtractor] fixed scan time for the smoothing window; 0 = per trace
+ 
+     /// Type of width filtering
+     String pw_filtering_;
