@@ -243,20 +243,39 @@ namespace spx
     }
   }
 
-  /// Stream an .mzpeak run into `consumer` (MS1 first, then MS2 per (frame, window), frame order).
-  /// Returns the number of frames seen.
-  inline std::size_t loadMzPeakStreaming(const std::string& path, OpenMS::FullSwathFileConsumer& consumer, int threads)
+  /// [frames] The archive's run metadata from ONE sweep (no peak decode): per spectrum its RT,
+  /// vendor frame id, isolation windows with their 1/K0 bands, and number_of_peaks (MS:1003059,
+  /// -1 when the archive does not record it); the MS1/MS2 index lists; the exact calibration.
+  /// Cached by path so the frozen frame tables and every tile of a tiled read share it: 72k
+  /// metadata() calls once per run, never per tile.
+  struct MzPeakRunMeta
   {
-    // 1) metadata sweep (no peak decode): RT, level, windows with IM bands, per frame
+    std::string path;
+    std::vector<double> rt;
+    std::vector<long> frame_id;
+    std::vector<std::vector<MzPeakWin>> wins;
+    std::vector<std::size_t> ms1, ms2;
+    std::vector<long> n_peaks;
+    bool n_peaks_known = true;   ///< false = at least one spectrum lacks number_of_peaks (its frames count as present)
+    std::shared_ptr<MzPeakExactMz> exact;
+  };
+  inline std::shared_ptr<const MzPeakRunMeta>& lastMzPeakMeta() { static std::shared_ptr<const MzPeakRunMeta> p; return p; }
+
+  inline std::shared_ptr<const MzPeakRunMeta> mzPeakRunMeta(const std::string& path)
+  {
+    if (lastMzPeakMeta() && lastMzPeakMeta()->path == path) return lastMzPeakMeta();
+    auto meta = std::make_shared<MzPeakRunMeta>();
+    meta->path = path;
     MzPeak::Index index = MzPeak::open(path);
     MzPeak::Spectra spectra = index.spectra();
     const std::size_t n = spectra.size();
     lastMzPeakCalibration() = "mzpeak_two_point_transform (library-applied MS:1003825 from the archive; not the TDF MzCalibration model) archive=" + path.substr(path.find_last_of('/') + 1);
-    std::vector<double> rt(n);
-    std::vector<long> frame_id(n, -1);
-    std::vector<std::vector<MzPeakWin>> wins(n);
-    std::vector<std::size_t> ms1, ms2;
-    std::shared_ptr<MzPeakExactMz> exact;
+    std::vector<double>& rt = meta->rt; rt.assign(n, 0.0);
+    std::vector<long>& frame_id = meta->frame_id; frame_id.assign(n, -1);
+    std::vector<std::vector<MzPeakWin>>& wins = meta->wins; wins.assign(n, {});
+    std::vector<std::size_t>& ms1 = meta->ms1; std::vector<std::size_t>& ms2 = meta->ms2;
+    meta->n_peaks.assign(n, -1);
+    std::shared_ptr<MzPeakExactMz>& exact = meta->exact;
     lastMzPeakExact().reset();
     // DEFAULT ON (2026-09-02 18:58): with the exact model recovered from the tdf, mzPeak input gives 12,082 Sage
     // peptides vs 10,785 with the archive's two-point transform (and 12,217 from .d): the transform was 91% of the
@@ -279,6 +298,7 @@ namespace spx
       const auto& md = sp.metadata();
       rt[i] = md.retention_time.value_or(0.0);
       { const std::string& id = md.id; const auto pos = id.find("frame="); if (pos != std::string::npos) frame_id[i] = std::atol(id.c_str() + pos + 6); }
+      if (md.number_of_peaks) meta->n_peaks[i] = (long)*md.number_of_peaks; else meta->n_peaks_known = false;
       if (md.ms_level.value_or(1) == 1) { wins[i] = {MzPeakWin{0, 0, -1e9, 1e9}}; ms1.push_back(i); continue; }
       // Selected ions carry the per-window 1/K0 band. mzpeak-convert 0.9.x writes precursor_index
       // as NULL and the band as NAME-ONLY CV params; the reader then attaches every ion of the
@@ -313,6 +333,22 @@ namespace spx
       }
       if (!wins[i].empty()) ms2.push_back(i);
     }
+    lastMzPeakMeta() = meta;
+    return meta;
+  }
+
+  /// Stream an .mzpeak run into `consumer` (MS1 first, then MS2 per (frame, window), frame order).
+  /// Returns the number of frames seen.
+  inline std::size_t loadMzPeakStreaming(const std::string& path, OpenMS::FullSwathFileConsumer& consumer, int threads)
+  {
+    // 1) the run metadata (cached sweep)
+    const std::shared_ptr<const MzPeakRunMeta> meta = mzPeakRunMeta(path);
+    const std::vector<double>& rt = meta->rt;
+    const std::vector<long>& frame_id = meta->frame_id;
+    const std::vector<std::vector<MzPeakWin>>& wins = meta->wins;
+    const std::vector<std::size_t>& ms1 = meta->ms1;
+    const std::vector<std::size_t>& ms2 = meta->ms2;
+    const std::shared_ptr<MzPeakExactMz>& exact = meta->exact;
 
     // 2) decode in parallel over contiguous ranges (row-group locality), hand off serially in order
     int nthr = std::max(1, threads);

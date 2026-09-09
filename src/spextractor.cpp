@@ -865,10 +865,13 @@ namespace
         const size_t want = (size_t)(per_frame * (double)std::max(expected_frames, F + 1) * 2.5) + add;
         v.reserve(std::max(v.size() + add, want));
       };
-      grow(tof, n); grow(inten, n); grow(imq, n);
-      tof.insert(tof.end(), mzq_, mzq_ + n);
-      inten.insert(inten.end(), inten_, inten_ + n);
-      imq.insert(imq.end(), imq_, imq_ + n);
+      if (n)   // an EMPTY frame (a padded table frame) carries no peak pointers
+      {
+        grow(tof, n); grow(inten, n); grow(imq, n);
+        tof.insert(tof.end(), mzq_, mzq_ + n);
+        inten.insert(inten.end(), inten_, inten_ + n);
+        imq.insert(imq.end(), imq_, imq_ + n);
+      }
       rt.push_back(frame_rt); frame_id.push_back(fid);
       frame_off.push_back((uint32_t)tof.size());
     }
@@ -1543,6 +1546,35 @@ namespace
     size_t frames_seen = 0;
     size_t frames_probe_dropped = 0;   ///< [tile-1] MS2 frames outside the probe's range + halo
 
+    /// [frames] A window's FROZEN frame table (rt, vendor id) in the reader's delivery order, with
+    /// the lockstep cursor: every table frame the reader skipped before the delivered one -- a raw
+    /// frame with no peaks, an empty ion-mobility slice, a probe-dropped frame -- is appended EMPTY
+    /// with the table's own rt and id, so the slab's frame sequence IS the table's in every mode
+    /// (an empty frame is a scan, not a miss; a missing frame would be neither). Measured 0 pads
+    /// on both pinned datasets, so today's output is unchanged; under the tiled readers the pads
+    /// stand in for the frames that are not resident.
+    struct FrameTab
+    {
+      std::vector<double> rt; std::vector<uint32_t> id;
+      size_t cur = 0, delivered = 0, padded = 0;
+      /// pad up to the delivered frame `t` (bitwise the table's rt); false = not in the table
+      bool step(PeakSlab& sl, double t, size_t expected_frames)
+      {
+        while (cur < rt.size() && rt[cur] != t) { sl.append(rt[cur], id[cur], nullptr, nullptr, nullptr, 0, expected_frames); ++cur; ++padded; }
+        if (cur == rt.size()) return false;
+        ++cur; ++delivered; return true;
+      }
+      void tail(PeakSlab& sl, size_t expected_frames)
+      { for (; cur < rt.size(); ++cur, ++padded) sl.append(rt[cur], id[cur], nullptr, nullptr, nullptr, 0, expected_frames); }
+    };
+    using FrameTables = std::map<WinKey, FrameTab>;
+    /// The reader's frozen tables, fetched at the first MS2 flush: both streaming readers publish
+    /// their metadata before their first MS2 frame (the .d loader exports its frame table and
+    /// windows before its MS2 loop, the mzPeak reader sweeps the archive before decoding). Unset
+    /// (an mzML) = no tables, no padding: the slab is its own table.
+    std::function<FrameTables()> tablefn;
+    const FrameTables& tables() const { return tables_; }
+
     /// [perf-load] Pick+compact a BATCH of buffered frames in parallel, then append in arrival
     /// order. OpenMS hands frames over a strictly serial `for (fid..) consumeSpectrum(spec)` loop,
     /// so before this the peak picking of 1.26e9 peaks ran on ONE thread and was 53% of total wall
@@ -1552,6 +1584,7 @@ namespace
     /// the 1e-5..1e-4 relative level (Sage count unchanged).
     void flush_()
     {
+      if (!tables_init_) { tables_init_ = true; if (tablefn) tables_ = tablefn(); }
       const int n = (int)buf_.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
@@ -1596,24 +1629,42 @@ namespace
       // Append in arrival order per window, the windows of this batch in parallel: a window's
       // frames stay in order (one thread walks them), distinct windows never touch each other's
       // slab, and the copy of ~1 GB per batch into cold pages no longer runs on one thread.
-      std::vector<std::pair<PeakSlab*, std::vector<int>>> per_win;
+      struct Batch { PeakSlab* slab; FrameTab* tab; std::vector<int> idx; };
+      std::vector<Batch> per_win;
       { std::map<WinKey, size_t> at;
         for (int i = 0; i < n; ++i)
         {
           if (!TileProbe::get().keepFrame(frt[(size_t)i])) { ++frames_probe_dropped; continue; }   // [tile-1]
           stats_ += st[(size_t)i];
-          auto it = at.find(key_[(size_t)i]);
-          if (it == at.end()) { it = at.emplace(key_[(size_t)i], per_win.size()).first; per_win.emplace_back(&windows_[key_[(size_t)i]], std::vector<int>()); }
-          per_win[it->second].second.push_back(i);
+          const WinKey& k = key_[(size_t)i];
+          auto it = at.find(k);
+          if (it == at.end())
+          { it = at.emplace(k, per_win.size()).first;
+            auto tt = tables_.find(k);
+            per_win.push_back(Batch{&windows_[k], tt == tables_.end() ? nullptr : &tt->second, {}}); }
+          per_win[it->second].idx.push_back(i);
         } }
       const size_t n_ms1 = ms1_.size();
+      std::exception_ptr pad_err;
       #pragma omp parallel for schedule(dynamic, 1)
       for (long w = 0; w < (long)per_win.size(); ++w)
-        for (int i : per_win[(size_t)w].second)
+      {
+        Batch& bw = per_win[(size_t)w];
+        for (int i : bw.idx)
         {
+          if (bw.tab && !bw.tab->step(*bw.slab, frt[(size_t)i], n_ms1))   // [frames] lockstep with the frozen table
+          {
+            #pragma omp critical(pad_err)
+            if (!pad_err) pad_err = std::make_exception_ptr(Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                  "[frames] a delivered MS2 frame is not in its window's frozen frame table (window "
+                  + String(key_[(size_t)i][0] / 100.0) + "-" + String(key_[(size_t)i][1] / 100.0) + ")", String(frt[(size_t)i], 6)));
+            break;
+          }
           const size_t o = scratch_off_[(size_t)i];
-          per_win[(size_t)w].first->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], n_ms1);
+          bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], n_ms1);
         }
+      }
+      if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
     }
@@ -1681,7 +1732,14 @@ namespace
     /// silently (dataset D: 210 of 32,210 = the last 105 frames of the last window group, which
     /// the .d reader emits group-major; at batch 4096 it was 3,538 and two whole windows -- the
     /// "7.2% of Sage peptides" on record for that batch size was this, not the picker).
-    void finish() { flushMS1_(); flush_(); }
+    void finish()
+    {
+      flushMS1_(); flush_();
+      // [frames] the tail of every delivered window's table; a table window that delivered nothing
+      // gets no slab (it is counted as absent by the caller)
+      for (auto& kv : tables_)
+      { auto w = windows_.find(kv.first); if (w != windows_.end()) kv.second.tail(w->second, ms1_.size()); }
+    }
 
   private:
     /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
@@ -1694,6 +1752,7 @@ namespace
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
+    FrameTables tables_; bool tables_init_ = false;   ///< [frames] the reader's frozen tables + cursors
     std::vector<size_t> scratch_off_;                 ///< per-frame regions of the batch scratch (raw sizes)
     std::vector<uint32_t> scratch_mzq_; std::vector<float> scratch_inten_; std::vector<uint16_t> scratch_imq_;
     PeakPickerIM& picker_;
@@ -3183,6 +3242,7 @@ protected:
     const bool stream_load = (getStringOption_("perf:stream_load") == "true");
     const bool trim_on = (getStringOption_("perf:malloc_trim") == "true");
     bool streamed = false;
+    String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
 
     if (stream_load)
     {
@@ -3198,13 +3258,60 @@ protected:
       if (const char* m = std::getenv("SPEXTRACTOR_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
       spicker.setParameters(sp);
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
-      try
+#ifdef SPEXTRACTOR_WITH_MZPEAK
+      const bool in_mzpeak = (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK);
+#else
+      const bool in_mzpeak = false;
+#endif
+      // [frames] The frozen frame tables come from the READER's metadata, keyed with the reader's
+      // own precursor expressions so the keys equal the consumer's: the .d loader exports its
+      // frame table and windows (patch: lastDIAFrameTable/lastDIAWindows; frames with no raw peaks
+      // are skipped for every window, as the loop skips them), the mzPeak reader its cached sweep
+      // (a spectrum with number_of_peaks == 0 yields only empty window spectra). An mzML is
+      // resident and untiled: no table, the slab is its own.
+      if (in_mzpeak)
       {
 #ifdef SPEXTRACTOR_WITH_MZPEAK
-        if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
-#else
-        if (false)
+        frame_table_src = "mzpeak";
+        consumer.tablefn = [&]() {
+          PickCompactConsumer::FrameTables t;
+          const auto m = spx::lastMzPeakMeta();
+          if (!m) return t;
+          for (size_t i : m->ms2)
+          {
+            if (m->n_peaks[i] == 0) continue;
+            for (const auto& w : m->wins[i])
+            {
+              const double c = 0.5 * (w.lo + w.hi), off = 0.5 * (w.hi - w.lo);   // frameToSpectra_'s precursor
+              auto& tab = t[winKey(c - off, c + off, 0)];
+              tab.rt.push_back(m->rt[i]); tab.id.push_back(m->frame_id[i] < 0 ? 0u : (uint32_t)m->frame_id[i]);
+            }
+          }
+          return t; };
 #endif
+      }
+      else
+      {
+        frame_table_src = "loader";
+        consumer.tablefn = [&]() {
+          PickCompactConsumer::FrameTables t;
+          const auto& ft = BrukerTimsFile::lastDIAFrameTable();
+          for (const auto& w : BrukerTimsFile::lastDIAWindows())
+          {
+            const auto g = ft.find(w.window_group);
+            if (g == ft.end()) continue;
+            const double c = w.mz_center, off = w.mz_width / 2.0;                 // BrukerTimsFile's precursor
+            const WinKey k = winKey(c - off, c + off, (uint32_t)w.window_group);
+            if (t.count(k))
+              throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] two DIA windows share one key", String(c - off) + "-" + String(c + off));
+            auto& tab = t[k];
+            for (const auto& r : g->second) if (r.num_peaks > 0) { tab.rt.push_back(r.time); tab.id.push_back(r.frame_id); }
+          }
+          return t; };
+      }
+      try
+      {
+        if (in_mzpeak)
         {
 #ifdef SPEXTRACTOR_WITH_MZPEAK
           spx::loadMzPeakStreaming(in, consumer, n_threads_req);   // consumer counts frames itself
@@ -3215,6 +3322,27 @@ protected:
         else BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
         consumer.finish();                                          // the last partial batch
         streamed = true;
+        if (consumer.tables().empty()) frame_table_src = "slab";    // the reader published no table
+        else
+        {
+          size_t n_pad = 0, n_del = 0, n_absent = 0;
+          for (const auto& kv : consumer.tables())
+          {
+            const String wl = String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0);
+            const auto w = ms2_by_window.find(kv.first);
+            if (w == ms2_by_window.end()) { ++n_absent; writeLogInfo_("[frames] window " + wl + ": absent (no frame delivered), " + String(kv.second.rt.size()) + " in the table"); continue; }
+            if (w->second.rt != kv.second.rt)   // the invariant the frozen tables rest on
+              throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] a window's slab is not its frozen frame table after padding", wl);
+            n_pad += kv.second.padded; n_del += kv.second.delivered;
+            writeLogInfo_("[frames] window " + wl + ": delivered " + String(kv.second.delivered) + ", padded " + String(kv.second.padded) + " of " + String(kv.second.rt.size()));
+          }
+          writeLogInfo_("[frames] source=" + frame_table_src + " windows=" + String(consumer.tables().size()) + " delivered=" + String(n_del) + " padded=" + String(n_pad) + " absent=" + String(n_absent));
+#ifdef SPEXTRACTOR_WITH_MZPEAK
+          if (in_mzpeak && spx::lastMzPeakMeta())
+            writeLogInfo_(String("[frames] mzPeak number_of_peaks ") + (spx::lastMzPeakMeta()->n_peaks_known ? "recorded: frames with none are skipped like the .d loop's"
+                                                                                                             : "absent: every listed MS2 frame counts as present (a frame with no peaks would be padded)"));
+#endif
+        }
         phase_stats_()["LOAD(stream)"].wall = phase_clock_();      // [perf-instr] start-to-here
         phase_stats_()["LOAD(stream)"].cpu  = cpu_seconds_();
         phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
@@ -4621,7 +4749,7 @@ protected:
     out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
     out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
-    out_exp.setMetaValue("spx:frame_table", "slab");      // the frozen tables' source (slab | loader | mzpeak)
+    out_exp.setMetaValue("spx:frame_table", frame_table_src);   // the frozen tables' source (loader | mzpeak | slab)
     out_exp.setMetaValue("spx:pearson_G", "frames");
     out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
