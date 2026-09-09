@@ -2279,6 +2279,27 @@ the fit is not linear down to one window: something in the loop is not per-windo
 spectra accumulate regardless of concurrency, and allocator retention differs between the arms).
 Do not use the slope outside the measured range, and do not read the intercept as a floor.
 
+
+## 2026-09-09: Fix A -- return the drained compact store when the last window has materialised (adopted)
+
+One `malloc_trim(0)` where the last window's `toSlab` returned (58c0981, arm `fixA` = `soa2` + this),
+gated identical on D (`b499027f`, e2e 13/13) and measured interleaved on `data` against `soa2`,
+TNBC 009, 100 threads, 250 ms VmRSS sidecar, `MemAvailable` 977-1079 GB at every start:
+
+| | `soa2` r1 | `fixA` r1 | `soa2` r2 | `fixA` r2 | mean |
+|---|---:|---:|---:|---:|---:|
+| peak RSS (`time -v`) | 168.93 GB | 139.23 | 169.17 | 136.91 | **169.05 -> 138.07 GB (-31.0 GB, -18.3%)** |
+| sidecar peak | 169.07 | 139.33 | 169.23 | 136.83 | agrees to 0.2% |
+| wall | 10:54.7 | 11:15.8 | 11:39.9 | 10:49.4 | 677.3 -> 662.6 s (-2.2%, within the pair spread) |
+| digest | identical | identical | identical | identical | |
+
+The trim fires at the moment the last window's slab exists (t ~ 13 s into the loop) and returns
+37.7 GB in 4.4 s (`101,532 -> 63,860 MB`), which is the arena corpse the lifetime audit priced at
+25-43 GB. At 0.14 s per GB it is 20x cheaper than the concurrency knob's 2.60 s/GB. This is the
+baseline every tiling number is read against (review correction C8): **138 GB, not 182 or 169.**
+Superseded structurally by the direct slabs (2d-ii: no second representation to return), which
+keep the `[trim]` site for the load's bookkeeping.
+
 ## 2026-09-09: tiling plan step 0 -- four zero-code measurements, one bug, one correction
 
 The 2D-tiling plan (`~/.claude/plans/humble-watching-dragonfly.md`) starts with measurements that

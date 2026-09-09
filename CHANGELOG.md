@@ -25,6 +25,38 @@ unchanged.
   `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
   **SORT -61%; the ASSEMBLE phase is gone.**
 
+### Performance (2026-09-09, second batch) -- byte-identical unless stated
+
+- **The drained compact store is returned when the last window has materialised.** The window
+  loop's peak held ~40 GB of dead per-frame vectors in the allocator's free list for its whole
+  life; one `malloc_trim` at the moment the last window's slab exists returns it. Interleaved A/B
+  on a 2-hour acquisition, two reps each: **peak RSS 169.1 -> 138.1 GB (-18%)**, wall within the
+  pair spread, output identical.
+- **The mzML is written by a streaming writer (`TileWriter`)**: header once, spectra appended in
+  the canonical order in parallel-encoded chunks with the index offsets rebased as they land, the
+  declared count exact when the total is known and a same-width placeholder otherwise. Bytes from
+  `<spectrumList>` on are the bulk writer's; **WRITE 19.6 -> 13.2 s on the 30-minute file** (the
+  per-thread encoders no longer share a handler). Emitted spectra now carry `id="spectrum=<rank>"`.
+- **The loader builds each window's peak slab directly.** The per-window `CompactFrame` store and
+  its copy at window start are gone; frames are appended as they are picked, m/z quanta become
+  flight-time bins in place when the window starts, and the batch's windows are appended in
+  parallel from one reusable scratch. Output and every per-window slab digest identical. Costs
+  +12 s of LOAD on the 30-minute file today (first-touch page faults on fewer threads; on the
+  backlog) and lifts the load-phase peak by ~3 GB there, below the window loop's peak on a
+  2-hour file.
+- **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span,
+  first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
+
+### Changed (2026-09-09)
+- **mzPeak input runs the integer detector.** mzPeak native IDs now carry `frame=<Id>` and the
+  flight-time axis is built from the archive's embedded (or sidecar) `analysis.tdf`; before, every
+  mzPeak spectrum was unmappable and the tool fell back to the OpenMS detector with a warning. On
+  the 30-minute archive: 855,561 spectra, Sage 12,537 (the `.d` gives 12,625; the OpenMS detector
+  on the same archive 12,756). Archives converted without the vendor tdf need
+  `SPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz>`.
+- **e2e check 14**: the declared spectrum count, `id="spectrum=K"`, `index="K"` and every
+  `<indexList>` offset agree.
+
 ### Fixed
 - **The streaming loader dropped the last `n mod 256` MS2 window spectra of every run.** The pick
   consumer's tail flush was overridden but never invoked (OpenMS reaches it only through
