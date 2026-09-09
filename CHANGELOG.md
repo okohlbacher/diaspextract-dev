@@ -47,6 +47,20 @@ unchanged.
 - **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span,
   first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
 
+### Added (2026-09-09)
+- **`tile:rt_sec` -- detection in fixed retention-time cells.** With a pitch given (600 s planned as
+  the default once gated), the integer detector traces each window per RT cell cut at the run's
+  MS1 frame times, so the output is bit-identical however the cells are grouped into tiles and
+  however many threads run (at a fixed `perf:trace_bands`); the cut lines are stamped into the
+  header (`spx:tile_rt_sec`, `spx:tile_boundaries`). This is what makes a streaming, tiled run
+  reproduce the whole run exactly -- the halo designs could not (docs/BASELINE.md, "cause 2 vs
+  cause 3"). Mass traces that elute across a cut line are cut there: on the 2-hour file at 600 s,
+  Sage 28,845 -> 29,066 (+0.8%) with 9.4% of the peptides within 15 s of a line lost against 6.0%
+  elsewhere (the usual set churn); the 30-minute file is measured at 600 and 300 s with both
+  engines and entrapment before the default moves. `-1` (the current default) is one cell = the
+  previous output, byte-identical; e2e check 15 holds the thread invariance at a pitch that cuts
+  the fixture in two.
+
 ### Changed (2026-09-09)
 - **The valley splitter's smoothing window comes from the acquisition's cycle time
   (`trace:split_scan_time=frame`, new default; `trace` restores the old behaviour).** OpenMS
