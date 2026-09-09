@@ -1661,6 +1661,10 @@ namespace
         ofs_ << "\" defaultDataProcessingRef=\"dp_sp_0\">\n";
         writing_spectra_ = true;
       }
+      // The emitted spectra carry no native IDs, and the bulk writer therefore renumbered them as
+      // "spectrum=<index>" (its uniqueness check trips on the duplicates); the running index here is
+      // that same number, so renewing reproduces its bytes exactly.
+      const bool renew_native_ids = true;
       // A handler is not reentrant (writeSpectrum_ memoises CV-term validation in cached_terms_),
       // so each thread encodes with its own; dps_ is shared read-only -- every spectrum carries the
       // one data-processing entry the header registered, so writeSpectrum_ never appends to it.
@@ -1684,7 +1688,7 @@ namespace
             std::ostringstream buf; buf.copyfmt(ofs_);          // identical formatting state, or the numbers differ
             const Size lo = w0 + (Size)c * CHUNK, hi = std::min(lo + CHUNK, w1);
             const Size o0 = h.spectra_offsets_.size();
-            for (Size i = lo; i < hi; ++i) h.writeSpectrum_(buf, block[i], spectra_written_ + i, *h.validator_, false, dps_);
+            for (Size i = lo; i < hi; ++i) h.writeSpectrum_(buf, block[i], spectra_written_ + i, *h.validator_, renew_native_ids, dps_);
             text[(Size)c] = buf.str();
             offs[(Size)c].assign(h.spectra_offsets_.begin() + o0, h.spectra_offsets_.end());   // buffer-relative
             h.spectra_offsets_.resize(o0);
