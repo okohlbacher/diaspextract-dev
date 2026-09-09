@@ -877,6 +877,40 @@ namespace
     size_t reserved() const { return (tof.capacity() - tof.size()) * 4 + (inten.capacity() - inten.size()) * 4 + (imq.capacity() - imq.size()) * 2; }
   };
 
+  /// [cell] A window's FROZEN frame table: every frame of the window's group, in RT order, as
+  /// run-level data -- the frame times, vendor ids, RT-axis indices, calibration factors, and the
+  /// MS1-frame -> window-frame map the Pearson uses. The window store's table and the scoring
+  /// support come from here in every mode, so a tile that holds only some of the frames scores
+  /// exactly as the whole run does (a span read outside the resident frames is 0 either way).
+  /// Today the source is the resident slab itself; the tiled readers supply it from metadata.
+  struct FrozenWin
+  {
+    vector<double>   frame_rt;
+    vector<uint32_t> frame_id;
+    vector<uint32_t> rt_index;
+    vector<double>   b;
+    vector<int>      nearest_local;   ///< MS1-store frame -> nearest window frame within delta_rt, or -1
+    size_t frames() const { return frame_rt.size(); }
+  };
+
+  /// The MS1-frame -> window-frame map over ALL window frames (every frame carries fragment
+  /// support: G == F, measured on 28/28 TNBC and 24/24 D windows), ties to the LATER frame.
+  inline vector<int> nearestLocal(const vector<double>& win_rt, const vector<double>& ms1_rt, double delta_rt)
+  {
+    vector<int> nl(ms1_rt.size(), -1);
+    size_t hi = 0;
+    for (size_t m = 0; m < ms1_rt.size(); ++m)
+    {
+      const double t = ms1_rt[m];
+      while (hi < win_rt.size() && win_rt[hi] < t) ++hi;
+      double bd = delta_rt; int gi = -1;
+      if (hi > 0)             { const double d = fabs(win_rt[hi - 1] - t); if (d <= bd) { bd = d; gi = (int)(hi - 1); } }
+      if (hi < win_rt.size()) { const double d = fabs(win_rt[hi] - t);     if (d <= bd) { bd = d; gi = (int)hi; } }
+      nl[m] = gi;
+    }
+    return nl;
+  }
+
   /// Ordered, incremental digest of a window's slab: frame table (rt index, factor bits, count) then
   /// every (tof, intensity bits, imq) tuple in frame order. Unlike detDigest_ it is NOT sorted, so a
   /// reordered equal-intensity peak or a tuple swapped between frames changes it -- which is what a
@@ -1682,35 +1716,14 @@ namespace
     size_t G = 0;
   };
 
-  /// G_override > 0 replaces the Pearson support G (frames with a real fragment point) with a
-  /// value supplied from outside -- the whole window's, when only part of it is resident. Step 0d
-  /// measured G == F on every window of dataset D, so the window's frame count is that value.
-  FragStats buildFragStats(const vector<Trace>& frags, const TraceStore& wst, const TraceStore& ms1st, double delta_rt,
-                           size_t G_override = 0)
+  /// The Pearson support is the window's FROZEN frame table: G = F (every frame), and the
+  /// MS1 -> window map is the table's, so neither depends on which frames are resident.
+  FragStats buildFragStats(const vector<Trace>& frags, const TraceStore& wst, const FrozenWin& fw)
   {
     FragStats g;
-    const size_t F = wst.frames();
-    vector<char> used(F, 0);            // window frame carries >= 1 real fragment point
-    for (const auto& f : frags)
-      for (size_t k = 0; k < f.span(); ++k) if (real(wst, f, k)) used[f.frame0 + k] = 1;
-    for (char u : used) g.G += u ? 1 : 0;
-    if (G_override > 0) g.G = G_override;
+    g.G = fw.frames();
     const double G = (double)g.G;
-    // Precursor points live on MS1 frames; each maps to the NEAREST window frame that carries real
-    // fragment data, within gate:delta_rt, ties to the LATER frame -- the rule the old grid used.
-    vector<uint32_t> uf; uf.reserve(g.G);
-    for (uint32_t f = 0; f < F; ++f) if (used[f]) uf.push_back(f);
-    g.nearest_local.assign(ms1st.frames(), -1);
-    size_t hi = 0;
-    for (size_t m = 0; m < ms1st.frames(); ++m)
-    {
-      const double t = ms1st.frame_rt[m];
-      while (hi < uf.size() && wst.frame_rt[uf[hi]] < t) ++hi;
-      double bd = delta_rt; int gi = -1;
-      if (hi > 0)          { const double d = fabs(wst.frame_rt[uf[hi - 1]] - t); if (d <= bd) { bd = d; gi = (int)uf[hi - 1]; } }
-      if (hi < uf.size())  { const double d = fabs(wst.frame_rt[uf[hi]] - t);     if (d <= bd) { bd = d; gi = (int)uf[hi]; } }
-      g.nearest_local[m] = gi;
-    }
+    g.nearest_local = fw.nearest_local;
     g.mean.resize(frags.size()); g.invnorm.resize(frags.size());
     #pragma omp taskloop default(shared)
     for (long ii = 0; ii < (long)frags.size(); ++ii)
@@ -3338,6 +3351,11 @@ protected:
       return INCOMPATIBLE_INPUT_DATA;
     }
 
+    // [cell] the frozen frame tables (see FrozenWin); today from the resident slabs, before
+    // indexRt() frees their frame times and toTof() their frame ids
+    map<WinKey, FrozenWin> frozen;
+    for (const auto& kv : ms2_by_window)
+    { FrozenWin& fw = frozen[kv.first]; fw.frame_rt = kv.second.rt; fw.frame_id = kv.second.frame_id; }
     // THE GLOBAL RT AXIS. Every frame contributes one retention time; every trace point sits on a
     // frame. Building it here, once, is what lets a trace point be 8 bytes (frame index +
     // intensity) instead of 16 (RT + intensity), and lets two profiles be aligned by integer
@@ -3364,6 +3382,8 @@ protected:
       const double _ts = phase_clock_(); const long _r0 = rss_mb_();
       size_t reserved = 0;
       for (auto& kv : ms2_by_window) { indexRt(kv.second); reserved += kv.second.reserved(); }
+      for (auto& kv : frozen)
+      { FrozenWin& fw = kv.second; fw.rt_index.resize(fw.frames()); for (size_t f = 0; f < fw.frames(); ++f) fw.rt_index[f] = rtIndex(fw.frame_rt[f]); }
 #ifdef __GLIBC__
       if (trim_on) malloc_trim(0);   // the load's arena churn, returned before the MS1 phase
 #endif
@@ -3968,6 +3988,13 @@ protected:
     // the stages that do not coexist). The old 16x of the COMPACT BYTES booked 160 B/peak, i.e.
     // 3.6x the sustained figure, which is why the gate never throttled anything.
     auto project = [&](const PeakSlab& sl) { return sl.peaks() * (size_t)44 + (size_t)256 * 1024 * 1024; };
+    for (auto& kv : frozen)
+    {
+      FrozenWin& fw = kv.second;
+      fw.b.resize(fw.frames());
+      for (size_t f = 0; f < fw.frames(); ++f) fw.b[f] = tofAxis().factor(fw.frame_id[f]);   // the value toTof() gives the slab
+      fw.nearest_local = nearestLocal(fw.frame_rt, ms1_store.frame_rt, delta_rt);
+    }
     if (cell_pitch > 0.0 && !integer_detector)
     {
       writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells) -- the header records no grid.");
@@ -4113,11 +4140,12 @@ protected:
         const int w_bands = n_bands;
         vector<Trace> frag_traces;
         TraceStore wst;                                   // this window's frame table + arenas; outlives scoring
+        const FrozenWin& fwin = frozen.at(window_list[wi].first);
         size_t w_live = 0;                                // [tile-0d] G_live, carried out of the tracing block
         TofIdx w_tlo = 0, w_thi = 0;                      // the window's band edges, for the window-file row
         if (integer_detector)
         {
-          wst.setFrames(wslab.rt_index, &wslab.b);
+          wst.setFrames(fwin.rt_index, &fwin.b);             // the FROZEN table, not the resident slab's
           // Banded like the OpenMS path. A band SEEDS only in its own flight-time core but may
           // extend anywhere, so no halo is needed and no trace is cut; the one approximation is
           // that two bands can take the same peak (each has its own `visited`), which is the same
@@ -4151,11 +4179,15 @@ protected:
           // into the window store afterwards, in (cell, band) order, with the frame indices rebased
           // by the cell's first frame. One cell (tile:rt_sec=-1) is the whole window on the slab
           // itself: the same statements, no copy, byte-identical to the uncelled code.
+          // the cut is SLAB-local (sliceFrames indexes the slab); the rebase below is a VALUE
+          // lookup of each cell's first frame time in the frozen table
+          vector<double> slab_rt(wslab.frames());
+          for (size_t f = 0; f < wslab.frames(); ++f) slab_rt[f] = rtAxis()[wslab.rt_index[f]];
           vector<size_t> cut{0};
           for (double e : cell_edges)
-          { const size_t f = (size_t)(lower_bound(wst.frame_rt.begin(), wst.frame_rt.end(), e) - wst.frame_rt.begin());
-            if (f > cut.back() && f < wst.frames()) cut.push_back(f); }
-          cut.push_back(wst.frames());
+          { const size_t f = (size_t)(lower_bound(slab_rt.begin(), slab_rt.end(), e) - slab_rt.begin());
+            if (f > cut.back() && f < slab_rt.size()) cut.push_back(f); }
+          cut.push_back(slab_rt.size());
           const size_t n_cells = cut.size() - 1;
           const bool one_cell = (n_cells == 1);
           // The slab and the seed order are dead the moment the detector returns: the merge below
@@ -4203,17 +4235,21 @@ protected:
             }
             w_detect += secs(std::chrono::steady_clock::now() - _td0);
           }
-          const size_t slab_frames = wslab.frames();
+          // Each cell's first frame in the FROZEN table, by value (the slab-local cut is an index
+          // into the resident slab, which may hold only some of the table's frames later); the
+          // resident frames must be, frame for frame, the table's -- asserted per cell.
+          vector<size_t> f0z(n_cells);
+          for (size_t ci = 0; ci < n_cells; ++ci)
+          {
+            const double t0 = slab_rt[cut[ci]];
+            f0z[ci] = (size_t)(lower_bound(wst.frame_rt.begin(), wst.frame_rt.end(), t0) - wst.frame_rt.begin());
+            for (size_t j = 0; j < cut[ci + 1] - cut[ci]; ++j)
+              if (f0z[ci] + j >= wst.frames() || wst.rt_index[f0z[ci] + j] != wslab.rt_index[cut[ci] + j])
+                throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                      "resident frames are not the frozen table's at cell " + String(ci) + " frame", String(j));
+          }
           release_input();                       // before the merge, not after it
           auto _tm0 = std::chrono::steady_clock::now();
-          // The rebase below adds the cell's first frame's index IN THE RESIDENT SLAB. That equals
-          // its index in the window store only while the store's frame table IS the slab's
-          // (wst.setFrames(wslab.rt_index) above). When the table is frozen from metadata (plan
-          // step 1: all frames of the window's group, including ones the loader never appended)
-          // the rebase must go through rt_index VALUES (plan C5), never an offset. [review, Kimi]
-          if (wst.frames() != slab_frames)
-            throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                  "cell rebase by offset needs the window store's frame table to be the slab's", String(wst.frames()) + " vs " + String(slab_frames));
           size_t tot = 0, arena = 0; bool any_bins = false;
           for (size_t ci = 0; ci < n_cells; ++ci) for (int b = 0; b < nb; ++b)
           { tot += per[ci][b].size(); arena += bst[ci][b].inten.size(); any_bins |= !bst[ci][b].bins.empty(); }
@@ -4224,7 +4260,7 @@ protected:
                           + String(arena) + " floats (" + String(arena * (any_bins ? 6 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
           for (size_t ci = 0; ci < n_cells; ++ci)
           {
-            const uint32_t f0 = (uint32_t)cut[ci];
+            const uint32_t f0 = (uint32_t)f0z[ci];             // the cell's first frame in the frozen table
             for (int b = 0; b < nb; ++b)
             {
               const uint32_t base = wst.absorb(bst[ci][b]);
@@ -4343,9 +4379,7 @@ protected:
         auto _t3 = std::chrono::steady_clock::now();
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         w_trace = secs(_t3 - _t2) - w_prep - w_split;
-        size_t g_over = 0;   // [tile-1] the whole run's G for this window, when a window file is given
-        { TileProbe::Row pr; if (TileProbe::row(String(win_lo) + "-" + String(win_hi), pr)) g_over = pr.G; }
-        FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt, g_over);
+        FragStats fg = buildFragStats(frag_traces, wst, fwin);
         if (const char* wf = std::getenv("SPEXTRACTOR_WINDOW_FILE_OUT"))   // [tile-1] this window's frozen row, for a later probe
         {
           #pragma omp critical(window_file_out)
@@ -4587,6 +4621,8 @@ protected:
     out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
     out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
+    out_exp.setMetaValue("spx:frame_table", "slab");      // the frozen tables' source (slab | loader | mzpeak)
+    out_exp.setMetaValue("spx:pearson_G", "frames");
     out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
