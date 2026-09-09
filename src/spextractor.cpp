@@ -909,6 +909,7 @@ namespace
   struct TracePrep
   {
     vector<char>     frame_live;  ///< F: has at least one member
+    size_t           n_live = 0;  ///< [tile-0d] frames with >= 1 above-noise peak (G_live)
     vector<uint32_t> order;       ///< seeds, intensity desc, later-index-first among equals
     vector<size_t>   seg;         ///< nb+1 offsets into `order`: band b owns [seg[b], seg[b+1])
     /// [tofidx] Per-frame direct-address index over the flight-time bins: bucket
@@ -986,6 +987,7 @@ namespace
     for (size_t f = 0; f < F; ++f)
       for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
         if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++n_seed; }
+    for (char u : tp.frame_live) tp.n_live += u ? 1 : 0;
     // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
     // intensities the LATER peak seeds first.
     auto cmp = [&](uint32_t a, uint32_t b) {
@@ -1412,7 +1414,7 @@ namespace
       // LOAD, measured 2026-09-02). Buffer and pick in parallel like MS2; order is kept by index.
       ms1_buf_.push_back(std::move(s));
       ++frames_seen;
-      if (ms1_buf_.size() >= kBatch) flushMS1_();
+      if (ms1_buf_.size() >= kBatch_()) flushMS1_();
     }
 
     void flushMS1_()
@@ -1455,7 +1457,7 @@ namespace
       key_.push_back(keyfn_(lo, hi, windowGroupOf(s.getNativeID())));
       buf_.push_back(std::move(s));                  // pick+compact deferred to flush_()
       ++frames_seen;
-      if (buf_.size() >= kBatch) flush_();
+      if (buf_.size() >= kBatch_()) flush_();
     }
 
     void ensureMapsAreFilled_() override { flushMS1_(); flush_(); }   // pick up the tails
@@ -1464,7 +1466,10 @@ namespace
     /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
     /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
     /// store.
-    static const size_t kBatch = 256;
+    /// [tile-0b] Overridable ONLY for the picker-purity measurement (SPEXTRACTOR_PICK_BATCH):
+    /// 256 -> 4096 is on record as costing 7.2% of Sage peptides, so this is a probe, not a knob.
+    static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH");
+      const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
     PeakPickerIM& picker_;
@@ -3358,10 +3363,11 @@ protected:
       // matches and destroys the ppm-residual feature a charge model needs. Every dump written
       // before 2026-07-23 carries that quantisation.
       ft.precision(12);
-      ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\n";
+      ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\trt_first\trt_last\n";   // [tile-0d] span endpoints
       for (const auto& t : ms1_traces)
         ft << t.mz << '\t' << rtOf(ms1_store, t) << '\t' << t.im << '\t' << intensityOf(ms1_store, t) << '\t'
-           << fwhm_of(t) << '\t' << t.np() << '\n';
+           << fwhm_of(t) << '\t' << t.np() << '\t'
+           << (t.span() ? rtAtSpan(ms1_store, t, 0) : 0.0) << '\t' << (t.span() ? rtAtSpan(ms1_store, t, t.span() - 1) : 0.0) << '\n';
       ft.close();
       ofstream fp((ms1_dump + ".precursors.tsv").c_str());
       fp.precision(12);
@@ -3715,7 +3721,10 @@ protected:
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
           const int nb = (thi <= tlo) ? 1 : std::max(1, w_bands);
-          size_t n_seeds = 0, n_parents = 0;
+          // [tile-0d] the slab-derived band bounds a tiled design would have to inject globally
+          writeLogInfo_("[tof] window " + String(win_lo) + "-" + String(win_hi) + " tlo=" + String(tlo)
+                        + " thi=" + String(thi) + " frames=" + String(wslab.frames()) + " peaks=" + String(wslab.peaks()));
+          size_t n_seeds = 0, n_parents = 0, w_live = 0;
           const size_t n_peaks = wslab.peaks();
           {
           // The band edges are computed ONCE and shared by the seed segmentation and the detector,
@@ -3732,7 +3741,7 @@ protected:
           auto _tp = std::chrono::steady_clock::now();
           TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per window
           w_prep = secs(std::chrono::steady_clock::now() - _tp);
-          n_seeds = tprep.order.size();
+          n_seeds = tprep.order.size(); w_live = tprep.n_live;
           // The slab and the seed order are dead the moment the detector returns: the merge below
           // reads only the band stores, and valley splitting reads only the window store. Releasing
           // them HERE rather than after the merge matters because the merge is the peak allocation
@@ -3789,7 +3798,33 @@ protected:
           auto _ts = std::chrono::steady_clock::now();
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4);
           w_split = secs(std::chrono::steady_clock::now() - _ts);
+          // [tile-0d] RT extent of fragment traces on the INTEGER path, which `ms2_span` never
+          // reports (it is only filled by the OpenMS detector). Two figures per trace: the total
+          // span, and the ONE-SIDED extent from the reported RT (rtOf) -- the quantity a tile halo
+          // has to cover, since trimToSpan bounds the span, not the distance from the apex.
+          // Logged before and after the trim so the halo can be sized on detection extent.
+          auto extents = [&](const char* tag) {
+            const size_t NB = 256; const double BW = 5.0;                     // 5-s bins to 1,280 s
+            vector<size_t> hs(NB + 1, 0), ho(NB + 1, 0); double mx_s = 0, mx_o = 0; size_t n = 0;
+            for (const auto& t : frag_traces)
+            { if (t.span() == 0) continue; ++n;
+              const double r0 = rtAtSpan(wst, t, 0), r1 = rtAtSpan(wst, t, t.span() - 1), rr = rtOf(wst, t);
+              const double sp = r1 - r0, os = std::max(rr - r0, r1 - rr);
+              mx_s = std::max(mx_s, sp); mx_o = std::max(mx_o, os);
+              ++hs[std::min<size_t>(NB, (size_t)(sp / BW))]; ++ho[std::min<size_t>(NB, (size_t)(os / BW))]; }
+            auto q = [&](const vector<size_t>& h, double p) { size_t acc = 0; const size_t want = (size_t)(p * n);
+              for (size_t i = 0; i <= NB; ++i) { acc += h[i]; if (acc >= want) return (i + 1) * BW; } return (NB + 1) * BW; };
+            auto fr = [&](const vector<size_t>& h, double x) { size_t acc = 0; for (size_t i = (size_t)(x / BW); i <= NB; ++i) acc += h[i];
+              return n ? 100.0 * acc / n : 0.0; };
+            writeLogInfo_("[ms2ext] window " + String(win_lo) + "-" + String(win_hi) + " " + tag + " n=" + String(n)
+                          + " span p50=" + String(q(hs, .5)) + " p90=" + String(q(hs, .9)) + " p99=" + String(q(hs, .99)) + " max=" + String(mx_s)
+                          + " frac>120=" + String(fr(hs, 120)) + "% frac>246=" + String(fr(hs, 246)) + "%"
+                          + " | onesided p50=" + String(q(ho, .5)) + " p90=" + String(q(ho, .9)) + " p99=" + String(q(ho, .99)) + " max=" + String(mx_o)
+                          + " frac>63=" + String(fr(ho, 63)) + "% frac>123=" + String(fr(ho, 123)) + "% frac>300=" + String(fr(ho, 300)) + "%");
+          };
+          if (detOn_()) extents("pre-trim");
           if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
+          if (detOn_()) extents("post-trim");
           vector<int16_t>().swap(wst.bins);
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
                         + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
@@ -3841,6 +3876,12 @@ protected:
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         w_trace = secs(_t3 - _t2) - w_prep - w_split;
         FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt);
+        // [tile-0d] the Pearson denominator G against the two tile-independent candidates: the
+        // window's frame count F and the frames with any above-noise peak G_live. If G == F the
+        // denominator can be injected from metadata under RT tiling; if not, the statistic must
+        // move to a G-free form (gate:variance_support / logoverlap) behind the peptide gate.
+        writeLogInfo_("[gstat] window " + String(win_lo) + "-" + String(win_hi) + " F=" + String(wst.frames())
+                      + " G=" + String(fg.G) + " G_live=" + String(w_live) + " frags=" + String(frag_traces.size()));
         auto _t4 = std::chrono::steady_clock::now();
         t_grid += std::chrono::duration_cast<std::chrono::nanoseconds>(_t4 - _t3).count();
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
