@@ -2117,8 +2117,17 @@ the loop cannot pay for its own bookkeeping. Per trace it is a handful of binary
 against that the point-list buffers cost more than they save -- 22 million small vector allocations
 move from one thread into all of them and contend in the allocator, and the parallel half writes
 adjacent doubles in three coordinate arrays. A version that pre-sized one flat buffer and avoided
-per-trace allocation might come out differently; this one does not, and the serial loop keeps a
-comment saying so.
+per-trace allocation was then written and measured too (2026-09-09): one chunked flat buffer, no
+per-trace allocation at all, coordinates and slice-sort in the parallel half, arena append in the
+serial half, again output-identical. It is **also no better** -- interleaved on dataset D, three
+reps each: 168.2 s serial against 171.6 s, and the MS1 phase 14.8 s against 15.3 s.
+
+So two independent parallelisations both lose to the serial loop, which is the answer: the per-trace
+work is a few binary searches over a 4,797-entry table that stays in cache, and against that the
+coordination costs more than the work. The serial loop also walks `mts` in order, which prefetches;
+both parallel versions scatter that walk across threads. This is the same lesson the detector's
+candidate scan taught tonight -- a sequential access pattern is worth more than the arithmetic it
+appears to waste. The loop stays serial, with a comment recording both attempts.
 
 ### Second file: the same work on the 30-minute acquisition (2026-09-09)
 

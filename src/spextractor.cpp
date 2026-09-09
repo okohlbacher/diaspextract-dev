@@ -1924,8 +1924,12 @@ protected:
     // (50.5 s -> 59.3 s, parallelism 18.8x -> 15.5x) even though its CPU seconds fell. The per-trace
     // work is a handful of binary searches, too little to cover the cost of the point-list buffers:
     // 22 million small vector allocations move from one thread to all of them and contend in the
-    // allocator, and the parallel halves write adjacent doubles in the coordinate arrays. See
-    // docs/BASELINE.md.
+    // allocator, and the parallel halves write adjacent doubles in the coordinate arrays. A second
+    // version using one chunked flat buffer, with no per-trace allocation at all, was measured too
+    // and is also no better (168.2 s serial vs 171.6 s, dataset D, three reps interleaved). The
+    // per-trace work is a few binary searches over a table that stays in cache; the coordination
+    // costs more than the work, and the serial walk over `mts` prefetches where a parallel one
+    // scatters. See docs/BASELINE.md.
     for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); mts[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
     return out;
   }
