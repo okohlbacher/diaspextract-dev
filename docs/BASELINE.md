@@ -2623,3 +2623,46 @@ review's LPS option) therefore cannot deliver invariance, and the seed cap's res
 exactly these dense lanes. Ranking of the mechanisms for the decision: the cell-atomic grid makes
 this churn part of the definition (parents are detected per cell in every mode, so it is the same
 in the whole run and in any tiling); the halo designs fight it and lose.
+
+## 2026-09-09: the cell-atomic grid, step 2 -- per-cell detection is exact on real data
+
+Decision A (docs/reviews/2026-09-09-bounded-parents-design/): the integer detector traces each
+window per fixed RT cell (`tile:rt_sec`, cut at the run's MS1 frame times, stamped in the header),
+so that any grouping of cells into tiles reproduces the whole run bit for bit. Commits 8779a0b,
+fc88b82 (review fixes), ee49bda. Reviews: docs/reviews/2026-09-09-cell-grid/ (Codex, Kimi, a
+four-lens refutation workflow: "sound-with-fixes", the fixes are in fc88b82).
+
+**Gates (ibminode05, fc88b82):**
+
+| gate | result |
+|---|---|
+| identity, `tile:rt_sec=-1`, `trace` window | `bc3c5ac9` -- **IDENTICAL** to the tail-fix pin |
+| identity, `-1`, `frame` window (default) | **IDENTICAL** to the split arm's output |
+| e2e | **15/15** -- check 15 holds 1 vs 4 threads byte-identical at a pitch that cuts the fixture in two |
+| whole run at pitch 300 (6 cells) | 611,034 spectra (612,664 at -1); 5:04 / 47.3 GB |
+| **cell exactness**, core cell 2 [602.0, 902.6) with cells 1-3 resident (probe, halo 0) vs the whole run at 300 | 152,360 spectra: **IDENTICAL**, 66.85 M fragments matched 100%, intensities 100% |
+| cell exactness, core cell 3 [902.6, 1203.2) with cells 2-4 resident | 185,782 spectra: **IDENTICAL**, 84.32 M fragments 100% |
+
+The same instrument gave 0.1% identical spectra and 51% matched fragments for the halo design
+yesterday. The probe proves the MS2-detection half per cell (the review's M3): scoring support,
+carry-over and pass 1 per cell are the tiled reader's contract (plan file, "tiled reader's
+contract"), gated on the reader itself.
+
+**The science price so far (arm `cell1` = 8779a0b, `frame` window):**
+
+| | -1 (whole) | pitch 600 | |
+|---|---:|---:|---|
+| TNBC 009 spectra | 3,291,533 | 3,285,827 | -0.2% |
+| TNBC 009 Sage peptides | 28,845 | **29,066** | +0.8%; set 27,058 common / 1,787 lost / 2,008 gained |
+| within 15 s of a cut line (1,435 base peptides) | | lost 135 (9.4%) vs 6.0% elsewhere; gained 105 | the excess ~50 peptides = 0.17% of the set |
+| TNBC 009 peak / wall | 130.2 GB / 11:16 | 124.5 GB / 11:37 | |
+| **one 600-s cell (t6), no halo** (G3, sidecar) | | **loop peak 23.7 GB** (start 12.0), loop 37 s / 1,856 CPU-s, detect 446 s | vs 29.8 GB / 51 s / 2,682 / 588 with the 123-s halo |
+
+The set churn (6%) is the FDR-set flip every perturbation shows; the cut lines add a small,
+localised excess that the gains next to the lines nearly balance. D at -1 / 600 / 300 with Sage,
+entrapment and MSFragger is recorded below when it lands; it decides the default pitch.
+
+**Fragment agreement under the old tiling, for the record** (probe1, old window, 13 tiles with a
+123-s halo, `bench/mzml_specdiff.py` at HEAD): 51.6% of fragments matched within 10 ppm, 56.8%
+of those with the same intensity -- the same picture as probe2 (51.0% / 51.8%); the churn was
+never about the splitter window.
