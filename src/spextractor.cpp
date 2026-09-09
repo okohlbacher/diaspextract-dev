@@ -27,6 +27,7 @@
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/CONCEPT/Constants.h>
+#include <OpenMS/CONCEPT/VersionInfo.h>   // verboseVersion_ carries the OpenMS build alongside ours
 
 #include <algorithm>
 #include <cmath>
@@ -1539,7 +1540,10 @@ public:
     // the output's software entry) unless the tool sets its own. --help prints verboseVersion_,
     // which the base constructor derives from the OpenMS version, so both are set.
     version_ = SPEXTRACTOR_VERSION;
-    verboseVersion_ = version_;
+    // Both numbers, deliberately: a bug report needs the tool's version AND the OpenMS it was
+    // built against, because this tool only builds against a patched development OpenMS and the
+    // two move independently. `version_` alone is what goes into the mzML software entry.
+    verboseVersion_ = String(SPEXTRACTOR_VERSION) + " (OpenMS " + VersionInfo::getVersion() + ")";
   }
 
 protected:
@@ -4108,6 +4112,23 @@ protected:
 
 int main(int argc, const char** argv)
 {
+  // OpenMS builds with ENABLE_UPDATE_CHECK=ON by default, and TOPPBase then calls
+  // UpdateCheck::run(tool_name_, version_) on every invocation -- a network request to an OpenMS
+  // REST endpoint asking whether a newer OPENMS exists. For a tool shipped outside the OpenMS
+  // release that answer is not actionable, and three things make it actively unwanted here:
+  // it sends this tool's name and version to a third party the user never opted into; it fires on
+  // every run of a benchmark chain; and when it fails -- an offline compute node, a proxy, a
+  // sandbox -- Qt prints "QIODevice::read (QNetworkReplyHttpImpl): device not open" to STDERR,
+  // which is the stream this project's own harness parses for timing and RSS.
+  //
+  // Set it only if unset, so a user who exports the variable still decides, in either direction.
+#ifdef _WIN32
+  size_t sz = 0;
+  if (getenv_s(&sz, nullptr, 0, "OPENMS_DISABLE_UPDATE_CHECK") != 0 || sz == 0)
+    _putenv_s("OPENMS_DISABLE_UPDATE_CHECK", "ON");
+#else
+  ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 0);
+#endif
   TOPPSpeXtractor tool;
   return tool.main(argc, argv);
 }
