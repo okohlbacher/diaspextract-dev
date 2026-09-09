@@ -2551,3 +2551,36 @@ are first-touched by at most 24 appending threads (one per window) or one; 12 GB
 is ~3 M faults. A default-initialising allocator for the three slab arrays would let the copy run
 100-wide (backlog). The 11.7-13 GB of arena free-list that appears during the load and goes with
 the trim after the slab pass is not explained.
+
+## 2026-09-09: the valley splitter's scan time -- gate on D and TNBC 009, and it does NOT make tiles invariant
+
+`trace:split_scan_time` (d85c2b4, 86444a5, 3755121; EPD param `scan_time`): the smoothing window
+of ElutionPeakDetection is `chrom_fwhm / scan time`, and the scan time was each parent's own
+average cycle time over its real points -- inflated by gaps, so gappy parents got a narrower window
+and any sub-range of one split differently. `frame` (new default) uses one run-wide value, the
+smallest gap between consecutive MS1 frame times; `trace` is the old behaviour. Build 0796595
+(arm `split1`), ibminode05 / data:
+
+| | dataset D, `trace` | dataset D, `frame` | TNBC 009, `frame` (probe2 whole) |
+|---|---:|---:|---:|
+| digest | **`bc3c5ac9` (identical to the pin)** | differs | `dba82377` |
+| MS1 traces | 4,905,492 | **3,092,075 (-37%)** | (precursors 4,433,660 vs 5,445,436, -19%) |
+| spectra | 855,575 | **612,664 (-28%)** | **3,291,533 (-16%)** |
+| Sage peptides (rank 1, q <= 0.01) | 12,625 | **13,388 (+6.0%)** | **28,845 (+3.5%)** vs 27,859 |
+| set overlap with the old arm | | 11,564 common / 1,061 old-only / 1,824 new-only | 25,304 common |
+| wall / peak | 4:35 / 46.9 GB | 4:02 / 46.6 GB | 11:16 / 130.2 GB |
+
+So the fixed window is a large whole-run change, not a neutral correction (the reviews said so):
+it splits far less -- most MS1 traces from MassTraceDetection have gaps, their per-trace windows
+were narrow, and the run-wide window is wider -- and the fewer, longer traces identify MORE
+peptides on both files. Whether the +6% / +3.5% is real signal or an FDR-calibration artefact of
+a smaller search space is what the entrapment search and the second engine decide (below, when
+they land); until then the default stays `frame` on the development branch only.
+
+**Tile invariance: no.** probe2 (arm `split1`, TNBC 009, core t6 3600-4200 s at H = 123 against
+the whole run under the same default): 314,685 core spectra, 379 identical (0.1%), 210,822 differ
+in the m/z list, 103,361 in the peak count -- the same 99.9% as with the old window, and uniform
+in RT. As the Codex review predicted: the smoothing is now local, the DECISION is not (EPD's
+retained-maximum walk), and detection itself is not (seeds, running centroid, `visited`). The
+fragment-level agreement (the number that matters for scoring; the spectrum-level one saturates
+at one changed fragment) is recorded below from the re-run of t6.
