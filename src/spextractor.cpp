@@ -1460,14 +1460,24 @@ namespace
       if (buf_.size() >= kBatch_()) flush_();
     }
 
-    void ensureMapsAreFilled_() override { flushMS1_(); flush_(); }   // pick up the tails
+    void ensureMapsAreFilled_() override { finish(); }
+
+  public:
+    /// Flush the buffered tails. Neither reader calls this for us: FullSwathFileConsumer reaches
+    /// ensureMapsAreFilled_ only through retrieveSwathMaps, which this consumer never uses, so
+    /// until 2026-09-09 the last `n mod kBatch` MS2 window spectra of every run were dropped
+    /// silently (dataset D: 210 of 32,210 = the last 105 frames of the last window group, which
+    /// the .d reader emits group-major; at batch 4096 it was 3,538 and two whole windows -- the
+    /// "7.2% of Sage peptides" on record for that batch size was this, not the picker).
+    void finish() { flushMS1_(); flush_(); }
 
   private:
     /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
     /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
     /// store.
-    /// [tile-0b] Overridable ONLY for the picker-purity measurement (SPEXTRACTOR_PICK_BATCH):
-    /// 256 -> 4096 is on record as costing 7.2% of Sage peptides, so this is a probe, not a knob.
+    /// [tile-0b] Overridable for the picker-purity measurement (SPEXTRACTOR_PICK_BATCH). With the
+    /// tail flushed (finish()) the batch size must not change the output; 256 stays the default
+    /// for the raw-buffer footprint.
     static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
     std::vector<MapType::SpectrumType> buf_;
@@ -2903,6 +2913,7 @@ protected:
 #endif
         }
         else BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
+        consumer.finish();                                          // the last partial batch
         streamed = true;
         phase_stats_()["LOAD(stream)"].wall = phase_clock_();      // [perf-instr] start-to-here
         phase_stats_()["LOAD(stream)"].cpu  = cpu_seconds_();
