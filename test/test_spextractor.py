@@ -389,8 +389,9 @@ def main():
         for k, (ref, off) in enumerate(offs):
             assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], \
                 f"index entry {k}: {ref!r} at {off!r}, spectrum starts at {specs[k][0]}"
+        # OpenMS records the offset one byte early (at the newline before the tag); accept that.
         ilo = int(re.search(rb'<indexListOffset>(\d+)</indexListOffset>', data).group(1))
-        assert data[ilo:ilo + 10] == b"<indexList", f"indexListOffset {ilo} does not point at <indexList"
+        assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"indexListOffset {ilo} does not point at <indexList"
     check("count, ids, index and indexList agree", c14)
 
     total = 6 + 2 + 2 + 1 + 1 + 1 + 1
