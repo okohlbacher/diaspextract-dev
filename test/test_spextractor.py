@@ -394,7 +394,21 @@ def main():
         assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"indexListOffset {ilo} does not point at <indexList"
     check("count, ids, index and indexList agree", c14)
 
-    total = 6 + 2 + 2 + 1 + 1 + 1 + 1
+    # 15: the cell grid (tile:rt_sec) is thread-invariant: each cell is traced on its own slice with
+    #     its own seeds/visited, band stores are absorbed in a fixed order, and the band count is
+    #     explicit -- so 1 and 4 threads must give byte-identical spectra at a pitch that cuts the
+    #     fixture into two cells (14 cycles of 1.4 s; pitch 10 s = 7 frames -> 2 cells).
+    def c15():
+        import re
+        r1 = run(binary, inp, os.path.join(work, "cell1.mzML"), extra=("-tile:rt_sec", "10"), threads=1)
+        r4 = run(binary, inp, os.path.join(work, "cell4.mzML"), extra=("-tile:rt_sec", "10"), threads=4)
+        m = re.search(r"\[cell\] pitch [0-9.]+ s = (\d+) MS1 frames .*?: (\d+) cells", r1.stdout + r1.stderr)
+        assert m and int(m.group(2)) >= 2, "the fixture was not cut into >= 2 cells:\n" + (r1.stdout + r1.stderr)[-800:]
+        assert digest(os.path.join(work, "cell1.mzML")) == digest(os.path.join(work, "cell4.mzML")), \
+            "tile:rt_sec output differs between 1 and 4 threads"
+    check("the cell grid is thread-invariant", c15)
+
+    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1
     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 

@@ -1302,7 +1302,10 @@ namespace
   /// changed nothing.
   vector<Trace> splitIntegerTraces(vector<Trace>& in, double split_valleys, TraceStore& wst, int nchunk, double scan_time)
   {
-    if (split_valleys <= 0.0 || in.size() < 2) return std::move(in);   // OpenMS branch: EPD needs > 1
+    // No `in.size() < 2` guard (review, 2026-09-09): EPD runs per parent below, so a lone parent
+    // splits exactly as it would among others -- the old guard made a cell's output depend on how
+    // many OTHER parents were resident, which a tile must never do.
+    if (split_valleys <= 0.0 || in.empty()) return std::move(in);
     const TofAxis& ax = tofAxis();
     nchunk = std::max(1, std::min<int>(nchunk, (int)in.size()));
     vector<vector<Trace>> parts(nchunk);
@@ -1888,7 +1891,7 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
-    registerDoubleOption_("tile:rt_sec", "<sec>", -1.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run: the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run, measured on peptides at each pitch. -1 = one cell = the whole run (the output before the cells, 2026-09-09).", false, true);
+    registerDoubleOption_("tile:rt_sec", "<sec>", -1.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run (at a fixed perf:trace_bands; the auto setting 0 ties the band count to the thread count): the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run, measured on peptides at each pitch. -1 = one cell = the whole run (the output before the cells, 2026-09-09).", false, true);
     registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time the valley splitter's smoothing window (chrom_fwhm / scan time) is derived from. 'frame': the acquisition's cycle time (the smallest gap between consecutive MS1 frame times), one value for the whole run and every trace. 'trace': each mass trace's own average cycle time, as OpenMS ElutionPeakDetection does by default -- which a trace with gaps inflates, so long gappy traces got a narrower window than their neighbours and a sub-range of such a trace was split differently from the whole (the behaviour before 2026-09-09).", false, true);
     setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' "
@@ -3385,7 +3388,7 @@ protected:
     // every window's frames split at the same instants; cell k = [T_k, T_{k+1}), T_0 = -inf.
     vector<double> cell_edges;
     String cell_boundaries;
-    const double cell_pitch = getDoubleOption_("tile:rt_sec");
+    double cell_pitch = getDoubleOption_("tile:rt_sec");
     if (cell_pitch > 0.0)
     {
       vector<double> rts; rts.reserve(ms1_map.size());
@@ -3396,9 +3399,9 @@ protected:
       if (n > 0)
       {
         for (size_t i = n; i < rts.size(); i += n) cell_edges.push_back(rts[i]);
-        if (!cell_edges.empty() && rts.size() - cell_edges.size() * n < n / 2) cell_edges.pop_back();   // remainder < pitch/2 joins the last cell
+        if (!cell_edges.empty() && 2 * (rts.size() - cell_edges.size() * n) < n) cell_edges.pop_back();   // remainder < pitch/2 joins the last cell
       }
-      for (double e : cell_edges) cell_boundaries += (cell_boundaries.empty() ? "" : ",") + String(e);
+      for (double e : cell_edges) { char buf[32]; std::snprintf(buf, sizeof buf, "%.17g", e); cell_boundaries += (cell_boundaries.empty() ? "" : ",") + String(buf); }   // round-trip exact
       writeLogInfo_("[cell] pitch " + String(cell_pitch) + " s = " + String(n) + " MS1 frames (cycle " + String(cyc) + " s): "
                     + String(cell_edges.size() + 1) + " cells, edges " + (cell_boundaries.empty() ? String("none") : cell_boundaries));
     }
@@ -3966,7 +3969,13 @@ protected:
     // 3.6x the sustained figure, which is why the gate never throttled anything.
     auto project = [&](const PeakSlab& sl) { return sl.peaks() * (size_t)44 + (size_t)256 * 1024 * 1024; };
     if (cell_pitch > 0.0 && !integer_detector)
-      writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells).");
+    {
+      writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells) -- the header records no grid.");
+      cell_edges.clear(); cell_boundaries.clear(); cell_pitch = -1.0;
+    }
+    if (cell_pitch > 0.0 && getIntOption_("perf:trace_bands") <= 0)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "tile:rt_sec needs a fixed perf:trace_bands: the auto setting (0) ties the band count to the thread count, and each band has its own `visited`, so the output would depend on the threads.");
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
@@ -4105,6 +4114,7 @@ protected:
         vector<Trace> frag_traces;
         TraceStore wst;                                   // this window's frame table + arenas; outlives scoring
         size_t w_live = 0;                                // [tile-0d] G_live, carried out of the tracing block
+        TofIdx w_tlo = 0, w_thi = 0;                      // the window's band edges, for the window-file row
         if (integer_detector)
         {
           wst.setFrames(wslab.rt_index, &wslab.b);
@@ -4116,6 +4126,7 @@ protected:
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
           { TileProbe::Row pr; if (TileProbe::row(String(win_lo) + "-" + String(win_hi), pr) && pr.thi > pr.tlo) { tlo = pr.tlo; thi = pr.thi; } }   // [tile-1] frozen edges
+          w_tlo = tlo; w_thi = thi;
           const int nb = (thi <= tlo) ? 1 : std::max(1, w_bands);
           // [tile-0d] the slab-derived band bounds a tiled design would have to inject globally
           writeLogInfo_("[tof] window " + String(win_lo) + "-" + String(win_hi) + " tlo=" + String(tlo)
@@ -4167,6 +4178,14 @@ protected:
             PeakSlab cslab;
             if (!one_cell) cslab = sliceFrames(wslab, f0, f1);
             const PeakSlab& cs = one_cell ? wslab : cslab;
+            if (!one_cell && !cs.tof.empty())
+            {
+              // the window's band edges must enclose the cell's bins: bandOf() and the tof index
+              // wrap for a bin below tlo (review M2). A run-level freeze must be a superset.
+              TofIdx clo = 0xFFFFFFFFu, chi = 0; for (TofIdx t : cs.tof) { clo = std::min(clo, t); chi = std::max(chi, t); }
+              if (clo < tlo || chi > thi) throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                    "cell bins outside the window's band edges", String(clo) + "-" + String(chi) + " vs " + String(tlo) + "-" + String(thi));
+            }
             auto _tp = std::chrono::steady_clock::now();
             TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per cell
             w_prep += secs(std::chrono::steady_clock::now() - _tp);
@@ -4292,11 +4311,18 @@ protected:
         }), frag_traces.end());
         if (frag_traces.empty()) return;   // nothing traceable in this window
 
+        // Content-only and TOTAL (review, 2026-09-09): two traces equal in (im, mz, rt, apex
+        // intensity) with different tails kept container order under std::sort, so which of them
+        // came first -- and the peak order inside a spectrum that emits both -- depended on what
+        // else was resident. The profile scalars settle it; exact duplicates are then interchangeable.
         sort(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& a, const Trace& b) {
           if (a.im != b.im) return a.im < b.im;
           if (a.mz != b.mz) return a.mz < b.mz;
           { const double ra = rtOf(wst, a), rb = rtOf(wst, b); if (ra != rb) return ra < rb; }
-          return intensityOf(wst, a) < intensityOf(wst, b);
+          { const double ia = intensityOf(wst, a), ib = intensityOf(wst, b); if (ia != ib) return ia < ib; }
+          if (a.npts != b.npts) return a.npts < b.npts;
+          if (a.len != b.len) return a.len < b.len;
+          return wst.frame_rt[a.frame0] < wst.frame_rt[b.frame0];
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
@@ -4311,6 +4337,11 @@ protected:
         size_t g_over = 0;   // [tile-1] the whole run's G for this window, when a window file is given
         { TileProbe::Row pr; if (TileProbe::row(String(win_lo) + "-" + String(win_hi), pr)) g_over = pr.G; }
         FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt, g_over);
+        if (const char* wf = std::getenv("SPEXTRACTOR_WINDOW_FILE_OUT"))   // [tile-1] this window's frozen row, for a later probe
+        {
+          #pragma omp critical(window_file_out)
+          { std::ofstream fo(wf, std::ios::app); fo << String(win_lo) << "-" << String(win_hi) << '\t' << fg.G << '\t' << w_tlo << '\t' << w_thi << '\n'; }
+        }
         // [tile-0d] the Pearson denominator G against the two tile-independent candidates: the
         // window's frame count F and the frames with any above-noise peak G_live. If G == F the
         // denominator can be injected from metadata under RT tiling; if not, the statistic must
