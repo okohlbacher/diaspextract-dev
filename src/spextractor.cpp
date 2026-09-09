@@ -4007,6 +4007,18 @@ protected:
         {
           { auto _tsl = std::chrono::steady_clock::now();
             wslab = std::move(*window_list[wi].second);
+            // [tile-2d probe] SPEXTRACTOR_SLAB_LOCAL=1: re-materialise the slab INSIDE the window
+            // task (a copy this thread first-touches). The direct slabs were allocated at load time
+            // by whichever thread appended them and are consumed here by another; on a two-socket
+            // node that is remote memory for the detector. If this copy buys the loop back its
+            // speed, the placement is the cost, not the representation.
+            static const bool slab_local = std::getenv("SPEXTRACTOR_SLAB_LOCAL") != nullptr;
+            if (slab_local)
+            {
+              wslab.tof = vector<TofIdx>(wslab.tof.begin(), wslab.tof.end());
+              wslab.inten = vector<float>(wslab.inten.begin(), wslab.inten.end());
+              wslab.imq = vector<uint16_t>(wslab.imq.begin(), wslab.imq.end());
+            }
             toTof(wslab);
             w_slab = secs(std::chrono::steady_clock::now() - _tsl); }
           if (detOn_())
