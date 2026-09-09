@@ -4151,6 +4151,23 @@ protected:
           n_parents = frag_traces.size();
           auto _ts = std::chrono::steady_clock::now();
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, std::max(1, w_bands) * 4, split_scan_time);
+          // [tile] Per-object dump for symmetric differences between runs (plan C6): one TSV per
+          // window, traces whose RT lies in SPEXTRACTOR_FRAG_DUMP_RT=lo,hi (all when unset), written
+          // BEFORE trimToSpan so a parent's extent is what the detector produced. Probe-only.
+          if (const char* dd = std::getenv("SPEXTRACTOR_FRAG_DUMP"))
+          {
+            double dlo = -1e300, dhi = 1e300;
+            if (const char* r = std::getenv("SPEXTRACTOR_FRAG_DUMP_RT")) std::sscanf(r, "%lf,%lf", &dlo, &dhi);
+            std::ofstream fo(String(dd) + "/" + String(win_lo) + "-" + String(win_hi) + ".tsv");
+            fo.precision(10);
+            for (const auto& t : frag_traces)
+            {
+              const double r = rtOf(wst, t);
+              if (r < dlo || r >= dhi) continue;
+              fo << t.mz << '\t' << r << '\t' << t.im << '\t' << intensityOf(wst, t) << '\t' << t.npts << '\t' << t.len
+                 << '\t' << wst.frame_rt[t.frame0] << '\t' << wst.frame_rt[t.frame0 + t.len - 1] << '\n';
+            }
+          }
           w_split = secs(std::chrono::steady_clock::now() - _ts);
           // [tile-0d] RT extent of fragment traces on the INTEGER path, which `ms2_span` never
           // reports (it is only filled by the OpenMS detector). Two figures per trace: the total
