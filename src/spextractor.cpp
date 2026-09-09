@@ -743,6 +743,33 @@ namespace
   /// 0 when absent (mzPeak input), which keeps that path keyed by m/z alone, as before.
   inline uint32_t windowGroupOf(const String& nid) { return nidField(nid, "windowGroup="); }
 
+  /// [tile-2d] One frame's picked peaks written into a caller-provided region -- no per-frame
+  /// allocation. The loader's parallel pick fills one reusable scratch per batch (regions sized by
+  /// the raw peak counts; a pick never emits more points than it was given) and the serial append
+  /// copies each region into its window's slab. Per-frame vectors allocated by 100 picking threads
+  /// and freed by the main thread left 12.7 GB of free-list in the threads' arenas on dataset D.
+  size_t compactifyInto(const MSSpectrum& s, CompactStats& st, uint32_t* mzq, float* inten, uint16_t* imq, size_t room)
+  {
+    if (!s.containsIMData()) { st.no_im_array += s.size(); return 0; }
+    const auto& im = s.getFloatDataArrays()[s.getIMData().first];
+    const Size n = s.size();
+    if (im.size() != n) { st.size_mismatch += n; return 0; }   // no out-of-bounds read
+    if (n > room) throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "picked frame larger than its raw region", std::to_string(n));
+    size_t k = 0;
+    for (Size i = 0; i < n; ++i)
+    {
+      const double mz = s[i].getMZ();
+      const double imv = (double)im[i];
+      if (!std::isfinite(mz) || mz <= 0.0 || mz * MZ_Q > 4.2e9) { ++st.bad_mz; continue; }
+      if (!std::isfinite(imv) || imv < IM_LO || imv > IM_HI)    { ++st.bad_im; continue; }
+      mzq[k] = (uint32_t)llround(mz * MZ_Q);
+      inten[k] = s[i].getIntensity();
+      imq[k] = (uint16_t)llround((imv - IM_LO) * IM_Q);
+      ++k; ++st.kept;
+    }
+    return k;
+  }
+
   CompactFrame compactify(const MSSpectrum& s, CompactStats& st)
   {
     CompactFrame f;
@@ -820,36 +847,34 @@ namespace
     size_t frames() const { return frame_off.empty() ? 0 : frame_off.size() - 1; }
     size_t peaks()  const { return tof.size(); }
     size_t bytes()  const { return tof.size() * 4 + inten.size() * 4 + imq.size() * 2; }
-    /// Append one picked frame. The loader cannot reserve exactly (the picked count is not known up
-    /// front), and geometric growth copies the store several times over (1.25x: ~5x the final
-    /// size, +31 s of LOAD on dataset D). Instead the capacity is projected from the frames seen
-    /// so far and the number of frames EXPECTED (`expected_frames`, the MS1 frame count: one MS2
-    /// frame per window per cycle, and MS1 arrives first on both readers): the running mean
-    /// converges after a few frames, so a window reallocates two or three times, not fifteen.
-    void append(const CompactFrame& f, size_t expected_frames)
+    /// Append one picked frame from a region. The loader cannot reserve exactly (the picked count
+    /// is not known up front), and every reallocation copies the window. Reserved-but-untouched
+    /// pages cost no RSS, so the capacity is projected from the running peaks-per-frame and the
+    /// number of frames EXPECTED (`expected_frames`, the MS1 frame count: one MS2 frame per window
+    /// per cycle, and MS1 arrives first on both readers) and then over-reserved 2.5x: a window
+    /// reallocates once or twice while its running mean settles, and never again. Nothing is
+    /// shrunk afterwards -- the untouched tail is virtual only and goes with the slab.
+    void append(double frame_rt, uint32_t fid, const uint32_t* mzq_, const float* inten_, const uint16_t* imq_, size_t n,
+                size_t expected_frames)
     {
       if (frame_off.empty()) frame_off.push_back(0);
-      const size_t F = frames(), n = f.mzq.size();
+      const size_t F = frames();
       auto grow = [&](auto& v, size_t add) {
         if (v.size() + add <= v.capacity()) return;
         const double per_frame = F ? (double)v.size() / (double)F : (double)add;
-        const size_t want = (size_t)(per_frame * (double)std::max(expected_frames, F + 1) * 1.05) + add;
-        v.reserve(std::max(v.size() + add, std::max(want, v.capacity() + v.capacity() / 4)));
+        const size_t want = (size_t)(per_frame * (double)std::max(expected_frames, F + 1) * 2.5) + add;
+        v.reserve(std::max(v.size() + add, want));
       };
-      grow(tof, n); grow(inten, f.inten.size()); grow(imq, f.imq.size());
-      tof.insert(tof.end(), f.mzq.begin(), f.mzq.end());
-      inten.insert(inten.end(), f.inten.begin(), f.inten.end());
-      imq.insert(imq.end(), f.imq.begin(), f.imq.end());
-      rt.push_back(f.rt); frame_id.push_back(f.frame_id);
+      grow(tof, n); grow(inten, n); grow(imq, n);
+      tof.insert(tof.end(), mzq_, mzq_ + n);
+      inten.insert(inten.end(), inten_, inten_ + n);
+      imq.insert(imq.end(), imq_, imq_ + n);
+      rt.push_back(frame_rt); frame_id.push_back(fid);
       frame_off.push_back((uint32_t)tof.size());
     }
-    /// Return the slack -- but only when it is worth a full copy of the window (> 1/16).
-    size_t shrink()
-    {
-      const size_t slack = (tof.capacity() - tof.size()) * 4 + (inten.capacity() - inten.size()) * 4 + (imq.capacity() - imq.size()) * 2;
-      if (tof.capacity() - tof.size() > tof.size() / 16) { tof.shrink_to_fit(); inten.shrink_to_fit(); imq.shrink_to_fit(); return slack; }
-      return 0;
-    }
+    void append(const CompactFrame& f, size_t expected_frames)
+    { append(f.rt, f.frame_id, f.mzq.data(), f.inten.data(), f.imq.data(), f.mzq.size(), expected_frames); }
+    size_t reserved() const { return (tof.capacity() - tof.size()) * 4 + (inten.capacity() - inten.size()) * 4 + (imq.capacity() - imq.size()) * 2; }
   };
 
   /// Ordered, incremental digest of a window's slab: frame table (rt index, factor bits, count) then
@@ -1457,7 +1482,13 @@ namespace
       const int n = (int)buf_.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
-      std::vector<CompactFrame> compacted((size_t)n);
+      // per-frame regions of one reusable scratch, sized by the RAW peak counts
+      scratch_off_.resize((size_t)n + 1);
+      { size_t total = 0; for (int i = 0; i < n; ++i) { scratch_off_[(size_t)i] = total; total += buf_[(size_t)i].size(); } scratch_off_[(size_t)n] = total;
+        if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); } }
+      std::vector<size_t> kept((size_t)n);
+      std::vector<double> frt((size_t)n);
+      std::vector<uint32_t> fid((size_t)n);
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
       // SPEXTRACTOR_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
@@ -1475,7 +1506,11 @@ namespace
           ensureIMArrayName(s);
           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
           ensureIMArrayName(s);
-          compacted[(size_t)i] = compactify(s, st[(size_t)i]);
+          frt[(size_t)i] = s.getRT();
+          fid[(size_t)i] = frameIdOf(s.getNativeID());
+          if (fid[(size_t)i] == 0) ++st[(size_t)i].unmapped_frame;
+          const size_t o = scratch_off_[(size_t)i];
+          kept[(size_t)i] = compactifyInto(s, st[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], scratch_off_[(size_t)i + 1] - o);
           s.clear(true);                                // raw frame dies here, inside the loop
         }
         catch (...)
@@ -1487,9 +1522,10 @@ namespace
       if (pick_err) std::rethrow_exception(pick_err);
       for (int i = 0; i < n; ++i)
       {
-        if (!TileProbe::get().keepFrame(compacted[(size_t)i].rt)) { ++frames_probe_dropped; continue; }   // [tile-1]
+        if (!TileProbe::get().keepFrame(frt[(size_t)i])) { ++frames_probe_dropped; continue; }   // [tile-1]
         stats_ += st[(size_t)i];
-        windows_[key_[(size_t)i]].append(compacted[(size_t)i], ms1_.size());   // the frame's vectors die with `compacted`
+        const size_t o = scratch_off_[(size_t)i];
+        windows_[key_[(size_t)i]].append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], ms1_.size());
       }
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
@@ -1571,6 +1607,8 @@ namespace
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
+    std::vector<size_t> scratch_off_;                 ///< per-frame regions of the batch scratch (raw sizes)
+    std::vector<uint32_t> scratch_mzq_; std::vector<float> scratch_inten_; std::vector<uint16_t> scratch_imq_;
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
     map<WinKey, PeakSlab>& windows_;
@@ -3266,24 +3304,14 @@ protected:
       // [tile-2d] frame times -> axis indices, and the load-time growth slack returned, window by
       // window (one window's copy in flight at a time, not all of them at once).
       const double _ts = phase_clock_(); const long _r0 = rss_mb_();
-      size_t slack = 0, kept = 0;
-      for (auto& kv : ms2_by_window)
-      {
-        PeakSlab& sl = kv.second;
-        const size_t before = (sl.tof.capacity() - sl.tof.size()) * 10;
-        indexRt(sl);
-        const size_t got = sl.shrink();
-        slack += got; kept += before - got;
-      }
-      // The picking threads' arenas hold every per-frame temporary the load ever freed (glibc
-      // keeps a thread's high-water mark); return them now, not after the MS1 phase.
+      size_t reserved = 0;
+      for (auto& kv : ms2_by_window) { indexRt(kv.second); reserved += kv.second.reserved(); }
 #ifdef __GLIBC__
-      if (trim_on) malloc_trim(0);
+      if (trim_on) malloc_trim(0);   // the load's arena churn, returned before the MS1 phase
 #endif
-      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis; growth slack "
-                    + String(slack / (1024ULL * 1024ULL)) + " MB returned, " + String(kept / (1024ULL * 1024ULL))
-                    + " MB kept (< 1/16), in " + String(phase_clock_() - _ts) + " s [RSS " + String(_r0) + " -> "
-                    + String(rss_mb_()) + " MB]" + mem_());
+      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis in " + String(phase_clock_() - _ts)
+                    + " s; " + String(reserved / (1024ULL * 1024ULL)) + " MB reserved but untouched (virtual only) [RSS "
+                    + String(_r0) + " -> " + String(rss_mb_()) + " MB]" + mem_());
     }
 
     //-------------------------------------------------------------
