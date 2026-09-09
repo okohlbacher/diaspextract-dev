@@ -357,12 +357,26 @@ namespace
   /// ElutionPeakDetection is skipped (trace:ms{1,2}_split_valleys = 0, or a single trace), where
   /// MassTraceDetection reports an intensity-weighted mean instead. Counted, not silent.
   inline std::atomic<size_t>& rtOffGrid() { static std::atomic<size_t> n{0}; return n; }
+  /// [soa-rt diag] cause (a): the producer's RT was not one of the store's frame times at all.
+  inline std::atomic<size_t>& rtNotAFrame() { static std::atomic<size_t> n{0}; return n; }
+  /// [soa-rt diag] cause (b): the RT frame was outside the window trimToSpan kept.
+  inline std::atomic<size_t>& rtTrimmedOut() { static std::atomic<size_t> n{0}; return n; }
+  /// [soa-rt diag] cause (a) again: is the stray RT strictly BETWEEN two frame times (a weighted
+  /// mean, which no frame index can represent) or merely a hair off one (a representable value)?
+  inline std::atomic<size_t>& rtStrictlyBetween() { static std::atomic<size_t> n{0}; return n; }
   /// Record `rt` as a frame offset. Snaps to the nearest frame if the value is off-grid (counted).
   inline void setRtFrame(const TraceStore& s, Trace& t, double rt)
   {
     if (s.frame_rt.empty()) { t.rt_at = 0; return; }
     const uint32_t f = s.frameOf(rt);
-    if (s.frame_rt[f] != rt) rtOffGrid().fetch_add(1, std::memory_order_relaxed);
+    if (s.frame_rt[f] != rt)
+    {
+      rtOffGrid().fetch_add(1, std::memory_order_relaxed);
+      rtNotAFrame().fetch_add(1, std::memory_order_relaxed);
+      // strictly interior to the frame grid => an interpolated value, unrepresentable as an index
+      if (f > 0 && f + 1 < s.frame_rt.size() && rt > s.frame_rt[f - 1] && rt < s.frame_rt[f + 1])
+        rtStrictlyBetween().fetch_add(1, std::memory_order_relaxed);
+    }
     const uint32_t d = f > t.frame0 ? f - t.frame0 : 0u;
     t.rt_at = (uint16_t)(d > 65535u ? 65535u : d);
   }
@@ -428,7 +442,8 @@ namespace
     // [soa-rt] rt_at names EPD's SMOOTHED apex, which is not `apex` (the raw maximum) and can in
     // principle sit outside the window this trim keeps. Clamping would change the trace's reported
     // RT, so it is counted rather than assumed away -- and the digest gate is what settles it.
-    if (t.rt_at < lo || t.rt_at > hi) rtOffGrid().fetch_add(1, std::memory_order_relaxed);
+    if (t.rt_at < lo || t.rt_at > hi)
+    { rtOffGrid().fetch_add(1, std::memory_order_relaxed); rtTrimmedOut().fetch_add(1, std::memory_order_relaxed); }
     const size_t rr = t.rt_at < lo ? lo : (t.rt_at > hi ? hi : (size_t)t.rt_at);
     t.frame0 += (uint32_t)lo; t.off += (uint32_t)lo;
     t.len = (uint16_t)(hi - lo + 1); t.apex = (uint16_t)(a - lo); t.npts = np;
@@ -3911,6 +3926,10 @@ protected:
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
+    writeLogInfo_("[soa-rt] off-grid " + String(rtOffGrid().load())
+                  + " = not-a-frame " + String(rtNotAFrame().load())
+                  + " (of which strictly between two frames " + String(rtStrictlyBetween().load()) + ")"
+                  + " + trimmed-out " + String(rtTrimmedOut().load()));
     if (rtOffGrid().load() != 0)
       writeLogWarn_("[soa-rt] " + String(rtOffGrid().load()) + " traces had an RT that is not one of "
                     "the store's frame times (ElutionPeakDetection skipped, or a span trimmed away from "
