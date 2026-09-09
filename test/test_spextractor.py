@@ -15,6 +15,7 @@ checks that fail if the things most likely to break do break:
   5. trace extension     one missing cycle must leave ONE trace and its gapped fragment in the
                          spectrum; seven missing cycles must give TWO traces. Every version of the
                          integer detector that lost 92% of the peptides passed checks 1-4.
+  ... 14. writer           count, id="spectrum=K", index="K" and the <indexList> offsets agree
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
@@ -370,7 +371,29 @@ def main():
             "the concurrency cap changed the output; results must be written to index-addressed slots"
     check("the concurrency cap bounds admitted windows and does not change output", c13)
 
-    total = 6 + 2 + 2 + 1 + 1 + 1
+    # 14: the writer's invariants. The parallel writer shipped an EMPTY <indexList> for a release
+    #     (count="0", one dummy entry) and nothing here looked; the streaming writer (TileWriter) now
+    #     owns the count, the ids and the index, so all three are checked on the default output:
+    #     declared count == spectra, id="spectrum=K" and index="K" are the rank from 0, and every
+    #     index offset lands on its own <spectrum.
+    def c14():
+        import re
+        data = open(out_def, "rb").read()
+        n_decl = int(re.search(rb'<spectrumList count="(\d+)"', data).group(1))
+        specs = [(m.start(), m.group(1), m.group(2)) for m in re.finditer(rb'<spectrum id="([^"]*)" index="(\d+)"', data)]
+        assert n_decl == len(specs) > 0, f"spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
+        for k, (_, sid, idx) in enumerate(specs):
+            assert int(idx) == k and sid == b"spectrum=%d" % k, f"spectrum {k}: id={sid!r} index={idx!r}"
+        offs = re.findall(rb'<offset idRef="([^"]*)">(\d+)</offset>', data)
+        assert len(offs) == len(specs), f"indexList has {len(offs)} offsets for {len(specs)} spectra"
+        for k, (ref, off) in enumerate(offs):
+            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], \
+                f"index entry {k}: {ref!r} at {off!r}, spectrum starts at {specs[k][0]}"
+        ilo = int(re.search(rb'<indexListOffset>(\d+)</indexListOffset>', data).group(1))
+        assert data[ilo:ilo + 10] == b"<indexList", f"indexListOffset {ilo} does not point at <indexList"
+    check("count, ids, index and indexList agree", c14)
+
+    total = 6 + 2 + 2 + 1 + 1 + 1 + 1
     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 
