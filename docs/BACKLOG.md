@@ -713,6 +713,21 @@ prints even on `--help`, where it is meaningless; and there is still no macOS or
 packaging at all (blocked on the missing Developer ID private key -- see the release review).
 
 
+### Linux GUI application, distributable (2026-09-09, user request)
+
+Alongside the macOS (.app/.dmg, blocked on the Developer ID private key) and Windows (SignPath)
+packaging that does not yet exist, a **Linux desktop GUI** for SpeXtractor, shipped as a
+self-contained distributable (AppImage first -- one file, no install, runs on any glibc >= the
+build host's; Flatpak second if a store presence is wanted). Scope: a thin front end over the
+CLI (input .d/.mzpeak/.mzML, output path/format, the handful of options users actually set --
+threads, detector, min_charge, max_span, the tile:/perf: memory knobs once tiling lands -- with
+the tool's own log streamed into a pane and the [perf]/[mem] summary rendered at the end), NOT a
+reimplementation of anything. Bundle libOpenMS.so + share/OpenMS + the tool; assert at startup
+that the bundled share/ resolves (the same env -i gate CI runs for the CLI). Same three
+external-tool rules as the CLI: our version string, update check off, no stderr noise. Revisit
+the GUI toolkit choice against what the Windows/macOS shells will use so there is one GUI
+codebase, not three.
+
 ## Memory-work plan status (2026-09-08)
 
 The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
