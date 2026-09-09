@@ -4203,8 +4203,17 @@ protected:
             }
             w_detect += secs(std::chrono::steady_clock::now() - _td0);
           }
+          const size_t slab_frames = wslab.frames();
           release_input();                       // before the merge, not after it
           auto _tm0 = std::chrono::steady_clock::now();
+          // The rebase below adds the cell's first frame's index IN THE RESIDENT SLAB. That equals
+          // its index in the window store only while the store's frame table IS the slab's
+          // (wst.setFrames(wslab.rt_index) above). When the table is frozen from metadata (plan
+          // step 1: all frames of the window's group, including ones the loader never appended)
+          // the rebase must go through rt_index VALUES (plan C5), never an offset. [review, Kimi]
+          if (wst.frames() != slab_frames)
+            throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                  "cell rebase by offset needs the window store's frame table to be the slab's", String(wst.frames()) + " vs " + String(slab_frames));
           size_t tot = 0, arena = 0; bool any_bins = false;
           for (size_t ci = 0; ci < n_cells; ++ci) for (int b = 0; b < nb; ++b)
           { tot += per[ci][b].size(); arena += bst[ci][b].inten.size(); any_bins |= !bst[ci][b].bins.empty(); }
