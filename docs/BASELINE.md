@@ -2164,3 +2164,76 @@ the window loop's remaining slack is not in task ordering, not in per-candidate 
 in the conversion. It is in the memory traffic of the detector's inner loop, which is already
 prefetched about as well as a sequential scan can be. Further gains there need the algorithm to
 visit fewer candidates -- which is output-changing and needs the full peptide gate.
+
+## 2026-09-09: `Trace` 48 -> 40 bytes, the RT stored as a frame index (adopted, digest-identical)
+
+`Trace::rt` was a cached double. Every producer reports an RT that is already one of the owning
+store's frame times: the integer detector assigns `rtAxis()[sl.rt_index[fap]]` directly, and
+ElutionPeakDetection -- which runs on BOTH MS1 and MS2 at the shipped defaults
+(`trace:ms{1,2}_split_valleys = 7.0`) -- calls `updateSmoothedMaxRT()` on the unsplit trace
+(ElutionPeakDetection.cpp:463) and on every split child (:541), which sets
+`centroid_rt_ = trace_peaks_[max_idx].getRT()` (MassTrace.cpp:507), i.e. one of the points this tool
+built from `frame_rt`. So the 8 bytes were a copy of `frame_rt[frame0 + k]`.
+
+Store `k` instead, in the two bytes that were tail padding. `sizeof(Trace)` 48 -> 40, pinned by the
+static_assert. `rtOf()` is one load from a ~38 KB per-window table; the 1.69e13-visit scoring scan
+never reads it (it reads `FragRt::rt`, the SoA copy, now built from `rtOf()`).
+
+**`rt_at` is SIGNED, and that is what makes it exact.** The first implementation clamped it into the
+window `trimToSpan` kept, and the S30 digest came back `69a6066d...` against the pinned `b499027f...`
+with 855,493 spectra against 854,817. A split counter localised it in one run:
+
+    [soa-rt] off-grid 23140 = not-a-frame 0 (of which strictly between two frames 0) + trimmed-out 23140
+
+`not-a-frame` is ZERO -- every producer's RT really is a frame time -- and all 23,140 were my own
+clamp. Making the offset signed leaves `frame0 + rt_at` (the absolute store frame, and therefore the
+RT) invariant under trimming, because `frame0` gains `lo` and `rt_at` loses it. With that,
+`[soa-rt] off-grid 0` and the digest is `b499027f...` exactly.
+
+### Measured: interleaved A/B on `data`, arms alternating, released HEAD (`final1`) vs `soa1`
+
+| | final1 | soa1 | |
+|---|---|---|---|
+| TNBC 009 (2 h), 2 reps -- peak RSS | 185.75 GB | **180.25 GB** | **-5.50 GB (-2.96%)** |
+| TNBC 009 -- wall | 658.1 s | 675.5 s | +2.65% |
+| dataset D (30 min), 3 reps -- peak RSS | 57.66 GB | **55.76 GB** | **-1.90 GB (-3.29%)** |
+| dataset D -- wall | 171.4 s | 177.4 s | +3.49% |
+
+All four 2-hour runs `SPECTRUM DATA IDENTICAL`; dataset D digest `b499027f...`; e2e 13/13.
+
+**The wall difference is occupancy, not work.** CPU seconds on the 2-hour file, which are
+load-robust where wall is not:
+
+| phase | final1 CPU s | soa1 CPU s | |
+|---|---|---|---|
+| LOAD(stream) | 5,253.8 | 5,289.1 | +0.67% |
+| MS1_TRACE | 957.8 | 925.1 | -3.42% |
+| PRECURSOR_INFER | 596.5 | 606.6 | +1.70% |
+| WINDOW_LOOP | 34,247.7 | 34,294.8 | **+0.14%** |
+| WRITE(mzML) | 1,110.9 | 1,024.9 | -7.74% |
+| **total** | **42,166.8** | **42,140.5** | **-0.06%** |
+
+The window loop -- where all 2.14e9 records live -- costs the same CPU to within 0.14%, and total
+CPU is flat at -0.06%. The wall gap is one outlier: `soa1_r2` ran the loop at a parallel factor of
+77.2x against 81-84x for the other three. Note that run reported the LOWEST `uptime` 1-minute
+average of the four (44.56), which is why that figure is not a usable covariate -- it is sampled at
+the end of the run and reflects our own tail, not the competing load during it. Two reps cannot
+settle wall; the CPU-second evidence says no work was added.
+
+**Adopted on memory at CPU parity, not on wall.** -5.50 GB of a 185.75 GB peak for a
+byte-identical output.
+
+### What this does and does not establish
+
+Fable's adversarial review predicted -5.5 GiB by correcting the naive arithmetic: parents are freed
+at the split (`vector<Trace>().swap(in)`), so the 2.14e9 records are NOT all simultaneously
+resident; roughly 0.6 x children + 0.4 x parents ~ 49 GiB of records are at the peak, not 95.8. The
+measured -5.50 GB confirms that correction and refutes the -16 GiB I first claimed. **Every further
+per-record byte is therefore worth ~0.7 GB at the peak, not ~2 GB** -- use this coefficient, not the
+record-count product, to price the remaining field removals (`im` -> side array, `bframe`, `mz`).
+
+Three of four external reviewers (codex, vibe, kimi) were told this claim was load-bearing and asked
+to check it, and all three repeated the author's original error that child RT is an off-grid
+weighted mean. Only Fable read `MassTrace.cpp`. The digest, not the review, was the arbiter -- and
+it caught a second error (the clamp) that no reviewer saw either.
+
