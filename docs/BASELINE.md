@@ -2408,3 +2408,71 @@ pin, identical), the trim returned 11.9 GB in 2.6 s. Wall is neutral within the 
 now 138 GB, not 169 (review correction C8: tiling is benchmarked against this). Step 2d-ii (the
 loader builds the slabs directly, no second representation) makes the same saving structural --
 no trim, no allocator dependence -- and is gated separately.
+
+## 2026-09-09: tiling plan step 1 -- the RT-tile probe on TNBC 009 (no reader/writer code)
+
+Review correction C7 restated step 1 as a probe: keep only the MS2 frames of one RT range plus a
+halo, applied AFTER picking (batches unchanged); freeze the whole run's per-window tof edges and
+Pearson support `G`; score only the precursors whose apex is in the core; MS1 stays whole-run
+(pass 1 untiled). Arm `probe1` (e3a8917 = tail fix + Fix A + the env-gated probe), `data`, 100
+threads, 250 ms VmRSS sidecar; 13 cores of 600 s at halo 123 s, the last core absorbing the
+remainder; outputs concatenated by core (`bench/tile_concat.py`, self-check byte-exact on the whole
+output) and searched once.
+
+| run | loop peak RSS | loop start | loop wall | loop CPU | detect CPU | core precursors | spectra |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| whole run (reference) | **138.81 GB** | 47.8 | 421.1 s | 34,811 s | 4,371 s | 5,445,436 | 3,919,816 |
+| t0 0-600 s | 26.3 | 26.3 | 15.3 | 590 | 134 | 307,117 | 163,817 |
+| t1 600-1200 | 23.3 | 9.5 | 37.7 | 1,561 | 322 | 501,647 | 325,387 |
+| t2 1200-1800 | 26.4 | 9.8 | 36.8 | 1,892 | 392 | 510,645 | 357,867 |
+| t3 1800-2400 | 26.2 | 9.2 | 46.9 | 2,051 | 432 | 499,855 | 358,782 |
+| t4 2400-3000 | 28.8 | 12.1 | 46.2 | 2,415 | 530 | 502,970 | 371,347 |
+| t5 3000-3600 | 28.0 | 16.9 | 48.5 | 2,507 | 566 | 489,708 | 373,525 |
+| t6 3600-4200 | **29.8** | 10.7 | 51.5 | 2,682 | 588 | 484,063 | 378,118 |
+| t7 4200-4800 | 28.2 | 10.2 | 50.4 | 2,419 | 533 | 449,372 | 353,260 |
+| t8 4800-5400 | 28.7 | 10.6 | 50.1 | 2,502 | 548 | 418,722 | 327,660 |
+| t9 5400-6000 | 28.4 | 12.3 | 45.8 | 2,323 | 492 | 391,518 | 301,048 |
+| t10 6000-6600 | 27.6 | 17.5 | 40.0 | 2,027 | 415 | 345,945 | 250,137 |
+| t11 6600-7200 | 26.5 | 11.2 | 34.2 | 1,763 | 338 | 300,919 | 202,190 |
+| t12 7200-end | 21.3 | 10.3 | 25.3 | 1,263 | 234 | 242,955 | 156,658 |
+| **13 tiles, sum** | max 29.8 (**-79%**) | | **528.7 s (+25.5%)** | **25,995 s (-25.3%)** | 5,523 s (+26.4%) | 5,445,436 (exact) | 3,919,796 (-20) |
+
+Each tile holds 520 of the 4,797 MS2 frames per window (C+2H = 846 s / 1.626 s); the probe's
+whole-process peak stays at 82 GB per tile because the load and the MS1 phase are still whole-run
+(that is pass 1, step 5). Loop start ~10 GB = the persistent MS1 state + floor.
+
+**What the probe settles.**
+1. **Memory**: the window loop of a 600-s tile peaks at 21-30 GB against 138.8 GB whole -- the
+   memory model's ~33 GB cell for C=600/H=123 (plus its 5-8 GB allowance) was conservative.
+2. **CPU**: total loop CPU falls by a quarter under tiling despite the 41% frame halo. The detector
+   itself is near-linear (+26% CPU for +41% frames: sub-linear); the saving is in everything after
+   it -- merge, split, `buildFragStats` (per-fragment work over G frames), the candidate scans --
+   which scale with the window's frames and fragments and are 9x smaller per tile: 30,441 -> 20,472 s
+   (-33%). So the super-linearity was real, and it lives in the scoring path, not the detector.
+3. **Wall**: +25.5% when the tiles run one after another, exactly the linear model's +23%: a tile's
+   loop runs at ~49x against the whole run's 83x, because fewer windows are in flight. That is the
+   occupancy the pipelined design (a tile's tail overlapped with the next tile's head) recovers;
+   with the CPU already 25% lower, tiled wall should come in BELOW the whole run once two tiles
+   overlap.
+4. **Halo**: on the densest core (t6) and an early one (t1), H = 63 / 123 / 300 s:
+
+   | | loop peak | loop CPU | loop wall | spectra |
+   |---|---:|---:|---:|---:|
+   | t6, H=63 | 26.7 GB | 2,352 s | 43.6 s | 378,110 |
+   | t6, H=123 | 29.8 | 2,682 | 51.5 | 378,118 |
+   | t6, H=300 | 35.7 | 3,441 | 71.4 | 378,128 |
+   | t1, H=63 | 22.2 | 1,386 | 34.3 | 325,383 |
+   | t1, H=123 | 23.3 | 1,561 | 37.7 | 325,387 |
+   | t1, H=300 | 25.9 | 2,038 | 45.8 | 325,391 |
+
+   The spectrum count moves by ~1e-5 across a 5x range of halo: the boundary is not where the
+   spectra change. Memory and CPU price the halo at ~0.05 GB and ~4-6 CPU-s per second of halo on
+   the densest tile; 123 s stays the default.
+5. **Peptides (Sage, rank 1, q <= 0.01)**: tiled **27,931 vs whole 27,859 (+0.26%)**; set overlap
+   26,083 common, 1,776 whole-only, 1,848 tiled-only (93.6%). For calibration, the max_span arms
+   of step 0c -- a change to 0.1-0.6% of traces -- flip 30-112 of 12.6 k peptides (0.2-0.9%), and
+   the project's 2026-09-02 thread-count comparison flipped 20% of the union at a 2% count
+   difference: an FDR-thresholded set is a poor instrument for small perturbations. The
+   per-spectrum comparison (`bench/mzml_specdiff.py`, whole vs concatenated, differing spectra
+   binned by distance to the nearest 600-s boundary) is the instrument; its result is recorded
+   below when it lands.
