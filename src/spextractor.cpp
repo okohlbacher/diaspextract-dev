@@ -1366,6 +1366,29 @@ namespace
     }
     bool keepFrame(double rt) const { return !on || (rt >= lo - halo && rt <= hi + halo); }
     bool core(double rt) const { return !on || (rt >= lo && rt < hi); }
+    /// SPEXTRACTOR_WINDOW_FILE: one line per window, "<lo>-<hi>\t<G>\t<tlo>\t<thi>" as the whole
+    /// run logged them ([gstat] and [tof]); the probe freezes all three so a partial window is
+    /// scored on the whole window's support and traced in the whole window's bands.
+    struct Row { size_t G = 0; unsigned tlo = 0, thi = 0; };
+    static bool row(const std::string& key, Row& out)
+    {
+      static const std::map<std::string, Row> rows = []{
+        std::map<std::string, Row> m;
+        if (const char* e = std::getenv("SPEXTRACTOR_WINDOW_FILE"))
+        {
+          std::ifstream f(e); std::string ln;
+          while (std::getline(f, ln))
+          {
+            char k[128]; unsigned long g; unsigned a, b;
+            if (std::sscanf(ln.c_str(), "%127s %lu %u %u", k, &g, &a, &b) == 4) m[k] = Row{(size_t)g, a, b};
+          }
+          if (m.empty()) throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "SPEXTRACTOR_WINDOW_FILE has no rows", e);
+        }
+        return m; }();
+      const auto it = rows.find(key);
+      if (it == rows.end()) { if (!rows.empty()) throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "SPEXTRACTOR_WINDOW_FILE has no row for window", key); return false; }
+      out = it->second; return true;
+    }
   };
 
   class PickCompactConsumer : public FullSwathFileConsumer
@@ -3786,8 +3809,7 @@ protected:
           // TASKS, so they fill the pool alongside every other window's work.
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
-          if (const char* e = std::getenv("SPEXTRACTOR_TOF_EDGES"))   // [tile-1] freeze the whole-run edges
-          { unsigned a = 0, b = 0; if (std::sscanf(e, "%u,%u", &a, &b) == 2 && b > a) { tlo = a; thi = b; } }
+          { TileProbe::Row pr; if (TileProbe::row(String(win_lo) + "-" + String(win_hi), pr) && pr.thi > pr.tlo) { tlo = pr.tlo; thi = pr.thi; } }   // [tile-1] frozen edges
           const int nb = (thi <= tlo) ? 1 : std::max(1, w_bands);
           // [tile-0d] the slab-derived band bounds a tiled design would have to inject globally
           writeLogInfo_("[tof] window " + String(win_lo) + "-" + String(win_hi) + " tlo=" + String(tlo)
@@ -3943,13 +3965,8 @@ protected:
         auto _t3 = std::chrono::steady_clock::now();
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         w_trace = secs(_t3 - _t2) - w_prep - w_split;
-        size_t g_over = 0;   // [tile-1] SPEXTRACTOR_G_FILE: lines "<lo>-<hi>\t<G>" from a whole-run [gstat] log
-        if (const char* e = std::getenv("SPEXTRACTOR_G_FILE"))
-        {
-          std::ifstream gf(e); std::string ln; const std::string key = String(win_lo) + "-" + String(win_hi);
-          while (std::getline(gf, ln)) { const auto tab = ln.find('\t'); if (tab != std::string::npos && ln.substr(0, tab) == key) { g_over = (size_t)std::atol(ln.c_str() + tab + 1); break; } }
-          if (g_over == 0) throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "SPEXTRACTOR_G_FILE has no G for window", key);
-        }
+        size_t g_over = 0;   // [tile-1] the whole run's G for this window, when a window file is given
+        { TileProbe::Row pr; if (TileProbe::row(String(win_lo) + "-" + String(win_hi), pr)) g_over = pr.G; }
         FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt, g_over);
         // [tile-0d] the Pearson denominator G against the two tile-independent candidates: the
         // window's frame count F and the frames with any above-noise peak G_live. If G == F the
