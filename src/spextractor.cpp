@@ -254,7 +254,6 @@ namespace
   struct Trace
   {
     double mz = 0.0;
-    double rt = 0.0;   ///< apex/centroid RT
     double im = 0.0;   ///< centroid ion mobility (1/K0)
     /// The flight-time bin this trace was measured on, and the calibration factor of its apex
     /// frame. The pair is the AUTHORITATIVE m/z: `mz` below is a cached convenience for the gates
@@ -278,6 +277,16 @@ namespace
     uint16_t len = 0;      ///< frames spanned (a gradient is ~1,400; asserted < 65536)
     uint16_t npts = 0;     ///< REAL points in the span
     uint16_t apex = 0;     ///< position of the apex within the span
+    /// [soa-rt] THE RT IS AN INDEX, NOT A VALUE. Every producer of a Trace reports an RT that is
+    /// one of the store's own frame times: the integer detector uses the apex frame's RT directly,
+    /// and ElutionPeakDetection -- which runs on both MS1 and MS2 at the shipped defaults -- sets
+    /// `centroid_rt_ = trace_peaks_[max_idx].getRT()` in updateSmoothedMaxRT(), i.e. one of the
+    /// points it was given, whose RT this tool set from the frame table. So the 8-byte double was
+    /// a cached copy of `frame_rt[frame0 + rt_at]`; storing the offset instead costs 2 bytes that
+    /// were tail padding and takes the record from 48 to 40 -- 16 GiB on a 2-hour acquisition.
+    /// Read it with rtOf(); never reconstruct it from `apex`, which is the RAW maximum and is a
+    /// DIFFERENT frame from EPD's smoothed maximum.
+    uint16_t rt_at = 0;    ///< span-relative frame whose time is this trace's RT (see rtOf())
     size_t np() const { return npts; }
     size_t span() const { return len; }
     void freeProfile() { len = 0; npts = 0; }        ///< the arena is the store's; nothing to free
@@ -325,7 +334,7 @@ namespace
       return (uint32_t)base;
     }
   };
-  static_assert(sizeof(Trace) == 48, "Trace must stay 48 bytes: it is the largest structure in the tool "
+  static_assert(sizeof(Trace) == 40, "Trace must stay 40 bytes: it is the largest structure in the tool "
                                     "(2.1e9 records on a 2-h file), and a silent 8-byte regrowth costs ~16 GiB");
 
   /// Span accessors take the owning store EXPLICITLY. Every trace of a vector shares one store, so
@@ -338,6 +347,25 @@ namespace
   inline uint32_t gframe(const TraceStore& s, const Trace& t, size_t k)
   { assert(t.frame0 + k < s.rt_index.size()); return s.rt_index[t.frame0 + k]; }
   inline double rtAtSpan(const TraceStore& s, const Trace& t, size_t k) { return rtAxis()[gframe(s, t, k)]; }
+  /// [soa-rt] The trace's reported RT. `frame_rt` is one double per frame of the owning store
+  /// (~38 KB for a window), so this is a single load from a table that stays hot, against the
+  /// 8 bytes per record it replaces. Identical by construction: frame_rt[f] IS rtAxis()[ri[f]],
+  /// the same array element the producers read.
+  inline double rtOf(const TraceStore& s, const Trace& t)
+  { assert((size_t)t.frame0 + t.rt_at < s.frame_rt.size()); return s.frame_rt[t.frame0 + t.rt_at]; }
+  /// Traces whose RT is NOT one of the store's frame times: only reachable when
+  /// ElutionPeakDetection is skipped (trace:ms{1,2}_split_valleys = 0, or a single trace), where
+  /// MassTraceDetection reports an intensity-weighted mean instead. Counted, not silent.
+  inline std::atomic<size_t>& rtOffGrid() { static std::atomic<size_t> n{0}; return n; }
+  /// Record `rt` as a frame offset. Snaps to the nearest frame if the value is off-grid (counted).
+  inline void setRtFrame(const TraceStore& s, Trace& t, double rt)
+  {
+    if (s.frame_rt.empty()) { t.rt_at = 0; return; }
+    const uint32_t f = s.frameOf(rt);
+    if (s.frame_rt[f] != rt) rtOffGrid().fetch_add(1, std::memory_order_relaxed);
+    const uint32_t d = f > t.frame0 ? f - t.frame0 : 0u;
+    t.rt_at = (uint16_t)(d > 65535u ? 65535u : d);
+  }
   /// The calibration factor of the trace's own apex/measurement frame. Empty table (the OpenMS
   /// detector has no per-frame factors) yields 0.0, which is what the field held there before, and
   /// exportMz_ returns the cached m/z for those traces because their `tof` is 0.
@@ -397,8 +425,14 @@ namespace
     if (lo == 0 && hi + 1 == t.span()) return;                  // already within the cap, ends real
     uint16_t np = 0;
     for (size_t k = lo; k <= hi; ++k) if (xv(s, t, k) > 0.0f) ++np;
+    // [soa-rt] rt_at names EPD's SMOOTHED apex, which is not `apex` (the raw maximum) and can in
+    // principle sit outside the window this trim keeps. Clamping would change the trace's reported
+    // RT, so it is counted rather than assumed away -- and the digest gate is what settles it.
+    if (t.rt_at < lo || t.rt_at > hi) rtOffGrid().fetch_add(1, std::memory_order_relaxed);
+    const size_t rr = t.rt_at < lo ? lo : (t.rt_at > hi ? hi : (size_t)t.rt_at);
     t.frame0 += (uint32_t)lo; t.off += (uint32_t)lo;
     t.len = (uint16_t)(hi - lo + 1); t.apex = (uint16_t)(a - lo); t.npts = np;
+    t.rt_at = (uint16_t)(rr - lo);
   }
 
   /// Drop the spans of the traces nobody references and compact the arena IN PLACE, walking the kept
@@ -512,7 +546,7 @@ namespace
     if (mz_est == "apex" && mt.getSize() > 0) t.mz = mt[mt.findMaxByIntPeak(false)].getMZ();
     else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); t.mz = m2.getCentroidMZ(); }
     else t.mz = mt.getCentroidMZ();
-    t.rt = mt.getCentroidRT();
+    const double crt = mt.getCentroidRT();   // [soa-rt] a frame time; stored as an offset below
     t.im = mt.getCentroidIM();
     // One peak per frame (MassTraceDetection takes at most one candidate per spectrum), so the
     // profile is a span over the store's frame table with zeros where frames were missed.
@@ -521,7 +555,8 @@ namespace
     pts.reserve(np);
     for (Size i = 0; i < np; ++i) pts.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
     Trace sp = makeSpan(pts, store);
-    sp.mz = t.mz; sp.rt = t.rt; sp.im = t.im;
+    sp.mz = t.mz; sp.im = t.im;
+    setRtFrame(store, sp, crt);
     return sp;
   }
 
@@ -713,7 +748,7 @@ namespace
     {
       uint64_t u; double v;
       v = t.mz; std::memcpy(&u, &v, 8); b.push_back(u);
-      v = t.rt; std::memcpy(&u, &v, 8); b.push_back(u);
+      v = rtOf(st, t); std::memcpy(&u, &v, 8); b.push_back(u);
       v = t.im; std::memcpy(&u, &v, 8); b.push_back(u);
       v = intensityOf(st, t); std::memcpy(&u, &v, 8); b.push_back(u);
       b.push_back((uint64_t)t.tof);
@@ -1103,7 +1138,7 @@ namespace
       for (const auto& g : got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
       t.tof = sl.tof[kap]; t.bframe = fap;   // got-order first max: the frame the bin was measured on
       t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
-      t.rt = rtAxis()[sl.rt_index[fap]];
+      t.rt_at = (uint16_t)(fap - t.frame0);   // [soa-rt] was rtAxis()[sl.rt_index[fap]]
       t.im = IM_LO + cim / IM_Q;
       out.push_back(std::move(t));
     }
@@ -1994,13 +2029,13 @@ protected:
     sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
     vector<double> sorted_mz(N);
     for (size_t i = 0; i < N; ++i) sorted_mz[i] = ms1[by_mz[i]].mz;
-    // [soa] findPartner's candidate scan walks `by_mz` and dereferences ms1[j].rt / ms1[j].im --
-    // two 8-byte fields out of a 48-byte record, reached through an index, i.e. one cache miss per
-    // candidate per field. This phase is single-threaded and 26% of TNBC wall, so lay the two gate
+    // [soa] findPartner's candidate scan walks `by_mz` and dereferences each candidate's RT and
+    // IM -- two 8-byte gate fields out of a 40-byte record, reached through an index, i.e. one
+    // cache miss per candidate per field. This phase is single-threaded and 26% of TNBC wall, so lay the two gate
     // fields out in m/z order next to `sorted_mz` and scan them sequentially. Same values, same
     // order, same first match: output-identical by construction. 16 B/trace of transient state.
     vector<double> sorted_rt(N), sorted_im(N);
-    for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = t.rt; sorted_im[i] = t.im; }
+    for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
     // [mzidx] A DIRECTLY COMPUTED integer index over `sorted_mz` -- no search to find the bucket
     // and no floating-point arithmetic to compute it. The greedy walk below is the single-threaded
     // residue of this phase (measured: 138.3 s of 155.7 on a 2-hour file) and it spent that in
@@ -2098,6 +2133,7 @@ protected:
       {
       if (used[seed]) continue;
       const Trace& s = ms1[seed];
+      const double s_rt = rtOf(ms1st, s);     // [soa-rt] hoisted: the candidate scan reads it per probe
       const double tol = s.mz * mass_ppm * 1e-6;
 
       // Find an unused isotope partner near `target` m/z, co-localized in RT and IM (binary-search
@@ -2106,7 +2142,7 @@ protected:
         size_t klo = lbmz(target - tol), khi = ubmz(target + tol);   // [mzidx] same positions, local search
         for (size_t k = klo; k < khi; ++k)
         {
-          if (fabs(sorted_rt[k] - s.rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
+          if (fabs(sorted_rt[k] - s_rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
           size_t j = by_mz[k];
           if (used[j] || j == seed) continue;
           { R.deps.push_back((size_t)j); return (long)j; }
@@ -2208,7 +2244,7 @@ protected:
         }
         Precursor_ pc0;
         pc0.trace_idx = seed;
-        pc0.rt = s.rt; pc0.im = s.im;
+        pc0.rt = s_rt; pc0.im = s.im;
         pc0.mono_mz = best_mono;
         // Carry the bin of whichever trace the monoisotope call landed on, so the exported mass is
         // calibrated from a measurement rather than from a number that passed through the gates.
@@ -2280,7 +2316,7 @@ protected:
 
       Precursor_ pc;
       pc.trace_idx = seed;
-      pc.rt = s.rt; pc.im = s.im;
+      pc.rt = s_rt; pc.im = s.im;
 
       if (hyps.empty())
       {
@@ -2368,12 +2404,13 @@ protected:
         if (pc.charge != 1) continue;
         ++n1;
         const Trace& sd = ms1[pc.trace_idx];
+        const double sd_rt = rtOf(ms1st, sd);   // [soa-rt]
         const double tol = sd.mz * mass_ppm * 1e-6;
         auto has = [&](double target, bool& free_) -> bool {
           const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
           for (size_t k = klo; k < khi; ++k)
           {
-            if (fabs(sorted_rt[k] - sd.rt) > delta_rt || fabs(sorted_im[k] - sd.im) > iso_im_tol) continue;
+            if (fabs(sorted_rt[k] - sd_rt) > delta_rt || fabs(sorted_im[k] - sd.im) > iso_im_tol) continue;
             const size_t j = by_mz[k]; if (j == pc.trace_idx) continue;
             free_ = !used[j]; return true;
           }
@@ -2427,13 +2464,13 @@ protected:
     /// inv == 0 is the DISABLED state, not an error: every bucket is then 0, every dq is 0, and
     /// the exact test alone decides. That is the fallback for every degenerate parameter below,
     /// and it costs no branch in the scan.
-    void build(const vector<Trace>& fr, double delta_rt)
+    void build(const vector<Trace>& fr, const TraceStore& st, double delta_rt)
     {
       const size_t n = fr.size();
       rt.resize(n); q.assign(n, 0);
       rt0 = 0.0; inv = 0.0;
       double lo = 0.0, hi = 0.0;
-      for (size_t i = 0; i < n; ++i) { rt[i] = fr[i].rt; if (!i || rt[i] < lo) lo = rt[i]; if (!i || rt[i] > hi) hi = rt[i]; }
+      for (size_t i = 0; i < n; ++i) { rt[i] = rtOf(st, fr[i]); if (!i || rt[i] < lo) lo = rt[i]; if (!i || rt[i] > hi) hi = rt[i]; }
       // A denormal delta_rt makes 1/delta_rt infinite, and an RT range spanning +/-DBL_MAX makes
       // the span infinite; both then produce inf*0 = NaN inside bucketOf. Neither survives real
       // acquisition, but both are reachable and both were UB, so every one degrades to disabled.
@@ -3081,7 +3118,7 @@ protected:
     {
       const size_t before = ms1_traces.size();
       ms1_traces.erase(remove_if(ms1_traces.begin(), ms1_traces.end(), [&ms1_store](const Trace& t) {
-        return !std::isfinite(t.mz) || !std::isfinite(t.rt) || !std::isfinite(t.im)
+        return !std::isfinite(t.mz) || !std::isfinite(rtOf(ms1_store, t)) || !std::isfinite(t.im)
                || !std::isfinite(intensityOf(ms1_store, t));
       }), ms1_traces.end());
       if (before != ms1_traces.size())
@@ -3089,7 +3126,7 @@ protected:
     }
     sort(ms1_traces.begin(), ms1_traces.end(), [&ms1_store](const Trace& a, const Trace& b) {
       if (a.mz != b.mz) return a.mz < b.mz;
-      if (a.rt != b.rt) return a.rt < b.rt;
+      { const double ra = rtOf(ms1_store, a), rb = rtOf(ms1_store, b); if (ra != rb) return ra < rb; }
       if (a.im != b.im) return a.im < b.im;
       return intensityOf(ms1_store, a) < intensityOf(ms1_store, b);
     });
@@ -3277,7 +3314,7 @@ protected:
       ft.precision(12);
       ft << "mz\trt\tim\tintensity\tfwhm_s\tn_xic\n";
       for (const auto& t : ms1_traces)
-        ft << t.mz << '\t' << t.rt << '\t' << t.im << '\t' << intensityOf(ms1_store, t) << '\t'
+        ft << t.mz << '\t' << rtOf(ms1_store, t) << '\t' << t.im << '\t' << intensityOf(ms1_store, t) << '\t'
            << fwhm_of(t) << '\t' << t.np() << '\n';
       ft.close();
       ofstream fp((ms1_dump + ".precursors.tsv").c_str());
@@ -3736,20 +3773,20 @@ protected:
         }
 
         auto _tso = std::chrono::steady_clock::now();
-        frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [](const Trace& t) {
-          return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(t.rt);
+        frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& t) {
+          return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(rtOf(wst, t));
         }), frag_traces.end());
         if (frag_traces.empty()) return;   // nothing traceable in this window
 
         sort(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& a, const Trace& b) {
           if (a.im != b.im) return a.im < b.im;
           if (a.mz != b.mz) return a.mz < b.mz;
-          if (a.rt != b.rt) return a.rt < b.rt;
+          { const double ra = rtOf(wst, a), rb = rtOf(wst, b); if (ra != rb) return ra < rb; }
           return intensityOf(wst, a) < intensityOf(wst, b);
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
-        FragRt frag_rt; frag_rt.build(frag_traces, delta_rt);
+        FragRt frag_rt; frag_rt.build(frag_traces, wst, delta_rt);
         w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
@@ -3874,6 +3911,12 @@ protected:
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
+    if (rtOffGrid().load() != 0)
+      writeLogWarn_("[soa-rt] " + String(rtOffGrid().load()) + " traces had an RT that is not one of "
+                    "the store's frame times (ElutionPeakDetection skipped, or a span trimmed away from "
+                    "its smoothed apex); their RT was snapped to the nearest frame. Zero is the "
+                    "output-identical case -- a nonzero count here means the digest will differ.");
+    else writeLogInfo_("[soa-rt] every trace RT was exactly a frame time (0 snapped).");
     writeLogInfo_("All windows done (admission high-water " + String(adm_hwm.load()) + " of "
                   + String(n_conc) + " allowed concurrent windows)." + clk_() + rss_() + mem_()); // [mem]
 #ifdef __GLIBC__
