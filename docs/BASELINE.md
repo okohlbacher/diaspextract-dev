@@ -2599,3 +2599,27 @@ exist only in the whole run and 46.2 M only in the tile -- 46.6% of the union ag
 That exact test also counts an apex-frame shift of the SAME fragment (the apex m/z is computed
 from the apex frame's calibration) as one lost plus one gained; the 10-ppm-tolerant match and the
 same metric on probe1's outputs (the old per-trace window) are recorded when they land.
+
+## 2026-09-09: cause 2 vs cause 3 -- detection alone accounts for the larger half of the tile churn
+
+Judge's open question 1 (docs/reviews/2026-09-09-bounded-parents-design/): the whole run and the
+core t6 probe (3600-4200 s, H = 123, frozen edges/G, MS1 whole-run) with `-trace:ms2_split_valleys
+0` -- the valley splitter off, so the fragment traces ARE the detector's parents -- dumped per
+window before trimming (`SPEXTRACTOR_FRAG_DUMP`, build 9981e97, ibminode05), symmetric difference
+of the parents whose RT lies in the core, key (mz 1e-4, apex RT, im 1e-4, apex intensity):
+
+| | parents in the core | whole-only | tile-only | common with a different extent |
+|---|---:|---:|---:|---:|
+| all 28 windows | **62.6 M common = 58.8% of the union** | 21.8 M | 22.0 M | 31,018 (0.05%) |
+| 400-426 Th (sparsest) | 500,186 common | 25,325 (5%) | 26,264 | 16 |
+| 1000-1026 Th | 2,611,394 | 960,254 (27%) | 965,755 | 1,582 |
+| 750-951 Th (densest) | 2.8-3.4 M each | 27-28% each | | |
+
+So with NO splitting involved, 41% of the parents a 600-s core sees differ from the whole run's --
+detection (seeds in intensity order, the running centroid/sd, `visited` claims along connected
+lanes, unbounded extension) is the larger half of the churn, and it scales with peak density; the
+parents both runs share are the same objects (extents equal in 99.95%). A splitter-only fix (the
+review's LPS option) therefore cannot deliver invariance, and the seed cap's residual would sit on
+exactly these dense lanes. Ranking of the mechanisms for the decision: the cell-atomic grid makes
+this churn part of the definition (parents are detected per cell in every mode, so it is the same
+in the whole run and in any tiling); the halo designs fight it and lose.
