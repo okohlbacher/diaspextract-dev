@@ -30,7 +30,6 @@
 #
 # Base: OpenMS/OpenMS develop bd4b89555629d68b431b189a4c841efbcc4dfeea (2026-04-24).
 # Regenerated 2026-09-09 against that commit; verified to reproduce the built tree byte-for-byte.
-# Apply with: patch -p1 -d <OpenMS tree> < this file
 --- a/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
 +++ b/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
 @@ -13,6 +13,7 @@
@@ -101,16 +100,21 @@
      return;
    }
  
-@@ -384,7 +402,7 @@
+@@ -384,8 +402,11 @@
      // Step 1: Smooth data
      // *********************************************************************
  
 -    double scan_time(mt.getAverageMS1CycleTime());
+-    Size win_size = std::ceil(chrom_fwhm_ / scan_time);
 +    double scan_time(scan_time_ > 0.0 ? scan_time_ : mt.getAverageMS1CycleTime());
-     Size win_size = std::ceil(chrom_fwhm_ / scan_time);
++    // With a fixed scan time the ratio can sit on an integer (7 s / 1.4 s): a last-bit difference
++    // in the scan time then flips ceil() between two windows, so back off by an epsilon there.
++    // The per-trace path keeps the original expression.
++    Size win_size = scan_time_ > 0.0 ? (Size)std::ceil(chrom_fwhm_ / scan_time - 1e-6) : (Size)std::ceil(chrom_fwhm_ / scan_time);
  
      // add smoothed data (original data is still accessible)
-@@ -456,12 +474,7 @@
+     smoothData(mt, static_cast<Int>(win_size));
+@@ -456,12 +477,7 @@
            mt.estimateFWHM(true);
          }
  
@@ -124,7 +128,7 @@
  
        }
      }
-@@ -541,12 +554,7 @@
+@@ -541,12 +557,7 @@
              new_mt.estimateFWHM(true);
            }
  
@@ -138,7 +142,7 @@
          }
        }
      }
-@@ -573,16 +581,30 @@
+@@ -573,16 +584,30 @@
      }
  
      MSSpectrum spectrum;
@@ -174,7 +178,7 @@
      sg.filter(spectrum);
      MSSpectrum::iterator iter = spectrum.begin();
      std::vector<double> smoothed_intensities;
-@@ -625,6 +647,7 @@
+@@ -625,6 +650,7 @@
      chrom_peak_snr_ = (double)param_.getValue("chrom_peak_snr");
      min_fwhm_ = (double)param_.getValue("min_fwhm");
      max_fwhm_ = (double)param_.getValue("max_fwhm");

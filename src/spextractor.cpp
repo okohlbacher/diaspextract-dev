@@ -1259,11 +1259,15 @@ namespace
   /// is narrower and a sub-range of it (an RT tile) is split differently from the whole.
   inline double frameSpacing(const vector<double>& frame_rt)
   {
-    if (frame_rt.size() < 2) return 0.0;
-    vector<double> d; d.reserve(frame_rt.size() - 1);
-    for (size_t i = 1; i < frame_rt.size(); ++i) d.push_back(frame_rt[i] - frame_rt[i - 1]);
-    std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
-    return d[d.size() / 2] > 0.0 ? d[d.size() / 2] : 0.0;
+    // The smallest POSITIVE gap, not the median: with one frame per cycle every gap is a positive
+    // multiple of the cycle, so the minimum is the cycle whatever frames were skipped, while a
+    // median is twice the cycle once most frames of a sparse window were empty and dropped by the
+    // reader (review, 2026-09-09). 0 when no two frames differ -> the splitter falls back to the
+    // trace's own average.
+    double m = 0.0;
+    for (size_t i = 1; i < frame_rt.size(); ++i)
+    { const double d = frame_rt[i] - frame_rt[i - 1]; if (d > 0.0 && (m == 0.0 || d < m)) m = d; }
+    return m;
   }
 
   /// Integer traces -> MassTrace objects for EPD -> Trace again, with the flight-time bin
