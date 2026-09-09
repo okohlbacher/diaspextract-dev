@@ -256,14 +256,21 @@ namespace spx
     std::vector<std::vector<MzPeakWin>> wins;
     std::vector<std::size_t> ms1, ms2;
     std::vector<long> n_peaks;
-    bool n_peaks_known = true;   ///< false = at least one spectrum lacks number_of_peaks (its frames count as present)
+    std::size_t n_peaks_missing_ms2 = 0;   ///< MS2 spectra without number_of_peaks (they count as present)
     std::shared_ptr<MzPeakExactMz> exact;
+    std::string calibration;   ///< lastMzPeakCalibration() as the sweep left it (restored on a cache hit)
   };
   inline std::shared_ptr<const MzPeakRunMeta>& lastMzPeakMeta() { static std::shared_ptr<const MzPeakRunMeta> p; return p; }
 
   inline std::shared_ptr<const MzPeakRunMeta> mzPeakRunMeta(const std::string& path)
   {
-    if (lastMzPeakMeta() && lastMzPeakMeta()->path == path) return lastMzPeakMeta();
+    if (lastMzPeakMeta() && lastMzPeakMeta()->path == path)
+    {
+      // a cache hit republishes the "last" accessors: a failed sweep of another archive in
+      // between may have reset them (Codex, frame-tables review)
+      lastMzPeakExact() = lastMzPeakMeta()->exact; lastMzPeakCalibration() = lastMzPeakMeta()->calibration;
+      return lastMzPeakMeta();
+    }
     auto meta = std::make_shared<MzPeakRunMeta>();
     meta->path = path;
     MzPeak::Index index = MzPeak::open(path);
@@ -298,8 +305,9 @@ namespace spx
       const auto& md = sp.metadata();
       rt[i] = md.retention_time.value_or(0.0);
       { const std::string& id = md.id; const auto pos = id.find("frame="); if (pos != std::string::npos) frame_id[i] = std::atol(id.c_str() + pos + 6); }
-      if (md.number_of_peaks) meta->n_peaks[i] = (long)*md.number_of_peaks; else meta->n_peaks_known = false;
+      if (md.number_of_peaks) meta->n_peaks[i] = (long)*md.number_of_peaks;
       if (md.ms_level.value_or(1) == 1) { wins[i] = {MzPeakWin{0, 0, -1e9, 1e9}}; ms1.push_back(i); continue; }
+      if (!md.number_of_peaks) ++meta->n_peaks_missing_ms2;
       // Selected ions carry the per-window 1/K0 band. mzpeak-convert 0.9.x writes precursor_index
       // as NULL and the band as NAME-ONLY CV params; the reader then attaches every ion of the
       // frame to the FIRST precursor. So: flatten all ions of the spectrum and match each window
@@ -333,6 +341,7 @@ namespace spx
       }
       if (!wins[i].empty()) ms2.push_back(i);
     }
+    meta->calibration = lastMzPeakCalibration();
     lastMzPeakMeta() = meta;
     return meta;
   }
