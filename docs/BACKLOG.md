@@ -569,7 +569,9 @@ than base64 of the arrays, is most of the 23.7 us/spectrum -- then a per-thread 
 route and the base64 shortcut is not worth building. Also: on the default output format (mzPeak,
 which is Parquet) this phase is a different code path entirely and the whole item may not apply.
 
-### Is Savitzky-Golay the right smoother for elution-peak detection?
+### Can DWT/CWT smoothing improve QUALITY without costing too much runtime?
+*(was: "Is Savitzky-Golay the right smoother for elution-peak detection?" -- the runtime half
+of that question is now closed by measurement; see below. Only quality is open.)*
 
 **The idea.** `ElutionPeakDetection::smoothData()` smooths every mass trace with a Savitzky-Golay
 filter (polynomial order 2, frame length = max(3, win_size)) before the local-minimum search that
@@ -582,8 +584,9 @@ memory and peptide quality.
 construction, which was the dominant cost -- MS1 tracing CPU fell 44% and the window loop 10%. What
 remains is the filter *application*: O(n x frame_length) multiply-adds per trace, plus an MSSpectrum
 copy of the trace points on every call. A stationary wavelet transform is O(n x levels) with levels
-~ log2(frame_length), so for the longer frames it is asymptotically cheaper; a Haar DWT is O(n).
-Whether that matters depends on the frame-length distribution, which is not measured.
+~ log2(frame_length), so for LONG frames it would be asymptotically cheaper; a Haar DWT is O(n).
+Whether that matters depends on the frame-length distribution -- **now measured, and it kills the
+runtime argument in the opposite direction: the frames are short, so a DWT is MORE work, not less.**
 
 Quality is the more interesting half. SG preserves peak height and width by construction (that is
 its whole point, and OpenMS's own comment says it fits better than the lowess alternative it
@@ -613,18 +616,69 @@ smoother changes the workload rather than isolating its cost -- it needs a timer
 a drop-in, it moves the split count directly, so it must be gated on peptides and on the split-count
 distribution, not on speed.
 
-**How to test.** The smoother is behind one OpenMS function, so this is a contained experiment:
-(1) instrument `smoothData()` directly -- accumulate its wall time per thread and report the share
-of window-loop CPU -- if it is under ~3% the runtime case is dead and only quality is left; (2) implement the alternative behind a `trace:smoother = savgol | wavelet` option,
+**MEASURED 2026-09-09: step (1) is done and the runtime half is CLOSED. `smoothData` is 0.385%
+of run CPU; the filter itself is 0.236%.** `rdtsc` around three regions of `smoothData`, dataset D,
+100 threads, TSC pinned at 2.4500 GHz, run CPU 16,549 s (user 16,261 + sys 288):
+
+| region | cycles/point | CPU s | % of run CPU |
+|---|---|---|---|
+| build the input `MSSpectrum` copy | 37.3 | 14.44 | 0.087% |
+| `sg.filter()` -- Savitzky-Golay proper | 101.1 | 39.11 | **0.236%** |
+| copy out via unreserved `push_back` | 26.4 | 10.22 | 0.062% |
+| whole `smoothData` | 164.8 | **63.76** | **0.385%** |
+
+41,190,765 calls over 947,955,937 points (23.0 points/trace); **`frame_len` ranges over [3, 6]**,
+i.e. `win_size = ceil(chrom_fwhm / scan_time) = ceil(7.0 / 1.627) = 5`. Against the two phases that
+contain it (window loop 12,033 + MS1 trace 337 = 12,369 CPU s) `smoothData` is 0.52% and the filter
+0.32%. The four `rdtsc` reads per call add ~1.9 CPU s of the total, so the true figures are a few
+percent lower. (The measurement build is not shipped: the instrumented
+`ElutionPeakDetection.cpp` was restored and the rebuilt binary hashes to `dc5c331c...`, byte-identical
+to the published `soa1`.)
+
+Three conclusions follow, and together they close the runtime half for good:
+
+1. **The coefficient cache already took it.** Pre-cache, `smoothData` was ~1,260 CPU s (from the
+   -44% MS1 / -10% window-loop measurement that justified the cache); post-cache it is 63.8. There
+   is no remaining runtime in this function to win.
+2. **A DWT would be SLOWER, not faster.** At `frame_len` 5 the SG is a 5-tap convolution, ~6
+   multiply-adds per point. A DWT denoise is analysis + threshold + synthesis over an L-level
+   pyramid at ~8*k*n operations for filter length k: Haar (k=2) ~16n, db4 (k=8) ~64n -- **3x to 11x
+   the arithmetic of the filter it would replace.** The entry's original "asymptotically cheaper"
+   reasoning assumed long frames; the frames are 3-6.
+3. **The traces are too short for a multi-level transform anyway.** 23.0 points per trace on
+   average, and traces under 3 points skip smoothing entirely. A DWT wants n = 2^L; at n = 23 you
+   get four levels at best, with levels 3-4 holding two or three coefficients where boundary
+   extension dominates the transform. Wavelet shrinkage is a large-n method and this is not large n.
+
+**So the ceiling on the runtime side is 0.24%: a smoother that took ZERO time would return 39 CPU s
+of 16,549.** A DWT/CWT can only be adopted here if it wins on PEPTIDES, and it must do so while
+paying 3-11x the arithmetic of what it replaces -- which, on a 0.24% base, is affordable: even a 10x
+slower smoother costs ~2.4% of CPU, and at 80x parallelism roughly 4-5 s of a 660 s wall. **That is
+the trade to state up front: runtime is no longer an objection to trying it, and no longer an
+argument for it either.** The only remaining question is whether multi-scale denoising splits traces
+better than a fixed 5-tap filter.
+
+One incidental finding, not worth doing on its own: 39% of `smoothData` is the wrapper, not the
+filter -- a `Peak1D` copy in and an unreserved `push_back` loop out, 24.7 CPU s (0.15%). Reserving
+and writing the smoothed vector directly is output-identical and would make any future smoother
+comparison cleaner, but 0.15% is a tidiness fix.
+
+**How to test the remaining (quality) half.** The smoother is behind one OpenMS function, so this
+is a contained experiment: (1) DONE -- see above; (2) implement the alternative behind a
+`trace:smoother = savgol | wavelet` option,
 defaulting to savgol; (3) compare on the two gate datasets and both engines, with entrapment FDR,
 plus the split-count and trace-length distributions, which is where a smoother difference shows up
 before the peptides do.
 
 **What would falsify it.** Wavelet smoothing loses peptides on either engine or either dataset (it
-is OUTPUT-CHANGING, so it needs the full gate); or `smoothData()` is a negligible share of CPU after
-the cache, in which case the runtime half is closed and the quality half needs a reason beyond
-"multi-scale sounds better"; or the split-count distribution is indistinguishable, meaning the
-valley search is insensitive to the smoother and the whole question is moot.
+is OUTPUT-CHANGING, so it needs the full gate); or the split-count distribution is indistinguishable,
+meaning the valley search is insensitive to the smoother and the whole question is moot. The second
+falsifier in the original entry -- "`smoothData()` is a negligible share of CPU after the cache" --
+HAS NOW FIRED at 0.385%, which is why this item is a pure quality question and must be justified by
+peptides or dropped. Note the direction of the prior: the tool currently emits 31% FEWER spectra
+than with no smoothing at all, so the SG is already doing substantial work in suppressing spurious
+valleys; a smoother that suppresses MORE is not automatically better, and the split-count
+distribution is the first thing to look at, before any search runs.
 
 ## Memory-work plan status (2026-09-08)
 
