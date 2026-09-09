@@ -2325,11 +2325,23 @@ the two readers' outputs differ). The differing slab digests of the 20 intact wi
 axis: it is built from the loaded frames, so removing frames shifts every later `rt_index`.
 Every pinned digest (D `b499027f`, TNBC 009 `057aad4b`) has 210 / ~170 spectra missing.
 
-Fix: `finish()` called after both readers (commit 8219485). Gate: Sage peptides on D, and the
-batch-size identity test that the 2026-09-07 entry could not pass -- result recorded below when
-the chain lands. The backlog item "the peak picker is sensitive to how frames are grouped" is
-closed as this bug; step 2d-i of the tiling plan (picker determinism under regrouping) is resolved
-the same way, pending the identity run.
+Fix: `finish()` called after both readers (commit 8219485). **Gate (ibminode05, build 01e455f):**
+
+| | before (`soa2`) | after, batch 256 | after, batch 4096 |
+|---|---:|---:|---:|
+| windows / frames | 24; 21x1342, 1x1343, 2x1237 | 24; 22x1342, 2x1343 | identical to 256 |
+| compact peaks | 1,255,770,798 | 1,258,053,975 | identical |
+| spectra | 854,817 | **855,575 (+758)** | 855,575 |
+| digest | `b499027f` | **`bc3c5ac9`** | **`bc3c5ac9` -- identical** |
+| Sage peptides (rank 1, q <= 0.01) | 12,609 | **12,625 (+16)** | -- |
+| wall / peak RSS | -- | 4:42 / 43.3 GB | 4:28 / 44.0 GB |
+
+e2e 13/13. The batch size no longer changes a byte: the picker is per-frame pure and
+`SPEXTRACTOR_PICK_BATCH` is a resource knob (4096: LOAD 48 -> 41 s on D, +0.7 GB peak). The
+backlog item "the peak picker is sensitive to how frames are grouped" is closed as this bug, and
+step 2d-i of the tiling plan (picker determinism under regrouping) with it: any batching is
+equivalent. **New pinned digest for dataset D: `bc3c5ac9`**; TNBC 009 is re-pinned from the
+probe's whole-run output below.
 
 ### 0c. `trace:max_span_sec` sweep -- shipped as CHANGES OUTPUT, never gated until now (spock, `soa2`)
 

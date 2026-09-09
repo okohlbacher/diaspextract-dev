@@ -33,8 +33,9 @@ unchanged.
   105 cycles of two windows (210 of 32,210 spectra); on mzPeak input the last ~9 cycles of every
   window. The v2.0.0 note "`SPEXTRACTOR_PICK_BATCH` is fast and rejected -- the picker carries
   per-thread state" was this bug: at 4096 the dropped tail was two whole windows plus 427 frames of
-  two more, 11% of the MS2 spectra. The picker is per-frame pure (20 of 22 windows had identical
-  picked peak counts at both batch sizes). Output changes (more spectra); digests re-pinned.
+  two more, 11% of the MS2 spectra. With the tail kept, batch 256 and 4096 produce the identical
+  digest: the picker is per-frame pure and the batch size is a resource knob. Dataset D: +758
+  spectra, Sage 12,609 -> 12,625 peptides. Output changes; digests re-pinned.
 - **The parallel mzML writer emitted an empty `<indexList>`** (`count="0"`, one dummy entry) since
   it shipped in v2.0.0: the per-thread handlers' spectrum offsets were discarded on concatenation.
   Search engines do not read the index, so no result was affected; the file was not a valid
