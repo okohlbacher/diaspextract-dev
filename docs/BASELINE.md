@@ -2144,3 +2144,23 @@ Savitzky-Golay cache pays once per mass trace, and a 2-hour gradient carries 22.
 against 4.9 M here, with longer spans. The write parallelisation scales the same way -- 20.1 s of a
 196 s run against 90 s of an 822 s one. Both files gain, the longer one gains more, and neither
 changes a byte of output.
+
+### Longest-first band dispatch: no effect (2026-09-09)
+
+The window's 12 band tasks are created in band order, and with 24-28 windows in flight that is
+288-336 tasks queueing on 100 threads -- so a heavy task created last should land at the end and
+extend the makespan. Dispatching heaviest-first is free of output risk (each band writes a private
+store and the merge absorbs them in band order regardless of completion), and the band's seed count
+is known before any of them runs, so the work proxy costs nothing.
+
+It changes nothing. Interleaved on dataset D, three reps each: 176.8 s against 176.4 s of wall --
+inside the noise -- and the window loop's CPU *rose* 7,891 -> 8,239 for the sort. The pool is simply
+deep enough: with ~300 tasks over 100 threads there is always work to steal, so creation order does
+not determine the tail. Reverted.
+
+**Three rejections in one night, and they agree.** Reordering the detector's candidate scan (-10%),
+parallelising the MS1 conversion twice (no gain, once 17% worse), and now reordering band dispatch:
+the window loop's remaining slack is not in task ordering, not in per-candidate arithmetic, and not
+in the conversion. It is in the memory traffic of the detector's inner loop, which is already
+prefetched about as well as a sequential scan can be. Further gains there need the algorithm to
+visit fewer candidates -- which is output-changing and needs the full peptide gate.
