@@ -2676,8 +2676,10 @@ while the measured error rate drifts up (raw entrapment fraction 0.79 -> 0.88 ->
 of the pitch-300 gain is calibration; at 600 both engines rise and the entrapment moves +0.14
 points, inside its interval and the release rule (<= base + 0.3). **`tile:rt_sec` defaults to 600
 from 2026-09-10** (the decision's pitch); new pins at the default: **D `f9e65631`**, **TNBC 009
-`f0502f33`** (29,066 Sage). TNBC entrapment and MSFragger at 600 vs -1 are the second-acquisition
-release gate, recorded when they land.
+`f0502f33`** (29,066 Sage). Gate on the default flip (58c6784, arm `grid1`): D at the default
+digests `f9e65631` exactly (the review fixes are byte-neutral at 600 as at -1), `-1` reproduces
+both window-mode pins, e2e 15/15. TNBC entrapment and MSFragger at 600 vs -1 are the
+second-acquisition release gate, recorded when they land.
 
 **Fragment agreement under the old tiling, for the record** (probe1, old window, 13 tiles with a
 123-s halo, `bench/mzml_specdiff.py` at HEAD): 51.6% of fragments matched within 10 ppm, 56.8%
