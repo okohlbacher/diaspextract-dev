@@ -660,12 +660,12 @@ namespace
   /// Populate the flight-time axis from a Bruker analysis.tdf (the .d directory, or a sidecar).
   /// Returns false and leaves the axis unusable if anything is missing -- the detector that needs it
   /// refuses to run rather than substituting a reference temperature for every frame.
-  inline bool loadTofAxis(const std::string& tdf_path, String& why)
+  /// Build the flight-time axis from a calibration and the per-frame T1 (index = Frames.Id).
+  inline void setTofAxis(const spextractor::TdfMzCalibration& cal, const std::vector<double>& t1)
   {
     TofAxis& ax = tofAxis();
     ax.ok = false;
-    std::vector<double> t1;
-    if (!spextractor::loadTdfCalibration(tdf_path, ax.cal, t1, why)) return false;
+    ax.cal = cal;
     ax.b_by_frame.assign(t1.size(), 0.0);
     for (size_t i = 1; i < t1.size(); ++i) ax.b_by_frame[i] = ax.cal.frameFactor(t1[i]);
     // Frames the tdf did not list keep the reference factor rather than a zero -- but index 0
@@ -677,6 +677,13 @@ namespace
     for (size_t i = 1; i < ax.b_by_frame.size(); ++i) if (!(ax.b_by_frame[i] > 0.0)) ax.b_by_frame[i] = bref;
     ax.b_by_frame[0] = 0.0;
     ax.ok = true;
+  }
+  inline bool loadTofAxis(const std::string& tdf_path, String& why)
+  {
+    spextractor::TdfMzCalibration cal;
+    std::vector<double> t1;
+    if (!spextractor::loadTdfCalibration(tdf_path, cal, t1, why)) { tofAxis().ok = false; return false; }
+    setTofAxis(cal, t1);
     return true;
   }
   constexpr double IM_LO = 0.4, IM_HI = 1.8;
@@ -3603,6 +3610,16 @@ protected:
       for (const std::string& c : cand)
         if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
               + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
+#ifdef SPEXTRACTOR_WITH_MZPEAK
+      // An mzPeak archive carries its own vendor/analysis.tdf.gz, and the exact-m/z path has already
+      // read MzCalibration + Frames.T1 from it: the same calibration the .d path loads.
+      if (!tofAxis().ok && spx::lastMzPeakExact())
+      {
+        setTofAxis(spx::lastMzPeakExact()->cal, spx::lastMzPeakExact()->t1_by_frame);
+        writeLogInfo_("flight-time axis from the mzPeak archive's embedded analysis.tdf: "
+                      + String(tofAxis().b_by_frame.size()) + " frame factors");
+      }
+#endif
     }
     // FAIL CLOSED on frames the calibration cannot address. A .d names every frame "frame=<Id>";
     // an mzML (or an archive index) may not, and frameIdOf() returns 0 for anything it cannot

@@ -168,6 +168,10 @@ namespace spx
     }
   };
 
+  /// The exact calibration of the last streamed archive, kept so the tool can build its flight-time
+  /// axis from the embedded tdf instead of demanding a sidecar (null when the archive had none).
+  inline std::shared_ptr<const MzPeakExactMz>& lastMzPeakExact() { static std::shared_ptr<const MzPeakExactMz> p; return p; }
+
   /// One decoded frame split per window (index-aligned with `wins` of that frame).
   inline void frameToSpectra_(const MzPeak::Spectrum& sp, double rt, std::size_t frame_idx,
                               const std::vector<MzPeakWin>& wins, std::vector<OpenMS::MSSpectrum>& out,
@@ -198,7 +202,11 @@ namespace spx
       spec.setRT(rt);
       spec.setMSLevel(wins.size() == 1 && !(win.lo < win.hi) ? 1 : 2);
       spec.setDriftTimeUnit(DriftTimeUnit::VSSC);
-      spec.setNativeID("mzpeak=" + std::to_string(frame_idx) + " window=" + std::to_string(w));
+      // "frame=<Id>" is the vendor frame id the per-frame calibration factor is keyed on; without it
+      // frameIdOf() returned 0 and the integer detector never ran on mzPeak input (fell back to
+      // openms with a warning). "mzpeak=" stays the archive index.
+      spec.setNativeID("mzpeak=" + std::to_string(frame_idx) + (frame_id >= 0 ? " frame=" + std::to_string(frame_id) : std::string())
+                       + " window=" + std::to_string(w));
       if (spec.getMSLevel() == 2)
       {
         Precursor prec;
@@ -248,7 +256,8 @@ namespace spx
     std::vector<long> frame_id(n, -1);
     std::vector<std::vector<MzPeakWin>> wins(n);
     std::vector<std::size_t> ms1, ms2;
-    std::unique_ptr<MzPeakExactMz> exact;
+    std::shared_ptr<MzPeakExactMz> exact;
+    lastMzPeakExact().reset();
     // DEFAULT ON (2026-09-02 18:58): with the exact model recovered from the tdf, mzPeak input gives 12,082 Sage
     // peptides vs 10,785 with the archive's two-point transform (and 12,217 from .d): the transform was 91% of the
     // loss. Fail closed like the .d path: no tdf (embedded or SPEXTRACTOR_MZPEAK_TDF sidecar) -> error, unless
@@ -256,7 +265,7 @@ namespace spx
     const char* ex = std::getenv("SPEXTRACTOR_MZPEAK_EXACT");
     if (!(ex && std::string(ex) == "0"))
     {
-      try { exact = std::make_unique<MzPeakExactMz>(path); }
+      try { exact = std::make_shared<MzPeakExactMz>(path); lastMzPeakExact() = exact; }
       catch (const std::exception& e)
       {
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
