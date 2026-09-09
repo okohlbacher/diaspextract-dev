@@ -728,6 +728,19 @@ external-tool rules as the CLI: our version string, update check off, no stderr 
 the GUI toolkit choice against what the Windows/macOS shells will use so there is one GUI
 codebase, not three.
 
+**The parameter structure is shared between the GUI and the README (2026-09-09, user request).**
+The CLI already groups its options thematically -- `gate:` (precursor-fragment co-localisation),
+`assembly:` (pseudo-spectrum assembly), `trace:` (mass-trace detection), `charge:` (isotope /
+charge inference), `perf:` (concurrency / memory), plus the planned `tile:` group -- via TOPPBase's
+`registerSubsection_`/`addEmptyLine_` groupings, which is what `--help` prints under its section
+headers. That same structure is the GUI's tab/panel layout AND the structure of the README's
+parameter documentation: one section per group, in the same order, each option with its default,
+its unit, the measurement that set the default (the help strings already carry these), and which
+ones change output. Generate the README section from `--helphelp` (or from `-write_ini`) rather than
+hand-maintaining it, so the three views cannot drift: the tool's own registration is the single
+source. The 2026-09-09 release review found the README's option list had already drifted from the
+binary's defaults once.
+
 ## Memory-work plan status (2026-09-08)
 
 The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
