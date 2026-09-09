@@ -2659,8 +2659,25 @@ contract"), gated on the reader itself.
 | **one 600-s cell (t6), no halo** (G3, sidecar) | | **loop peak 23.7 GB** (start 12.0), loop 37 s / 1,856 CPU-s, detect 446 s | vs 29.8 GB / 51 s / 2,682 / 588 with the 123-s halo |
 
 The set churn (6%) is the FDR-set flip every perturbation shows; the cut lines add a small,
-localised excess that the gains next to the lines nearly balance. D at -1 / 600 / 300 with Sage,
-entrapment and MSFragger is recorded below when it lands; it decides the default pitch.
+localised excess that the gains next to the lines nearly balance.
+
+**Dataset D at -1 / 600 / 300 (arm `cell1`, ibminode05, Sage `sage_deiso`, entrapment
+human+Arabidopsis, MSFragger 4.4.1 via `score_msf_td.py`):**
+
+| pitch | cells | spectra | Sage peptides | entrapment FDR @ nominal 1% (95% CI) | MSFragger | digest |
+|---:|---:|---:|---:|---|---:|---|
+| -1 | 1 | 612,664 | 13,387 | 1.16% (0.95-1.40); 12,496 targets / 99 hits | 12,732 | `63d0ecfc` |
+| **600** | 3 | 611,850 | **13,490 (+0.8%)** | **1.30% (1.05-1.55)**; 12,630 / 112 | **12,918 (+1.5%)** | **`f9e65631`** |
+| 300 | 6 | 611,034 | 13,836 (+3.4%) | 1.38% (1.12-1.63); 12,918 / 121 | 12,921 (+1.5%) | `3f8d421d` |
+
+Loss within 15 s of a cut line: 9.3% (600) / 9.6% (300) of the base peptides there, against
+7.9% / 7.7% elsewhere -- the same ~2-point excess as on TNBC. More cuts give more Sage peptides
+while the measured error rate drifts up (raw entrapment fraction 0.79 -> 0.88 -> 0.93%), so part
+of the pitch-300 gain is calibration; at 600 both engines rise and the entrapment moves +0.14
+points, inside its interval and the release rule (<= base + 0.3). **`tile:rt_sec` defaults to 600
+from 2026-09-10** (the decision's pitch); new pins at the default: **D `f9e65631`**, **TNBC 009
+`f0502f33`** (29,066 Sage). TNBC entrapment and MSFragger at 600 vs -1 are the second-acquisition
+release gate, recorded when they land.
 
 **Fragment agreement under the old tiling, for the record** (probe1, old window, 13 tiles with a
 123-s halo, `bench/mzml_specdiff.py` at HEAD): 51.6% of fragments matched within 10 ppm, 56.8%
