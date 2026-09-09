@@ -14,7 +14,9 @@ Self-check: `tile_concat.py out whole.mzML:0:1e12` reproduces whole.mzML's seman
 import re, sys
 
 RT = re.compile(rb'accession="MS:1000016"[^>]*value="([^"]+)"')
-IDX = re.compile(rb'(<spectrum index=")(\d+)(")')
+# OpenMS writes <spectrum id="spectrum=N" index="N" ...>: both carry the rank, both are renumbered
+IDX = re.compile(rb'(<spectrum [^>]*?)(index=")(\d+)(")')
+SID = re.compile(rb'(<spectrum [^>]*?id="spectrum=)(\d+)(")')
 COUNT = re.compile(rb'(<spectrumList count=")(\d+)(")')
 
 def blocks(path, lo, hi, on_head=None, on_tail=None):
@@ -54,7 +56,9 @@ def main(out_path, specs):
                 out.write(COUNT.sub(lambda m: m.group(1) + str(total).encode() + m.group(3), line) if b"<spectrumList" in line else line)
             def on_tail(lines): tail[:] = lines
             for data in blocks(path, lo, hi, on_head, on_tail):
-                out.write(IDX.sub(lambda mm: mm.group(1) + str(n_out).encode() + mm.group(3), data, count=1))
+                data = IDX.sub(lambda mm: mm.group(1) + mm.group(2) + str(n_out).encode() + mm.group(4), data, count=1)
+                data = SID.sub(lambda mm: mm.group(1) + str(n_out).encode() + mm.group(3), data, count=1)
+                out.write(data)
                 n_out += 1
             print(f"tile {ti} {path} [{lo},{hi}): kept {counts[ti]}", file=sys.stderr)
         out.write(b"".join(tail))
