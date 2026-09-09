@@ -2513,10 +2513,20 @@ and passes the e2e suite; the reference is `/scratch/kohlbach/tail_S30/pseudo.mz
 
 | step | commit | what changed | gate result |
 |---|---|---|---|
-| 2b/2c mzPeak `frame=` + flight-time axis from the archive's embedded tdf | fdb33b6 | `frameIdOf()` returned 0 on every mzPeak spectrum, so the integer detector never ran on that input; the exact-m/z path's calibration now feeds `setTofAxis()` | `.d` identical; mzPeak (S30 v0.9.2 archive + sidecar tdf): **integer detector runs for the first time**, 855,561 spectra, Sage **12,537 vs 12,625 from the .d (-0.7%)**; LOAD 131 s / 63 GB peak against 45 s / 43 GB (the library decode). The July S08 archive carries no per-window IM band and never streamed. |
+| 2b/2c mzPeak `frame=` + flight-time axis from the archive's embedded tdf | fdb33b6 | `frameIdOf()` returned 0 on every mzPeak spectrum, so the integer detector never ran on that input; the exact-m/z path's calibration now feeds `setTofAxis()` | `.d` identical; mzPeak (S30 v0.9.2 archive + sidecar tdf): **integer detector runs for the first time**, 855,561 spectra, Sage **12,537 vs 12,625 from the .d (-0.7%)**, set overlap 11,499 common / 1,126 d-only / 1,038 mz-only; the OpenMS detector on the same archive gives **12,756** (11,280 common with the .d) -- on this file the detectors' sign is the one the integer-detector memory records (openms +1.7%), and the archive's peaks differ from the .d's (the two detectors' outputs are not comparable peptide for peptide). LOAD 131 s / 63 GB peak against 45 s / 43 GB (the library decode). The July S08 archive carries no per-window IM band and never streamed. |
 | 2e `TileWriter` at one block | 3856893, 371653d | `PlainMSDataWritingConsumer` subclass: header once, blocks appended in canonical order, per-thread encoders, index offsets rebased, exact count when known, same-width placeholder otherwise; native IDs renewed as `spectrum=<rank>` (what the bulk writer emitted for our id-less spectra) | identical; **WRITE 19.6 -> 13.2 s (11.7x -> 29.4x)**; header differs only in completion time and the `out` name; INDEX VALID (855,575 offsets); e2e check 14 (count/id/index/indexList) added, 0f534bd |
 | 2g content-only MS1 trace order | 7cd120f | `(mz, rt, im, intensity, npts, len, first frame time)`, equal-key neighbours logged | **0 equal-key neighbours** on D; identical |
 | 2d-ii the loader builds the slabs directly | 98b34d5, eb04568, a77e089, 9c97b60 | `CompactFrame` store and `toSlab` deleted; frames appended to the window's `PeakSlab` as picked, m/z quanta -> bins in place at window start; one reusable per-batch scratch; 2.5x virtual over-reservation, no shrink; per-window append in parallel | identical, **24/24 per-window slab digests identical**; LOAD on D: 45 s (old) -> 80 (1.25x growth, per-frame temporaries) -> 65 (projected reserve + shrink) -> 59 (scratch) -> see #4; RSS at load end 31.1 -> 40.3 GB (11.7 GB of arena free-list appears during the load and is returned after the slab pass: 39.0 -> 28.3 GB); D peak 43.3 -> 46.2 GB (load-phase, below the loop peak on the 2-h file) |
 
 Not done: 2a (the frame table comes with the tiled reader), 2f (exact by the metadata check --
 frames per window group == non-empty frames on both datasets -- and lands with the reader).
+
+2d-ii's remaining cost, measured on the same node in one chain (run #4, 9c97b60): LOAD 58.4 vs
+46.3 s, window loop 188.9 vs 184.7 s wall and 12,001 vs 12,019 CPU-s (equal), total 291 vs 272 s.
+The node has one NUMA domain, so placement is not it; the parallel per-window append changed
+nothing (pick/flush 44.0 vs 45.0 s). What differs: the old store's per-frame vectors were
+allocated -- and their pages first-touched -- by the 100 picking threads, while the direct slabs
+are first-touched by at most 24 appending threads (one per window) or one; 12 GB of fresh pages
+is ~3 M faults. A default-initialising allocator for the three slab arrays would let the copy run
+100-wide (backlog). The 11.7-13 GB of arena free-list that appears during the load and goes with
+the trim after the slab pass is not explained.

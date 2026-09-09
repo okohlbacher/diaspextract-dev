@@ -452,6 +452,58 @@ is the last group's last cycles (docs/BASELINE.md, "tiling plan step 0", 0b). Fi
 tail (the non-streaming path has no batches), the rest is the reader's frame aggregation; re-measure
 after the fix before calling it a sensitivity.
 
+### Direct slabs: the load-phase page-fault cost and the arena free-list (2026-09-09)
+
+**The idea.** The loader now builds each window's `PeakSlab` directly (98b34d5..9c97b60), output-
+and slab-digest-identical, but LOAD is +12 s on dataset D (58.4 vs 46.3 s) and ~10-13 GB of arena
+free-list appears during the load (returned by the trim after the slab pass; it only lifts the
+load-phase peak, 46 vs 43 GB on D). The window loop is unchanged (188.9 vs 184.7 s wall, equal
+CPU) and the node has one NUMA domain, so it is not placement. The old store's per-frame vectors
+were first-touched by the 100 picking threads; the slabs are first-touched by <= 24 appending
+threads: 12 GB of fresh pages, ~3 M faults, on a few threads. Fix: a default-initialising
+allocator for `tof/inten/imq` so `resize` does not touch pages and the per-frame copy (100-wide,
+by frame region) does the first touch; or 2 MB pages (`madvise(MADV_HUGEPAGE)` on the reserved
+regions) to cut the fault count 500x. The free-list needs one `mallinfo2` per batch to localise.
+
+**Why.** 4% of D's wall, ~5% of a 2-hour run's, for a representation the tiled reader needs.
+
+**What would falsify it.** A LOAD within 2 s of the old store's after the allocator change means
+the faults were the whole cost; if the free-list stays, it is something else in the batch loop.
+
+### Tile invariance needs bounded parents (2026-09-09, decision pending)
+
+**The idea.** The step-1 probe showed 99.7% of spectra change under RT tiling, uniformly in RT:
+EPD's smoothing window was per-parent (fixed, `trace:split_scan_time=frame`), and EPD's valley
+DECISIONS are parent-global (a failed valley keeps the taller maximum and advances the other), so
+any sub-range of a long parent can split differently from the whole. Detection itself is
+unbounded (seeds by intensity, running centroid/sd, `visited` claims along a connected trace),
+and MassTraceDetection's `min_sample_rate` is a whole-trace gate on the OpenMS-detector path.
+Children are short (TNBC: p99 44 s, max 421 s) but parents are not. Options under design review
+(bounded-parents workflow, 2026-09-09): cap the detector's extension around the seed; make the
+split local (windowed EPD, a local valley rule, gap-filled parents); or price the dependence and
+make the tiled geometry the reference. See docs/reviews/2026-09-09-split-scan-time/.
+
+**Why.** Without it the tiled output differs everywhere by a small amount and the only gate is the
+FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size.
+
+**What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
+differences are confined to within the smoother's edge of a boundary after the fix.
+
+### Splitter: audit children per parent by parent sample rate (Kimi review, 2026-09-09)
+
+**The idea.** The fixed smoothing window is wider than the old per-trace window on gappy parents
+(5 real points can span 6.5 s dense or 13 s with alternate cycles missing -- SG convolves by
+index), so it can merge two separable peaks in sparse stretches. Log, per parent, real frames /
+span frames and the number of children, old vs new default, on dataset D: a children drop
+concentrated in low-sample-rate parents is the merger signature. If it fires, the principled fix
+is gap-filling parents with zero-intensity points at missing frames before EPD (uniform sampling
+makes a fixed point count a fixed time span).
+
+**Why.** It needs only data the DET run already has, and it decides whether the frame-spacing
+default costs anything a peptide count would hide.
+
+**What would falsify it.** A flat children-per-parent ratio across sample-rate strata.
+
 ### The 2+/3+ tie-breaker for the mobility veto
 
 **The idea.** The fitted 2+ and 3+ lines are ~1 sigma apart at low m/z (at m/z 500: 0.867 vs 0.822
