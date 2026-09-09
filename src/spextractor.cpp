@@ -3345,12 +3345,28 @@ protected:
       if (before != ms1_traces.size())
         writeLogInfo_("dropped " + String(before - ms1_traces.size()) + " MS1 traces with non-finite coordinates");
     }
-    sort(ms1_traces.begin(), ms1_traces.end(), [&ms1_store](const Trace& a, const Trace& b) {
+    // [tile-2g] The key is CONTENT only -- (mz, rt, im, intensity), then the profile's point count,
+    // span and first frame time -- never a container index or an arena offset, so the order is the
+    // same whichever tile detected a trace and whatever order tiles were absorbed in. Traces equal
+    // in all seven fields are counted and logged: they are the only place inference can still
+    // depend on assembly order (std::sort is not stable).
+    auto traceLess = [&ms1_store](const Trace& a, const Trace& b) {
       if (a.mz != b.mz) return a.mz < b.mz;
       { const double ra = rtOf(ms1_store, a), rb = rtOf(ms1_store, b); if (ra != rb) return ra < rb; }
       if (a.im != b.im) return a.im < b.im;
-      return intensityOf(ms1_store, a) < intensityOf(ms1_store, b);
-    });
+      { const double ia = intensityOf(ms1_store, a), ib = intensityOf(ms1_store, b); if (ia != ib) return ia < ib; }
+      if (a.npts != b.npts) return a.npts < b.npts;
+      if (a.len != b.len) return a.len < b.len;
+      return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
+    };
+    sort(ms1_traces.begin(), ms1_traces.end(), traceLess);
+    {
+      size_t ties = 0;
+      for (size_t i = 1; i < ms1_traces.size(); ++i)
+        if (!traceLess(ms1_traces[i - 1], ms1_traces[i])) ++ties;
+      writeLogInfo_("[det] MS1 traces sorted by content: " + String(ms1_traces.size()) + " traces, "
+                    + String(ties) + " equal-key neighbours");
+    }
     double _t_win = 0, _c_win = 0;                             // [perf-instr] window loop (function scope)
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
