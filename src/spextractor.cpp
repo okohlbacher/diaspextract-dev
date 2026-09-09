@@ -286,7 +286,10 @@ namespace
     /// were tail padding and takes the record from 48 to 40 -- 16 GiB on a 2-hour acquisition.
     /// Read it with rtOf(); never reconstruct it from `apex`, which is the RAW maximum and is a
     /// DIFFERENT frame from EPD's smoothed maximum.
-    uint16_t rt_at = 0;    ///< span-relative frame whose time is this trace's RT (see rtOf())
+    /// SIGNED: trimToSpan advances `frame0` by `lo` and this by -`lo`, so their SUM -- the
+    /// absolute store frame -- is invariant under trimming. A trim can therefore move the span
+    /// away from the frame EPD called the apex without changing the RT this trace reports.
+    int16_t rt_at = 0;     ///< frame whose time is this trace's RT, relative to frame0 (see rtOf())
     size_t np() const { return npts; }
     size_t span() const { return len; }
     void freeProfile() { len = 0; npts = 0; }        ///< the arena is the store's; nothing to free
@@ -352,7 +355,8 @@ namespace
   /// 8 bytes per record it replaces. Identical by construction: frame_rt[f] IS rtAxis()[ri[f]],
   /// the same array element the producers read.
   inline double rtOf(const TraceStore& s, const Trace& t)
-  { assert((size_t)t.frame0 + t.rt_at < s.frame_rt.size()); return s.frame_rt[t.frame0 + t.rt_at]; }
+  { const int64_t f = (int64_t)t.frame0 + t.rt_at;
+    assert(f >= 0 && (size_t)f < s.frame_rt.size()); return s.frame_rt[(size_t)f]; }
   /// Traces whose RT is NOT one of the store's frame times: only reachable when
   /// ElutionPeakDetection is skipped (trace:ms{1,2}_split_valleys = 0, or a single trace), where
   /// MassTraceDetection reports an intensity-weighted mean instead. Counted, not silent.
@@ -377,8 +381,9 @@ namespace
       if (f > 0 && f + 1 < s.frame_rt.size() && rt > s.frame_rt[f - 1] && rt < s.frame_rt[f + 1])
         rtStrictlyBetween().fetch_add(1, std::memory_order_relaxed);
     }
-    const uint32_t d = f > t.frame0 ? f - t.frame0 : 0u;
-    t.rt_at = (uint16_t)(d > 65535u ? 65535u : d);
+    const int64_t d = (int64_t)f - (int64_t)t.frame0;
+    if (d < -32768 || d > 32767) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+    t.rt_at = (int16_t)d;
   }
   /// The calibration factor of the trace's own apex/measurement frame. Empty table (the OpenMS
   /// detector has no per-frame factors) yields 0.0, which is what the field held there before, and
@@ -442,12 +447,13 @@ namespace
     // [soa-rt] rt_at names EPD's SMOOTHED apex, which is not `apex` (the raw maximum) and can in
     // principle sit outside the window this trim keeps. Clamping would change the trace's reported
     // RT, so it is counted rather than assumed away -- and the digest gate is what settles it.
-    if (t.rt_at < lo || t.rt_at > hi)
-    { rtOffGrid().fetch_add(1, std::memory_order_relaxed); rtTrimmedOut().fetch_add(1, std::memory_order_relaxed); }
-    const size_t rr = t.rt_at < lo ? lo : (t.rt_at > hi ? hi : (size_t)t.rt_at);
+    // frame0 and rt_at move in opposite directions by the same amount: the frame this trace
+    // reports its RT from is untouched, whether or not the trim kept it inside the span.
+    const long rr = (long)t.rt_at - (long)lo;
+    if (rr < -32768L || rr > 32767L) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
     t.frame0 += (uint32_t)lo; t.off += (uint32_t)lo;
     t.len = (uint16_t)(hi - lo + 1); t.apex = (uint16_t)(a - lo); t.npts = np;
-    t.rt_at = (uint16_t)(rr - lo);
+    t.rt_at = (int16_t)rr;
   }
 
   /// Drop the spans of the traces nobody references and compact the arena IN PLACE, walking the kept
@@ -1153,7 +1159,7 @@ namespace
       for (const auto& g : got) store.bins[t.off + (g.first - t.frame0)] = sl.tof[g.second];
       t.tof = sl.tof[kap]; t.bframe = fap;   // got-order first max: the frame the bin was measured on
       t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
-      t.rt_at = (uint16_t)(fap - t.frame0);   // [soa-rt] was rtAxis()[sl.rt_index[fap]]
+      t.rt_at = (int16_t)((int64_t)fap - (int64_t)t.frame0);   // [soa-rt] was rtAxis()[sl.rt_index[fap]]
       t.im = IM_LO + cim / IM_Q;
       out.push_back(std::move(t));
     }
