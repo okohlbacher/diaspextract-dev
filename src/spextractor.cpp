@@ -3566,6 +3566,14 @@ protected:
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
     std::atomic<size_t> inflight{0};
     std::atomic<int> adm_hwm{0};   // high-water mark of admitted windows, for the log and the e2e
+    // [Fix A] The compact store is consumed window by window (toSlab/materializeWindow swap each
+    // frame's vectors away), but it was all arena memory in ~126 kB chunks, so glibc kept every
+    // freed byte on its free lists: measured, 43 GB whose last read is the last materialisation
+    // stayed resident for 425 of the loop's 431 s. Return it ONCE, when the last window has
+    // materialised, under the same gate as the two phase-boundary trims. Zero-code arm on record
+    // (2026-09-09): forcing every >=64 kB block to mmap took the peak from 168.2 to 154.2 GB but
+    // cost +28% wall through LOAD; a single trim here is the same reclaim at ~4 s.
+    std::atomic<size_t> n_materialised{0};
     // Projected footprint per window, from its own compact size. RE-CALIBRATED 2026-09-03: the
     // 10x multiplier booked the average dataset A window at 8.9 GB against a measured 12-14 GB, i.e. it
     // under-booked by 35-55% in the UNSAFE direction -- it admitted more windows than fit. That was
@@ -3682,6 +3690,13 @@ protected:
             writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " compact n=" + String(b.size() / 2) + " digest=" + String(detDigest_(std::move(b))));
           }
         }
+        if (++n_materialised == window_list.size() && trim_on)
+        { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
+#ifdef __GLIBC__
+          malloc_trim(0);
+#endif
+          writeLogInfo_("[trim] last window materialised -> compact store returned: " + String(_r0) + " -> "
+                        + String(rss_mb_()) + " MB RSS in " + String(phase_clock_() - _tt) + " s" + mem_()); }
         auto _t1 = std::chrono::steady_clock::now();
         t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
         for (MSSpectrum& s : wmap) s.setMSLevel(1); // MassTraceDetection traces MS1-level only
