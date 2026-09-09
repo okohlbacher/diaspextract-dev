@@ -2736,6 +2736,11 @@ protected:
     out.setMSLevel(2);
     out.setType(SpectrumSettings::SpectrumType::CENTROID);
     out.setRT(pc.rt);
+    // [mem] emplace_back with no reserve grows by doubling, so a spectrum at the 500-fragment cap
+    // ends up with capacity 512 and every spectrum between 129 and 256 fragments carries a 256-slot
+    // array. 3.9e6 spectra x 16 B/Peak1D of slack is real memory held from emit until the write.
+    // Reserving the exact count cannot change the peaks or their order.
+    out.reserve(frags.size());
     for (const auto& fr : frags) out.emplace_back(fr.first, fr.second);
     out.sortByPosition();
     OpenMS::Precursor prec;
