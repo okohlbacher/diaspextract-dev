@@ -2582,5 +2582,9 @@ the whole run under the same default): 314,685 core spectra, 379 identical (0.1%
 in the m/z list, 103,361 in the peak count -- the same 99.9% as with the old window, and uniform
 in RT. As the Codex review predicted: the smoothing is now local, the DECISION is not (EPD's
 retained-maximum walk), and detection itself is not (seeds, running centroid, `visited`). The
-fragment-level agreement (the number that matters for scoring; the spectrum-level one saturates
-at one changed fragment) is recorded below from the re-run of t6.
+fragment-level number (the spectrum-level one saturates at one changed fragment): over the
+314,685 core spectra present in both, **80.7 M fragments have the identical m/z in both, 46.4 M
+exist only in the whole run and 46.2 M only in the tile -- 46.6% of the union agree exactly.**
+That exact test also counts an apex-frame shift of the SAME fragment (the apex m/z is computed
+from the apex frame's calibration) as one lost plus one gained; the 10-ppm-tolerant match and the
+same metric on probe1's outputs (the old per-trace window) are recorded when they land.
