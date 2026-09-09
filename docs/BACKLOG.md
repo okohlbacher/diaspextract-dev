@@ -437,22 +437,20 @@ band-independent tracing, or a cap that leaves threads idle.
 **What would falsify it.** An interleaved dataset D A/B, with the loop no longer tail-bound, where the
 control spread (133.0 vs 121.7 s) still exceeds the effect.
 
-### The peak picker is sensitive to how frames are grouped across threads
+### The peak picker is sensitive to how frames are grouped across threads -- CLOSED (2026-09-09): it was a dropped tail
 
-**The idea.** `SPEXTRACTOR_PICK_BATCH` 256 -> 4096 is -39% LOAD wall but changes the digest and costs
-7.2% Sage / 6.1% MSFragger peptides on dataset D (overlap 91.7% / 81.3%), and `perf:stream_load=false` —
-another frame grouping — also changes the output (docs/BASELINE.md:1762-1790; CHANGELOG.md v2.0.0
-Measured, "`SPEXTRACTOR_PICK_BATCH` is fast and rejected" and "`perf:stream_load` is a
-sensitivity/resource trade"). A picker whose output depends on which thread saw which frames carries
-per-thread state it should not; find it in the pick consumer (`PickCompactConsumer`/`FrameCentroider`,
-src/spextractor.cpp:3169; CHANGELOG.md v0.3.0 Runtime, "MS1 path parallelised") and make the pick
-frame-local.
+**What it was.** `SPEXTRACTOR_PICK_BATCH` 256 -> 4096 changed the digest and cost 7.2% Sage / 6.1%
+MSFragger peptides on dataset D, and the picker was suspected of per-thread state. Step 0b of the
+tiling plan compared per-window slab digests and picked peak counts at both sizes: 20 of the 22
+windows present at 4096 had IDENTICAL peak counts, and two windows were missing altogether. The
+loss is exactly `n_MS2 mod kBatch` (210 at 256, 3,538 at 4096): `PickCompactConsumer`'s tail flush
+was never invoked on the streaming path, and the `.d` reader emits window-group major, so the tail
+is the last group's last cycles (docs/BASELINE.md, "tiling plan step 0", 0b). Fixed in 8219485
+(`finish()` after both readers). The picker is frame-local; the batch size is a resource knob again.
 
-**Why.** A correctness smell in the first stage, and it blocks a free 1.6x on LOAD (13.7% of a 2-h run).
-
-**What would falsify it.** A frame-local picker that is byte-identical across batch sizes but loses
-peptides against today's 256 — then the state is a real cross-frame feature, and the item becomes a
-documented parameter, not a bug.
+**What remains.** `perf:stream_load=false` also differs from `true` -- part of that was the same
+tail (the non-streaming path has no batches), the rest is the reader's frame aggregation; re-measure
+after the fix before calling it a sensitivity.
 
 ### The 2+/3+ tie-breaker for the mobility veto
 
@@ -504,9 +502,10 @@ size controls, and that is frozen (below).
 **Why it should be output-identical.** The frame grouping is what the picker is sensitive to, and
 double-buffering does not change it: batch i is still frames [256i, 256i+256), picked by the same
 code with the same per-thread scheduling. Only *when* the pick runs changes. That distinction
-matters here because the batch size itself is frozen -- `SPEXTRACTOR_PICK_BATCH` 256 -> 4096 is
--39% on the load phase but changes the digest and loses 7.2% of Sage peptides, so the picker carries
-per-thread state across frames and the grouping is load-bearing.
+mattered while the batch size was thought to be frozen. It is not: the 256 -> 4096 loss was the
+dropped tail (see the closed picker item above), so the grouping is not load-bearing and (b), a
+larger batch, is the cheaper candidate -- it is a resource knob (raw buffer ~1 GB per 256 frames)
+to be measured on LOAD wall and peak RSS, not gated on peptides.
 
 **What would falsify it.** Both stages already saturate the cores while they run, so overlapping
 them only fills ramps -- if instrumenting decode wall and CPU separately shows each stage near 100x

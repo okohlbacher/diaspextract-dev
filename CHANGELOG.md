@@ -25,6 +25,22 @@ unchanged.
   `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
   **SORT -61%; the ASSEMBLE phase is gone.**
 
+### Fixed
+- **The streaming loader dropped the last `n mod 256` MS2 window spectra of every run.** The pick
+  consumer's tail flush was overridden but never invoked (OpenMS reaches it only through
+  `retrieveSwathMaps`, which the streaming path does not use). The `.d` reader hands frames over
+  window-group by window-group, so the loss fell on the last group: on a 31-minute file the last
+  105 cycles of two windows (210 of 32,210 spectra); on mzPeak input the last ~9 cycles of every
+  window. The v2.0.0 note "`SPEXTRACTOR_PICK_BATCH` is fast and rejected -- the picker carries
+  per-thread state" was this bug: at 4096 the dropped tail was two whole windows plus 427 frames of
+  two more, 11% of the MS2 spectra. The picker is per-frame pure (20 of 22 windows had identical
+  picked peak counts at both batch sizes). Output changes (more spectra); digests re-pinned.
+- **The parallel mzML writer emitted an empty `<indexList>`** (`count="0"`, one dummy entry) since
+  it shipped in v2.0.0: the per-thread handlers' spectrum offsets were discarded on concatenation.
+  Search engines do not read the index, so no result was affected; the file was not a valid
+  indexedmzML. Offsets are now rebased as each chunk is appended; an independent validator checks
+  every offset on the benchmark output (854,817 spectra).
+
 ### Changed
 - **Twenty-four falsified options removed** (from 71 to 47; 21 fewer in the plain `--help`). Each
   either carried a falsification verdict in its own help text or had no measurement on record, and

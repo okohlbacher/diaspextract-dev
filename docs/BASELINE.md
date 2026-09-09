@@ -1777,6 +1777,9 @@ batch size: the picker carries per-thread state, so which frames a thread sees c
 the "~2% of intensities at the 1e-5..1e-4 level" the load comment already records for serial vs
 parallel picking.
 
+**Correction (2026-09-09):** the cause was not the picker -- the loader dropped its last
+`n mod kBatch` MS2 spectra (two whole windows at 4096); see "tiling plan step 0", 0b below.
+
 **Gated and REJECTED.** That perturbation is not benign:
 
 | | Sage | MSFragger | Sage overlap | MSFragger overlap |
@@ -2276,3 +2279,94 @@ the fit is not linear down to one window: something in the loop is not per-windo
 spectra accumulate regardless of concurrency, and allocator retention differs between the arms).
 Do not use the slope outside the measured range, and do not read the intercept as a floor.
 
+## 2026-09-09: tiling plan step 0 -- four zero-code measurements, one bug, one correction
+
+The 2D-tiling plan (`~/.claude/plans/humble-watching-dragonfly.md`) starts with measurements that
+need no architecture. All on dataset D (S30) unless stated; `soa2` = HEAD before Fix A.
+
+### 0a. Allocator tunables on TNBC 009 (data, back to back, load 4.9, sidecar 250 ms)
+
+| arm | wall | peak RSS (`time -v`) | sidecar peak | minor faults | LOAD | digest |
+|---|---:|---:|---:|---:|---:|---|
+| control (`soa2`) | 671.2 s | 169.70 GB | 169.89 GB | 251.6 M | 94.7 s | IDENTICAL |
+| `MALLOC_MMAP_THRESHOLD_=65536 MALLOC_TRIM_THRESHOLD_=128M` | 846.3 s (+26%) | **154.15 GB (-15.5)** | 154.24 GB | 501.9 M | 261.7 s | IDENTICAL |
+
+Production is glibc (`ldd`: nothing else linked, `LD_PRELOAD` empty). Serving every >= 64 kB block
+from mmap does return memory (-15.5 GB, `mmap=12,513 MB` at the loop start against 1,869 MB), but
+the compact store's ~126 kB chunks then each cost a page-fault storm: LOAD 94.7 -> 261.7 s and
+2x the faults. So the corpse is real free-list, and the tunables are the wrong tool: Fix A (one
+`malloc_trim(0)` when the last window has materialised, commit 58c0981) targets the same memory at
+the moment it dies. Measured separately below.
+
+### 0b. `SPEXTRACTOR_PICK_BATCH` 256 vs 4096 with `[det]` slab digests -- it was a dropped tail
+
+The 2026-09-07 entry above ("fast, and rejected", -7.2% Sage peptides at 4096, "the picker carries
+per-thread state") is **wrong about the cause**. Per-window peak counts at both batch sizes:
+
+| | 256 | 4096 |
+|---|---:|---:|
+| windows in the compact store | 24 | **22** |
+| compact-store peaks | 1,255,770,798 | 1,098,791,267 (-156,979,531) |
+| windows with identical picked peak count | 20 of 22 present | |
+| 684.29-708.32 / 1134.06-1400.62 | 1,237 frames each | **absent** |
+| 662.33-685.29 / 1045.52-1135.06 | 1,342 frames each | **915** each |
+
+The deficit closes exactly: 48,665,355 + 62,781,911 + 31,459,728 + 14,072,537 = 156,979,531. And the
+frame arithmetic closes exactly too: 32,210 MS2 window spectra mod 256 = **210** = 2 x 105 (1,342 ->
+1,237); mod 4096 = **3,538** = 2 x 1,342 + 2 x 427. `PickCompactConsumer::ensureMapsAreFilled_`
+(the tail flush) is overridden but never invoked -- `FullSwathFileConsumer` reaches it only via
+`retrieveSwathMaps`, which the streaming path never calls -- so **every run since streaming became
+the default dropped its last `n mod kBatch` MS2 window spectra**. The `.d` reader emits window-group
+major (the calibration patch's outer loop is over groups), so the loss lands entirely on the LAST
+group: on D the last 105 cycles (~2.5 min) of two windows; at 4096, two whole windows plus 427
+frames of two more -- 11% of the MS2 spectra, which is the 7.2% of peptides. The mzPeak reader
+emits frame-major, so there the loss is the last ~9 cycles of every window instead (one more reason
+the two readers' outputs differ). The differing slab digests of the 20 intact windows are the RT
+axis: it is built from the loaded frames, so removing frames shifts every later `rt_index`.
+Every pinned digest (D `b499027f`, TNBC 009 `057aad4b`) has 210 / ~170 spectra missing.
+
+Fix: `finish()` called after both readers (commit 8219485). Gate: Sage peptides on D, and the
+batch-size identity test that the 2026-09-07 entry could not pass -- result recorded below when
+the chain lands. The backlog item "the peak picker is sensitive to how frames are grouped" is
+closed as this bug; step 2d-i of the tiling plan (picker determinism under regrouping) is resolved
+the same way, pending the identity run.
+
+### 0c. `trace:max_span_sec` sweep -- shipped as CHANGES OUTPUT, never gated until now (spock, `soa2`)
+
+| `max_span_sec` | spectra | digest | Sage peptides (rank 1, q <= 0.01) | peak RSS | wall |
+|---:|---:|---|---:|---:|---:|
+| 0 (off) | 854,967 | `f435f4c2` | 12,619 | 51.60 GB | 2:56.6 |
+| 60 | 854,030 | `443e448a` | 12,611 | 51.58 GB | 2:43.8 |
+| **120 (default)** | 854,817 | `b499027f` | 12,609 | 50.70 GB | 2:45.0 |
+| 240 | 855,143 | `94f899f7` | 12,619 | 51.32 GB | 2:52.9 |
+
+Spread 10 peptides = 0.08%, below the set-noise of this gate: the trim is free in peptides, and
+so is the halo it sizes. D's MS1 spans are longer than TNBC's (median 15.2 s, p90 59.6, p99 203.6,
+max 1,243.9; 3.06% > 120 s, 0.66% > 240 s) -- the RT-local premise holds on both, with a heavier
+tail here.
+
+### 0d. One instrumented build (2afb302): G vs F, MS2 extents, per-window tof edges
+
+- **`G == G_live == F` on every window** (`[gstat] F=1342 G=1342 G_live=1342`, all 24): every MS2
+  frame of a window carries at least one fragment point. `buildFragStats`'s Pearson denominator can
+  be injected from the frame table (`G_override = F_window`) with no output change -- step 2f is
+  exact, and tiles can score without the whole window's fragments.
+- **MS2 detection extents on the integer path** (never logged before; window 523-546, n=8.2 M):
+  pre-trim span p50 = 5 s, p90 = 20, p99 = 55, max 345; **one-sided** (apex to the far end) p50 =
+  5, p90 = 15, p99 = 45, max 330; fraction > 63 s = 0.27%, **> 123 s = 0.013%**, > 300 s = 2.4e-5.
+  Post-trim: total span capped at 119 s, one-sided max 205 s (the asymmetric-trim case from review
+  correction C1, real but 0.002%). So a 123 s halo mis-sees ~1 in 8,000 fragment traces at a tile
+  edge and a 300 s halo ~1 in 40,000; the Sage gate prices what that costs.
+- Window tof edges: `tlo` 0-3, `thi` 634,068-634,072 on every window -- the slab extremes ARE the
+  acquisition range, so injecting `tlo/thi` from the method's m/z range changes nothing measurable.
+
+### The parallel mzML writer wrote an empty index (v2.0.0 .. 2afb302)
+
+Found by C4's "verify the shipped index" instruction: `patches/openms-mzml-parallel-write.patch`
+concatenated the per-thread handlers' output but discarded their `spectra_offsets_`, so every
+parallel-written file carried `<indexList count="0">` with one dummy entry -- still a well-formed
+mzML, still read by Sage/MSFragger (which do not use the index), but not a valid indexedmzML, and
+the e2e never checked it. Fixed (3c996c3) by rebasing each chunk's offsets by `os.tellp()` as it is
+appended; validator (`step0/idxcheck.py`, reads every offset and checks it lands on
+`<spectrum index="N"`) reports INDEX VALID on 854,817 offsets, spectrum digest unchanged
+(`b499027f`), e2e 13/13. The validator is now part of the tail-fix gate chain.
