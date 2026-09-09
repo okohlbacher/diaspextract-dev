@@ -741,6 +741,16 @@ hand-maintaining it, so the three views cannot drift: the tool's own registratio
 source. The 2026-09-09 release review found the README's option list had already drifted from the
 binary's defaults once.
 
+**README references (2026-09-09, user request).** Add a citation for the diaPASEF acquisition
+approach itself (Meier et al., Nat Methods 2020, doi:10.1038/s41592-020-00998-0 -- "DP" read as
+diaPASEF; adjust if another approach was meant), and move EVERY reference and publication the
+README cites inline (OpenMS 3, the reference extractor's paper, the benchmark datasets PXD047793
+/ its Scientific Data paper PMC11258311 and the LC-MS methods paper PMC11301665, Sage, MSFragger,
+mzPeak, the FDR/entrapment method) into ONE numbered **References** section at the end of
+README.md, with inline `[n]` markers in the text. Keep CITATION.cff as the machine-readable copy
+of the tool's own citation; the README section is for what the tool builds on and is benchmarked
+against.
+
 ## Memory-work plan status (2026-09-08)
 
 The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
