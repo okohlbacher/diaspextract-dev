@@ -44,13 +44,21 @@ def main():
                 if float(x.get("peptide_q", 1)) > 0.01:
                     continue
                 z = int(x["charge"])
-                rows.append({"pep": x["peptide"], "rt": float(x["rt"]) * 60.0,
+                rows.append({"pep": x["peptide"], "rt_raw": float(x["rt"]),
                              "mz": (float(x["expmass"]) + z * PROTON) / z,
                              "im": float(x.get("ion_mobility") or 0), "z": z})
             except (TypeError, ValueError, KeyError):
                 continue
     if not rows:
         sys.exit("ABORT: no identified PSMs parsed from %s" % a.tsv)
+    # [rt-unit] Sage reports rt in MINUTES for these inputs, but the unit is a property of
+    # the INPUT mzML, not of Sage: SpeXtractor writes scan start time in seconds
+    # (UO:0000010) and the reference extractor writes minutes (UO:0000031). Detect rather
+    # than assume -- reading seconds as minutes silently scales every RT by 60 and the
+    # result still looks plausible. Same guard as bench/cycle_redundancy.py.
+    rt_to_s = 60.0 if max(r["rt_raw"] for r in rows) < 200 else 1.0
+    for r in rows:
+        r["rt"] = r["rt_raw"] * rt_to_s
     rows.sort(key=lambda r: r["rt"])
     print("[data] %d identified PSMs at peptide_q<=0.01" % len(rows), flush=True)
 

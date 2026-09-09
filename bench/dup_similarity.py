@@ -62,12 +62,22 @@ def main():
         for x in rd:
             try:
                 rows.append({"pep": x["peptide"], "sid": x["scannr"],
-                             "cyc": int(float(x["rt"]) * 60 / CYCLE_S),
+                             "rt_raw": float(x["rt"]),
                              "score": float(x["sage_discriminant_score"]),
                              "decoy": all(p.startswith("rev_")
                                           for p in x["proteins"].split(";") if p)})
             except (TypeError, ValueError, KeyError):
                 continue
+    if not rows:
+        sys.exit("ABORT: no rows parsed from %s" % a.tsv)
+    # [rt-unit] Sage reports rt in MINUTES for these inputs, but the unit is a property of
+    # the INPUT mzML, not of Sage: SpeXtractor writes scan start time in seconds
+    # (UO:0000010) and the reference extractor writes minutes (UO:0000031). Detect rather
+    # than assume -- reading seconds as minutes silently scales every RT by 60 and the
+    # result still looks plausible. Same guard as bench/cycle_redundancy.py.
+    rt_to_s = 60.0 if max(r["rt_raw"] for r in rows) < 200 else 1.0
+    for r in rows:
+        r["cyc"] = int(r["rt_raw"] * rt_to_s / CYCLE_S)
     ranked = sorted(rows, key=lambda r: -r["score"])
     nt = nd = 0
     keep, acc = [], []
