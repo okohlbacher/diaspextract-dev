@@ -911,6 +911,24 @@ namespace
     vector<double>().swap(sl.rt);
   }
 
+  /// [cell] One RT cell of a window's slab -- frames [f0, f1) -- as a slab of its own, so the
+  /// detector's seeds, `visited`, frame_live and tof index are the cell's alone. Traces found on
+  /// it carry cell-local frame indices; the caller rebases them by f0 into the window store.
+  PeakSlab sliceFrames(const PeakSlab& sl, size_t f0, size_t f1)
+  {
+    PeakSlab s;
+    const uint32_t p0 = sl.frame_off[f0], p1 = sl.frame_off[f1];
+    s.frame_off.assign(sl.frame_off.begin() + f0, sl.frame_off.begin() + f1 + 1);
+    for (auto& o : s.frame_off) o -= p0;
+    s.rt_index.assign(sl.rt_index.begin() + f0, sl.rt_index.begin() + f1);
+    s.b.assign(sl.b.begin() + f0, sl.b.begin() + f1);
+    s.tof.assign(sl.tof.begin() + p0, sl.tof.begin() + p1);
+    s.inten.assign(sl.inten.begin() + p0, sl.inten.begin() + p1);
+    s.imq.assign(sl.imq.begin() + p0, sl.imq.begin() + p1);
+    s.mzq = sl.mzq;
+    return s;
+  }
+
   /// m/z quanta -> flight-time bins, in place. The store keeps m/z at a 1e-5 Da quantum, ~400x finer
   /// than one TOF bin at m/z 600, so inverting the calibration recovers the ORIGINAL bin exactly --
   /// no approximation is introduced here, and the loader does not have to know the axis.
@@ -1870,6 +1888,7 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
+    registerDoubleOption_("tile:rt_sec", "<sec>", -1.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run: the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run, measured on peptides at each pitch. -1 = one cell = the whole run (the output before the cells, 2026-09-09).", false, true);
     registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time the valley splitter's smoothing window (chrom_fwhm / scan time) is derived from. 'frame': the acquisition's cycle time (the smallest gap between consecutive MS1 frame times), one value for the whole run and every trace. 'trace': each mass trace's own average cycle time, as OpenMS ElutionPeakDetection does by default -- which a trace with gaps inflates, so long gappy traces got a narrower window than their neighbours and a sub-range of such a trace was split differently from the whole (the behaviour before 2026-09-09).", false, true);
     setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' "
@@ -3362,6 +3381,27 @@ protected:
     // [split-scan-time] ONE scalar for the whole run, from the MS1 frame times: one MS1 frame per
     // cycle, so it is the MS2 cadence too. Per window it would differ in the last bits (and per
     // tile later), and a sparse window would not be scanned differently from its neighbours.
+    // [cell] The fixed RT cells (tile:rt_sec): interior edges T_1..T_{K-1} on MS1 frame times, so
+    // every window's frames split at the same instants; cell k = [T_k, T_{k+1}), T_0 = -inf.
+    vector<double> cell_edges;
+    String cell_boundaries;
+    const double cell_pitch = getDoubleOption_("tile:rt_sec");
+    if (cell_pitch > 0.0)
+    {
+      vector<double> rts; rts.reserve(ms1_map.size());
+      for (const auto& sp : ms1_map) rts.push_back(sp.getRT());
+      std::sort(rts.begin(), rts.end());
+      const double cyc = frameSpacing(rts);
+      const size_t n = cyc > 0.0 ? std::max<size_t>(1, (size_t)llround(cell_pitch / cyc)) : 0;
+      if (n > 0)
+      {
+        for (size_t i = n; i < rts.size(); i += n) cell_edges.push_back(rts[i]);
+        if (!cell_edges.empty() && rts.size() - cell_edges.size() * n < n / 2) cell_edges.pop_back();   // remainder < pitch/2 joins the last cell
+      }
+      for (double e : cell_edges) cell_boundaries += (cell_boundaries.empty() ? "" : ",") + String(e);
+      writeLogInfo_("[cell] pitch " + String(cell_pitch) + " s = " + String(n) + " MS1 frames (cycle " + String(cyc) + " s): "
+                    + String(cell_edges.size() + 1) + " cells, edges " + (cell_boundaries.empty() ? String("none") : cell_boundaries));
+    }
     double split_scan_time = 0.0;
     if (getStringOption_("trace:split_scan_time") == "frame")
     {
@@ -3925,6 +3965,8 @@ protected:
     // the stages that do not coexist). The old 16x of the COMPACT BYTES booked 160 B/peak, i.e.
     // 3.6x the sustained figure, which is why the gate never throttled anything.
     auto project = [&](const PeakSlab& sl) { return sl.peaks() * (size_t)44 + (size_t)256 * 1024 * 1024; };
+    if (cell_pitch > 0.0 && !integer_detector)
+      writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells).");
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
@@ -4092,10 +4134,19 @@ protected:
             bnd[nb] = thi + 1;
           }
           else bnd = {0, 0};
-          auto _tp = std::chrono::steady_clock::now();
-          TracePrep tprep = prepareTracing(wslab, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per window
-          w_prep = secs(std::chrono::steady_clock::now() - _tp);
-          n_seeds = tprep.order.size(); w_live = tprep.n_live;
+          // [cell] Detection per fixed RT cell: the window's frames are cut at the run-level cell
+          // edges (tile:rt_sec), each cell is traced on a slice of its own -- seeds, `visited`,
+          // frame_live and the tof index are the cell's -- and every cell's band stores are absorbed
+          // into the window store afterwards, in (cell, band) order, with the frame indices rebased
+          // by the cell's first frame. One cell (tile:rt_sec=-1) is the whole window on the slab
+          // itself: the same statements, no copy, byte-identical to the uncelled code.
+          vector<size_t> cut{0};
+          for (double e : cell_edges)
+          { const size_t f = (size_t)(lower_bound(wst.frame_rt.begin(), wst.frame_rt.end(), e) - wst.frame_rt.begin());
+            if (f > cut.back() && f < wst.frames()) cut.push_back(f); }
+          cut.push_back(wst.frames());
+          const size_t n_cells = cut.size() - 1;
+          const bool one_cell = (n_cells == 1);
           // The slab and the seed order are dead the moment the detector returns: the merge below
           // reads only the band stores, and valley splitting reads only the window store. Releasing
           // them HERE rather than after the merge matters because the merge is the peak allocation
@@ -4105,45 +4156,56 @@ protected:
             vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
             vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
             vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
-            vector<uint32_t>().swap(tprep.order); vector<char>().swap(tprep.frame_live);
-            vector<size_t>().swap(tprep.seg); vector<uint32_t>().swap(tprep.fidx);
           };
-          // Each band appends spans to a PRIVATE store; after the taskloop joins, the window
-          // store absorbs them in band order and every offset is rebased (R4 sequencing).
-          vector<TraceStore> bst(std::max(1, nb));
-          if (nb == 1)
+          // Each band of each cell appends spans to a PRIVATE store; after the taskloops join, the
+          // window store absorbs them in (cell, band) order and every offset is rebased (R4 sequencing).
+          vector<vector<TraceStore>> bst(n_cells, vector<TraceStore>(std::max(1, nb)));
+          vector<vector<vector<Trace>>> per(n_cells, vector<vector<Trace>>(std::max(1, nb)));
+          for (size_t ci = 0; ci < n_cells; ++ci)
           {
-            frag_traces = detectTracesInteger_(wslab, tprep, bst[0], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr);
-            release_input();
-          }
-          else
-          {
-            vector<vector<Trace>> per(nb);
+            const size_t f0 = cut[ci], f1 = cut[ci + 1];
+            PeakSlab cslab;
+            if (!one_cell) cslab = sliceFrames(wslab, f0, f1);
+            const PeakSlab& cs = one_cell ? wslab : cslab;
+            auto _tp = std::chrono::steady_clock::now();
+            TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per cell
+            w_prep += secs(std::chrono::steady_clock::now() - _tp);
+            n_seeds += tprep.order.size(); w_live += tprep.n_live;
             auto _td0 = std::chrono::steady_clock::now();
-            #pragma omp taskloop grainsize(1) default(shared)
-            for (int b = 0; b < nb; ++b)
-              per[b] = detectTracesInteger_(wslab, tprep, bst[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
-                                            bnd[b], bnd[b + 1], b);
-            w_detect = secs(std::chrono::steady_clock::now() - _td0);
-            auto _tm0 = std::chrono::steady_clock::now();
-            release_input();                       // before the merge, not after it
-            size_t tot = 0, arena = 0; bool any_bins = false;
-            for (int b = 0; b < nb; ++b)
-            { tot += per[b].size(); arena += bst[b].inten.size(); any_bins |= !bst[b].bins.empty(); }
-            frag_traces.reserve(tot);
-            wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);   // as in splitIntegerTraces
-            writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + " merge: " + String(nb) + " band arenas, "
+            if (nb == 1)
+              per[ci][0] = detectTracesInteger_(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr);
+            else
+            {
+              vector<vector<Trace>>& pc = per[ci]; vector<TraceStore>& bc = bst[ci];
+              #pragma omp taskloop grainsize(1) default(shared)
+              for (int b = 0; b < nb; ++b)
+                pc[b] = detectTracesInteger_(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, ms2_msr,
+                                             bnd[b], bnd[b + 1], b);
+            }
+            w_detect += secs(std::chrono::steady_clock::now() - _td0);
+          }
+          release_input();                       // before the merge, not after it
+          auto _tm0 = std::chrono::steady_clock::now();
+          size_t tot = 0, arena = 0; bool any_bins = false;
+          for (size_t ci = 0; ci < n_cells; ++ci) for (int b = 0; b < nb; ++b)
+          { tot += per[ci][b].size(); arena += bst[ci][b].inten.size(); any_bins |= !bst[ci][b].bins.empty(); }
+          frag_traces.reserve(tot);
+          wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);   // as in splitIntegerTraces
+          if (nb > 1)
+            writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + " merge: " + String(n_cells) + " cell(s) x " + String(nb) + " band arenas, "
                           + String(arena) + " floats (" + String(arena * (any_bins ? 6 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
+          for (size_t ci = 0; ci < n_cells; ++ci)
+          {
+            const uint32_t f0 = (uint32_t)cut[ci];
             for (int b = 0; b < nb; ++b)
             {
-              const uint32_t base = wst.absorb(bst[b]);
-              for (auto& t : per[b]) { t.off += base; frag_traces.push_back(std::move(t)); }
-              vector<Trace>().swap(per[b]);
+              const uint32_t base = wst.absorb(bst[ci][b]);
+              for (auto& t : per[ci][b]) { t.off += base; t.frame0 += f0; t.bframe += f0; frag_traces.push_back(std::move(t)); }
+              vector<Trace>().swap(per[ci][b]);
             }
-            w_merge = secs(std::chrono::steady_clock::now() - _tm0);
           }
-          if (nb == 1) { const uint32_t base = wst.absorb(bst[0]); for (auto& t : frag_traces) t.off += base; }
-          }                                                  // tprep dies here
+          w_merge = secs(std::chrono::steady_clock::now() - _tm0);
+          }                                                  // the band stores die here
           // (the slab and the seed order were released above, before the band-arena merge)
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
           // defects behind the first version's 92% peptide loss. It rebuilds the arena, so the
@@ -4484,6 +4546,8 @@ protected:
 #endif
     out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
+    out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
+    out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     out_exp.setMetaValue("spx:require_isotope_support",
