@@ -1520,13 +1520,27 @@ namespace
         }
       }
       if (pick_err) std::rethrow_exception(pick_err);
-      for (int i = 0; i < n; ++i)
-      {
-        if (!TileProbe::get().keepFrame(frt[(size_t)i])) { ++frames_probe_dropped; continue; }   // [tile-1]
-        stats_ += st[(size_t)i];
-        const size_t o = scratch_off_[(size_t)i];
-        windows_[key_[(size_t)i]].append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], ms1_.size());
-      }
+      // Append in arrival order per window, the windows of this batch in parallel: a window's
+      // frames stay in order (one thread walks them), distinct windows never touch each other's
+      // slab, and the copy of ~1 GB per batch into cold pages no longer runs on one thread.
+      std::vector<std::pair<PeakSlab*, std::vector<int>>> per_win;
+      { std::map<WinKey, size_t> at;
+        for (int i = 0; i < n; ++i)
+        {
+          if (!TileProbe::get().keepFrame(frt[(size_t)i])) { ++frames_probe_dropped; continue; }   // [tile-1]
+          stats_ += st[(size_t)i];
+          auto it = at.find(key_[(size_t)i]);
+          if (it == at.end()) { it = at.emplace(key_[(size_t)i], per_win.size()).first; per_win.emplace_back(&windows_[key_[(size_t)i]], std::vector<int>()); }
+          per_win[it->second].second.push_back(i);
+        } }
+      const size_t n_ms1 = ms1_.size();
+      #pragma omp parallel for schedule(dynamic, 1)
+      for (long w = 0; w < (long)per_win.size(); ++w)
+        for (int i : per_win[(size_t)w].second)
+        {
+          const size_t o = scratch_off_[(size_t)i];
+          per_win[(size_t)w].first->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], n_ms1);
+        }
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
     }
