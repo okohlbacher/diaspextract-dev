@@ -55,8 +55,9 @@ unchanged.
   narrower window than its neighbours and split more. With one run-wide window the traces are
   fewer and longer -- 37% fewer MS1 traces and 28% fewer spectra on the 30-minute file, 16% fewer
   spectra on the 2-hour file -- and identify MORE peptides: Sage 12,625 -> 13,388 (+6.0%) and
-  27,859 -> 28,845 (+3.5%), with the entrapment FDR at nominal 1% moving from 1.35% to 1.16% on
-  the 30-minute file (12,496 vs 11,722 target peptides against the entrapment database). Found
+  27,859 -> 28,845 (+3.5%), MSFragger 12,236 -> 12,732 (+4.1%) on the 30-minute file, with the
+  entrapment FDR at nominal 1% moving from 1.35% to 1.16% there (12,496 vs 11,722 target peptides
+  against the entrapment database). Found
   while measuring RT tiling: the per-trace window made a trace's split depend on where the run was
   cut. The EPD patch gains an advanced `scan_time` parameter (0 = the OpenMS default).
 - **mzPeak input runs the integer detector.** mzPeak native IDs now carry `frame=<Id>` and the

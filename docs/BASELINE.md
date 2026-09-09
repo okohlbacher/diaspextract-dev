@@ -2583,8 +2583,10 @@ a smaller search space is what the entrapment search and the second engine decid
 | `frame` (new) | **12,496 (+6.6%)** | 99 | 0.79% | **1.16%** | 0.94-1.40% |
 
 More peptides at a lower measured error rate: the gain is signal, not recalibration (the old arm's
-1.35% matches the 1.33% recorded for D at the shipped defaults on 2026-09-05). MSFragger, the
-second engine, is recorded below when it lands; `frame` is the default on the development branch.
+1.35% matches the 1.33% recorded for D at the shipped defaults on 2026-09-05). **MSFragger 4.4.1
+(second engine, `score_msf_td.py`, D): 12,236 -> 12,732 target peptides at 1% FDR (+4.1%).** Both
+engines up, entrapment down: `frame` is the default on the development branch; the second
+acquisition's MSFragger run and the entrapment on TNBC 009 are due before release.
 
 **Tile invariance: no.** probe2 (arm `split1`, TNBC 009, core t6 3600-4200 s at H = 123 against
 the whole run under the same default): 314,685 core spectra, 379 identical (0.1%), 210,822 differ
