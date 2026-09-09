@@ -26,24 +26,32 @@
 #
 # Base: OpenMS/OpenMS develop bd4b89555629d68b431b189a4c841efbcc4dfeea (2026-04-24).
 # Verified to reproduce the built tree byte-for-byte. Touches the .cpp only.
+#
+# 2026-09-09: INDEX REGRESSION FIXED. Each per-thread handler recorded its <spectrum> offsets
+# relative to its own chunk buffer and into its own spectra_offsets_, which nobody read, so every
+# file this patch wrote carried an EMPTY <indexList> (count="0", one dummy entry, offset -1) --
+# a v2.0.0 conformance defect the spectrum digest cannot see (it stops at </spectrumList>) and the
+# search engines never noticed (they parse sequentially). The pre-patch writer indexed correctly.
+# The chunk loop now collects each chunk's buffer-relative offsets and rebases them by the file
+# position the chunk is appended at; the spectrum bytes are unchanged.
 # Apply with: patch -p1 -d <OpenMS tree> < this file
---- a/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp
-+++ b/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp
-@@ -7,6 +7,13 @@
- // --------------------------------------------------------------------------
+--- a/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp	2026-09-09 12:16:35
++++ b/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp	2026-09-09 12:16:38
+@@ -8,6 +8,13 @@
  
  #include <OpenMS/FORMAT/HANDLERS/MzMLHandler.h>
-+
+ 
 +#include <sstream>
 +#include <exception>
 +#include <memory>
 +#ifdef _OPENMP
 +#include <omp.h>
 +#endif
- 
++
  #include <OpenMS/CONCEPT/Exception.h>
  #include <OpenMS/CONCEPT/LogStream.h>
-@@ -4070,12 +4077,76 @@
+ #include <OpenMS/CONCEPT/VersionInfo.h>
+@@ -4070,12 +4077,87 @@
          }
  
          // write actual data
@@ -86,6 +94,11 @@
 +            const Size w1 = std::min(w0 + wave, n_spec);
 +            const Size n_chunk = (w1 - w0 + CHUNK - 1) / CHUNK;
 +            enc.assign(n_chunk, std::string());
++            // [speXtract index] Each thread's handler records <spectrum> offsets RELATIVE TO ITS
++            // OWN CHUNK BUFFER and into ITS OWN spectra_offsets_, which nobody read: the file's
++            // <indexList> came out empty (count="0", a dummy entry) on every parallel-written
++            // file. Collect the chunk's offsets here and rebase them when the chunk is appended.
++            std::vector<std::vector<std::pair<std::string, Int64> > > offs(n_chunk);
 +#pragma omp parallel for schedule(dynamic, 1)
 +            for (SignedSize c = 0; c < (SignedSize)n_chunk; ++c)
 +            {
@@ -99,11 +112,15 @@
 +                std::ostringstream buf;
 +                buf.copyfmt(os);   // identical formatting state, or the numbers differ
 +                const Size lo = w0 + (Size)c * CHUNK, hi = std::min(lo + CHUNK, w1);
++                const Size o0 = hs[tid]->spectra_offsets_.size();
 +                for (Size s_idx = lo; s_idx < hi; ++s_idx)
 +                {
 +                  hs[tid]->writeSpectrum_(buf, exp[s_idx], s_idx, *vs[tid], renew_native_ids, dps);
 +                }
 +                enc[(Size)c] = buf.str();
++                // buffer-relative offsets of this chunk's spectra (writeSpectrum_ took buf.tellp())
++                offs[(Size)c].assign(hs[tid]->spectra_offsets_.begin() + o0, hs[tid]->spectra_offsets_.end());
++                hs[tid]->spectra_offsets_.resize(o0);
 +              }
 +              catch (...)
 +              {
@@ -115,7 +132,9 @@
 +            if (wr_err) { std::rethrow_exception(wr_err); }
 +            for (Size c = 0; c < n_chunk; ++c)
 +            {
++              const Int64 base = (Int64)os.tellp();   // where this chunk lands in the FILE
 +              os << enc[c];
++              for (const auto& p : offs[c]) { spectra_offsets_.emplace_back(p.first, base + p.second); }
 +              std::string().swap(enc[c]);
 +            }
 +            progress += (int)(w1 - w0);
