@@ -3710,6 +3710,7 @@ protected:
         const int w_bands = n_bands;
         vector<Trace> frag_traces;
         TraceStore wst;                                   // this window's frame table + arenas; outlives scoring
+        size_t w_live = 0;                                // [tile-0d] G_live, carried out of the tracing block
         if (integer_detector)
         {
           wst.setFrames(wslab.rt_index, &wslab.b);
@@ -3724,7 +3725,7 @@ protected:
           // [tile-0d] the slab-derived band bounds a tiled design would have to inject globally
           writeLogInfo_("[tof] window " + String(win_lo) + "-" + String(win_hi) + " tlo=" + String(tlo)
                         + " thi=" + String(thi) + " frames=" + String(wslab.frames()) + " peaks=" + String(wslab.peaks()));
-          size_t n_seeds = 0, n_parents = 0, w_live = 0;
+          size_t n_seeds = 0, n_parents = 0;
           const size_t n_peaks = wslab.peaks();
           {
           // The band edges are computed ONCE and shared by the seed segmentation and the detector,
