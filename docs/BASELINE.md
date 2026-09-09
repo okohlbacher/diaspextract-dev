@@ -2237,3 +2237,42 @@ to check it, and all three repeated the author's original error that child RT is
 weighted mean. Only Fable read `MassTrace.cpp`. The digest, not the review, was the arbiter -- and
 it caught a second error (the clamp) that no reviewer saw either.
 
+## 2026-09-09: d(peak RSS)/d(windows in flight) = 2.85 GB per window -- measured, no code change
+
+The number every memory estimate in this project has been guessing at. `perf:max_concurrent_windows`
+was already registered, resolved and enforced, and defaults to 0 = unlimited; the logs proved it had
+never bound (`admission high-water 28 of 28`). Two runs of TNBC 009 on `data`, back to back on a
+quiet node (load 6.3), build `soa1`, with a 250 ms `/proc/<pid>/status` VmRSS sidecar on each:
+
+| | 28 windows | 11 windows | |
+|---|---|---|---|
+| peak RSS (`time -v`) | 182.20 GB | **133.76 GB** | **-48.44 GB (-26.6%)** |
+| peak VmRSS (sidecar, 2566/3055 samples) | 181.88 GB | 133.80 GB | agrees to 0.2% |
+| wall | 673.3 s | 799.1 s | +125.8 s (+18.7%) |
+| WINDOW_LOOP wall | 431.3 s | 560.0 s | +128.7 s |
+| WINDOW_LOOP CPU | 34,318.9 s | 33,762.2 s | **-1.6%** |
+| WINDOW_LOOP parallel | 79.6x | 60.3x | |
+
+Both `SPECTRUM DATA IDENTICAL`. Window-loop CPU is flat, so the entire wall cost is occupancy:
+fewer windows in flight leave threads idle, they do not create work.
+
+**The exchange rate, which is the usable result:**
+
+    d(peak) / d(window in flight) = 2.85 GB per window
+    d(wall) / d(window in flight) = 7.4 s per window
+    => 0.385 GB of peak per second of wall, or 2.60 s of wall per GB saved
+
+For comparison, `perf:malloc_trim` (on by default) trades ~30% of peak for ~8.5% of wall. The
+concurrency knob is the same kind of trade at a similar rate, and it is a flag, not a change.
+
+**What this re-prices.** Every structural saving should be read against 2.85 GB/window: the 40-byte
+`Trace` (-5.50 GB) is worth about 1.9 windows of concurrency, i.e. ~14 s of wall it does NOT cost.
+That is the argument for the structural work -- not that it is bigger than the knob, but that it is
+free where the knob is not.
+
+**What it does NOT establish.** The relation is measured only over 11-28 windows. Extrapolating the
+2.85 GB/window slope to zero gives a 102 GB intercept against a measured ~46 GB loop-start floor, so
+the fit is not linear down to one window: something in the loop is not per-window (the emitted
+spectra accumulate regardless of concurrency, and allocator retention differs between the arms).
+Do not use the slope outside the measured range, and do not read the intercept as a floor.
+
