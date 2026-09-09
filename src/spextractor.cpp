@@ -801,16 +801,40 @@ namespace
   /// One window's peaks in INDEX SPACE, frame-major. This is what the compact store already holds;
   /// the point is that it is never converted back to Peak1D doubles. Replaces the materialised
   /// PeakMap for the integer detector. See docs/MZ-AXIS-DESIGN.md.
+  /// A window's peaks, frame-major. [tile-2d] Built DIRECTLY by the loader, one frame at a time, and
+  /// handed to the detector by move: there is no second representation of the run any more (the
+  /// per-window `vector<CompactFrame>` store and its `toSlab` copy -- 10 B/peak copied per window at
+  /// window start, and a 43 GB arena corpse on the 2-hour file -- are gone). Until `toTof()` runs
+  /// `tof` holds the 1e-5 Da m/z quantum (`mzq`), which the OpenMS-detector path reads as is.
   struct PeakSlab
   {
     vector<uint32_t> frame_off;    ///< size F+1: frame f owns [frame_off[f], frame_off[f+1])
-    vector<uint32_t> rt_index;     ///< size F: the frame's index on the GLOBAL RT axis
-    vector<TofIdx>   tof;          ///< flight-time bin, ascending within a frame
-    vector<double>   b;            ///< size F: the frame's calibration factor (bin -> m/z)
+    vector<uint32_t> rt_index;     ///< size F: the frame's index on the GLOBAL RT axis (indexRt)
+    vector<TofIdx>   tof;          ///< flight-time bin, ascending within a frame (m/z quanta while mzq)
+    vector<double>   b;            ///< size F: the frame's calibration factor (bin -> m/z) (toTof)
     vector<float>    inten;
     vector<uint16_t> imq;          ///< the store's quantised 1/K0, kept for export
-    size_t frames() const { return rt_index.size(); }
+    vector<double>   rt;           ///< size F until indexRt: the frame's retention time
+    vector<uint32_t> frame_id;     ///< size F until toTof: vendor frame Id, the calibration key
+    bool mzq = true;               ///< tof[] holds m/z quanta, not bins, until toTof()
+    size_t frames() const { return frame_off.empty() ? 0 : frame_off.size() - 1; }
     size_t peaks()  const { return tof.size(); }
+    size_t bytes()  const { return tof.size() * 4 + inten.size() * 4 + imq.size() * 2; }
+    /// Append one picked frame. Growth by 1.25x, not the library's 2x: the loader cannot reserve
+    /// exactly (it does not know the picked count up front), and 2x would leave ~40% of the run's
+    /// largest allocation as slack; the remainder is returned by shrink() once the load is done.
+    void append(const CompactFrame& f)
+    {
+      if (frame_off.empty()) frame_off.push_back(0);
+      auto grow = [](auto& v, size_t n) { if (v.size() + n > v.capacity()) v.reserve(std::max(v.size() + n, v.capacity() + v.capacity() / 4)); };
+      grow(tof, f.mzq.size()); grow(inten, f.inten.size()); grow(imq, f.imq.size());
+      tof.insert(tof.end(), f.mzq.begin(), f.mzq.end());
+      inten.insert(inten.end(), f.inten.begin(), f.inten.end());
+      imq.insert(imq.end(), f.imq.begin(), f.imq.end());
+      rt.push_back(f.rt); frame_id.push_back(f.frame_id);
+      frame_off.push_back((uint32_t)tof.size());
+    }
+    void shrink() { tof.shrink_to_fit(); inten.shrink_to_fit(); imq.shrink_to_fit(); }
   };
 
   /// Ordered, incremental digest of a window's slab: frame table (rt index, factor bits, count) then
@@ -831,46 +855,40 @@ namespace
     return h;
   }
 
-  /// Move a window's compact frames into a slab, consuming them as it goes (the compact store has
-  /// to shrink in step, exactly as materializeWindow does, or the two representations coexist).
-  PeakSlab toSlab(vector<CompactFrame>& frames)
+  /// Frame times -> indices on the GLOBAL RT axis, once the axis exists; the frames must be in RT
+  /// order (the extension loop steps frames by index and takes the RT span as last minus first --
+  /// the OpenMS path sorts its spectra for the same reason). The loader delivers them ordered; this
+  /// checks rather than assumes.
+  void indexRt(PeakSlab& sl)
   {
-    PeakSlab sl;
-    const size_t F = frames.size();
-    sl.frame_off.resize(F + 1, 0);
+    const size_t F = sl.frames();
     sl.rt_index.resize(F);
-    size_t total = 0;
-    for (const auto& f : frames) total += f.mzq.size();
-    sl.tof.reserve(total); sl.inten.reserve(total); sl.imq.reserve(total);
-    sl.b.resize(F);
-    const TofAxis& ax = tofAxis();
-    for (size_t i = 0; i < F; ++i)
-    {
-      CompactFrame& f = frames[i];
-      sl.rt_index[i] = rtIndex(f.rt);
-      // The compact store keeps m/z at a 1e-5 Da quantum, ~400x finer than one TOF bin at m/z 600,
-      // so inverting the calibration recovers the ORIGINAL bin exactly -- no approximation is
-      // introduced here, and the loader does not have to change.
-      const double b = ax.factor(f.frame_id);
-      sl.b[i] = b;
-      sl.frame_off[i] = (uint32_t)sl.tof.size();
-      for (size_t k = 0; k < f.mzq.size(); ++k)
-        sl.tof.push_back(ax.tofOf((double)f.mzq[k] / MZ_Q, b));
-      sl.inten.insert(sl.inten.end(), f.inten.begin(), f.inten.end());
-      sl.imq.insert(sl.imq.end(), f.imq.begin(), f.imq.end());
-      vector<uint32_t>().swap(f.mzq);
-      vector<float>().swap(f.inten);
-      vector<uint16_t>().swap(f.imq);
-    }
-    sl.frame_off[F] = (uint32_t)sl.tof.size();
-    // The extension loop steps frames by index and takes the RT span as last minus first, so the
-    // frames must be in RT order -- the OpenMS path sorts its spectra for the same reason. The
-    // loader delivers them ordered; this checks rather than assumes.
+    for (size_t i = 0; i < F; ++i) sl.rt_index[i] = rtIndex(sl.rt[i]);
     for (size_t i = 1; i < F; ++i)
       if (sl.rt_index[i] < sl.rt_index[i - 1])
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "window frames are not in retention-time order at frame", std::to_string(i));
-    return sl;
+    vector<double>().swap(sl.rt);
+  }
+
+  /// m/z quanta -> flight-time bins, in place. The store keeps m/z at a 1e-5 Da quantum, ~400x finer
+  /// than one TOF bin at m/z 600, so inverting the calibration recovers the ORIGINAL bin exactly --
+  /// no approximation is introduced here, and the loader does not have to know the axis.
+  void toTof(PeakSlab& sl)
+  {
+    if (!sl.mzq) return;
+    const TofAxis& ax = tofAxis();
+    const size_t F = sl.frames();
+    sl.b.resize(F);
+    for (size_t i = 0; i < F; ++i)
+    {
+      const double b = ax.factor(sl.frame_id[i]);
+      sl.b[i] = b;
+      for (uint32_t k = sl.frame_off[i]; k < sl.frame_off[i + 1]; ++k)
+        sl.tof[k] = ax.tofOf((double)sl.tof[k] / MZ_Q, b);
+    }
+    vector<uint32_t>().swap(sl.frame_id);
+    sl.mzq = false;
   }
 
 
@@ -1305,37 +1323,36 @@ namespace
     return out;
   }
 
-  /// Rebuild a PeakMap for ONE window from its compact frames, for MassTraceDetection.
-  /// Frames are consumed (cleared) as they are materialised so the compact store shrinks in step.
-  PeakMap materializeWindow(vector<CompactFrame>& frames)
+  /// Rebuild a PeakMap for ONE window from its slab (still in m/z quanta), for MassTraceDetection.
+  /// The slab is consumed.
+  PeakMap materializeWindow(PeakSlab& sl)
   {
+    if (!sl.mzq) throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "materializeWindow needs a slab in m/z quanta", "tof");
     PeakMap m;
-    m.reserve(frames.size());
-    for (auto& f : frames)
+    const size_t F = sl.frames();
+    m.reserve(F);
+    for (size_t f = 0; f < F; ++f)
     {
       MSSpectrum s;
-      s.setRT(f.rt);
+      s.setRT(rtAxis()[sl.rt_index[f]]);
       s.setMSLevel(1); // MassTraceDetection traces MS1-level only
-      s.reserve(f.mzq.size());
+      const size_t n = sl.frame_off[f + 1] - sl.frame_off[f];
+      s.reserve(n);
       OpenMS::DataArrays::FloatDataArray ima;
       ima.setName(Constants::UserParam::ION_MOBILITY);
-      ima.reserve(f.mzq.size());
-      for (size_t i = 0; i < f.mzq.size(); ++i)
+      ima.reserve(n);
+      for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
       {
         Peak1D p;
-        p.setMZ((double)f.mzq[i] / MZ_Q);
-        p.setIntensity(f.inten[i]);
+        p.setMZ((double)sl.tof[k] / MZ_Q);
+        p.setIntensity(sl.inten[k]);
         s.push_back(p);
-        ima.push_back((float)(IM_LO + (double)f.imq[i] / IM_Q));
+        ima.push_back((float)(IM_LO + (double)sl.imq[k] / IM_Q));
       }
       s.getFloatDataArrays().push_back(std::move(ima));
       m.addSpectrum(std::move(s));
-      // release this frame's compact storage immediately
-      vector<uint32_t>().swap(f.mzq);
-      vector<float>().swap(f.inten);
-      vector<uint16_t>().swap(f.imq);
     }
-    vector<CompactFrame>().swap(frames);
+    sl = PeakSlab();   // consumed
     return m;
   }
 
@@ -1405,7 +1422,7 @@ namespace
   class PickCompactConsumer : public FullSwathFileConsumer
   {
   public:
-    PickCompactConsumer(PeakPickerIM& picker, map<WinKey, vector<CompactFrame>>& windows,
+    PickCompactConsumer(PeakPickerIM& picker, map<WinKey, PeakSlab>& windows,
                         PeakMap& ms1, CompactStats& stats,
                         std::function<WinKey(double, double, uint32_t)> keyfn)
       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats), keyfn_(std::move(keyfn)) {}
@@ -1457,7 +1474,7 @@ namespace
       {
         if (!TileProbe::get().keepFrame(compacted[(size_t)i].rt)) { ++frames_probe_dropped; continue; }   // [tile-1]
         stats_ += st[(size_t)i];
-        windows_[key_[(size_t)i]].push_back(std::move(compacted[(size_t)i]));
+        windows_[key_[(size_t)i]].append(compacted[(size_t)i]);   // the frame's vectors die with `compacted`
       }
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
@@ -1541,7 +1558,7 @@ namespace
     std::vector<WinKey> key_;
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
-    map<WinKey, vector<CompactFrame>>& windows_;
+    map<WinKey, PeakSlab>& windows_;
     PeakMap& ms1_;
     CompactStats& stats_;
     std::function<WinKey(double, double, uint32_t)> keyfn_;
@@ -3030,7 +3047,7 @@ protected:
     // Accept mzML, mzPeak, or a Bruker .d directory; FileHandler auto-detects the format
     // (mzPeak -> MzPeakFile; .d -> BrukerTimsFile, requires WITH_OPENTIMS).
     PeakMap ms1_map;
-    map<WinKey, vector<CompactFrame>> ms2_by_window;
+    map<WinKey, PeakSlab> ms2_by_window;
     CompactStats cstat;
     auto winKey = [](double lo, double hi, uint32_t window_group) -> WinKey {
       return {(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)window_group};
@@ -3176,7 +3193,7 @@ protected:
         const OpenMS::Precursor& pr = s.getPrecursors()[0];
         double lo = pr.getMZ() - pr.getIsolationWindowLowerOffset();
         double hi = pr.getMZ() + pr.getIsolationWindowUpperOffset();
-        ms2_by_window[winKey(lo, hi, windowGroupOf(s.getNativeID()))].push_back(compactify(s, cstat));
+        ms2_by_window[winKey(lo, hi, windowGroupOf(s.getNativeID()))].append(compactify(s, cstat));
         s.clear(true);   // [mem] the picked frame is dead once compacted; waiting for exp.clear()
       }                  // below held the whole picked run (20 B/peak) beside the compact store
     }
@@ -3184,7 +3201,7 @@ protected:
     exp.clear(true); // frames moved out; release the container
     {
       size_t cb = 0, cp = 0;
-      for (const auto& kv : ms2_by_window) for (const auto& f : kv.second) { cb += f.bytes(); cp += f.mzq.size(); }
+      for (const auto& kv : ms2_by_window) { cb += kv.second.bytes(); cp += kv.second.peaks(); }
       const size_t lost = cstat.no_im_array + cstat.size_mismatch + cstat.bad_mz + cstat.bad_im;
       if (lost)
       {
@@ -3214,10 +3231,10 @@ protected:
     {
       vector<double>& ax = rtAxis();
       ax.clear();
-      { size_t nf = ms1_map.size(); for (const auto& kv : ms2_by_window) nf += kv.second.size();
+      { size_t nf = ms1_map.size(); for (const auto& kv : ms2_by_window) nf += kv.second.frames();
         ax.reserve(nf + 1024); }   // MS1 *and* every window's MS2 frames land here [mem]
       for (const auto& sp : ms1_map) ax.push_back(sp.getRT());
-      for (const auto& kv : ms2_by_window) for (const auto& f : kv.second) ax.push_back(f.rt);
+      for (const auto& kv : ms2_by_window) ax.insert(ax.end(), kv.second.rt.begin(), kv.second.rt.end());
       sort(ax.begin(), ax.end());
       ax.erase(unique(ax.begin(), ax.end()), ax.end());
       writeLogInfo_("RT axis: " + String(ax.size()) + " distinct frame retention times"
@@ -3227,6 +3244,20 @@ protected:
         writeLogError_("Error: no frame retention times; cannot build the RT axis.");
         return INCOMPATIBLE_INPUT_DATA;
       }
+      // [tile-2d] frame times -> axis indices, and the load-time growth slack returned, window by
+      // window (one window's copy in flight at a time, not all of them at once).
+      const double _ts = phase_clock_(); const long _r0 = rss_mb_();
+      size_t slack = 0;
+      for (auto& kv : ms2_by_window)
+      {
+        PeakSlab& sl = kv.second;
+        slack += (sl.tof.capacity() - sl.tof.size()) * 10;
+        indexRt(sl);
+        sl.shrink();
+      }
+      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis; "
+                    + String(slack / (1024ULL * 1024ULL)) + " MB of growth slack returned in "
+                    + String(phase_clock_() - _ts) + " s [RSS " + String(_r0) + " -> " + String(rss_mb_()) + " MB]");
     }
 
     //-------------------------------------------------------------
@@ -3621,7 +3652,7 @@ protected:
     // canonically sorted, so output is thread-count-independent. Exceptions (e.g. MassTraceDetection
     // on a degenerate window) are captured and rethrown serially. [C-3,H-5,C-5,par-Crit-2/3/4]
     //-------------------------------------------------------------
-    vector<pair<WinKey, vector<CompactFrame>*>> window_list;
+    vector<pair<WinKey, PeakSlab*>> window_list;
     window_list.reserve(ms2_by_window.size());
     for (auto& kv : ms2_by_window) window_list.emplace_back(kv.first, &kv.second);
     // [heavy-first] Process the biggest windows FIRST. With n_conc slots and unequal windows,
@@ -3631,7 +3662,7 @@ protected:
     // which correlates with both trace and score work. Output order is unaffected: a canonical
     // total-order sort over all emitted spectra runs after the loop, so reordering here is safe.
     {
-      auto wbytes = [](const vector<CompactFrame>& fr) { size_t b = 0; for (const auto& f : fr) b += f.bytes(); return b; };
+      auto wbytes = [](const PeakSlab& sl) { return sl.bytes(); };
       { auto& st = phase_stats_()["PRECURSOR_INFER"]; if (st.n++ == 0) phase_order_().push_back("PRECURSOR_INFER");
         st.wall += phase_clock_() - _t_inf; st.cpu += cpu_seconds_() - _c_inf; st.rss_end_mb = rss_mb_(); }
       _t_win = phase_clock_(); _c_win = cpu_seconds_();          // [perf-instr] window loop
@@ -3788,10 +3819,7 @@ protected:
     // 0.21 parents + 0.28 children per peak x 56 B + span arena 4.4 + scoring copies 12.9, minus
     // the stages that do not coexist). The old 16x of the COMPACT BYTES booked 160 B/peak, i.e.
     // 3.6x the sustained figure, which is why the gate never throttled anything.
-    auto project = [&](const vector<CompactFrame>& fr) {
-      size_t peaks = 0; for (const auto& f : fr) peaks += f.mzq.size();
-      return peaks * (size_t)44 + (size_t)256 * 1024 * 1024;
-    };
+    auto project = [&](const PeakSlab& sl) { return sl.peaks() * (size_t)44 + (size_t)256 * 1024 * 1024; };
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
@@ -3864,16 +3892,17 @@ protected:
                         + "\n    [tsub] " + String(win_lo) + "-" + String(win_hi) + " trace = slab " + String(w_slab)
                         + " + detect " + String(w_detect) + " + merge " + String(w_merge) + " + sort " + String(w_sort) + " s");
         }};
-        // [compact] materialise ONLY this window, and free its compact frames as we go
+        // [tile-2d] take ONLY this window's slab (a move: the store is the slab) and convert its
+        // m/z quanta to flight-time bins in place. Only the OpenMS path needs the peaks converted
+        // back into Peak1D doubles, which is the largest per-window allocation.
         auto _t0 = std::chrono::steady_clock::now();
-        // The integer detector reads the compact store directly; only the OpenMS path needs the
-        // peaks converted back into Peak1D doubles, which is the largest per-window allocation.
         PeakMap wmap;
         PeakSlab wslab;
         if (integer_detector)
         {
           { auto _tsl = std::chrono::steady_clock::now();
-            wslab = toSlab(*window_list[wi].second);
+            wslab = std::move(*window_list[wi].second);
+            toTof(wslab);
             w_slab = secs(std::chrono::steady_clock::now() - _tsl); }
           if (detOn_())
           {
@@ -3898,7 +3927,7 @@ protected:
 #ifdef __GLIBC__
           malloc_trim(0);
 #endif
-          writeLogInfo_("[trim] last window materialised -> compact store returned: " + String(_r0) + " -> "
+          writeLogInfo_("[trim] last window materialised -> store bookkeeping returned: " + String(_r0) + " -> "
                         + String(rss_mb_()) + " MB RSS in " + String(phase_clock_() - _tt) + " s" + mem_()); }
         auto _t1 = std::chrono::steady_clock::now();
         t_mat += std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count();
