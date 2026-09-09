@@ -1347,6 +1347,27 @@ namespace
   /// the old (lo, hi) pair did.
   using WinKey = std::array<int, 3>;
 
+  /// [tile-1] The step-1 probe of the tiling plan (review correction C7): keep only the MS2 frames of
+  /// ONE RT range plus a halo, applied AFTER picking so batches are unchanged; score only the
+  /// precursors whose apex is in the range; freeze the window tof edges and the Pearson support
+  /// (SPEXTRACTOR_TOF_EDGES, SPEXTRACTOR_G_FILE) so they are the whole-run values. It prices the
+  /// boundary effect and the halo CPU of an RT tile with no reader/writer code. Probe only.
+  struct TileProbe
+  {
+    bool on = false; double lo = 0, hi = 0, halo = 0;
+    static const TileProbe& get()
+    {
+      static const TileProbe p = []{
+        TileProbe t;
+        if (const char* e = std::getenv("SPEXTRACTOR_MS2_RT_RANGE"))
+          if (std::sscanf(e, "%lf,%lf,%lf", &t.lo, &t.hi, &t.halo) == 3) t.on = true;
+        return t; }();
+      return p;
+    }
+    bool keepFrame(double rt) const { return !on || (rt >= lo - halo && rt <= hi + halo); }
+    bool core(double rt) const { return !on || (rt >= lo && rt < hi); }
+  };
+
   class PickCompactConsumer : public FullSwathFileConsumer
   {
   public:
@@ -1356,6 +1377,7 @@ namespace
       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats), keyfn_(std::move(keyfn)) {}
 
     size_t frames_seen = 0;
+    size_t frames_probe_dropped = 0;   ///< [tile-1] MS2 frames outside the probe's range + halo
 
     /// [perf-load] Pick+compact a BATCH of buffered frames in parallel, then append in arrival
     /// order. OpenMS hands frames over a strictly serial `for (fid..) consumeSpectrum(spec)` loop,
@@ -1399,6 +1421,7 @@ namespace
       if (pick_err) std::rethrow_exception(pick_err);
       for (int i = 0; i < n; ++i)
       {
+        if (!TileProbe::get().keepFrame(compacted[(size_t)i].rt)) { ++frames_probe_dropped; continue; }   // [tile-1]
         stats_ += st[(size_t)i];
         windows_[key_[(size_t)i]].push_back(std::move(compacted[(size_t)i]));
       }
@@ -1502,7 +1525,11 @@ namespace
     size_t G = 0;
   };
 
-  FragStats buildFragStats(const vector<Trace>& frags, const TraceStore& wst, const TraceStore& ms1st, double delta_rt)
+  /// G_override > 0 replaces the Pearson support G (frames with a real fragment point) with a
+  /// value supplied from outside -- the whole window's, when only part of it is resident. Step 0d
+  /// measured G == F on every window of dataset D, so the window's frame count is that value.
+  FragStats buildFragStats(const vector<Trace>& frags, const TraceStore& wst, const TraceStore& ms1st, double delta_rt,
+                           size_t G_override = 0)
   {
     FragStats g;
     const size_t F = wst.frames();
@@ -1510,6 +1537,7 @@ namespace
     for (const auto& f : frags)
       for (size_t k = 0; k < f.span(); ++k) if (real(wst, f, k)) used[f.frame0 + k] = 1;
     for (char u : used) g.G += u ? 1 : 0;
+    if (G_override > 0) g.G = G_override;
     const double G = (double)g.G;
     // Precursor points live on MS1 frames; each maps to the NEAREST window frame that carries real
     // fragment data, within gate:delta_rt, ties to the LATER frame -- the rule the old grid used.
@@ -2921,6 +2949,10 @@ protected:
         if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
         if (std::getenv("SPEXTRACTOR_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+        if (TileProbe::get().on)
+          writeLogInfo_("[probe] MS2 RT range " + String(TileProbe::get().lo) + "-" + String(TileProbe::get().hi)
+                        + " halo " + String(TileProbe::get().halo) + " s: dropped " + String(consumer.frames_probe_dropped)
+                        + " of " + String(consumer.frames_seen - ms1_map.size()) + " MS2 window frames after picking");
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + " (native ms2_neighbors="
@@ -3400,6 +3432,13 @@ protected:
       if (a.im != b.im) return a.im < b.im;
       return a.trace_idx < b.trace_idx;
     });
+    if (TileProbe::get().on)   // [tile-1] score only the precursors whose apex is in the core
+    {
+      const size_t n0 = precursors.size();
+      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
+                                      [](const Precursor_& pc) { return !TileProbe::get().core(pc.rt); }), precursors.end());
+      writeLogInfo_("[probe] core precursors: " + String(precursors.size()) + " of " + String(n0));
+    }
     vector<double> prec_mz(precursors.size());
     for (size_t i = 0; i < precursors.size(); ++i) prec_mz[i] = precursors[i].mono_mz;
     // NOTE: ms1_map is already empty here. detectTraces_ takes it by non-const reference and
@@ -3747,6 +3786,8 @@ protected:
           // TASKS, so they fill the pool alongside every other window's work.
           TofIdx tlo = 0xFFFFFFFFu, thi = 0;
           for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
+          if (const char* e = std::getenv("SPEXTRACTOR_TOF_EDGES"))   // [tile-1] freeze the whole-run edges
+          { unsigned a = 0, b = 0; if (std::sscanf(e, "%u,%u", &a, &b) == 2 && b > a) { tlo = a; thi = b; } }
           const int nb = (thi <= tlo) ? 1 : std::max(1, w_bands);
           // [tile-0d] the slab-derived band bounds a tiled design would have to inject globally
           writeLogInfo_("[tof] window " + String(win_lo) + "-" + String(win_hi) + " tlo=" + String(tlo)
@@ -3902,7 +3943,14 @@ protected:
         auto _t3 = std::chrono::steady_clock::now();
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         w_trace = secs(_t3 - _t2) - w_prep - w_split;
-        FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt);
+        size_t g_over = 0;   // [tile-1] SPEXTRACTOR_G_FILE: lines "<lo>-<hi>\t<G>" from a whole-run [gstat] log
+        if (const char* e = std::getenv("SPEXTRACTOR_G_FILE"))
+        {
+          std::ifstream gf(e); std::string ln; const std::string key = String(win_lo) + "-" + String(win_hi);
+          while (std::getline(gf, ln)) { const auto tab = ln.find('\t'); if (tab != std::string::npos && ln.substr(0, tab) == key) { g_over = (size_t)std::atol(ln.c_str() + tab + 1); break; } }
+          if (g_over == 0) throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "SPEXTRACTOR_G_FILE has no G for window", key);
+        }
+        FragStats fg = buildFragStats(frag_traces, wst, ms1_store, delta_rt, g_over);
         // [tile-0d] the Pearson denominator G against the two tile-independent candidates: the
         // window's frame count F and the frames with any above-noise peak G_live. If G == F the
         // denominator can be injected from metadata under RT tiling; if not, the statistic must
