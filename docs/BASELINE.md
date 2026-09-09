@@ -2382,3 +2382,29 @@ the e2e never checked it. Fixed (3c996c3) by rebasing each chunk's offsets by `o
 appended; validator (`step0/idxcheck.py`, reads every offset and checks it lands on
 `<spectrum index="N"`) reports INDEX VALID on 854,817 offsets, spectrum digest unchanged
 (`b499027f`), e2e 13/13. The validator is now part of the tail-fix gate chain.
+
+## 2026-09-09: Fix A -- one `malloc_trim` when the last window has materialised: -31 GB on TNBC 009, wall-neutral
+
+Step 0a showed the drained compact store is real free-list (the allocator tunables returned it,
+at +26% wall). Fix A (58c0981) returns it at the one moment it dies: `toSlab` empties each window's
+compact frames at window start, so when the LAST window has materialised the store is a corpse --
+an atomic counter and one `malloc_trim(0)` under the existing `perf:malloc_trim` gate, ~6 lines.
+Interleaved A/B on `data`, two reps each, 250 ms VmRSS sidecar, `MemAvailable` ~1 TB throughout:
+
+| arm | rep | wall | peak RSS (`time -v`) | sidecar | digest |
+|---|---|---:|---:|---:|---|
+| `soa2` (HEAD before) | r1 | 10:54.7 | 168.93 GB | 169.07 | IDENTICAL |
+| `soa2` | r2 | 11:39.9 | 169.17 GB | 169.23 | IDENTICAL |
+| `fixA` | r1 | 11:15.8 | 139.23 GB | 139.33 | IDENTICAL |
+| `fixA` | r2 | 10:49.4 | 136.91 GB | 136.83 | IDENTICAL |
+| **mean** | | **11:17 -> 11:03 (-2%, noise)** | **169.05 -> 138.07 GB (-31.0 GB, -18.3%)** | | |
+
+The trim itself: `101,532 -> 63,860 MB RSS in 4.4 s` at t~215 s (37.7 GB returned, 0.12 s/GB --
+against the concurrency knob's 2.60 s/GB). Dataset D: 43.45 GB peak, digest `b499027f` (pre-tail
+pin, identical), the trim returned 11.9 GB in 2.6 s. Wall is neutral within the two reps' spread
+(the r1/r2 order of magnitude of node-load noise is 45 s). Published as arm `fixA`.
+
+**What it re-prices.** The 2.85 GB/window exchange rate stands, but the baseline it applies to is
+now 138 GB, not 169 (review correction C8: tiling is benchmarked against this). Step 2d-ii (the
+loader builds the slabs directly, no second representation) makes the same saving structural --
+no trim, no allocator dependence -- and is gated separately.
