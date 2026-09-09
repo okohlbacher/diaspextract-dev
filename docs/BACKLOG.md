@@ -680,6 +680,39 @@ than with no smoothing at all, so the SG is already doing substantial work in su
 valleys; a smoother that suppresses MORE is not automatically better, and the split-count
 distribution is the first thing to look at, before any search runs.
 
+### External-tool defects that need an OpenMS change or a DOI (2026-09-09)
+
+Found by walking the openms-external-tools checklist. Two were fixed in the tool (the live update
+check, and `verboseVersion_` dropping the OpenMS build -- both now gated in CI). These three
+cannot be fixed inside SpeXtractor and are recorded rather than left to be rediscovered.
+
+**1. `--help` advertises a documentation URL that 404s.** `TOPPBase::getDocumentationURL()`
+(TOPPBase.cpp:2375-2388) returns `http://www.openms.de/doxygen/nightly/html/TOPP_<tool>.html`
+unconditionally -- it does not consult the `official` flag we pass as false. For a tool that is
+not in the OpenMS release there is no such page, so every user who follows the first line of
+`--help` lands on a 404 instead of this repository. The method is NOT virtual (TOPPBase.h:194),
+so it cannot be overridden in a subclass; fixing it means a fifth OpenMS patch making it virtual,
+or upstreaming a change that respects `official`. Worth doing when the patch set is next touched,
+not worth a patch of its own.
+
+**2. The tool cites OpenMS but not itself.** `TOPPBase` takes a `std::vector<Citation>` as its
+fourth constructor argument and prints "To cite <tool>:" when it is non-empty; we pass none, so
+`--help` credits only OpenMS. `Citation::toString()` is `authors + title + when_where + "doi:" +
+doi` with no conditional, so passing an entry without a DOI renders a bare "doi:." -- which is why
+this is blocked rather than merely undone. It needs a real DOI first (a Zenodo deposit on the
+GitHub release is the cheap route); CITATION.cff already exists and has everything else.
+
+**3. `stty: 'standard input': Inappropriate ioctl for device` on every non-tty run.** OpenMS
+probes the terminal width by shelling out to `stty`, which fails whenever stdout is not a
+terminal -- i.e. every cluster run, every CI run, every pipe. It is harmless but it lands on the
+same stderr this project's benchmark harness parses, and it looks like our error. Upstream fix
+only.
+
+Two smaller notes from the same pass, both ours: the `[perf-load] ms2 decode_wall=...` diagnostic
+prints even on `--help`, where it is meaningless; and there is still no macOS or Windows
+packaging at all (blocked on the missing Developer ID private key -- see the release review).
+
+
 ## Memory-work plan status (2026-09-08)
 
 The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
