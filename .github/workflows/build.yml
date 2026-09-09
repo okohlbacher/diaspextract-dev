@@ -84,19 +84,60 @@ jobs:
       # OpenMS refuses to start without its share/ directory (unit definitions, CV terms). A source
       # build does not install it, so point at the tree directly. Without this the binary dies on
       # --help with an uncaught exception whose message never reaches the log.
-      - name: The binary runs and reports itself
-        env:
-          OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS
+      # These gates run the binary with NOTHING inherited from the runner except the variables
+      # the tool documents as required. `env -i` is the load-bearing part: a runner that still has
+      # the build tree on PATH, or OPENMS_DATA_PATH exported globally, will happily run a binary
+      # that cannot stand on its own -- which is how a broken artefact reaches users past a green
+      # pipeline.
+      #
+      # Streams are MERGED deliberately: TOPPBase writes --help to STDERR, not stdout, so a gate
+      # that reads stdout alone sees an empty file and every grep below passes vacuously.
+      - name: The binary runs from a clean environment and reports itself
         run: |
-          spextractor/build/spextractor --help > help.txt 2>&1 || { cat help.txt; exit 1; }
-          head -5 help.txt
+          set -o pipefail
+          env -i HOME="$HOME" \
+                 OPENMS_DATA_PATH="$GITHUB_WORKSPACE/OpenMS/share/OpenMS" \
+                 LD_LIBRARY_PATH="$GITHUB_WORKSPACE/OpenMS/build/lib" \
+                 spextractor/build/spextractor --help > help.txt 2>&1 \
+            || { echo "::error::the tool does not run from a clean environment"; cat help.txt; exit 1; }
+          head -6 help.txt
+
           grep -q '^SpeXtractor' help.txt \
-            || { echo "the tool does not identify itself as SpeXtractor"; cat help.txt; exit 1; }
+            || { echo "::error::the tool does not identify itself as SpeXtractor"; cat help.txt; exit 1; }
+
+          # OUR version, not the OpenMS one TOPPBase prints by default.
           V=$(sed -n 's/^project(SpeXtractor VERSION \([0-9.]*\).*/\1/p' spextractor/CMakeLists.txt)
-          grep -q "Version: $V" help.txt \
-            || { echo "the tool does not report version $V"; cat help.txt; exit 1; }
+          grep -q "^Version: $V" help.txt \
+            || { echo "::error::wrong version (want $V, likely OpenMS's)"; cat help.txt; exit 1; }
+          # and the OpenMS build alongside it, because a bug report needs both numbers
+          grep -qE "^Version: $V \\(OpenMS .+\\)" help.txt \
+            || { echo "::error::Version line does not carry the OpenMS build"; cat help.txt; exit 1; }
+
+          # OpenMS builds with ENABLE_UPDATE_CHECK=ON by default and TOPPBase then makes a network
+          # request on every run; when it fails, Qt prints to stderr and users report it as ours.
+          # main() disables it -- assert that it stayed disabled.
+          ! grep -qi 'QIODevice\|QNetwork' help.txt \
+            || { echo "::error::the OpenMS update check is live -- see main()"; cat help.txt; exit 1; }
 
       - name: End-to-end suite against the freshly built binary
         env:
           OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS
         run: python3 spextractor/test/test_spextractor.py spextractor/build/spextractor
+
+      # A tool that only builds against a PATCHED development OpenMS has one more way to ship
+      # broken: the patches silently not applying. apply_openms_patches.sh is what CI runs above,
+      # so assert the markers the four patches leave behind are actually in the built tree.
+      - name: The OpenMS patches are in the tree the binary was built from
+        run: |
+          set -o pipefail
+          fail=0
+          for f in spextractor/patches/*.patch; do
+            base=$(basename "$f")
+            # every patch must at least apply cleanly in reverse -- i.e. it IS applied
+            if ! git -C OpenMS apply --reverse --check "$GITHUB_WORKSPACE/$f" 2>/dev/null; then
+              echo "::error::$base is NOT applied to the OpenMS tree"; fail=1
+            else
+              echo "  ok: $base"
+            fi
+          done
+          exit $fail
