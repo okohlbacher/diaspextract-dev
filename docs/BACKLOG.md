@@ -489,7 +489,7 @@ FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size
 **What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
 differences are confined to within the smoother's edge of a boundary after the fix.
 
-### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; analysis running)
+### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; ANALYSED)
 
 **The paper.** Garrett, Diedrich and Yates III, *dnoise: Fast Native Data Reduction for Bruker
 timsTOF*, bioRxiv 2026.08.27.747603; open source (Rust, MIT, github.com/pgarrett-scripps/dnoise).
@@ -525,11 +525,31 @@ noise burying them. It is an S-class change: Sage and MSFragger plus an entrapme
 acquisitions, against D Sage 13,491 / MSFragger 12,918 / entrapment 1.30% and TNBC 009
 Sage 29,067 / MSFragger 27,949 / entrapment 1.09%.
 
-**Status.** A four-phase analysis is running: ground the method against what `pickIMCluster`
-already does, three independent integration designs (in the picker, in the loader patch, or as a
-detector criterion rather than a filter), each attacked on science risk and on interaction with
-the frozen frame tables and the cell grid, then one judged recommendation with its parameter
-sweep. Written up in docs/reviews/2026-09-10-dnoise/.
+**Verdict (docs/reviews/2026-09-10-dnoise/verdict.md): ship the PREDICATE as instrumentation
+first, not a filter.** One count-only pass that changes no byte of output and prices the whole
+proposal, `dnoise:ms1=count`. If it is ever built as a filter it belongs in the LOADER
+(`frameToSpectrum`, on the integer (scan, TOF, intensity) triples before m/z conversion), MS1 only,
+stage 1 only, halo off, MS2 off, and the `.d` rewrite never. Four reasons the loader is the layer:
+the exact scan index is computed there and thrown away, so nothing downstream can reconstruct
+occupancy; the triples are already CSR-ordered, so the filter is one linear sweep; TOF indices are
+integers, so the neighbourhood is the paper's own bin window rather than a ppm window 2.4x wider at
+m/z 1700 than at 300; and a deleted point never pays for `tof2mz`, the `Peak1D` build, the sort,
+the picker transient or a `PeakMap` slot.
+
+What is genuinely new is run length on the SCAN axis. The tool has no contiguity concept anywhere:
+`pickIMCluster` has no minimum member count, no run and no gap rule, and a single-scan hit becomes a
+first-class centroid indistinguishable from a 40-scan streak's. Occupancy is destroyed at emission,
+so the criterion CANNOT live downstream of the picker. The MS2 half of dnoise's geometric gate is
+already a no-op here (the loader slices each MS2 frame to its window's 1/K0 band).
+
+**Worth, and why it is not urgent.** The MS1 map would fall 13,830 -> <= 4,038 MiB, but that is
+**0 GB at the shipped default**, whose peak is in the window loop with the MS1 map already
+released. It converts the 6-tile arm by -24% and only then makes tiling a real memory lever. Time:
+-5 to -9% of the run, and NEGATIVE if emission rises -- the two closest prior experiments raised
+emission 31% and 620%. **Risk:** at the counting limit occupancy IS intensity, and three cascades
+(MS1 `min_sample_rate`, the break-on-first-miss isotope walk, the run-global veto fit) turn one
+deleted point into a lost precursor, in exactly the low-abundance stratum that is the whole
+identification deficit. S-class: both engines and entrapment on both acquisitions.
 
 ### Tiled reader, steps 3a/3b: what the step-2 reviews put on the list (2026-09-10)
 
