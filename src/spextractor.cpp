@@ -1841,6 +1841,21 @@ namespace
         if (a[i].getMZ() != b[i].getMZ()) return a[i].getMZ() < b[i].getMZ();
         if (a[i].getIntensity() != b[i].getIntensity()) return a[i].getIntensity() < b[i].getIntensity();
       }
+      // equal peaks: the fields that still serialise differently -- two overlapping isolation
+      // windows can emit one precursor with the same peaks and different offsets (review, step 2)
+      const auto& pa = a.getPrecursors(); const auto& pb = b.getPrecursors();
+      if (pa.empty() != pb.empty()) return pa.empty();
+      if (!pa.empty())
+      {
+        if (pa[0].getIsolationWindowLowerOffset() != pb[0].getIsolationWindowLowerOffset()) return pa[0].getIsolationWindowLowerOffset() < pb[0].getIsolationWindowLowerOffset();
+        if (pa[0].getIsolationWindowUpperOffset() != pb[0].getIsolationWindowUpperOffset()) return pa[0].getIsolationWindowUpperOffset() < pb[0].getIsolationWindowUpperOffset();
+        if (pa[0].getDriftTime() != pb[0].getDriftTime()) return pa[0].getDriftTime() < pb[0].getDriftTime();
+      }
+      for (const char* key : {"spx_guessed", "spx_n_isotopes"})
+      {
+        const int ia = a.metaValueExists(key) ? (int)a.getMetaValue(key) : -1, ib = b.metaValueExists(key) ? (int)b.getMetaValue(key) : -1;
+        if (ia != ib) return ia < ib;
+      }
       return false;
     });
     vector<MSSpectrum> ord; ord.reserve(v.size());
@@ -4298,7 +4313,10 @@ protected:
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "mzPeak output is written in one piece; tile:cells_per_tile > 0 needs mzML output (-out_type mzML).");
     std::unique_ptr<TileWriter> writer;
-    if (out_type == FileTypes::MZML) { writer.reset(new TileWriter(out)); writer->setExperimentalSettings(out_exp); }
+    // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
+    // structurally valid file holding the earlier tiles only (review, step 2)
+    const String out_part = out + ".part";
+    if (out_type == FileTypes::MZML) { writer.reset(new TileWriter(out_part)); writer->setExperimentalSettings(out_exp); }
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
     writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows in " + String(tiles.size()) + " tile(s) (OpenMP over windows, <="
@@ -4434,7 +4452,7 @@ protected:
             writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " compact n=" + String(b.size() / 2) + " digest=" + String(detDigest_(std::move(b))));
           }
         }
-        if (++n_materialised == wl.size() && trim_on)
+        if (++n_materialised == wl.size() && trim_on && tiles.size() == 1)
         { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
 #ifdef __GLIBC__
           malloc_trim(0);
@@ -4477,6 +4495,8 @@ protected:
           // [tile] no frame of this window lies in the tile: nothing to trace, the carried-in
           // fragments (below) are all it scores with
           wst.setFrames(fwin.rt_index, &fwin.b);
+          #pragma omp critical(winlog)
+          writeLogInfo_("[tile] window " + String(win_lo) + "-" + String(win_hi) + " tile " + String(tk + 1) + ": no frames in the tile");
         }
         else if (integer_detector)
         {
@@ -4702,6 +4722,29 @@ protected:
             }
             n_carried_in = ci.rec.size();
           } }
+        // [tile] the precursors this tile OWNS, decided with the SCORER's own arithmetic: a
+        // fragment at frame time x is a candidate of rt iff fabs(x - rt) <= delta_rt (doubles), so
+        // rt has no candidate at or beyond an edge T iff (T - rt) > delta_rt -- the same
+        // subtraction, monotone in T. The first tile k with (T_{k+1} - rt) > delta_rt owns rt:
+        // exactly one does (-inf never, +inf always). Marked here, before any early exit, so the
+        // coverage check after the last tile sees every precursor exactly once. Only this
+        // window's precursors (by mono m/z); NaN sorts to the end, excluded; charge 0 kept.
+        const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), win_lo) - prec_mz.begin();
+        const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), win_hi) - prec_mz.begin();
+        vector<uint32_t> pidx; pidx.reserve(phi > plo ? phi - plo : 0);
+        for (size_t pi = plo; pi < phi; ++pi)
+        {
+          const Precursor_& pc = precursors[pi];
+          if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
+          if (!(tk == 0 || !(tile.lo - pc.rt > delta_rt))) continue;   // an earlier tile owns it
+          if (!(tile.last || (tile.hi - pc.rt > delta_rt))) continue;  // a later tile owns it
+          pidx.push_back((uint32_t)pi);
+        }
+        { vector<uint8_t>& vis = visited.at(wl[wi].first);
+          for (uint32_t pi : pidx)
+            if (vis[pi - plo]++ != 0)
+              throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tile] a precursor is owned by two tiles",
+                                            String(precursors[pi].rt, 6) + " s in window " + String(win_lo) + "-" + String(win_hi)); }
         auto _tso = std::chrono::steady_clock::now();
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& t) {
           return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(rtOf(wst, t));
@@ -4719,7 +4762,15 @@ protected:
           { const double ia = intensityOf(wst, a), ib = intensityOf(wst, b); if (ia != ib) return ia < ib; }
           if (a.npts != b.npts) return a.npts < b.npts;
           if (a.len != b.len) return a.len < b.len;
-          return wst.frame_rt[a.frame0] < wst.frame_rt[b.frame0];
+          { const double fa = wst.frame_rt[a.frame0], fb = wst.frame_rt[b.frame0]; if (fa != fb) return fa < fb; }
+          // ...and the PROFILE and the bin fields, so two records are ordered unless they are
+          // the same record in every field the scorer or the export reads (review, step 2: two
+          // bands can share an apex with different flanks)
+          for (size_t k = 0; k < a.len; ++k) { const float xa = xv(wst, a, k), xb = xv(wst, b, k); if (xa != xb) return xa < xb; }
+          if (a.tof != b.tof) return a.tof < b.tof;
+          if (a.bframe != b.bframe) return a.bframe < b.bframe;
+          if (a.rt_at != b.rt_at) return a.rt_at < b.rt_at;
+          return false;
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
@@ -4748,10 +4799,6 @@ protected:
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
 
         vector<MSSpectrum>& bucket = win_out[wi];
-        // only this window's precursors (by mono m/z); NaN mono_mz sorts to the end, excluded.
-        // (charge 0 is NOT dropped: emitted with charge UNSET so the engine searches its range.)
-        size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), win_lo) - prec_mz.begin();
-        size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), win_hi) - prec_mz.begin();
         {
           // Share-all (default, current best): each fragment goes to EVERY gated precursor.
           //
@@ -4779,22 +4826,7 @@ protected:
           // inside this same loop, measured at 43.5% kernel time) -- reproduced here by omission.
           // Divide the budget instead of multiplying it.
           auto _t5 = std::chrono::steady_clock::now();
-          // [tile] the precursors this tile OWNS (see the tile loop), in index order as before;
-          // each is emitted by exactly one tile -- asserted, never assumed
-          vector<uint32_t> pidx; pidx.reserve(phi > plo ? phi - plo : 0);
-          for (size_t pi = plo; pi < phi; ++pi)
-          {
-            const Precursor_& pc = precursors[pi];
-            if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
-            if (pc.rt < tile.lo - delta_rt || pc.rt >= tile.hi - delta_rt) continue;
-            pidx.push_back((uint32_t)pi);
-          }
-          { vector<uint8_t>& vis = visited.at(wl[wi].first);
-            for (uint32_t pi : pidx)
-              if (vis[pi - plo]++ != 0)
-                throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tile] a precursor is owned by two tiles",
-                                              String(precursors[pi].rt, 6) + " s in window " + String(win_lo) + "-" + String(win_hi)); }
-          vector<MSSpectrum> pslot(pidx.size());
+          vector<MSSpectrum> pslot(pidx.size());   // [tile] the owned precursors, in index order as before
           // grainsize, not num_threads: the pool decides how many threads land here, so a window
           // that outlives its neighbours gets the whole machine instead of a fixed team of 12.
           //
@@ -4853,10 +4885,15 @@ protected:
         // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
         // whose RT is within 2 delta_rt of this tile's upper edge -- the candidates of a precursor
         // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
-        if (!tile.last)
+        // A precursor a later tile owns has (T - rt) <= delta_rt, its candidates x have
+        // (rt - x) <= delta_rt: x >= T - 2 delta_rt up to two roundings of ~1e-12 s. The slack
+        // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
+        // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
+        static const bool no_carry = std::getenv("SPEXTRACTOR_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
+        if (!tile.last && !no_carry)
         {
           Carry& co = carry_out.at(wl[wi].first);
-          const double keep_from = tile.hi - 2.0 * delta_rt;
+          const double keep_from = tile.hi - 2.0 * delta_rt - 1e-6;
           for (const Trace& t : frag_traces)
             if (rtOf(wst, t) >= keep_from)
             {
@@ -4881,6 +4918,36 @@ protected:
       }      // omp task
     }
     if (worker_err) std::rethrow_exception(worker_err);
+    if (tile.last)
+    {
+      // [tile] coverage: every finite precursor of every window was owned by exactly one tile
+      // (the per-tile check catches a second owner; this catches none)
+      size_t n_cov = 0;
+      for (const auto& w : window_list)
+      {
+        const double lo = w.first[0] / 100.0, hi = w.first[1] / 100.0;
+        const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), lo) - prec_mz.begin();
+        const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), hi) - prec_mz.begin();
+        const vector<uint8_t>& vis = visited.at(w.first);
+        for (size_t pi = plo; pi < phi; ++pi)
+        {
+          if (!std::isfinite(precursors[pi].rt) || !std::isfinite(precursors[pi].im)) continue;
+          if (vis[pi - plo] != 1)
+            throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tile] a precursor was owned by no tile",
+                                          String(precursors[pi].rt, 6) + " s in window " + String(lo) + "-" + String(hi));
+          ++n_cov;
+        }
+      }
+      writeLogInfo_("[tile] coverage: " + String(n_cov) + " precursor-window pairs owned exactly once over " + String(tiles.size()) + " tile(s)");
+      // MEMORY: every MS1 structure is dead once the last tile's window loop has joined -- scoring
+      // was its only reader (assembleOne_ -> scoreCandidates_ dereferences ms1_traces[pc.trace_idx]
+      // and its span). Released BEFORE this tile's output is assembled and written. [mem]
+      vector<Trace>().swap(ms1_traces);
+      ms1_store = TraceStore();
+      vector<Precursor_>().swap(precursors);
+      vector<double>().swap(prec_mz);
+      writeLogInfo_("[mem] MS1 traces, spans, precursors released after the window loop." + rss_() + mem_());
+    }
     {
       // [tile] this tile's spectra in the canonical order: written as one block (mzML), or kept for
       // the bulk writer (mzPeak, one tile). Tiles are RT-disjoint, so the blocks concatenate to the
@@ -4907,15 +4974,6 @@ protected:
     carry_out.clear();
     for (const auto& w : window_list) carry_out[w.first];
     }   // tiles
-    // MEMORY: every MS1 structure is dead once the window loop has joined -- scoring was its only
-    // reader (assembleOne_ -> scoreCandidates_ dereferences ms1_traces[pc.trace_idx] and its span).
-    // They used to ride to the end of main_, i.e. through the canonical sort, the PeakMap
-    // assembly and the whole mzML write. [mem]
-    vector<Trace>().swap(ms1_traces);
-    ms1_store = TraceStore();
-    vector<Precursor_>().swap(precursors);
-    vector<double>().swap(prec_mz);
-    writeLogInfo_("[mem] MS1 traces, spans, precursors released after the window loop." + rss_() + mem_());
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
@@ -4965,7 +5023,11 @@ protected:
     }
 
     if (writer)
-    { Phase _ph("WRITE(mzML)"); writer.reset(); }   // the count patched, the index and footer written
+    {
+      { Phase _ph("WRITE(mzML)"); writer.reset(); }   // the count patched, the index and footer written
+      if (std::rename(out_part.c_str(), out.c_str()) != 0)
+        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + out_part);
+    }
     else
     {
       // the bulk path (mzPeak output, one tile): as before, whole

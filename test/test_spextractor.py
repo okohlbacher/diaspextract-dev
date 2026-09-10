@@ -64,7 +64,7 @@ def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0):
 </binaryDataArrayList></spectrum>"""
 
 
-def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None):
+def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0, drop_ms2=None):
     """Two precursors that co-elute in one isolation window: a z=2 envelope and a z=1 envelope.
 
     Both are given a 3-peak isotope envelope so `require_isotope_support` keeps them, matching
@@ -79,6 +79,10 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None):
     `groups`: two WindowGroup ids; the MS2 frames then alternate between them by cycle,
     which is how one diaPASEF scheme (PXD017703 "py3") acquires the SAME m/z window twice per
     cycle with shifted ion-mobility slices. They must become two windows, not one.
+
+    `z1_shift`: cycles by which the z=1 precursor's elution apex is moved (negative = earlier),
+    so the two precursors can be owned by different tiles. `drop_ms2`: (lo, hi) in seconds; MS2
+    frames with lo <= rt < hi are omitted (a window with no frames in one tile).
     """
     win = (600.0, 590.0, 620.0)                    # target, lo, hi
     z2_mono, z2_im = 601.3, 0.90                   # a doubly-charged precursor
@@ -90,19 +94,22 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None):
         rt = 1.0 + c * cycle_s
         shape = 1.0 - abs(c - n_cycles / 2.0) / (n_cycles / 2.0 + 1.0)   # a triangular elution
         amp = max(shape, 0.05)
+        shape1 = 1.0 - abs(c - (n_cycles / 2.0 + z1_shift)) / (n_cycles / 2.0 + 1.0)
+        amp1 = max(shape1, 0.05)
         ms1, ms1_im = [], []
         gap = c in gap_cycles
         for k, rel in enumerate((1.0, 0.55, 0.20)):                      # averagine-ish envelope
             if not gap:
                 ms1.append((z2_mono + k * ISO / 2.0, 6.0e5 * amp * rel)); ms1_im.append(z2_im)
-            ms1.append((z1_mono + k * ISO / 1.0, 4.0e5 * amp * rel)); ms1_im.append(z1_im)
+            ms1.append((z1_mono + k * ISO / 1.0, 4.0e5 * amp1 * rel)); ms1_im.append(z1_im)
         order = sorted(range(len(ms1)), key=lambda i: ms1[i][0])
         specs.append(spectrum(idx, 1, rt, [ms1[i] for i in order], [ms1_im[i] for i in order])); idx += 1
+        if drop_ms2 and drop_ms2[0] <= rt < drop_ms2[1]: continue
         ms2, ms2_im = [], []
         for fi, (mz, rel) in enumerate(z2_frags):
             if gap and fi == 0: continue                                   # first fragment gapped too
             ms2.append((mz, 2.0e5 * amp * rel)); ms2_im.append(z2_im)
-        for mz, rel in z1_frags: ms2.append((mz, 1.5e5 * amp * rel)); ms2_im.append(z1_im)
+        for mz, rel in z1_frags: ms2.append((mz, 1.5e5 * amp1 * rel)); ms2_im.append(z1_im)
         order = sorted(range(len(ms2)), key=lambda i: ms2[i][0])
         specs.append(spectrum(idx, 2, rt, [ms2[i] for i in order], [ms2_im[i] for i in order],
                               prec=win, group=groups[c % 2] if groups else 0)); idx += 1
@@ -418,44 +425,98 @@ def main():
             "tile:rt_sec output differs between 1 and 4 threads"
     check("the cell grid is thread-invariant", c15)
 
-    # 16: the TILE loop reproduces the one-tile run bit for bit: pitch 10 s cuts the fixture into
-    #     >= 2 cells, one cell per tile runs the window loop tile by tile (precursor ownership by the
-    #     shifted half-open ranges, boundary fragments carried, per-tile sort + streamed write with the
-    #     zero-padded count), at 1 and 4 threads. The fixture's z2 precursor apexes exactly on the
-    #     pitch-10 edge (rt 10.8 = rts[7]), so it straddles a tile boundary and must be emitted once.
-    #     Check 14's invariants hold on the tiled file (its count is the patched placeholder).
+    # 16-18: the TILE loop. A longer fixture (26 cycles of 1.4 s) with the z=1 precursor's apex
+    #     moved 6 cycles earlier: pitch 10 s (7 frames) cuts it at 10.8 / 20.6 / 30.4 s, one cell per
+    #     tile gives four tiles; z=1 (rt 10.8) is owned by tile 2 and z=2 (rt 19.2) by tile 3, so two
+    #     tiles emit and two write nothing. z=2's fragments crest just BEFORE the 20.6-s cut, so its
+    #     spectrum in tile 3 depends on fragments CARRIED from tile 2.
+    def tiled_fixture(name, **kw):
+        path = os.path.join(work, name)
+        synth(path, n_cycles=26, z1_shift=-6, **kw)
+        return path
+    def invariants(path, label):
+        import re
+        data = open(path, "rb").read()
+        n_decl = int(re.search(rb'<spectrumList count="(\d+)"', data).group(1))
+        specs = [(m.start(), m.group(1), m.group(2)) for m in re.finditer(rb'<spectrum id="([^"]*)" index="(\d+)"', data)]
+        assert n_decl == len(specs) > 0, f"{label}: spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
+        for k, (_, sid, idx) in enumerate(specs):
+            assert int(idx) == k and sid == b"spectrum=%d" % k, f"{label} spectrum {k}: id={sid!r} index={idx!r}"
+        offs = re.findall(rb'<offset idRef="([^"]*)">(\d+)</offset>', data)
+        assert len(offs) == len(specs), f"{label}: indexList has {len(offs)} offsets for {len(specs)} spectra"
+        for k, (ref, off) in enumerate(offs):
+            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], f"{label} index entry {k}: {ref!r} at {off!r}, spectrum at {specs[k][0]}"
+        ilo = int(re.search(rb'<indexListOffset>(\d+)</indexListOffset>', data).group(1))
+        assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"{label}: indexListOffset {ilo} does not point at <indexList"
+        return len(specs), re.search(rb'<spectrumList count="([^"]*)"', data).group(1)
+
+    # 16: tile-count x thread invariance, two non-empty blocks, the count/index invariants on the
+    #     tiled file, the exact (unpadded) count on the one-tile file
     def c16():
         import re
         tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
         env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
-        one = os.path.join(work, "cell1.mzML")   # from check 15: pitch 10, one tile, 1 thread
-        assert os.path.exists(one), "check 15 must run first"
+        inp_t = tiled_fixture("tiles.mzML")
+        one = os.path.join(work, "tiles_one.mzML")
+        run(binary, inp_t, one, extra=("-tile:rt_sec", "10"), threads=4, env=env)
+        n_one, cnt_one = invariants(one, "one-tile file")
+        assert cnt_one == str(n_one).encode(), f"one-tile count is not exact: {cnt_one!r}"
         outs = []
         for thr in (1, 4):
             o = os.path.join(work, f"tiles{thr}.mzML")
-            r = run(binary, inp, o, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=thr, env=env)
-            m = re.search(r"\[tile\] (\d+) tile\(s\) of up to 1 cell", r.stdout + r.stderr)
-            assert m and int(m.group(1)) >= 2, "the fixture did not run as >= 2 tiles:\n" + (r.stdout + r.stderr)[-800:]
+            r = run(binary, inp_t, o, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=thr, env=env)
+            log = r.stdout + r.stderr
+            m = re.search(r"\[tile\] (\d+) tile\(s\) of up to 1 cell", log)
+            assert m and int(m.group(1)) >= 3, "the fixture did not run as >= 3 tiles:\n" + log[-800:]
+            written = [int(x) for x in re.findall(r"\[tile\] \d+/\d+: (\d+) spectra written", log)]
+            assert sum(1 for w in written if w > 0) >= 2, f"fewer than two tiles wrote spectra: {written}"
+            assert "coverage:" in log, "no coverage line"
             outs.append(o)
         hdr = open(outs[0], encoding="utf-8", errors="replace").read(200000)
         mt = re.search(r'spx:tiles"[^>]*value="(\d+)"', hdr)
-        assert mt and int(mt.group(1)) >= 2, "the header does not record the tile count"
+        assert mt and int(mt.group(1)) >= 3, "the header does not record the tile count"
         d1 = digest(one)
         for o in outs:
             assert digest(o) == d1, f"tiled output {os.path.basename(o)} differs from the one-tile run"
-        data = open(outs[1], "rb").read()
-        n_decl = int(re.search(rb'<spectrumList count="(\d+)"', data).group(1))
-        specs = [(m.start(), m.group(1), m.group(2)) for m in re.finditer(rb'<spectrum id="([^"]*)" index="(\d+)"', data)]
-        assert n_decl == len(specs) > 0, f"tiled file: spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
-        for k, (_, sid, idx) in enumerate(specs):
-            assert int(idx) == k and sid == b"spectrum=%d" % k, f"tiled file spectrum {k}: id={sid!r} index={idx!r}"
-        offs = re.findall(rb'<offset idRef="([^"]*)">(\d+)</offset>', data)
-        assert len(offs) == len(specs), f"tiled file: indexList has {len(offs)} offsets for {len(specs)} spectra"
-        for k, (ref, off) in enumerate(offs):
-            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], f"tiled file index entry {k}: {ref!r} at {off!r}, spectrum at {specs[k][0]}"
+        n_t, cnt_t = invariants(outs[1], "tiled file")
+        assert n_t == n_one
     check("the tile loop is tile-count- and thread-invariant", c16)
 
-    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1
+    # 17: the carry is load-bearing: the same tiled run WITHOUT the carry (a test-only switch)
+    #     must differ from the one-tile run, and the normal run must report carried fragments
+    def c17():
+        import re
+        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
+        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        inp_t = os.path.join(work, "tiles.mzML"); one = os.path.join(work, "tiles_one.mzML")
+        assert os.path.exists(inp_t) and os.path.exists(one), "check 16 must run first"
+        r = run(binary, inp_t, os.path.join(work, "tiles_c.mzML"), extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env)
+        carried = [int(x) for x in re.findall(r"carried in (\d+)", r.stdout + r.stderr)]
+        assert carried and max(carried) > 0, "no tile reported carried-in fragments:\n" + (r.stdout + r.stderr)[-800:]
+        env_nc = dict(env, SPEXTRACTOR_TILE_NO_CARRY="1")
+        nc = os.path.join(work, "tiles_nocarry.mzML")
+        run(binary, inp_t, nc, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env_nc)
+        assert digest(nc) != digest(one), "switching the carry off changed nothing: the fixture does not exercise it"
+    check("the boundary carry is load-bearing", c17)
+
+    # 18: a window with NO frames in a middle tile (its MS2 frames in [20.6, 30.4) dropped): the
+    #     empty-slab branch runs, the tile scores with carried fragments only, and the tiled run
+    #     still equals the one-tile run of the same file
+    def c18():
+        import re
+        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
+        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        inp_e = tiled_fixture("tiles_empty.mzML", drop_ms2=(20.6, 30.4))
+        one = os.path.join(work, "tiles_empty_one.mzML")
+        run(binary, inp_e, one, extra=("-tile:rt_sec", "10"), threads=2, env=env)
+        t = os.path.join(work, "tiles_empty_t.mzML")
+        r = run(binary, inp_e, t, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env)
+        assert "no frames in the tile" in (r.stdout + r.stderr), "the empty-slab branch did not run:\n" + (r.stdout + r.stderr)[-800:]
+        assert digest(t) == digest(one), "the tiled run of a window with an empty tile differs from the one-tile run"
+        invariants(t, "empty-tile file")
+    check("a window with no frames in a tile", c18)
+
+    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 

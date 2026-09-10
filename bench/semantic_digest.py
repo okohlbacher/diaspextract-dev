@@ -33,7 +33,12 @@ def digest(path):
                 started = True
                 c = buf[i:]
                 # a run written tile by tile declares its count through a same-width zero-padded
-                # placeholder (`count="0000611034"`); the number is the same, so normalise it
+                # placeholder (`count="0000611034"`); the number is the same, so normalise it --
+                # on the COMPLETE opening line (a chunk boundary can fall inside the tag)
+                while c.find(b"\n") < 0:
+                    more = f.read(1 << 22)
+                    if not more: break
+                    c += more
                 nl = c.find(b"\n")
                 head = c if nl < 0 else c[:nl]
                 c = re.sub(rb'count="0+(\d)', rb'count="\1', head, count=1) + (b"" if nl < 0 else c[nl:])
