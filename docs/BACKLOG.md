@@ -489,6 +489,20 @@ FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size
 **What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
 differences are confined to within the smoother's edge of a boundary after the fix.
 
+### Tiled reader, steps 3a/3b: what the step-2 reviews put on the list (2026-09-10)
+
+- **A `readTile()` seam.** Step 2 slices the resident slabs inline in the tile loop; step 3b's
+  `.d` reader (`Config::dia_ms2_rt_lo/hi` + per-tile re-open) needs the two-method source the
+  judged plan names (`readMS1()`, `readTile(tile)`), with the frozen tables, window keys and band
+  edges initialised from METADATA independently of delivered slabs (Codex 11, Kimi 10).
+- **`expected_frames` in pass 2.** The consumer reserves each slab from `ms1_.size()`; with
+  `load_ms1 = false` that is 0 and the reservation degrades to geometric growth. Pass the tile's
+  frozen frame count per window (judged plan item 12; Kimi 9b).
+- **Band edges from the acquisition range (3a)** so that a reader that never sees the whole slab
+  can compute `wbands`; a G-class re-pin (`tlo = 0`, `thi` from `MzAcqRangeUpper`).
+- **Log semantics at K > 1**: `[gstat]` is per (window, tile) with `G_live` tile-local; the
+  window-file row is written once per tile; `w_tlo/w_thi` are 0 on the empty-slab branch (Kimi 9).
+
 ### mzML input keeps the slab as its frame table (2026-09-10, deliberate)
 
 The judged tiled-reader plan (docs/reviews/2026-09-10-tiled-reader-plan/judge.md, step 1) defines
