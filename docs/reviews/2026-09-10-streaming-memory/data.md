@@ -30,6 +30,24 @@ small individually). `glibc free` is `mallinfo2().fordblks` -- memory the progra
 allocator and the allocator kept. The charges are TOUCHED bytes, not capacity: `PeakSlab`
 deliberately over-reserves 2.5x and untouched pages cost address space, not residency.
 
+**Three caveats on this table, from the first review of it (docs/.../codex.md):**
+
+1. `stream_3tiles` runs at the DEFAULT pitch (600 s, 3 cells, 3 tiles) and `stream_6tiles` at
+   pitch 300 (6 cells, 6 tiles). They have different digests and different cut lines, so they are
+   NOT a controlled comparison of tile grouping -- they jointly show the MS1 floor, nothing more.
+   A controlled grouping comparison has to hold the pitch fixed and vary `tile:cells_per_tile`.
+2. `WINDOW_LOOP` in the phase table ENCLOSES the per-tile reads, the canonical sort and the
+   writes, so those rows must not be added to it. Use the ledger's phase intervals for scheduling
+   arithmetic: at 3 tiles the reads are 1.60 / 7.17 / 6.25 s against EXCLUSIVE loop intervals of
+   12.1 / 62.0 / 46.6 s, so a perfect prefetch hides at most 13.4 s of 177.1 s = **7.6%**, not the
+   ~20% the brief guessed.
+3. The ledger's "MB" columns are MiB, and the charges have known gaps (band arenas and trace
+   records are charged only after the detection join; the splitter's child stores, the copied cell
+   slab and the per-precursor output slots are uncharged; the MS1 map stays charged after its
+   spectra are consumed; raw spectra are charged at 16 B/peak where the picked representation is
+   a padded 20). So `unattributed` is an upper bound on reclaimable memory, not a measurement of
+   it, and `fordblks` is not a count of resident free pages.
+
 **The single most important row.** In the 6-tile streaming arm the process peak is no longer the
 window loop; it is the MS1 pass, at t ~ 9 s, before a single MS2 frame has been read. That is why
 the 3-tile and 6-tile arms have the same peak: the MS2 side is already below the MS1 floor, and
