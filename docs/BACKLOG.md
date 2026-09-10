@@ -921,3 +921,27 @@ Not fixed in the release; each is a measured gap, not a guess.
 - **`perf:malloc_trim` in isolation at the shipped default**: the -30% / +8.5% pair is the whole
   memory pass (v13 -> v19) measured interleaved; the trim step alone was -28% / +6%. One trim-on/off
   A/B on v2.0.0 would settle the attribution.
+
+## The repaired ledger, and what it exposed (2026-09-10, commit 4258d16)
+
+The three streaming-memory reviewers all refused to price allocator reclamation off the old
+instrumentation. They were right; the repairs are in `4258d16` (phase nesting, the MS1 band
+partition, the emitted spectra, MiB). Two things became visible immediately, both on dataset D
+at the resident source, `instr3/resident_1tile`:
+
+- **The MS1 band partition is 13.6 GiB and was reported as 0.6.** It is a full copy of the MS1 map
+  plus a 1-5% halo, live from the distribution until each band's detection consumes it. The
+  handover is exact in the ledger: `ms1_map` 13,830 -> 0 and `band_arena` 0 -> 13,579 MiB in one
+  250 ms tick, then draining band by band. **MassTraceDetection's own internal copy of each band is
+  still unattributed** and can only be charged by patching OpenMS.
+- **The load accumulates ~17 GiB of allocator free list that a single `malloc_trim` returns at the
+  end of it.** RSS runs 45,279 MiB at t=27.5 s and 28,052 at t=30.1 with the charged total
+  UNCHANGED at ~26,500. So the process peak of the resident arm is not live data at all: it is one
+  load's worth of retention, released a second later.
+
+Two items follow, both D-class:
+
+| item | status | what it is |
+|---|---|---|
+| MS1 staging batch A/B (`SPEXTRACTOR_PICK_BATCH` 16/32/64/256/512 on D, streaming, 3 tiles) | RUNNING (chain `ms1batch`) | zero code. `ms1_buf_` is 256 frames of raw peaks (3.8-4.8 GiB on D) and the loader holds its own copy behind it; both scale with the batch, and step 0b proved batch composition is output-invariant. The only question is the wall cost. |
+| periodic `malloc_trim` DURING the load, not only at its end | NOT STARTED | ~5 lines under the existing `perf:malloc_trim` gate, every N batches. The env-var route (`MALLOC_TRIM_THRESHOLD_`/`MALLOC_MMAP_THRESHOLD_`) is already priced and rejected: step 0a measured -15.5 GB but +26% wall, because it changes the threshold for every allocation in the process rather than reclaiming at a few chosen points. |
