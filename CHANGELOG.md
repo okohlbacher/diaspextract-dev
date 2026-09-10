@@ -62,6 +62,30 @@ unchanged.
   `acquisition` refuses an input without a tdf before loading (`-trace:detector openms` is the
   escape); the header records `spx:band_edges`.
 
+### Instrumentation (2026-09-10) -- no shipped behaviour changes
+
+- **The per-structure memory ledger and the phase table were repaired.** Three independent
+  reviewers refused to price allocator reclamation off the previous version, and each of their
+  four objections was correct. The tile loop's read, sort and write all run INSIDE the window
+  loop, and the table summed every row, so `TOTAL(measured)` reached 105-109% of the run and the
+  unattributed column went negative; phases now carry a nesting depth and an enclosed row is
+  marked and left out of the sum. The MS1 band partition -- a full copy of the MS1 map plus a
+  1-5% halo, and the largest allocation of the MS1 phase -- was carried under `ms1_map` until
+  detection returned; it is handed to `band_arena` at the swap and released band by band, and it
+  measures **13.6 GiB on dataset D where the old ledger reported 0.6**. A window's emitted
+  spectra were charged only after the stage that produces them, and are now charged as they are
+  emitted, together with the ~700 bytes of empty slot header per owned precursor. The columns
+  were `>>20` of a byte count and were labelled `_mb`; they are `_mib`, and `bench/ledger_report.py`
+  reads either. Verified output-identical on dataset D at both pitches and every tiling.
+  MassTraceDetection's own internal copy of each band remains unattributed: charging it needs an
+  OpenMS patch, and the source now says so where the gap is.
+- **`SPEXTRACTOR_LOAD_TRIM=<n>`, a probe, off by default.** Calls `malloc_trim(0)` every nth
+  picker flush. The repaired ledger shows the resident arm's process peak on D is not live data:
+  RSS falls 45,279 -> 28,052 MiB at the end of the load while the charged total does not move, so
+  ~17 GiB of the peak is one load's worth of allocator free list. `MALLOC_TRIM_THRESHOLD_` cannot
+  reach it, because `free()` trims only the top of the main arena and with ~100 threads the
+  retention sits in per-thread arenas.
+
 ### Added (2026-09-10)
 - **`tile:cells_per_tile` -- the window loop runs tile by tile.** The retention-time cells are
   grouped into tiles of n cells; each tile traces its isolation windows on the tile's frames only,
