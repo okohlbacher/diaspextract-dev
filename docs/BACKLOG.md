@@ -489,6 +489,48 @@ FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size
 **What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
 differences are confined to within the smoother's edge of a boundary after the fix.
 
+### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; analysis running)
+
+**The paper.** Garrett, Diedrich and Yates III, *dnoise: Fast Native Data Reduction for Bruker
+timsTOF*, bioRxiv 2026.08.27.747603; open source (Rust, MIT, github.com/pgarrett-scripps/dnoise).
+It rewrites a native `.d` with points removed, in three stages:
+
+1. **Ion-mobility streak filter.** A frame is (scan index, TOF index, intensity) triples. Intensity
+   is summed over a neighbouring TOF window to give per-scan mobility profiles; occupied scans are
+   grouped into runs with internal gaps up to `max_internal_gap` (2) bridged; a run survives only
+   with at least `min_feature_length` (5) occupied scans; repeated for `iterations` passes.
+   Intensity floors are ZERO -- the criterion is mobility occupancy, not intensity.
+2. **Halo filter** against microchannel-plate saturation: drop a point below
+   `halo_peak_fraction` (0.15) times the maximum intensity in a local box that EXCLUDES its own
+   TOF column, so a real streak cannot suppress itself.
+3. **Acquisition-aware geometric gates**: drop MS1 points outside anything the method could
+   fragment -- for diaPASEF, the isolation-window table in m/z and 1/K0, with padding.
+
+Reported on diaPASEF: **91-94% of MS1 points removed**, frame binaries 35-40% smaller, precursor
+and protein-group counts within +/-0-2%; <= 69 s per run.
+
+**Why it matters here, in this tool's own numbers.** The streaming tiled architecture moved the
+process peak onto the MS1 pass: 31.0 GB, of which the picked MS1 `PeakMap` is **13.8 GB holding
+725,116,915 picked peaks**. Raw MS1 frames carry ~690k points each, so the existing
+`PeakPickerIM::pickIMCluster` is removing only about a fifth of them -- the rest are single-scan
+hits that survive clustering as their own centroid, which is exactly the population dnoise
+targets. If the reported diaPASEF reduction transfers even partly, the binding constraint of the
+whole streaming design falls by an order of magnitude, and MS1 tracing (204 CPU-s) with it. The
+MS2 side is the same shape: 12.6 GB of slab from 1.258e9 picked peaks.
+
+**Why it is not free.** This tool's identification gap is at LOW ABUNDANCE -- it emits a spectrum
+for ~87% of the peptides it misses, and abundance is the only discriminator. A filter keyed on
+occupancy could remove the faint ions the tool is already failing to convert, or could remove the
+noise burying them. It is an S-class change: Sage and MSFragger plus an entrapment FDR on both
+acquisitions, against D Sage 13,491 / MSFragger 12,918 / entrapment 1.30% and TNBC 009
+Sage 29,067 / MSFragger 27,949 / entrapment 1.09%.
+
+**Status.** A four-phase analysis is running: ground the method against what `pickIMCluster`
+already does, three independent integration designs (in the picker, in the loader patch, or as a
+detector criterion rather than a filter), each attacked on science risk and on interaction with
+the frozen frame tables and the cell grid, then one judged recommendation with its parameter
+sweep. Written up in docs/reviews/2026-09-10-dnoise/.
+
 ### Tiled reader, steps 3a/3b: what the step-2 reviews put on the list (2026-09-10)
 
 - **A `readTile()` seam.** Step 2 slices the resident slabs inline in the tile loop; step 3b's
