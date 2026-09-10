@@ -47,6 +47,21 @@ unchanged.
 - **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span,
   first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
 
+### Changed (2026-09-10) -- byte-identical on both pinned acquisitions and on the mzPeak archive
+
+- **Every isolation window's frame table is frozen from the reader's metadata.** The window
+  store's frame sequence, the Pearson support (`G` = the window's frame count) and the MS1-frame
+  to window-frame map are now run-level constants read from the loader (the calibration patch
+  exports the `.d` frame table and windows; the mzPeak reader's metadata sweep is cached), not
+  from whatever frames happen to be resident. The consumer walks each window's delivered frames
+  in lockstep with its table and appends every frame the reader skipped as an empty frame,
+  counted per window (`[frames] window W: delivered N, padded P`; 0 on both benchmark files).
+  Output is unchanged; what changed is that a window traced and scored with only some of its
+  frames resident now reproduces the whole run exactly (the cell-exactness probe: 100% of
+  spectra identical with 16,586 of 32,210 frames padded), which is the property the streaming
+  reader will rest on. Header stamps `spx:frame_table` (`loader` | `mzpeak` | `slab`) and
+  `spx:pearson_G=frames`; a frame-table mismatch is a fatal structural error, never a fallback.
+
 ### Added (2026-09-09)
 - **`tile:rt_sec` -- detection in fixed retention-time cells (default 600 s).** The integer detector traces each window per RT cell cut at the run's
   MS1 frame times, so the output is bit-identical however the cells are grouped into tiles and

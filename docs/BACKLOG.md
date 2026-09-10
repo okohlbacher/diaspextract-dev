@@ -489,6 +489,16 @@ FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size
 **What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
 differences are confined to within the smoother's edge of a boundary after the fix.
 
+### mzML input keeps the slab as its frame table (2026-09-10, deliberate)
+
+The judged tiled-reader plan (docs/reviews/2026-09-10-tiled-reader-plan/judge.md, step 1) defines
+an mzML window's frozen frame table as the union of its window group's frames. Step 1 (b) leaves
+mzML at "the frames the window delivered" (`spx:frame_table=slab`): the mzML path is resident and
+untiled, converters other than OpenMS's own carry no `windowGroup=` in their native IDs (every
+window would land in group 0 and the union would be the whole run's MS2 frames), and no gate
+exists for mzML input beyond the e2e fixtures. Revisit only if an mzML tiled reader is ever built;
+then the definition must be pinned on a converted real file first.
+
 ### Splitter: audit children per parent by parent sample rate (Kimi review, 2026-09-09)
 
 **The idea.** The fixed smoothing window is wider than the old per-trace window on gappy parents

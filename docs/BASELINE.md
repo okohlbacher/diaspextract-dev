@@ -2678,10 +2678,82 @@ points, inside its interval and the release rule (<= base + 0.3). **`tile:rt_sec
 from 2026-09-10** (the decision's pitch); new pins at the default: **D `f9e65631`**, **TNBC 009
 `f0502f33`** (29,066 Sage). Gate on the default flip (58c6784, arm `grid1`): D at the default
 digests `f9e65631` exactly (the review fixes are byte-neutral at 600 as at -1), `-1` reproduces
-both window-mode pins, e2e 15/15. TNBC entrapment and MSFragger at 600 vs -1 are the
-second-acquisition release gate, recorded when they land.
+both window-mode pins, e2e 15/15.
+
+**Second-acquisition release gate (arm `cell1`, TNBC 009, `data`, 2026-09-10 01:15):**
+
+| | -1 (whole) | pitch 600 | rule |
+|---|---:|---:|---|
+| Sage peptides | 28,845 | 29,066 (+0.8%) | |
+| entrapment FDR @ nominal 1% (95% CI) | 0.92% (0.79-1.07); 26,761 targets / 168 hits | 1.08% (0.93-1.23); 27,238 / 201 | <= base + 0.3 points: **+0.16, passes** |
+| MSFragger 4.4.1 (`score_msf_td.py`) | 27,973 | 27,952 (-0.08%) | flat -- 21 peptides, inside the run-to-run spread |
+| peak RSS / wall (600) | | 124.6 GB / 11:10 | |
+
+So on the second acquisition the grid is a wash for MSFragger and +0.8% for Sage at +0.16
+entrapment points; on D both engines rose. The default stands; nothing here argues for a
+smaller pitch (see the pitch-300 calibration drift above).
 
 **Fragment agreement under the old tiling, for the record** (probe1, old window, 13 tiles with a
 123-s halo, `bench/mzml_specdiff.py` at HEAD): 51.6% of fragments matched within 10 ppm, 56.8%
 of those with the same intensity -- the same picture as probe2 (51.0% / 51.8%); the churn was
 never about the splitter window.
+
+
+### Cell grid, step 1: frozen frame tables (2026-09-10)
+
+The tiled reader's contract (docs/reviews/2026-09-10-tiled-reader-plan/judge.md, step 1) needs
+every window's frame table -- the window store's frame sequence, the Pearson support `G`, and the
+MS1 -> window `nearest_local` map -- to be a RUN-LEVEL constant, so a tile that holds some of the
+frames scores exactly as the whole run does. Two commits:
+
+- **1 (a), 0862aa8:** `FrozenWin` per window (frame times, vendor ids, RT-axis indices, per-frame
+  calibration factors, `nearest_local` over ALL window frames, ties to the later frame); the
+  window store's table is the frozen one, `buildFragStats` takes `G = F` and the table's map (the
+  `used` policy and `G_override` are gone: G == G_live == F on 24/24 and 28/28 windows); the cell
+  cut is slab-local with a value lookup of each cell's first frame time in the table (the
+  ee49bda offset-rebase throw is deleted). Source of the table: the resident slab.
+- **1 (b), 38907fb:** the table comes from the READER's metadata. The calibration patch exports
+  `BrukerTimsFile::lastDIAFrameTable()` (per window group: frame id, `frame.time`, raw peak
+  count, in the loop's own order) and `lastDIAWindows()`; the mzPeak sweep is cached as
+  `MzPeakRunMeta` (with `number_of_peaks` when the archive records it); the consumer walks each
+  window's delivered frames in LOCKSTEP with its table and appends every skipped table frame as
+  an EMPTY frame (a raw frame with no peaks is not in the table, matching the loop's skip; an
+  empty ion-mobility slice, or a probe-dropped frame, is padded), counted per window
+  (`[frames] window W: delivered N, padded P`), the slab asserted equal to its table afterwards;
+  header stamp `spx:frame_table=loader|mzpeak|slab` (mzML stays the slab: docs/BACKLOG.md).
+
+**Gate 1 (a) (ibminode05, 0862aa8, chain `step1a`):** D at the default (600) `f9e65631` MATCH;
+`-1` in both window modes IDENTICAL to their pins (`frame` = the split arm's output, `trace` =
+`bc3c5ac9`); 300 `3f8d421d` MATCH; e2e 15/15 (check 15 now really runs the integer detector:
+a773f6e). **The cell-exactness probes DIFFER at 1 (a), as they must:** the frozen table is the
+resident slab's, and under the probe the slab holds three of six cells, so every window scores
+on `F = G = 651` frames instead of 1,342 (`[gstat]`: 1,342/1,342 whole, 651/651 probe) -- the
+Pearson mean and norm of every fragment move. 1 (a) therefore holds the whole-run pins but is
+not yet tile-exact; that is exactly the gap 1 (b) closes (the probe's dropped frames are padded,
+`F` is the run-level 1,342 again). The `SPEXTRACTOR_WINDOW_FILE` row's `G` is no longer read
+(only `tlo/thi`); the probe's support now comes from the table.
+
+**Gate 1 (b) (ibminode05, 38907fb, chain `step1b`, 01:17-02:13; the fix-up a91cfcf re-gated
+below):**
+
+| arm | `[frames]` | result |
+|---|---|---|
+| D at the default (600) | source=loader, 24 windows, 32,210 delivered, **0 padded** | `f9e65631` **MATCH**; 611,850 spectra, 3:57 / 47.1 GB |
+| D `-1`, `frame` window | 0 padded | **IDENTICAL** to the split arm's output (612,664) |
+| D `-1`, `trace` window | 0 padded | **IDENTICAL** to `bc3c5ac9` (855,575) |
+| D at 300 | 0 padded | `3f8d421d` **MATCH** |
+| cell exactness, core 2 (cells 1-3 resident) | 15,624 delivered, **16,586 padded** (the probe's dropped frames) | **IDENTICAL** to the whole run at 300 |
+| cell exactness, core 3 (cells 2-4 resident) | 15,624 / 16,586 | **IDENTICAL** |
+| mzPeak S30 archive (v0.9.2 + sidecar tdf), new build vs the step-1a binary, default settings | source=mzpeak, 0 padded; the archive records `number_of_peaks`, so frames with none are skipped like the .d loop's | **IDENTICAL**; 611,445 spectra both (5:17 / 61.8 GB) |
+| TNBC 009 at the default | source=loader, 28 windows, 134,312 delivered, **0 padded** | `f0502f33` **MATCH**; 3,285,827 spectra, 16:47 / 124.1 GB (a loaded node) |
+| e2e | | **15/15** |
+
+So the metadata table IS the delivered table on both acquisitions and on the archive (0 pads,
+as the 2f metadata check predicted), today's output is byte-unchanged in every mode, and the
+cell-exactness probe is restored: with the dropped frames padded, every window scores on the
+run-level `F = 1,342` again and the core cells reproduce the whole run bit for bit. This is the
+first build on which "only some of a window's frames are resident" gives the whole run's output
+-- the property the tiled reader is built on. Review (Codex, Kimi; docs/reviews/2026-09-10-frame-tables/):
+sound at P = 0; the structural throws had to be made fatal (the loader's fallback catch would
+have appended a second full load onto the partial slabs) and the lockstep now matches (rt, frame
+id) -- a91cfcf.
