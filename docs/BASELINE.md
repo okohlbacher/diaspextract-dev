@@ -2914,3 +2914,25 @@ which the frame table's `num_peaks` gives before anything is read.
 
 **Reads are small next to compute.** Per tile at 6 tiles: read 1.3-3.6 s, window loop 12.6-28.9 s,
 write 0.5-2.0 s. A prefetch thread can hide the read; it cannot hide much else.
+
+
+### What tiling actually costs, and why (2026-09-10)
+
+The controlled pair (dataset D, pitch 600, same digest `8c1b047f`): one tile runs the window loop
+in 89.5 s at 67.6x parallelism; three tiles run it in 121.7 s at 43.1x -- **+32.2 s of occupancy
+loss while the CPU total FALLS 13%** (5,990 -> 5,207 CPU-s). Tiling does not make the work bigger;
+it makes the machine idler.
+
+The cause is a straggler, measured from the tool's own per-window stage lines: in tile 2 the
+slowest window takes 61.2 s against a 22.5 s median, and the tile cannot close until it finishes.
+Summed over the three tiles the straggler gap is **71.7 s**. The culprit is the acquisition's own
+geometry -- one isolation window is **141.3 Da wide** against a ~26 Da typical, and carries 71,294
+of the tile's spectra with 51.0 s of tracing.
+
+Two consequences. First, a prefetch thread is not the lever: all the I/O in a 3-tile run is 14.1 s
+and the barrier costs 32.2. Second, the barrier is an artefact of the loop structure rather than a
+data dependency -- **the carry is keyed by WINDOW** (`carry_out.at(wl[wi].first)`), so window w of
+tile k+1 depends only on window w of tile k: 24 independent chains, not a barrier. A per-window
+ready flag over a global (window, tile) work list removes the edge for zero redundant work, which
+is what makes the redundant-boundary-cell idea (56% extra peaks re-read) unnecessary on one
+machine.

@@ -73,3 +73,33 @@ Canonical numbers first: **the task brief, `data.md` and the `[perf]` table disa
 **TNBC 009 (2-hour).** Prefix 178.6 s (`LOAD(stream)` 94.5 @60.2x + `MS1_TRACE` 59.3 @26.9x + `PRECURSOR_INFER` 24.8 @31.0x) + loop 32,968.6 CPU s at 80-100x (330-412 s) + write ~5 s (from 52.4 s at 1.0x) + teardown = **520-600 s (8:40-10:00)**, against 695.9 s (11:35.90). Note what this actually buys on the long file: the loop is *already* at 80.0x untiled, so the DAG mostly makes tiling **free** (peak 190.9 GB → the pass-1 floor) rather than fast; the raw speed comes from the serial write and from not paying the tile barrier. **Binding constraint then:** the 178.6 s prefix, now **31-34% of the run**, of which `LOAD(stream)` is 94.5 s at 60x.
 
 After that the levers are step 7 (per-cell pass 1, which is what moves the MS1 floor and is the next real memory lever) and band count — and BASELINE already settles band count on the science side (`trace:bands 24` fails dataset A, −1.61% Sage). So: **~1:56 on D and ~8:40 on TNBC is where this direction ends, and pass 1 is what is standing there.**
+---
+
+## The decisive measurement, run against the existing logs (2026-09-10)
+
+The panel asked for one 3-minute run to decide between "the DAG recovers the tiling penalty" and
+"the loop is bandwidth-limited and only the writer agent is worth building". The per-window stage
+lines the tool already logs answer it without a new run. Dataset D, pitch 600, `cells_per_tile 1`
+(K = 3), streaming source, 100 threads:
+
+| tile | windows | median window | slowest window | straggler gap | completion span |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 24 | 2.4 s | 12.2 s | 9.7 s | 11 s |
+| 2 | 24 | 22.5 s | 61.2 s | **38.7 s** | 47 s |
+| 3 | 24 | 22.9 s | 46.2 s | 23.3 s | 37 s |
+
+**Total straggler gap: 71.7 s**, against the 32.2 s the tiling costs in occupancy. And it is
+CONCENTRATED, exactly as the panel's first branch requires:
+
+| tile | the slowest window | width | its wall | of which tracing | spectra |
+|---:|---|---:|---:|---:|---:|
+| 1 | 327.52-468.80 Da | 141.3 Da | 12.2 s | 9.4 s | 18,958 |
+| 2 | 327.52-468.80 Da | 141.3 Da | **61.2 s** | 51.0 s | 71,294 |
+| 3 | 779.91-808.42 Da | 28.5 Da | 46.2 s | 41.6 s | 11,059 |
+
+The acquisition uses variable-width isolation windows, and one of them is 141 Da wide against a
+~26 Da typical. In tile 2 it runs 61.2 s while the median window runs 22.5 s, and the tile cannot
+close until it finishes. That is the tiling penalty, and it is a scheduling artefact, not a
+bandwidth wall: **the decision rule fires on the first branch, so the (window, tile) DAG recovers
+it directly** -- the wide window simply runs on into the next tile while nothing waits for it.
+Build the plan.
