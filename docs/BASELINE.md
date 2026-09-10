@@ -3024,3 +3024,23 @@ batch is the MS2 block and never runs in pass 1, and the correction is in data2.
 only help the resident shape. On the streaming shape the picker flush batch is the lever:
 `SPEXTRACTOR_PICK_BATCH=64` takes 3.0 GB off for +2.3% wall, and `SPEXTRACTOR_LOAD_BATCH` is inert on
 this peak (data3-batch.md).
+
+### TNBC 009 with the repaired ledger: on the long file the floor is MS1 tracing (2026-09-10, chain `tnbcled`)
+
+| arm | wall | peak | process peak |
+|---|---:|---:|---|
+| 1 tile | 10:00.62 | 109.12 GB | 106,699 MiB, window loop |
+| 13 tiles | 9:12.61 | 70.24 GB | 68,666 MiB at 74.7 s, MS1 partition phase |
+
+Both reproduce `bff54a1f`. **At 13 tiles the process peak is the MS1 partition phase**, 2-4 GiB above
+the load peak (64,186 MiB) -- the reverse of dataset D, where the partition phase sits 8.4 GiB below
+the load at the default batch. So the staging levers that pay on D (picker batch 64, narrower picker
+scratch) are worth ~nothing on TNBC's tiled peak until MS1 tracing comes down. At the peak instant
+the RSS is 29,451 MiB of charged partition, **28,605 MiB of glibc free list** (the drained MS1 map)
+and 10,610 MiB live but uncharged (MassTraceDetection's internal band copies): a trim inside MS1
+tracing is the lead candidate for the long file, with a measured ceiling of 28.6 GiB.
+
+Tiling cut the scorer's scan 12.016e12 -> 1.120e12 fragment visits (−90.7%) with identical survivors
+(13,857,222,667), loop CPU −33.7% (−9.7% on D: the untiled scan grows with run length squared). The
+13-tile loop's RSS climbs 15.5 -> 51.7 GiB tile over tile while charging ~6 GiB, because nothing
+trims between tiles. Details: docs/reviews/2026-09-10-streaming-memory/data4-tnbc.md.
