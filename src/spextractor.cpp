@@ -1675,7 +1675,8 @@ namespace
         Batch& bw = per_win[(size_t)w];
         for (int i : bw.idx)
         {
-          if (bw.tab && !bw.tab->step(*bw.slab, frt[(size_t)i], fid[(size_t)i], n_ms1))   // [frames] lockstep with the frozen table
+          const size_t exp_f = bw.tab ? bw.tab->rt.size() : n_ms1;   // the window's frame count: exact when a table exists
+          if (bw.tab && !bw.tab->step(*bw.slab, frt[(size_t)i], fid[(size_t)i], exp_f))   // [frames] lockstep with the frozen table
           {
             #pragma omp critical(pad_err)
             if (!pad_err) pad_err = std::make_exception_ptr(FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
@@ -1684,7 +1685,7 @@ namespace
             break;
           }
           const size_t o = scratch_off_[(size_t)i];
-          bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], n_ms1);
+          bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
         }
       }
       if (pad_err) std::rethrow_exception(pad_err);
@@ -1761,7 +1762,7 @@ namespace
       // [frames] the tail of every delivered window's table; a table window that delivered nothing
       // gets no slab (it is counted as absent by the caller)
       for (auto& kv : tables_)
-      { auto w = windows_.find(kv.first); if (w != windows_.end()) kv.second.tail(w->second, ms1_.size()); }
+      { auto w = windows_.find(kv.first); if (w != windows_.end()) kv.second.tail(w->second, kv.second.rt.size()); }
     }
 
   private:
@@ -3361,26 +3362,41 @@ protected:
               "trace:band_edges=acquisition: no candidate tdf provides a calibration:" + reasons + " (the integer detector cannot run on this input; -trace:detector openms is the escape)");
     }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
-
-    if (stream_load)
+    // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
+    // table regardless), pass 2 reads each tile's MS2 frames through the loader's RT range. The
+    // resident source (mzPeak, mzML, perf:stream_load=false, or SPEXTRACTOR_TILE_RESIDENT=1 for an
+    // A/B) holds the whole run and slices it, as before.
+    bool tile_source = false;
+    PickCompactConsumer::FrameTables run_tables;   // the reader's frozen tables, kept for pass 2
+    BrukerTimsFile::Config cfg;
+    cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
+    cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
+    PeakPickerIM spicker;
     {
-      // [stream] frame-by-frame: pick + compact on arrival, never hold the whole run.
-      // Also the ONLY place the reader's NATIVE pre-centroid frame aggregation is reachable.
-      BrukerTimsFile::Config cfg;
-      cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
-      cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
-      PeakPickerIM spicker;
       Param sp = spicker.getParameters();
       sp.setValue("pickIMCluster:im_tolerance_cluster", getDoubleOption_("gate:delta_im"));
       sp.setValue("pickIMCluster:ppm_tolerance_cluster", getDoubleOption_("trace:mass_error_ppm"));
       if (const char* m = std::getenv("SPEXTRACTOR_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
       spicker.setParameters(sp);
+    }
+
+    if (stream_load)
+    {
+      // [stream] frame-by-frame: pick + compact on arrival, never hold the whole run.
+      // Also the ONLY place the reader's NATIVE pre-centroid frame aggregation is reachable.
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
 #ifdef SPEXTRACTOR_WITH_MZPEAK
       const bool in_mzpeak = (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK);
 #else
       const bool in_mzpeak = false;
 #endif
+      tile_source = !in_mzpeak && std::getenv("SPEXTRACTOR_TILE_RESIDENT") == nullptr;
+      if (tile_source)
+      {
+        // pass 1: MS1 only; lo > hi selects no MS2 frame, the loader exports the table anyway
+        cfg.dia_ms2_rt_lo = std::numeric_limits<double>::infinity();
+        cfg.dia_ms2_rt_hi = -std::numeric_limits<double>::infinity();
+      }
       // [frames] The frozen frame tables come from the READER's metadata, keyed with the reader's
       // own precursor expressions so the keys equal the consumer's: the .d loader exports its
       // frame table and windows (patch: lastDIAFrameTable/lastDIAWindows; frames with no raw peaks
@@ -3473,6 +3489,8 @@ protected:
       }
       // [frames] the invariant the frozen tables rest on, checked OUTSIDE the recoverable catch: a
       // delivered window's slab is its table (rt and id, frame for frame) after padding
+      if (streamed && tile_source && consumer.tables().empty())
+        throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[3b] the .d loader exported no frame table; the tiled source cannot read this input", in);
       if (streamed && !consumer.tables().empty())
       {
         size_t n_pad = 0, n_del = 0, n_absent = 0;
@@ -3480,14 +3498,16 @@ protected:
         {
           const String wl = String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0);
           const auto w = ms2_by_window.find(kv.first);
-          if (w == ms2_by_window.end()) { ++n_absent; writeLogInfo_("[frames] window " + wl + ": absent (no frame delivered), " + String(kv.second.rt.size()) + " in the table"); continue; }
+          if (w == ms2_by_window.end()) { ++n_absent; if (!tile_source) writeLogInfo_("[frames] window " + wl + ": absent (no frame delivered), " + String(kv.second.rt.size()) + " in the table"); continue; }
           if (w->second.rt != kv.second.rt || w->second.frame_id != kv.second.id)
             throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] a window's slab is not its frozen frame table after padding", wl);
           n_pad += kv.second.padded; n_del += kv.second.delivered;
           writeLogInfo_("[frames] window " + wl + ": delivered " + String(kv.second.delivered) + ", padded " + String(kv.second.padded) + " of " + String(kv.second.rt.size()));
         }
         frame_table_src = table_src_if_ok;
-        writeLogInfo_("[frames] source=" + frame_table_src + " windows=" + String(consumer.tables().size()) + " delivered=" + String(n_del) + " padded=" + String(n_pad) + " absent=" + String(n_absent));
+        run_tables = consumer.tables();
+        writeLogInfo_("[frames] source=" + frame_table_src + " windows=" + String(consumer.tables().size()) + " delivered=" + String(n_del) + " padded=" + String(n_pad) + " absent=" + String(n_absent)
+                      + (tile_source ? " (pass 1: MS1 only; the windows' frames are read per tile)" : ""));
 #ifdef SPEXTRACTOR_WITH_MZPEAK
         if (in_mzpeak && spx::lastMzPeakMeta())
           writeLogInfo_("[frames] mzPeak number_of_peaks: " + String(spx::lastMzPeakMeta()->n_peaks_missing_ms2) + " MS2 spectra lack it and count as present"
@@ -3613,8 +3633,12 @@ protected:
     // [cell] the frozen frame tables (see FrozenWin); today from the resident slabs, before
     // indexRt() frees their frame times and toTof() their frame ids
     map<WinKey, FrozenWin> frozen;
-    for (const auto& kv : ms2_by_window)
-    { FrozenWin& fw = frozen[kv.first]; fw.frame_rt = kv.second.rt; fw.frame_id = kv.second.frame_id; }
+    if (tile_source)
+      for (const auto& kv : run_tables)   // [3b] every window of the reader's table, no slab needed
+      { FrozenWin& fw = frozen[kv.first]; fw.frame_rt = kv.second.rt; fw.frame_id = kv.second.id; }
+    else
+      for (const auto& kv : ms2_by_window)
+      { FrozenWin& fw = frozen[kv.first]; fw.frame_rt = kv.second.rt; fw.frame_id = kv.second.frame_id; }
     // THE GLOBAL RT AXIS. Every frame contributes one retention time; every trace point sits on a
     // frame. Building it here, once, is what lets a trace point be 8 bytes (frame index +
     // intensity) instead of 16 (RT + intensity), and lets two profiles be aligned by integer
@@ -3626,7 +3650,7 @@ protected:
       { size_t nf = ms1_map.size(); for (const auto& kv : ms2_by_window) nf += kv.second.frames();
         ax.reserve(nf + 1024); }   // MS1 *and* every window's MS2 frames land here [mem]
       for (const auto& sp : ms1_map) ax.push_back(sp.getRT());
-      for (const auto& kv : ms2_by_window) ax.insert(ax.end(), kv.second.rt.begin(), kv.second.rt.end());
+      for (const auto& kv : frozen) ax.insert(ax.end(), kv.second.frame_rt.begin(), kv.second.frame_rt.end());   // the tables' frame times (== the slabs' after padding)
       sort(ax.begin(), ax.end());
       ax.erase(unique(ax.begin(), ax.end()), ax.end());
       writeLogInfo_("RT axis: " + String(ax.size()) + " distinct frame retention times"
@@ -4082,6 +4106,8 @@ protected:
     vector<pair<WinKey, PeakSlab*>> window_list;
     window_list.reserve(ms2_by_window.size());
     for (auto& kv : ms2_by_window) window_list.emplace_back(kv.first, &kv.second);
+    const size_t n_win = frozen.size();   // the run's windows (the resident list is empty under the tiled source)
+    vector<WinKey> fkeys; fkeys.reserve(n_win); for (const auto& kv : frozen) fkeys.push_back(kv.first);
     // [heavy-first] Process the biggest windows FIRST. With n_conc slots and unequal windows,
     // a small window admitted late runs nearly alone in the tail; starting the largest first
     // gives the scheduler the whole run to overlap it. The widest tile holds ~23.7% of all
@@ -4126,7 +4152,7 @@ protected:
     // the thread budget so windows x bands cannot oversubscribe.
     int n_bands = getIntOption_("perf:trace_bands");
     if (n_bands <= 0)  // auto: enough bands that windows x bands covers every thread
-      n_bands = (int)std::ceil((double)n_threads / std::max<size_t>(window_list.size(), 1));
+      n_bands = (int)std::ceil((double)n_threads / std::max<size_t>(n_win, 1));
     n_bands = std::max(1, n_bands);
     // TOTAL live threads are outer x inner. Capping only the inner team (as a first cut did)
     // gave 24 windows x 9 bands = 216 threads on a 224-core box that another job was already
@@ -4149,14 +4175,14 @@ protected:
     // memory (157 GB both ways). The pool's regression was the gate's bandwidth problem amplified
     // by concurrency, not a working-set problem of its own -- so the cap is not needed, and taking
     // it out costs nothing. `perf:max_concurrent_windows` still bounds it for a small machine.
-    int n_conc = (int)window_list.size();
+    int n_conc = (int)n_win;
     if (max_conc > 0) n_conc = std::min(n_conc, max_conc);
     if (n_conc < 1) n_conc = 1;
 #ifdef _OPENMP
     // outer loop over windows + inner loop over bands = two live levels
     if (n_bands > 1) omp_set_max_active_levels(2);
 #endif
-    writeLogInfo_("Parallelism: " + String(window_list.size()) + " windows x " + String(n_bands)
+    writeLogInfo_("Parallelism: " + String(n_win) + " windows x " + String(n_bands)
                   + " m/z bands = " + String((int)window_list.size() * n_bands) + " trace units; "
                   + String(n_threads) + " worker threads over one task pool; up to "
                   + String(n_conc) + " windows in flight (memory-bounded)");
@@ -4296,15 +4322,22 @@ protected:
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "SPEXTRACTOR_WINDOW_FILE overrides the band edges per window (a slab-mode probe); it cannot be combined with trace:band_edges=acquisition.");
       if (!(tofAxis().n_bins > 1)) writeLogInfo_("[tof] no run-level axis bounds from the tdf (" + tofAxis().bounds_why + "); the acquisition edge set is not on record for this run");
-      for (const auto& w : window_list) wbands[w.first] = {0xFFFFFFFFu, 0};
+      if (tile_source && !band_edges_acq)
+        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or SPEXTRACTOR_TILE_RESIDENT=1 for the resident source.");
+      for (const WinKey& k : fkeys) wbands[k] = {0xFFFFFFFFu, 0};
       #pragma omp parallel for schedule(dynamic, 1)
-      for (long i = 0; i < (long)window_list.size(); ++i)
+      for (long i = 0; i < (long)fkeys.size(); ++i)
       {
-        const WinKey& k = window_list[(size_t)i].first;
-        PeakSlab& sl = *window_list[(size_t)i].second;
-        toTof(sl);
+        const WinKey& k = fkeys[(size_t)i];
         TofIdx tlo = 0xFFFFFFFFu, thi = 0;
-        for (TofIdx t : sl.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
+        const auto rs = ms2_by_window.find(k);   // a resident slab: converted here, once, in place
+        if (rs != ms2_by_window.end())
+        {
+          PeakSlab& sl = rs->second;
+          toTof(sl);
+          for (TofIdx t : sl.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
+        }
         // [3a] the run-level alternative: tlo 0, thi the larger of the digitizer's last bin
         // (DigitizerNumSamples - 1: no bin index can exceed it) and the acquisition's upper m/z
         // through the calibration at every frame of the frozen table; logged in both modes so
@@ -4337,13 +4370,13 @@ protected:
     struct Carry { vector<Trace> rec; vector<float> inten; };
     map<WinKey, Carry> carry_in, carry_out;
     map<WinKey, vector<uint8_t>> visited;
-    for (const auto& w : window_list)
+    for (const WinKey& k : fkeys)
     {
-      carry_out[w.first];
-      const double lo = w.first[0] / 100.0, hi = w.first[1] / 100.0;
+      carry_out[k];
+      const double lo = k[0] / 100.0, hi = k[1] / 100.0;
       const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), lo) - prec_mz.begin();
       const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), hi) - prec_mz.begin();
-      visited[w.first].assign(phi > plo ? phi - plo : 0, 0);
+      visited[k].assign(phi > plo ? phi - plo : 0, 0);
     }
     // [tile] The output: settings and stamps are fixed before the first tile, the mzML writer is
     // opened once and fed a sorted block per tile (with one tile the count is exact and the bytes
@@ -4411,7 +4444,8 @@ protected:
     if (out_type == FileTypes::MZML) { writer.reset(new TileWriter(out_part)); writer->setExperimentalSettings(out_exp); }
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
-    writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows in " + String(tiles.size()) + " tile(s) (OpenMP over windows, <="
+    out_exp.setMetaValue("spx:tile_source", tile_source ? "stream" : "resident");
+    writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
 
@@ -4445,7 +4479,45 @@ protected:
     // whole run: this arm is the exactness gate, not the memory configuration)
     map<WinKey, PeakSlab> tile_slabs;
     vector<pair<WinKey, PeakSlab*>> wl;
-    if (tiles.size() == 1) wl = window_list;
+    if (tile_source)
+    {
+      // [3b] read the tile: a fresh consumer over the loader's RT range, lockstep-padded against
+      // the frozen tables restricted to the tile, so a window's slab is exactly the table's frames
+      // in [lo, hi); a window with none gets an empty slab (the body's empty-slab branch)
+      Phase _ph("LOAD(tile)");
+      const double _tr0 = phase_clock_();
+      PeakMap ms1_none;
+      PickCompactConsumer tc(spicker, tile_slabs, ms1_none, cstat, winKey);
+      tc.tablefn = [&]() {
+        PickCompactConsumer::FrameTables t;
+        for (const auto& kv : frozen)
+        {
+          PickCompactConsumer::FrameTab& tab = t[kv.first];
+          for (size_t f = 0; f < kv.second.frames(); ++f)
+            if (kv.second.frame_rt[f] >= tile.lo && kv.second.frame_rt[f] < tile.hi) { tab.rt.push_back(kv.second.frame_rt[f]); tab.id.push_back(kv.second.frame_id[f]); }
+        }
+        return t; };
+      BrukerTimsFile::Config c2 = cfg;
+      c2.load_ms1 = false; c2.dia_ms2_rt_lo = tile.lo; c2.dia_ms2_rt_hi = tile.hi;
+      BrukerTimsFile().loadDIAStreaming(in, tc, c2);   // a failure here is fatal: no fallback onto a half-read tile
+      tc.finish();
+      size_t n_del = 0, n_pad = 0, n_absent = 0, n_peaks = 0;
+      for (const auto& kv : tc.tables())
+      {
+        auto w = tile_slabs.find(kv.first);
+        if (w == tile_slabs.end()) { ++n_absent; tile_slabs[kv.first]; continue; }   // no frame in this tile: an empty slab
+        if (w->second.rt != kv.second.rt || w->second.frame_id != kv.second.id)
+          throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[3b] a tile's slab is not the frozen table's frames for the tile", String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0));
+        n_del += kv.second.delivered; n_pad += kv.second.padded; n_peaks += w->second.peaks();
+      }
+      for (auto& kv : tile_slabs) indexRt(kv.second);
+      for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
+      std::stable_sort(wl.begin(), wl.end(), [](const auto& a, const auto& b) { return a.second->bytes() > b.second->bytes(); });
+      writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + ") read: "
+                    + String(wl.size()) + " windows, frames delivered " + String(n_del) + " padded " + String(n_pad) + " absent-windows " + String(n_absent)
+                    + ", " + String(n_peaks) + " peaks, " + String(phase_clock_() - _tr0, 1) + " s" + rss_() + mem_());
+    }
+    else if (tiles.size() == 1) wl = window_list;
     else
     {
       size_t tile_peaks = 0;
@@ -5022,12 +5094,12 @@ protected:
       // [tile] coverage: every finite precursor of every window was owned by exactly one tile
       // (the per-tile check catches a second owner; this catches none)
       size_t n_cov = 0;
-      for (const auto& w : window_list)
+      for (const WinKey& k : fkeys)
       {
-        const double lo = w.first[0] / 100.0, hi = w.first[1] / 100.0;
+        const double lo = k[0] / 100.0, hi = k[1] / 100.0;
         const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), lo) - prec_mz.begin();
         const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), hi) - prec_mz.begin();
-        const vector<uint8_t>& vis = visited.at(w.first);
+        const vector<uint8_t>& vis = visited.at(k);
         for (size_t pi = plo; pi < phi; ++pi)
         {
           if (!std::isfinite(precursors[pi].rt) || !std::isfinite(precursors[pi].im)) continue;
@@ -5071,7 +5143,7 @@ protected:
     }
     carry_in = std::move(carry_out);
     carry_out.clear();
-    for (const auto& w : window_list) carry_out[w.first];
+    for (const WinKey& k : fkeys) carry_out[k];
     }   // tiles
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");

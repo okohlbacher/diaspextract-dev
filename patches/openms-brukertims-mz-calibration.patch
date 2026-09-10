@@ -6,23 +6,38 @@
 # exports BrukerTimsFile::lastMzCalibration() so the emitted file can record which path ran.
 #
 # Base: OpenMS/OpenMS develop bd4b89555629d68b431b189a4c841efbcc4dfeea (2026-04-24).
-# Regenerated 2026-09-10 (DIA frame-table export) as a UNIFIED diff against that public commit. The previous version was
+# Regenerated 2026-09-10 (DIA frame-table export, MS2 RT-range entry point) as a UNIFIED diff against that public commit. The previous version was
 # generated against a partially-patched tree -- its BrukerTimsFile.h hunk carried, as context, a
 # comment the patch itself introduces -- so it could never apply to a pristine checkout.
 # Apply with: patch -p1 -d <OpenMS tree> < this file
 --- a/src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
 +++ b/src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
-@@ -12,7 +12,9 @@
+@@ -12,7 +12,10 @@
  #include <OpenMS/INTERFACES/IMSDataConsumer.h>
  #include <OpenMS/OPENSWATHALGO/DATAACCESS/SwathMap.h>
  #include <cstdint>
++#include <limits>
 +#include <map>
  #include <string>
 +#include <vector>
  
  class TimsDataHandle;
  
-@@ -120,6 +122,24 @@
+@@ -61,6 +64,13 @@
+       int   ms1_centroid_max_peaks = 100000; ///< Upper bound on centroided peaks per MS1 spectrum. Caps retention at the top-intensity peaks; low-intensity tail is dropped when the limit is hit (a warning is emitted at that point). Sized for aggregated MS1 where frame-stacked grids commonly exceed 200k peaks; per-frame MS1 rarely hits even 10k.
+ 
+       int dia_ms2_n_neighbors = 0;  ///< DIA MS2 frame aggregation: number of adjacent frames on each side (0 = disabled, 1 = 3-frame sum, 2 = 5-frame sum)
++      /// [speXtractor] Stream only the DIA MS2 frames whose time lies in [dia_ms2_rt_lo, dia_ms2_rt_hi)
++      /// (half-open, seconds; the defaults select every frame; lo > hi selects none -- an MS1-only
++      /// pass that still exports the frame table). Frames outside the range are neither decoded nor
++      /// emitted; everything about a selected frame is unchanged, so a caller that reads the run as
++      /// several ranges sees, per frame, exactly what one whole-run call emits.
++      double dia_ms2_rt_lo = -std::numeric_limits<double>::infinity();
++      double dia_ms2_rt_hi = std::numeric_limits<double>::infinity();
+       int dia_ms2_min_support = 1;  ///< DIA MS2 denoising: minimum occupied neighbors in 3x3 (mz x IM) grid to retain a point (center excluded)
+       bool dia_ms2_centroid = false; ///< DIA MS2 2D peak picking: apply Gaussian smoothing + local maxima detection to produce IM_CENTROIDED spectra
+ 
+@@ -120,6 +130,24 @@
                            const Config& config);
  
      /// Load entire .d directory into MSExperiment
@@ -64,10 +79,13 @@
  #include <opentims++/scan2inv_ion_mobility_converter.h>
  #include <OpenMS/FORMAT/RationalScan2ImConverter.h>
  #include <SQLiteCpp/SQLiteCpp.h>
-@@ -921,6 +929,114 @@
-     }
-   }
- 
+@@ -918,9 +926,117 @@
+         return PerFramePressureCompensationWithMissingReference;
+       default:
+         return NoPressureCompensation;
++    }
++  }
++
 +// [speXtractor table-mz] License-free EXACT TOF->m/z from the TDF MzCalibration table.
 +// The MODEL lives in speXtractor's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
 +// scripts/sync_cluster.sh) so the shipped code is the code the C++ unit test exercises.
@@ -131,7 +149,7 @@
 +      cal_.C2 = sqlite3_column_double(st, 5); cal_.T1_ref = sqlite3_column_double(st, 6);
 +      cal_.dC1 = sqlite3_column_double(st, 7); cal_.dC2 = sqlite3_column_double(st, 8);
 +      cal_.C3 = sqlite3_column_double(st, 9);  cal_.C4 = sqlite3_column_double(st, 10);
-+    }
+     }
 +    sqlite3_finalize(st); st = nullptr;
 +    if (!cal_.isSupported())
 +    { const std::string why = cal_.unsupportedReason(); sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: " + why); }
@@ -158,7 +176,7 @@
 +    }
 +    sqlite3_finalize(st);
 +    sqlite3_close(db);
-+  }
+   }
 +  // frame_id 0 is not a real Bruker frame (Frames.Id is 1-based); one pristine OpenMS DDA path
 +  // converts with a hardcoded 0. Slot 0 therefore holds T1_ref by construction = no temperature
 +  // correction (<=0.7 ppm on the files measured). Documented rather than incidental.
@@ -174,7 +192,7 @@
 +  std::string description() override final { return "TdfMzCalibration (ModelType 1 + temperature, exact)"; }
 +};
 +} // namespace
-+
+ 
 +
    // =====================================================================
    // Helper: open TimsDataHandle with tiered calibration strategy
@@ -405,10 +423,11 @@
      std::map<int, std::vector<const DIAWindow*>> group_to_windows;
      for (const auto& w : windows)
        group_to_windows[w.window_group].push_back(&w);
-@@ -1448,71 +1662,124 @@
+@@ -1448,71 +1662,131 @@
      startProgress(0, total_work, "Streaming DIA-PASEF MS2 frames");
      Size progress_count = 0;
  
+-    for (const auto& [group, frame_ids] : group_to_frames)
 +    // [speXtractor par-load] FRAME-MAJOR, PARALLEL, DECODE-ONCE.
 +    //
 +    // The original loop was window-major: for each window of a group, for each frame, decode the
@@ -426,12 +445,19 @@
 +    size_t batch = 256;
 +    if (const char* e = std::getenv("SPEXTRACTOR_LOAD_BATCH")) { const long v = std::atol(e); if (v > 0) batch = (size_t)v; }
 +
-     for (const auto& [group, frame_ids] : group_to_frames)
++    for (const auto& [group, frame_ids_all] : group_to_frames)
      {
        auto wit = group_to_windows.find(group);
        if (wit == group_to_windows.end()) continue;
 -      const auto& dia_windows = wit->second;
 +      const auto& dia_windows = wit->second;   // windows of this group, in table order
++      // [speXtractor tile] the frames of this group whose time lies in the configured range (the
++      // frame table above was exported for ALL of them); the batch loop below is unchanged, so a
++      // selected frame is decoded, sliced and emitted exactly as in a whole-run call
++      std::vector<uint32_t> frame_ids;
++      frame_ids.reserve(frame_ids_all.size());
++      for (uint32_t fid : frame_ids_all)
++      { const double t = handle->get_frame(fid).time; if (t >= config.dia_ms2_rt_lo && t < config.dia_ms2_rt_hi) frame_ids.push_back(fid); }
  
 -      for (const DIAWindow* win : dia_windows)
 +      for (size_t b0 = 0; b0 < frame_ids.size(); b0 += batch)
@@ -473,21 +499,15 @@
 -
            frame.save_to_buffs(nullptr, scan_ids.data(), nullptr, intensities.data(),
 -                              mzs.data(), inv_ion_mobilities.data(), nullptr);
--
++                              mzs.data(), inv_ion_mobilities.data(), nullptr, tl_ctx.get());
++          frame.close();                                    // releases the frame's view of OUR buffer
+ 
 -          MSSpectrum spec;
 -          spec.setRT(frame.time);
 -          spec.setMSLevel(2);
 -          spec.setDriftTimeUnit(DriftTimeUnit::VSSC);
 -          spec.setType(SpectrumSettings::SpectrumType::CENTROID);
 -          spec.setNativeID("frame=" + String(frame.id) + " windowGroup=" + String(win->window_group) + " scan=" + String(win->scan_begin));
-+                              mzs.data(), inv_ion_mobilities.data(), nullptr, tl_ctx.get());
-+          frame.close();                                    // releases the frame's view of OUR buffer
- 
--          Precursor prec;
--          prec.setMZ(win->mz_center);
--          prec.setIsolationWindowLowerOffset(win->mz_width / 2.0);
--          prec.setIsolationWindowUpperOffset(win->mz_width / 2.0);
--          spec.setPrecursors({prec});
 +          auto& slot = out[(size_t)k];
 +          slot.reserve(dia_windows.size());
 +          for (const DIAWindow* win : dia_windows)
@@ -499,8 +519,11 @@
 +            spec.setType(SpectrumSettings::SpectrumType::CENTROID);
 +            spec.setNativeID("frame=" + String(frame.id) + " windowGroup=" + String(win->window_group) + " scan=" + String(win->scan_begin));
  
--          spec.setMetaValue("ion mobility lower limit", win->im_lower);
--          spec.setMetaValue("ion mobility upper limit", win->im_upper);
+-          Precursor prec;
+-          prec.setMZ(win->mz_center);
+-          prec.setIsolationWindowLowerOffset(win->mz_width / 2.0);
+-          prec.setIsolationWindowUpperOffset(win->mz_width / 2.0);
+-          spec.setPrecursors({prec});
 +            Precursor prec;
 +            prec.setMZ(win->mz_center);
 +            prec.setIsolationWindowLowerOffset(win->mz_width / 2.0);
@@ -509,6 +532,9 @@
 +            spec.setMetaValue("ion mobility lower limit", win->im_lower);
 +            spec.setMetaValue("ion mobility upper limit", win->im_upper);
  
+-          spec.setMetaValue("ion mobility lower limit", win->im_lower);
+-          spec.setMetaValue("ion mobility upper limit", win->im_upper);
+-
 -          DataArrays::FloatDataArray im_array;
 -          IMDataConverter::setIMUnit(im_array, DriftTimeUnit::VSSC);
 -
@@ -572,7 +598,7 @@
        }
      }
      endProgress();
-@@ -1526,9 +1793,14 @@
+@@ -1526,9 +1800,14 @@
      load(path, exp, Config());
    }
  
@@ -587,7 +613,7 @@
      auto handle = openTimsDataHandle(path, config);
  
      String tdf_path = path + "/analysis.tdf";
-@@ -1551,6 +1823,7 @@
+@@ -1551,6 +1830,7 @@
      loadExperimentalSettings_(path, exp);
  
      // Sort by RT, interleaved across MS levels
