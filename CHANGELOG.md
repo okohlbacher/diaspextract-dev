@@ -47,6 +47,21 @@ unchanged.
 - **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span,
   first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
 
+### Changed (2026-09-10) -- output changes (a few bins at the band edges)
+- **The integer detector's band partition comes from the acquisition's metadata**
+  (`trace:band_edges=acquisition`, the new default). Each isolation window is traced in
+  flight-time bands; their edges were the window's resident peaks' extremes -- data a reader
+  holding only a tile's frames cannot see. They are now `[0, DigitizerNumSamples - 1]` (the
+  digitizer's last bin through the store's quantum, or the acquisition's upper m/z through the
+  calibration, whichever is larger): run-level constants from `analysis.tdf`'s GlobalMetadata.
+  The interior edges move by a bin or two, which re-assigns the seeds nearest each edge; measured
+  against `slab` on the same build: dataset D Sage 13,491 vs 13,490 (13,488 common), MSFragger
+  12,918 both, entrapment FDR 1.30% both; TNBC 009 Sage 29,067 vs 29,066, MSFragger 27,949 vs
+  27,952, entrapment 1.09% vs 1.08%. New reference digests: D `8c1b047f`, TNBC 009 `bff54a1f`.
+  `-trace:band_edges slab` reproduces the earlier output. With the integer detector,
+  `acquisition` refuses an input without a tdf before loading (`-trace:detector openms` is the
+  escape); the header records `spx:band_edges`.
+
 ### Added (2026-09-10)
 - **`tile:cells_per_tile` -- the window loop runs tile by tile.** The retention-time cells are
   grouped into tiles of n cells; each tile traces its isolation windows on the tile's frames only,

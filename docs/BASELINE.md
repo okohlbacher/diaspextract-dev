@@ -2801,3 +2801,54 @@ source holds the whole run, so memory is not the claim here (the 8-thread arms a
 because fewer windows are in flight); the streaming readers (steps 3b/4) turn the tile into the
 memory unit. Wall at 100 threads: +13-15% for 2-6 tiles on D (per-tile barrier tails and the
 per-tile sort/write), the price the pipeline (step 5) is meant to recover.
+
+
+### Cell grid, step 3a: the band partition from metadata (2026-09-10)
+
+Commits 1641a00 (`trace:band_edges=slab|acquisition`), dde035e and 09947f5 (the review fixes;
+docs/reviews/2026-09-10-band-edges/). The integer detector traces each window in flight-time
+bands, uniform in [tlo, thi]; a seed's band decides which `visited` set competes for it. Until
+now tlo/thi were the window's resident peaks' extremes -- data a reader holding only a tile's
+frames cannot see. `acquisition` takes tlo = 0 and thi = the larger of the digitizer's quantised
+last bin (`DigitizerNumSamples - 1` through the store's 1e-5 Da quantum and back, per frame) and
+the MzAcqRangeUpper conversion -- run-level metadata. Measured: on D the two coincide (634,072;
+slab thi 634,068-634,072, tlo 0-3); on TNBC they do NOT: MzAcqRangeUpper converts to 399,199
+while the digitizer has 399,967 bins and real peaks reach 399,965 -- the first version's TNBC
+arm threw on the superset assert, exactly the hazard both reviewers named, and the digitizer
+bound is what makes the option safe.
+
+**Science gate, dataset D at the default grid (600), same build (chain `step3a` on 1641a00, whose
+D edges equal the fix-up's; the fix-up re-checked in chain `step3afu`):**
+
+| | `slab` (today) | `acquisition` | |
+|---|---:|---:|---|
+| digest | `f9e65631` (the pin) | **`8c1b047f`** | the re-pin |
+| Sage peptides | 13,490 | 13,491 | set: 13,488 common, 2 slab-only, 3 acquisition-only |
+| entrapment FDR @ nominal 1% | 1.30% (12,630 / 112) | 1.30% (12,629 / 112) | |
+| MSFragger | 12,918 | 12,918 | |
+| per-spectrum diff (`mzml_specdiff.py`, same precursors: 0 only-A/B) | | | 98.5% of 611,850 spectra identical; 0.99% with a different fragment count, 0.55% intensity-only; fragments 99.98% common |
+
+The interior edges move by a bin or two (a uniform partition over [0, 634,072] instead of
+[tlo, thi]), which re-assigns the seeds nearest each edge between two `visited` sets -- 1.5% of
+spectra touched at the fragment level, five peptides in 13,490 at the search level, identical
+error rate.
+
+**Second acquisition, TNBC 009 at 600 (chain `step3afu` on the fix-up 09947f5; the slab control
+re-run on the same build digests `f0502f33`, so the recorded slab searches are the base):**
+
+| | `slab` (recorded, same spectra) | `acquisition` | rule |
+|---|---:|---:|---|
+| digest | `f0502f33` | **`bff54a1f`** | the re-pin |
+| Sage peptides | 29,066 | 29,067 | |
+| entrapment FDR @ nominal 1% | 1.08% (27,238 / 201) | 1.09% (27,237 / 202) | <= base + 0.3 points: **+0.01, passes** |
+| MSFragger | 27,952 | 27,949 | -3 |
+| wall / peak RSS (100 threads) | 13:12 / 125.0 GB | 13:14 / 124.9 GB | |
+
+**Decision (2026-09-10 07:05): `trace:band_edges` defaults to `acquisition`.** The edges a
+reader holding only a tile's frames can compute cost nothing measurable on either acquisition
+(+1 / +1 Sage, 0 / -3 MSFragger, +0.00 / +0.01 entrapment points), and they remove the last
+data-dependent input from the detector's partition. `slab` stays as the option that reproduces
+the earlier pins. New pins at the default: **D `8c1b047f`**, **TNBC 009 `bff54a1f`**; the `-1`
+and 300 pins are re-recorded on the flipped build below. Review: docs/reviews/2026-09-10-band-edges/
+(three rounds; the first version's TNBC arm threw on the superset assert because MzAcqRangeUpper
+converts to 399,199 while the digitizer's last bin is 399,966 -- the reviewers' hazard, measured).
