@@ -21,15 +21,24 @@ spread; 31.83 GB is the load-trim chain's last control, copied into the wrong ro
 difference quoted below should be read against that 0.43 GB. Every arm reproduced the pin. 512 doubles the `scratch` row
 (9,211 MiB) without raising the peak: the peak instant is not the staging maximum at that size.
 
-**The knee is 64: −9.6% peak for +2.9% wall.** Below it the curve turns. 32 buys another 1.3% of
-memory for 11% of wall; 16 is WORSE on both, because by then the load staging is gone and the peak
-has moved to the window loop, which this knob does not touch. The floor of the knob is ~28.3 GB.
+**64 is the best point in the sweep: −9.6% peak for +2.3% wall** against the first control, −10.2%
+and +3.3% against the mean of the two. That wall cost is inside the controls' own 3.45 s spread, so
+it is not resolved by one arm; the phase table prices it at ~+11 s split between the MS1 pick and
+the tile reads. No 128 arm was run, so 64 is not a located knee. Below it the process peak stops
+following the MS1 peak: the MS1 peak keeps falling (28,194 -> 27,827 -> 27,207 MiB at 64/32/16) but
+the process peak cannot go below the 3-tile window loop (27,574-28,549 MiB across arms), while wall
+climbs +10.8% and +23.6%.
 
 **The cost is on the wrong side of the knob.** The memory win is entirely MS1: the picker's staging
 is 4,802 MiB of a peak that happens during the load, and the `scratch` row drops out of the top six
 by 64. But `kBatch_()` drove BOTH flushes, so the same setting re-batches the MS2 tile reads, whose
-CPU rises 845 -> 1,192 -> 1,624 s while buying no memory at all -- the MS2 slabs are not what peaks.
-`SPEXTRACTOR_PICK_BATCH_MS1` (commit e39df17) splits them; the arm that tests it is queued.
+WALL rises 15.9 -> 23.2 -> 32.7 s at 256/64/32 while buying no memory. The LOAD(tile) CPU rise that
+accompanies it (845 -> 1,192 -> 1,624 s) is `RUSAGE_SELF` and includes idle threads spinning at the
+barriers of many short parallel regions -- the MS1 pass under the same knob stays flat at 678-729
+CPU-s -- so the MS2-side price is wall, not work. `SPEXTRACTOR_PICK_BATCH_MS1` (commit e39df17)
+splits the two flushes. Its code is correct (unset falls back to the shared knob; a C++11 magic
+static; used only at the MS1 buffer threshold) but it is not in the binary these arms ran, so
+"the MS1 memory without the MS2 cost" is a prediction until chain `compose` measures it.
 
 ## 2. What a `malloc_trim(0)` actually costs, measured, no new experiment needed
 
@@ -116,10 +125,16 @@ MS1 band partition is live; POST = the rest of pass 1):
 | batch 16 | 27,207 @ 34.6 s | 22,775 | 22,573 | **window loop, 27,935** |
 | resident, 1 tile | 45,884 @ 28.0 s | 34,403 | 33,491 | load |
 
-The partition's high-water sits **~8 GiB below** the load peak in every streaming arm, and stays
-there as the staging drains. So the staging levers are real, and their floor is not MS1 tracing:
-at batch 16 the load peak is still 27.2 GiB, and the window loop at 3 tiles (~27.9 GiB) takes over
-as the process peak. **On D at 3 tiles the reachable floor from pass-1 staging alone is ~28 GiB.**
+The RSS while the partition is live is FLAT at 22,226-22,868 MiB in every streaming arm, whatever
+the batch. The load peak sits 8.4 GiB above it at batch 256 but only 5.4 / 5.0 / 4.3 GiB above it
+at 64 / 32 / 16: **the gap shrinks because the load peak falls while the partition does not
+move**, so draining the staging lowers the process peak rather than relocating it into MS1
+tracing. At batch 16 the load peak is 27,207 MiB (26.6 GiB) and the 3-tile window loop is 27,935 MiB
+(27.3 GiB); the two are equal within the loop's own ~1 GiB run-to-run spread. **That window-loop
+peak is a soft cap, not a floor.** At its instant 50-62% of RSS is glibc free list, and the
+load-trim arms -- whose trim also fires in the tile-read flushes inside the loop -- put the same
+loop peak at 22,872-24,995 MiB. The composition that would test how far below it the process can
+go (the MS1-only batch plus a trim) is chain `compose`.
 
 **M-c -- the scorer's survivor fraction, and what tiling does to scan work.** Same build, same
 precursors (710,356), same survivors per pitch:
@@ -134,9 +149,13 @@ precursors (710,356), same survivors per pitch:
 **Tiling halves the scorer's scan at 3 tiles and cuts it 73% at 6, with identical survivors**,
 because a tile's precursors are only ever tested against the tile's fragments plus the carry.
 That is why loop CPU FALLS 9.7% and 14.7% while wall rises: the work shrank and the occupancy fell
-further (59.9x -> 44.1x). It sizes the orchestration prize from a same-build pair rather than a
-model, and it says the arena re-layout family is not worth building: at the shipped default only
-0.63% of visits survive the RT gate, so the survivor-side walk is a small share of the scan.
+further (59.9x -> 44.1x). **The CPU fall is consistent with the halved scan but not attributable
+to it from these runs**: there is no per-stage CPU counter, and the score stage's summed elapsed
+fell only 17% and 16% against visit cuts of 51% and 73%, at ~4% of summed stage elapsed (tracing
+is ~95%). The 0.63% survivor fraction is also the wrong gate for the arena re-layout family: a
+reject is a 2-byte read while a survivor walks a 96-byte record and its arena span, so survivors
+are roughly two thirds of the score stage's time. If that family is dropped, the reason is that the
+whole score stage is a small share of the loop, and that needs a CPU-share measurement to confirm.
 
 **M-e -- TNBC 009 per-cell density, pitch 600, from `Frames.NumPeaks` without decoding.** 13 cells;
 the densest cell holds 9.69% of raw MS2 peaks against a uniform 7.69% (1.26x). Grouping the cells
@@ -150,12 +169,41 @@ into fewer, larger tiles:
 | 6 | 3 | 52.90% | 37.39% | 29% |
 
 Density-balanced grouping is worth nothing at one cell per tile and 18-29% of the densest tile at
-three to six. It matters only where someone chooses fewer tiles to buy back wall time, and only
+three to six. Two qualifications from verification: the 3-cells-per-tile figure needs one tile of
+four cells (capped at three cells it is 9.3%), and on the tool's actual cell edges (10,584 frames per
+cell, a short last cell, shares taken from the tile reads) the four figures are 1.5 / 22.4 / 23.6 /
+29.8%. It matters only where someone chooses fewer tiles to buy back wall time, and only
 if the densest tile, rather than pass 1, sets the peak there.
 
 **M-f -- the TNBC write, re-read from the step-3b gate.** 44.3 s at 32.1x (1 tile) and 41.8 s at
 34.1x (13 tiles), 1,424-1,426 CPU-s. The panel's "~50 s at 1.0x" came from a 2026-09-07 table that
 predates the parallel writer. A writer agent can hide at most the twelve non-terminal blocks,
-~38 s, and those encoders already use ~34 cores, so the hidden time is not free of contention with
-the loop it would overlap. Treat ~38 s as an upper bound, not a projection.
+~40-41 s if encode time follows spectrum count (38.6 s only if blocks were uniform), and those
+encoders already use ~34 cores, so the hidden time is not free of contention with the loop it
+would overlap. Treat it as an upper bound, not a projection. Separately, 13 tiles cut the TNBC loop
+itself (net of the enclosed read/sort/write) 43,005 -> 21,693 CPU-s (−49.6%); that is consistent
+with the scan halving measured on D but inferred, not measured, because the gate's driver did not
+extract the score-gate line.
+
+## 7. Verification (14 Fable 5.1 verifiers, 2026-09-10)
+
+Every claim in sections 1-6 went to two independent verifiers: one recomputed every number from the
+raw `ledger.tsv`, `e.log` and `t.log` files, the other attacked the mechanism in the source. **All
+seven came back "partly"**: the direction of every claim held, and each needed a correction, now
+applied in place above. The corrections that change a decision:
+
+- **The window-loop "floor" on D is soft.** Half its RSS is free list, and a trim inside the tile
+  reads already lowers it by 3-5 GiB. So R1 and R2 are capped by it only under today's no-trim loop.
+- **The load-trim prediction held in direction, but its cost premise was ~7x too high.** A mid-load
+  trim costs 0.23-0.9 s, not the ~1.7 s of the phase-boundary trims, because far less is on the
+  free list then. `every16` did nothing because pass 1 has only six picker flushes and it never
+  fired before the peak; `every4` fired once, right before the peak batch. The prediction text in
+  section 2 is left as written, because it was committed before the run.
+- **The survivor fraction is not the gate for the arena re-layout family**; the score stage's CPU
+  share is, and it is not instrumented.
+- **Unit convention.** `/usr/bin/time` reports KiB. Following the project convention (BACKLOG,
+  "Units"), the "GB" figures in sections 1-5 are that KiB count divided by 10^6; the ledger's are
+  MiB. The verifiers flagged that an earlier draft of section 6 labelled thousand-MiB values as GiB.
+
+Full verdicts: `scratchpad/verify2_digest.md` (session artefact), summarised above.
 

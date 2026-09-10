@@ -3016,8 +3016,11 @@ not a memory knob, wherever `tile:cells_per_tile` is set.
 **The resident and streaming peaks are made of different things.** The resident arm's 45,884 MiB at
 t=28.0 s falls to 28,052 two seconds later with the charged total UNCHANGED: 17.3 GiB of it was one
 load's worth of allocator free list, not live data. The streaming arm's 30,974 MiB at t=8.8 s has
-only 5,495 MiB of glibc free, so **~10.7 GiB there is live and uncharged** -- the load's two staging
-buffers, `ms1_buf_` (charged as `scratch`, 4,235 MiB) and behind it the calibration patch's own
-256-frame decode batch plus the opentims raw buffers, which the tool does not allocate. A trim can
-only help the resident shape; the batch sizes are the only knobs on the streaming shape, and they
-are two separate knobs (`SPEXTRACTOR_PICK_BATCH`, `SPEXTRACTOR_LOAD_BATCH`).
+only 5,495 MiB of glibc free, so **~10.7 GiB there is live and uncharged**. It is mostly
+`PeakPickerIM::pickIMCluster`'s own per-spectrum temporaries -- 88.125 B per RAW peak across six
+simultaneously live arrays, times up to 100 concurrent picks -- plus the loader's 64-frame MS1 decode
+stage (`patch:340`). (A first version of this paragraph blamed a 256-frame loader decode batch; that
+batch is the MS2 block and never runs in pass 1, and the correction is in data2.md.) A trim can
+only help the resident shape. On the streaming shape the picker flush batch is the lever:
+`SPEXTRACTOR_PICK_BATCH=64` takes 3.0 GB off for +2.3% wall, and `SPEXTRACTOR_LOAD_BATCH` is inert on
+this peak (data3-batch.md).
