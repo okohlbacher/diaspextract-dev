@@ -3431,31 +3431,25 @@ protected:
     if (band_edges_acq && std::getenv("SPEXTRACTOR_WINDOW_FILE"))   // an option x env conflict: refuse in milliseconds
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "SPEXTRACTOR_WINDOW_FILE overrides the band edges per window (a slab-mode probe); it cannot be combined with trace:band_edges=acquisition.");
-    if (band_edges_acq && getStringOption_("trace:detector") == "integer"
-#ifdef SPEXTRACTOR_WITH_MZPEAK
-        && FileHandler::getTypeByFileName(in) != FileTypes::MZPEAK
-#endif
-       )
+    if (band_edges_acq && getStringOption_("trace:detector") == "integer")
     {
-      // the same candidate order the axis is loaded in below (the first whose calibration loads
-      // is THE source), so the bounds checked are the selected tdf's
+      // [3a] The axis is selected HERE, in the order the load below would use it (the first
+      // candidate whose calibration loads is THE source), so the bounds that are checked belong to
+      // the tdf that will actually calibrate the run -- and the check costs a two-row query rather
+      // than the whole load. No candidate at all is NOT an error: the integer detector then falls
+      // back to the OpenMS detector further down, loudly, and traces no bands to partition.
       std::vector<std::string> cand{in + "/analysis.tdf"};
       if (const char* sc = std::getenv("SPEXTRACTOR_MZPEAK_TDF")) cand.push_back(sc);
-      String reasons; bool selected = false;
       for (const std::string& c : cand)
       {
         String w_axis;
-        if (!loadTofAxis(c, w_axis)) { reasons += " [" + c + ": no calibration: " + w_axis + "]"; continue; }
-        selected = true;
+        if (!loadTofAxis(c, w_axis)) continue;   // not a calibration source; try the next
         if (!(tofAxis().n_bins > 1))
           throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                "trace:band_edges=acquisition needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + ").");
+                "trace:band_edges=acquisition needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + "). Use -trace:band_edges slab, or -trace:detector openms.");
         writeLogInfo_("flight-time axis from " + c + " (preflight): " + String(tofAxis().b_by_frame.size()) + " frame factors; digitizer bins " + String(tofAxis().n_bins) + ", acquisition m/z " + String(tofAxis().acq_lo) + "-" + String(tofAxis().acq_hi));
         break;
       }
-      if (!selected)
-        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:band_edges=acquisition: no candidate tdf provides a calibration:" + reasons + " (the integer detector cannot run on this input; -trace:detector openms is the escape)");
     }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
