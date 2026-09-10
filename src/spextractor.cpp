@@ -1698,11 +1698,12 @@ namespace
       const int n = (int)buf_.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
-      // [ledger] the batch's RAW frames: ~16 B per raw peak (m/z double + intensity float + the
-      // ion-mobility float array), freed one by one inside the pick loop below. This is the load's
-      // largest transient and the reason its peak is not the sum of what survives it.
+      // [ledger] the batch's RAW frames at 20 B per raw peak: a Peak1D is 16 B (a double position
+      // plus a float intensity, padded) and the ion-mobility float array adds 4. Freed one by one
+      // inside the pick loop below; this is the load's largest transient, and the reason its peak
+      // is not the sum of what survives it. (Both reviews of 2026-09-10 corrected 16 -> 20.)
       long long raw_b = 0;
-      for (const auto& sp : buf_) raw_b += (long long)sp.size() * 16;
+      for (const auto& sp : buf_) raw_b += (long long)sp.size() * 20;
       LedCharge _raw(LC_SCRATCH, raw_b);
       // per-frame regions of one reusable scratch, sized by the RAW peak counts
       scratch_off_.resize((size_t)n + 1);
@@ -1812,11 +1813,12 @@ namespace
       const int n = (int)ms1_buf_.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
-      // [ledger] the buffered RAW MS1 frames: ~16 B per raw peak, held until each is picked in
-      // place below. MS1 is 37% of the run's peaks, so this batch is the largest single transient
-      // of pass 1 -- the reason the MS1 phase peaks far above the map it produces.
+      // [ledger] the buffered RAW MS1 frames at 20 B per raw peak (Peak1D 16 padded + the IM
+      // float), held until each is picked in place below. 256 frames x ~690k peaks = ~3.5 GB on
+      // dataset D: the largest single transient of pass 1, and the reason the MS1 phase peaks far
+      // above the map it produces. Both reviews of 2026-09-10 identified this row independently.
       long long raw_b = 0;
-      for (const auto& sp : ms1_buf_) raw_b += (long long)sp.size() * 16;
+      for (const auto& sp : ms1_buf_) raw_b += (long long)sp.size() * 20;
       LedCharge _raw(LC_SCRATCH, raw_b);
       PeakPickerIM picker = picker_;
       std::exception_ptr pick_err;
