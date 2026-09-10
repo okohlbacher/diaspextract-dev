@@ -4716,6 +4716,8 @@ protected:
             frag_traces.reserve(frag_traces.size() + ci.rec.size());
             for (const Trace& r : ci.rec)
             {
+              if (wst.inten.size() + r.len >= (size_t)std::numeric_limits<uint32_t>::max())
+                throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);   // as absorb()
               Trace t = r; t.off = (uint32_t)wst.inten.size();
               wst.inten.insert(wst.inten.end(), ci.inten.begin() + r.off, ci.inten.begin() + r.off + r.len);
               frag_traces.push_back(t);
@@ -4867,6 +4869,10 @@ protected:
               for (long j = cs; j < ce; ++j)
               {
                 const Precursor_& pc = precursors[pidx[(size_t)j]];
+                // [tile] detector: what is scored here is owned here (the file is concatenated
+                // tile by tile without a global sort, so a mis-owned RT would mis-order it)
+                if (!((tk == 0 || !(tile.lo - pc.rt > delta_rt)) && (tile.last || (tile.hi - pc.rt > delta_rt))))
+                  throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tile] scoring a precursor this tile does not own", String(pc.rt, 6));
                 MSSpectrum ms2;
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
                              delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);

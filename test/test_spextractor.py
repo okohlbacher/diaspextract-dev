@@ -497,6 +497,14 @@ def main():
         nc = os.path.join(work, "tiles_nocarry.mzML")
         run(binary, inp_t, nc, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env_nc)
         assert digest(nc) != digest(one), "switching the carry off changed nothing: the fixture does not exercise it"
+        # the TRANSITIVE carry: pitch 5 s (4 frames) is below 2 x gate:delta_rt (6 s), so a
+        # fragment must be re-carried across more than one tile to reach its precursor
+        one5 = os.path.join(work, "tiles5_one.mzML"); t5 = os.path.join(work, "tiles5_t.mzML")
+        run(binary, inp_t, one5, extra=("-tile:rt_sec", "5"), threads=2, env=env)
+        r5 = run(binary, inp_t, t5, extra=("-tile:rt_sec", "5", "-tile:cells_per_tile", "1"), threads=2, env=env)
+        m = re.search(r"\[tile\] (\d+) tile\(s\) of up to 1 cell", r5.stdout + r5.stderr)
+        assert m and int(m.group(1)) >= 5, "pitch 5 did not give >= 5 tiles"
+        assert digest(t5) == digest(one5), "the transitive carry (pitch < 2 delta_rt) does not reproduce the one-tile run"
     check("the boundary carry is load-bearing", c17)
 
     # 18: a window with NO frames in a middle tile (its MS2 frames in [20.6, 30.4) dropped): the
