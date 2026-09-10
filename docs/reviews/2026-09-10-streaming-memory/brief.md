@@ -69,6 +69,15 @@ be recomputed instead of held, could it be per tile instead of per run, and does
 frees actually leave the process? The ledger data below gives live bytes per structure at 250 ms
 resolution alongside RSS, so "freed but retained" is visible as the unattributed column.
 
+**A lever the measurements just exposed.** The cells must be fixed (that is what makes the output
+invariant), but a TILE is any GROUP of adjacent cells, and the grouping is free -- output is
+identical for every grouping, proven by digest. On dataset D at pitch 300 grouped 3 cells per
+tile, the first tile holds 3.30e8 picked peaks and the second 9.28e8: equal-time tiles are nowhere
+near equal-work tiles, because peak density along the gradient varies ~3x. So the peak memory of a
+tiled run is set by the DENSEST tile, and grouping cells by cumulative peak count (which the frame
+table's `num_peaks` gives before anything is read) would cut it without touching a line of science.
+Say what you think that is worth and what it costs.
+
 Also fair game, if the data supports it: the pass-1 MS1 phase (still whole-run and now the process
 peak), the cost of re-opening the `.d` per tile, the prefetch that is not implemented yet, the
 allocator (glibc, `malloc_trim` at phase boundaries; tcmalloc measured -7% peak once), and the
