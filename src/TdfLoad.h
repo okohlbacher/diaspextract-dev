@@ -28,6 +28,26 @@ namespace spextractor
 // one row (per-frame recalibration, unsupported). t1_by_frame[id] = Frames.T1, T1_ref when NULL;
 // index 0 is never a frame (Ids start at 1) and is left for the caller to treat as a sentinel.
 // ---------------------------------------------------------------------------------------------
+/// The acquisition's m/z range from GlobalMetadata (MzAcqRangeLower/Upper): the run-level bound the
+/// integer detector's band partition rests on when it must not depend on which frames are resident.
+inline bool loadTdfAcqRange(const std::string& tdf, double& lo, double& hi, std::string& why)
+{
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+  { why = std::string("cannot open ") + tdf; sqlite3_close(db); return false; }
+  sqlite3_stmt* st = nullptr; lo = hi = std::numeric_limits<double>::quiet_NaN();
+  if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper')", -1, &st, nullptr) == SQLITE_OK)
+    while (sqlite3_step(st) == SQLITE_ROW)
+    {
+      const std::string k = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+      const double v = std::atof(reinterpret_cast<const char*>(sqlite3_column_text(st, 1)));   // stored as text
+      if (k == "MzAcqRangeLower") lo = v; else hi = v;
+    }
+  sqlite3_finalize(st); sqlite3_close(db);
+  if (!(lo > 0.0) || !(hi > lo)) { why = "GlobalMetadata has no MzAcqRangeLower/Upper"; return false; }
+  return true;
+}
+
 inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
                                std::vector<double>& t1_by_frame, std::string& why)
 {

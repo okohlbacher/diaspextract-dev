@@ -72,6 +72,7 @@ namespace spx
     spextractor::TdfMzCalibration cal;
     std::vector<double> t1_by_frame;          // index = Frames.Id
     bool enabled = false;
+    double acq_lo = std::numeric_limits<double>::quiet_NaN(), acq_hi = std::numeric_limits<double>::quiet_NaN();   // GlobalMetadata MzAcqRange
 
     static std::vector<char> readMember_(zip_t* z, const char* name, zip_int64_t from = 0, zip_int64_t len = -1)
     {
@@ -135,7 +136,8 @@ namespace spx
           inflateEnd(&zs); std::fclose(out); }
         { std::string why;
           if (!spextractor::loadTdfCalibration(std::string(tmpl), cal, t1_by_frame, why))
-            throw std::runtime_error("mzpeak: " + why); }
+            throw std::runtime_error("mzpeak: " + why);
+          std::string w2; double lo, hi; if (spextractor::loadTdfAcqRange(std::string(tmpl), lo, hi, w2)) { acq_lo = lo; acq_hi = hi; } }
         std::remove(tmpl);
         enabled = true;
       }

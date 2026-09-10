@@ -639,6 +639,8 @@ namespace
     spextractor::TdfMzCalibration cal;
     vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
     bool ok = false;
+    double acq_lo = std::numeric_limits<double>::quiet_NaN();   ///< the acquisition's m/z range (GlobalMetadata)
+    double acq_hi = std::numeric_limits<double>::quiet_NaN();
 
     double factor(size_t frame_id) const
     { return frame_id < b_by_frame.size() ? b_by_frame[frame_id] : cal.frameFactor(cal.T1_ref); }
@@ -688,6 +690,7 @@ namespace
     std::vector<double> t1;
     if (!spextractor::loadTdfCalibration(tdf_path, cal, t1, why)) { tofAxis().ok = false; return false; }
     setTofAxis(cal, t1);
+    { std::string w2; double lo, hi; if (spextractor::loadTdfAcqRange(tdf_path, lo, hi, w2)) { tofAxis().acq_lo = lo; tofAxis().acq_hi = hi; } }
     return true;
   }
   constexpr double IM_LO = 0.4, IM_HI = 1.8;
@@ -2030,6 +2033,8 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run (at a fixed perf:trace_bands; the auto setting 0 ties the band count to the thread count): the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run. DEFAULT 600 since 2026-09-10: on the 30-minute file Sage +0.8% and MSFragger +1.5% with the entrapment FDR 1.16 -> 1.30% (within its interval), on the 2-hour file Sage +0.8%; 300 gains more Sage (+3.4%) at 1.38% entrapment. -1 = one cell = the whole run (the output before the cells).", false, true);
+    registerStringOption_("trace:band_edges", "<mode>", "slab", "Where the integer detector's per-window flight-time band partition comes from. 'slab': the window's resident peaks' extremes (data-dependent: a reader that holds only some of the frames cannot reproduce them). 'acquisition': tlo = 0 and thi = the acquisition's upper m/z (GlobalMetadata MzAcqRangeUpper) at the largest per-frame factor of the window's frozen frame table -- a run-level constant from metadata. The two differ by a few bins at the top; band membership at the interior edges moves for a few seeds per window.", false);
+    setValidStrings_("trace:band_edges", {"slab", "acquisition"});
     registerIntOption_("tile:cells_per_tile", "<n>", 0, "Group the retention-time cells into TILES of n cells each and run the window loop tile by tile: "
                        "detection on the tile's frames only, scoring of the precursors the tile owns (an MS1 frame time in [T_k - gate:delta_rt, T_{k+1} - gate:delta_rt)) "
                        "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
@@ -4128,6 +4133,7 @@ protected:
       if (!tofAxis().ok && spx::lastMzPeakExact())
       {
         setTofAxis(spx::lastMzPeakExact()->cal, spx::lastMzPeakExact()->t1_by_frame);
+        tofAxis().acq_lo = spx::lastMzPeakExact()->acq_lo; tofAxis().acq_hi = spx::lastMzPeakExact()->acq_hi;
         writeLogInfo_("flight-time axis from the mzPeak archive's embedded analysis.tdf: "
                       + String(tofAxis().b_by_frame.size()) + " frame factors");
       }
@@ -4228,17 +4234,31 @@ protected:
     // (exactly the values the body computed on the whole window), so every tile traces in the
     // same bands. The bins are converted here, once, in place (toTof is idempotent).
     map<WinKey, pair<TofIdx, TofIdx>> wbands;
+    const bool band_edges_acq = (getStringOption_("trace:band_edges") == "acquisition");
     if (integer_detector)
     {
+      if (band_edges_acq && !(tofAxis().acq_hi > 0.0))
+        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "trace:band_edges=acquisition needs MzAcqRangeUpper from the tdf's GlobalMetadata, which this input's calibration source did not provide.");
       for (const auto& w : window_list) wbands[w.first] = {0xFFFFFFFFu, 0};
       #pragma omp parallel for schedule(dynamic, 1)
       for (long i = 0; i < (long)window_list.size(); ++i)
       {
+        const WinKey& k = window_list[(size_t)i].first;
         PeakSlab& sl = *window_list[(size_t)i].second;
         toTof(sl);
         TofIdx tlo = 0xFFFFFFFFu, thi = 0;
         for (TofIdx t : sl.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
-        wbands.at(window_list[(size_t)i].first) = {tlo, thi};
+        // [3a] the run-level alternative: tlo 0, thi the acquisition's upper m/z at the window's
+        // largest per-frame factor (every peak's bin is at or below it); logged in both modes so
+        // the two are on record side by side
+        TofIdx thi_acq = 0;
+        if (tofAxis().acq_hi > 0.0)
+          for (double b : frozen.at(k).b) thi_acq = std::max(thi_acq, tofAxis().tofOf(tofAxis().acq_hi, b));
+        #pragma omp critical(winlog)
+        writeLogInfo_("[tof] window " + String(k[0] / 100.0) + "-" + String(k[1] / 100.0) + " slab tlo=" + String(tlo) + " thi=" + String(thi)
+                      + " | acquisition tlo=0 thi=" + String(thi_acq) + (band_edges_acq ? " (in use)" : " (slab in use)"));
+        wbands.at(k) = band_edges_acq ? pair<TofIdx, TofIdx>{0, thi_acq} : pair<TofIdx, TofIdx>{tlo, thi};
       }
     }
     // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
@@ -4276,6 +4296,7 @@ protected:
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
     out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
     out_exp.setMetaValue("spx:tile_cells_per_tile", getIntOption_("tile:cells_per_tile"));
+    out_exp.setMetaValue("spx:band_edges", getStringOption_("trace:band_edges"));
     out_exp.setMetaValue("spx:tiles", (int)tiles.size());
     out_exp.setMetaValue("spx:frame_table", frame_table_src);   // the frozen tables' source (loader | mzpeak | slab)
     out_exp.setMetaValue("spx:pearson_G", "frames");
