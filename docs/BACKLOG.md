@@ -489,7 +489,7 @@ FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size
 **What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
 differences are confined to within the smoother's edge of a boundary after the fix.
 
-### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; ANALYSED)
+### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; ANALYSED, stage 1 MEASURED, real dnoise under test)
 
 **The paper.** Garrett, Diedrich and Yates III, *dnoise: Fast Native Data Reduction for Bruker
 timsTOF*, bioRxiv 2026.08.27.747603; open source (Rust, MIT, github.com/pgarrett-scripps/dnoise).
@@ -524,6 +524,12 @@ occupancy could remove the faint ions the tool is already failing to convert, or
 noise burying them. It is an S-class change: Sage and MSFragger plus an entrapment FDR on both
 acquisitions, against D Sage 13,491 / MSFragger 12,918 / entrapment 1.30% and TNBC 009
 Sage 29,067 / MSFragger 27,949 / entrapment 1.09%.
+
+**Measured (docs/reviews/2026-09-10-dnoise/stage1-measurement.md):** stage 1 removes 70.4% of TNBC's
+and 86.9% of D's raw MS1 points, as a monotone staircase in intensity; the verdict's streak-clustering
+design removes strictly more than the paper's definition, and its map bound fails on TNBC. 85.0% of TNBC's
+picked MS1 map is below the tracer's own 100-count threshold and is never traced. The real dnoise v0.1.0
+is running on both files with SpeXtractor and both search engines (chains dnoise_d, dnoise_tnbc).
 
 **Verdict (docs/reviews/2026-09-10-dnoise/verdict.md): ship the PREDICATE as instrumentation
 first, not a filter.** One count-only pass that changes no byte of output and prices the whole

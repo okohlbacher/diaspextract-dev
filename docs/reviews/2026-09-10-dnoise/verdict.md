@@ -1,5 +1,12 @@
 # dnoise in SpeXtractor: decision and plan
 
+> **Corrections, 2026-09-10 (stage1-measurement.md in this folder).** Measured on raw MS1 frames: the streak
+> clustering reformulation in section 3 removes strictly MORE than the per-point definition, so it is not an
+> equivalent cheaper design; the "every picker singleton is a run of length 1" lemma in section 4 fails on
+> TNBC 009, so the surviving-map bound is not a bound on the long file; 201.9 M centroids is 3,851 MiB, not
+> 4,038; removal is a monotone staircase in intensity (kill rule 4 fails at the raw-point level); and the
+> real dnoise v0.1.0 defaults are ±3 TOF, two iterations, halo ON and both MS1 gates on.
+
 ## 1. The verdict in five lines
 
 1. **Do not ship a dnoise filter now. Ship its predicate as instrumentation first** — one count-only pass that changes no byte of output and prices the whole proposal.
