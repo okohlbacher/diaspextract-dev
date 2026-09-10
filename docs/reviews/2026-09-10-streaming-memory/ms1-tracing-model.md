@@ -53,9 +53,14 @@ The two curves cross at a map of about 31 GiB, roughly an 80-minute gradient at 
 
 - **Band edges from the unpruned spectra.** The edges are quantiles of a stride-97 m/z sample of the
   whole map, and edge changes are visible at the 1e-4 level.
-- **A per-frame 48-bit band non-emptiness mask.** A band spectrum that exists today because it has any
-  peak in the band, sub-threshold included, must still be inserted, empty if need be, because the tracer
-  counts empty scans.
+- **Every band spectrum that exists today must still exist.** A band spectrum is inserted when any peak,
+  sub-threshold included, falls in its range, and the tracer counts it as a scan. *(Corrected the same day:
+  this condition was first written as a per-frame 48-bit band mask built at flush. That mask cannot be
+  built there: the edges are quantiles of the whole run's sample, known only after the last flush. The
+  buildable form is a witness chain: keep, besides every survivor, each frame's first and last peak and the
+  fewest sub-threshold peaks that leave no relative m/z gap wider than the band halo h = 20 x ppm x 1e-6.
+  Every band range is at least 2h/(1-h) wide, so a range that held any peak still holds one, whatever the
+  edges. Brute force: 0 mismatches in 360,968 band checks, 37,119 without the witnesses.)*
 
 The prune predicate must be intensity ≤ threshold as a double, the exact complement of the tracer's
 `> noise_threshold_int_`. Nothing else reads the map's peaks: every other reader takes retention times

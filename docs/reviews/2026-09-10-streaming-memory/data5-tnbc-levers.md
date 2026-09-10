@@ -11,7 +11,7 @@ agree with each other (`725298dd`), and the MS1 histogram is identical in all si
 | control, last (load 22) | 9:23.88 | 68.02 GB | 66,463 MiB at 79 s, MS1 partition | 20,061 s |
 | `SPEXTRACTOR_MS1_TRIM=1` | 9:39.37 | 65.94 GB | 64,535 MiB at 40 s, **load** | 19,988 s |
 | all three levers | 10:20.37 | **62.22 GB** | 61,082 MiB at 64 s, **load end** | 20,526 s |
-| pitch 300, 26 tiles | 8:44.41 | 68.72 GB | 67,216 MiB at 77 s, MS1 partition | 17,873 s |
+| pitch 300, 25 tiles (first recorded as 26; e.log: "in 25 tile(s)") | 8:44.41 | 68.72 GB | 67,216 MiB at 77 s, MS1 partition | 17,873 s |
 | pitch 300 with the levers | 9:52.18 | 62.78 GB | 61,221 MiB at 61 s, load end | 18,091 s |
 
 The levers are: the MS1 trim between band distribution and detection, the MS1-only picker batch of 64,

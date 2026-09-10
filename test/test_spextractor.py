@@ -16,10 +16,21 @@ checks that fail if the things most likely to break do break:
                          spectrum; seven missing cycles must give TWO traces. Every version of the
                          integer detector that lost 92% of the peptides passed checks 1-4.
   ... 14. writer           count, id="spectrum=K", index="K" and the <indexList> offsets agree
+  ... 19. MS1 prune        perf:ms1_prune leaves the spectra byte-identical; dropping its witnesses does not
+     19b. prune chain      a band kept alive only by interior chain links: dropping just the links changes it
+     19c. stored order     MS1 spectra stored in descending m/z give the ascending fixture's result, prune off or on
+     19d. non-finite m/z   a NaN or infinite MS1 m/z is refused right after the pick, before the prune, prune off or on
+      20. dnoise:ms1       on by default, it filters a Bruker .d only: an mzML is skipped, logged, stamped, unchanged
+      21. dnoise SDK       a .d holding only its analysis.tdf: with a Bruker SDK path set, dnoise:ms1 refuses before the
+                           load; without one the run gets past the dnoise setup and fails in the loader
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
 real data in the benchmark harness and not here.
+
+An mzML is never streamed: every check here takes the RESIDENT load (the stream attempt fails on it
+before any frame is delivered), so the MS1 prune inside the streaming consumer (flushMS1_, its
+cross-batch sample offsets) is covered only by the cluster gates on real .d input.
 
 Usage: test_spextractor.py /path/to/spextractor [workdir]
 Exit status is 0 only if every check passes.
@@ -64,7 +75,8 @@ def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0):
 </binaryDataArrayList></spectrum>"""
 
 
-def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0, drop_ms2=None):
+def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0, drop_ms2=None, ms1_extra=None,
+          ms1_descending=False):
     """Two precursors that co-elute in one isolation window: a z=2 envelope and a z=1 envelope.
 
     Both are given a 3-peak isotope envelope so `require_isotope_support` keeps them, matching
@@ -83,6 +95,9 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
     `z1_shift`: cycles by which the z=1 precursor's elution apex is moved (negative = earlier),
     so the two precursors can be owned by different tiles. `drop_ms2`: (lo, hi) in seconds; MS2
     frames with lo <= rt < hi are omitted (a window with no frames in one tile).
+
+    `ms1_extra`: a function of the cycle returning extra MS1 peaks [(mz, intensity, 1/K0)].
+    `ms1_descending`: store every MS1 spectrum in DESCENDING m/z order, the IM array in lockstep.
     """
     win = (600.0, 590.0, 620.0)                    # target, lo, hi
     z2_mono, z2_im = 601.3, 0.90                   # a doubly-charged precursor
@@ -102,7 +117,10 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
             if not gap:
                 ms1.append((z2_mono + k * ISO / 2.0, 6.0e5 * amp * rel)); ms1_im.append(z2_im)
             ms1.append((z1_mono + k * ISO / 1.0, 4.0e5 * amp1 * rel)); ms1_im.append(z1_im)
+        for mz, it, im in (ms1_extra(c) if ms1_extra else ()):
+            ms1.append((mz, it)); ms1_im.append(im)
         order = sorted(range(len(ms1)), key=lambda i: ms1[i][0])
+        if ms1_descending: order.reverse()
         specs.append(spectrum(idx, 1, rt, [ms1[i] for i in order], [ms1_im[i] for i in order])); idx += 1
         if drop_ms2 and drop_ms2[0] <= rt < drop_ms2[1]: continue
         ms2, ms2_im = [], []
@@ -164,6 +182,46 @@ def synth_tdf(path, n_frames):
                     ("DigitizerNumSamples", "634073")])
     db.commit(); db.close()
     return path
+
+
+def synth_fake_d(d):
+    """A Bruker .d holding only its analysis.tdf: no analysis.tdf_bin, so the loader cannot read a single frame.
+
+    The metadata carries everything the tool decides before the load: dataset D's MzCalibration row and the
+    GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- dataset D's TimsCalibration row,
+    ten Frames (ids 1 and 6 MS1) of 944 scans with integer NumScans/NumPeaks and AccumulationTime 99.958 ms, and 24
+    diaPASEF window rows. The shapes are those of the dnoise port's second-review fixtures.
+    """
+    import sqlite3, json
+    g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests", "calibration_golden.json")))[0]
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "analysis.tdf")
+    if os.path.exists(path):
+        os.remove(path)
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT)")
+    db.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
+                   [("AcquisitionSoftware", "timsTOF"), ("DigitizerNumSamples", "634073"),
+                    ("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
+                    ("OneOverK0AcqRangeLower", "0.600000"), ("OneOverK0AcqRangeUpper", "1.400000")])
+    db.execute("CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase REAL,"
+               " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL, C3 REAL, C4 REAL)")
+    db.execute("INSERT INTO MzCalibration VALUES (1,?,?,?,?,?,?,?,?,0,0,0)",
+               (g["model_type"], g["timebase"], g["delay"], g["C0"], g["C1"], g["C2"], g["T1_ref"], g["dC1"]))
+    db.execute("CREATE TABLE TimsCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER NOT NULL, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9)")
+    db.execute("INSERT INTO TimsCalibration VALUES (1, 2, ?,?,?,?,?,?,?,?,?,?)",
+               (1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644,
+                167.9496150068565, 16.646316600032645, 2241.865411900982))
+    db.execute("CREATE TABLE Frames (Id INTEGER PRIMARY KEY, Time REAL, MsMsType INTEGER, NumScans INTEGER, NumPeaks INTEGER,"
+               " AccumulationTime REAL, TimsCalibration INTEGER, MzCalibration INTEGER, T1 REAL)")
+    db.executemany("INSERT INTO Frames VALUES (?,?,?,944,1000,99.958,1,1,?)",
+                   [(i, 0.1 * i, 0 if i % 5 == 1 else 9, g["T1_ref"] + 0.03 * (i % 3)) for i in range(1, 11)])
+    db.execute("CREATE TABLE DiaFrameMsMsWindows (WindowGroup INTEGER, ScanNumBegin INTEGER, ScanNumEnd INTEGER,"
+               " IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL)")
+    db.executemany("INSERT INTO DiaFrameMsMsWindows VALUES (?,?,?,?,?,?)",
+                   [(1 + k % 12, 34 + (k * 7) % 400, 500 + (k * 13) % 400, 400.0 + 0.5 * k, 25.0, 30.0) for k in range(24)])
+    db.commit(); db.close()
+    return d
 
 
 def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
@@ -533,7 +591,200 @@ def main():
         invariants(t, "empty-tile file")
     check("a window with no frames in a tile", c18)
 
-    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
+    # 19: the MS1 prune (perf:ms1_prune, default true) drops picked MS1 peaks at or below
+    #     trace:noise_threshold_int at load and must leave the output byte-identical. The fixture makes it
+    #     load-bearing: an MS1 trace at m/z 400.25 with hits in cycles 6, 10 (apex) and 14 only, while
+    #     cycles 7-9 and 11-13 carry nothing but sub-threshold peaks inside its band's m/z range (400.2 at
+    #     50 and at exactly 100.0; 400.24-400.38 at 50, of which the chain drops 400.24). A band spectrum
+    #     whose peaks are all at or below the threshold is still a SCAN to MassTraceDetection: 3 hits in 9
+    #     scans fail min_sample_rate 0.5. Without those spectra it is 3 of 3 and a trace -- so the
+    #     no-witness control (SPEXTRACTOR_MS1_PRUNE_NO_WITNESS=1, survivors only) must change the MS1
+    #     traces or the band spectra, and the witness chain must change nothing. Each cycle's lowest peak
+    #     is its stride-97 m/z sample and places the band edges: 450 in cycles 0-5 / 15-20 (an edge above
+    #     the trace, and misses that end its extension), 300 in 6/10/14, 200 in 8. The hit in cycle 14 is
+    #     float32 nextafter(100): a survivor. 1 band is exact trivially; 2 and 48 are the real test.
+    #     The no-witness control drops the anchors too, and its change is pinned exactly: one more MS1 trace (400.25,
+    #     3 of 3) and one more precursor, both [det] digests and the band spectra differ. Like every check here this
+    #     runs the RESIDENT load (an mzML is never streamed): the prune inside the streaming consumer (flushMS1_) is
+    #     covered only by the cluster gates on real .d input.
+    PRUNE_RE = r"\[ms1-prune\] picked (\d+) survivors (\d+) witnesses (\d+) at_noise (\d+) nan (\d+) bad_mz (\d+): kept (\d+)"
+    PRUNE_KEYS = {"traces": r"\[det\] MS1 traces n=\S+ digest=\S+", "sorted": r"\[det\] MS1 traces sorted by content: [^\n]*",
+                  "prec": r"\[det\] precursors n=\S+ digest=\S+", "bands": r"\[det\] MS1 band spectra \S*", "edges": r"\[ms1-edges\] [^\n]*"}
+    nx100 = struct.unpack("<f", struct.pack("<I", struct.unpack("<I", struct.pack("<f", 100.0))[0] + 1))[0]
+    def prune_extra(c):
+        if c <= 5 or c >= 15: return [(450.0, 150.0, 0.80)]
+        if c in (6, 10, 14): return [(300.0, 150.0, 0.80), (400.25, {6: 150.0, 10: 500.0, 14: nx100}[c], 0.95)]
+        if c == 8: return [(200.0, 150.0, 0.80), (400.2, 50.0, 0.95)]
+        if c in (7, 9): return [(400.2, 50.0, 0.95)]
+        return [(400.2, 100.0, 0.95), (400.24, 50.0, 0.95), (400.28, 50.0, 0.95), (400.38, 50.0, 0.95)]
+    def prune_arm(inp_p, tag, bands, prune, env_extra=None):
+        """One SPEXTRACTOR_DET run: (output, {key: line or None}, every [det] and [ms1-edges] line, log)."""
+        import re
+        out = os.path.join(work, f"{tag}_b{bands}_{prune}.mzML")
+        env = dict(os.environ, SPEXTRACTOR_DET="1")
+        for v in ("SPEXTRACTOR_MS1_PRUNE_NO_WITNESS", "SPEXTRACTOR_MS1_PRUNE_NO_CHAIN"): env.pop(v, None)
+        env.update(env_extra or {})
+        r = run(binary, inp_p, out, extra=("-perf:ms1_trace_bands", str(bands), "-perf:ms1_prune", prune, "-diag:dump_ms1_tsv", out), env=env)
+        log = r.stdout + r.stderr
+        got = {k: (m.group(0) if m else None) for k, m in ((k, re.search(p, log)) for k, p in PRUNE_KEYS.items())}
+        assert got["traces"] and got["prec"], f"{tag} bands {bands} prune {prune}: no [det] MS1/precursor line under SPEXTRACTOR_DET:\n" + log[-800:]
+        assert (got["bands"] is not None) == (bands > 1) and (got["edges"] is not None) == (bands > 1), \
+            f"{tag} bands {bands} prune {prune}: [det] MS1 band spectra / [ms1-edges] expected iff bands > 1: {got}"
+        return out, got, re.findall(r"\[(?:det|ms1-edges)\][^\n]*", log), log
+    prune_ref = {}   # (bands, prune) -> (digest, every [det]/[ms1-edges] line) of check 19's fixture, for 19c
+    def c19():
+        import re
+        inp_p = os.path.join(work, "prune.mzML")
+        synth(inp_p, n_cycles=21, ms1_extra=prune_extra)
+        n_of = lambda line: int(re.search(r"n=(\d+)", line).group(1))
+        for bands in (1, 2, 48):
+            off, g_off, det_off, log_off = prune_arm(inp_p, "prune", bands, "false")
+            on, g_on, det_on, log_on = prune_arm(inp_p, "prune", bands, "true")
+            assert "[ms1-prune]" not in log_off, "perf:ms1_prune false still pruned"
+            m = re.search(PRUNE_RE, log_on)
+            assert m, "the prune did not log its counters:\n" + log_on[-800:]
+            picked, surv, wit, at_noise, _, bad_mz, kept = (int(x) for x in m.groups())
+            assert kept == surv + wit and picked > kept and wit > 0 and at_noise == 3 and bad_mz == 0, \
+                f"the fixture does not exercise the prune (picked {picked}, survivors {surv}, witnesses {wit}, at_noise {at_noise}, bad_mz {bad_mz}, kept {kept})"
+            assert digest(on) == digest(off), f"bands {bands}: perf:ms1_prune true changed the spectra"
+            for k in PRUNE_KEYS:
+                assert g_on[k] == g_off[k], f"bands {bands}: {k} differs with the prune on:\n  off {g_off[k]}\n  on  {g_on[k]}"
+            assert ms1_traces_near(off + ".traces.tsv", 400.25) == ms1_traces_near(on + ".traces.tsv", 400.25) == [], \
+                f"bands {bands}: with every witness kept the 400.25 trace must fail min_sample_rate (3 hits in 9 scans)"
+            prune_ref[(bands, "false")], prune_ref[(bands, "true")] = (digest(off), det_off), (digest(on), det_on)
+            if bands > 1:
+                nw, g_nw, _, log_nw = prune_arm(inp_p, "prune_nowit", bands, "true", {"SPEXTRACTOR_MS1_PRUNE_NO_WITNESS": "1"})
+                assert "SPEXTRACTOR_MS1_PRUNE_NO_WITNESS: survivors only" in log_nw, "the no-witness control did not announce itself"
+                near_nw = ms1_traces_near(nw + ".traces.tsv", 400.25)
+                assert n_of(g_nw["traces"]) == n_of(g_off["traces"]) + 1 and n_of(g_nw["prec"]) == n_of(g_off["prec"]) + 1 and near_nw == [3], \
+                    f"bands {bands}: dropping the witnesses must add exactly the 400.25 trace (3 of 3) and one precursor:\n" \
+                    f"  off   {g_off['traces']} / {g_off['prec']}\n  nowit {g_nw['traces']} / {g_nw['prec']}, near 400.25 {near_nw}"
+                assert g_nw["traces"] != g_off["traces"] and g_nw["prec"] != g_off["prec"] and g_nw["bands"] != g_off["bands"], \
+                    f"bands {bands}: the no-witness control must change both [det] digests and the band spectra"
+    check("the MS1 prune is output-identical, and its witnesses are load-bearing", c19)
+
+    # 19b: the chain's INTERIOR links are load-bearing on their own (check 19 cannot show it: its anchors and gap
+    #      endpoints keep every band alive). Every frame has < 97 peaks, so its stride-97 sample is its lowest peak:
+    #      399.9 in cycles 0-5, 200.0 in 6-14, 400.6 in 15-20. At 48 bands the trace at 400.25 (hits in cycles 6, 10 =
+    #      apex, 14) then owns the core band [399.9, 400.6), range [399.78003, 400.72018). Cycles 7-9 / 11-13 hold,
+    #      inside that range, nothing but the links of a sub-threshold chain 399.70..400.80 at 0.05 Th (hop at 400 =
+    #      0.12 Th): its first peak 200.0, its gap far side 399.70 and its last peak (612.61) all lie OUTSIDE the range.
+    #      With every link kept those six frames stay SCANS (3 hits in 9: no trace); with only the links dropped
+    #      (SPEXTRACTOR_MS1_PRUNE_NO_CHAIN=1, anchors kept) they vanish from 26 bands and the trace is 3 of 3. At 1 and 2
+    #      bands the outer ranges always hold a frame's first or last peak, so links can never matter there.
+    def c19b():
+        import re
+        chain = [round(399.70 + 0.05 * k, 2) for k in range(23)]
+        def extra(c):
+            if c <= 5: return [(399.9, 150.0, 0.80)]
+            if c >= 15: return [(400.6, 150.0, 0.80)]
+            if c in (6, 10, 14): return [(200.0, 50.0, 0.80), (400.25, {6: 150.0, 10: 500.0, 14: 150.0}[c], 0.95)]
+            return [(200.0, 50.0, 0.80)] + [(mz, 50.0, 0.95) for mz in chain]
+        inp_c = os.path.join(work, "prune_chain.mzML")
+        synth(inp_c, n_cycles=21, ms1_extra=extra)
+        near = lambda out: ms1_traces_near(out + ".traces.tsv", 400.25)
+        n_of = lambda line: int(re.search(r"n=(\d+)", line).group(1))
+        for bands in (1, 2, 48):
+            off, g_off, _, _ = prune_arm(inp_c, "chain", bands, "false")
+            on, g_on, _, log_on = prune_arm(inp_c, "chain", bands, "true")
+            assert digest(on) == digest(off), f"bands {bands}: perf:ms1_prune true changed the spectra"
+            for k in PRUNE_KEYS:
+                assert g_on[k] == g_off[k], f"bands {bands}: {k} differs with the prune on:\n  off {g_off[k]}\n  on  {g_on[k]}"
+            assert near(off) == near(on) == [], f"bands {bands}: with every link kept the 400.25 trace must be invalid: {near(off)} {near(on)}"
+        # the control, at 48 bands (the loop's last arms)
+        nc, g_nc, _, log_nc = prune_arm(inp_c, "chain_nochain", 48, "true", {"SPEXTRACTOR_MS1_PRUNE_NO_CHAIN": "1"})
+        m_on, m_nc = re.search(PRUNE_RE, log_on), re.search(PRUNE_RE, log_nc)
+        assert m_on and m_nc and "SPEXTRACTOR_MS1_PRUNE_NO_CHAIN: interior chain links dropped" in log_nc, \
+            "no [ms1-prune] counters, or the no-chain control did not announce itself:\n" + log_nc[-800:]
+        surv_on, wit_on, surv_nc, wit_nc = int(m_on.group(2)), int(m_on.group(3)), int(m_nc.group(2)), int(m_nc.group(3))
+        assert surv_nc == surv_on and wit_nc == 9 + 6 and wit_on > wit_nc, \
+            f"the control must drop the links ONLY: survivors {surv_on} -> {surv_nc}, witnesses {wit_on} -> {wit_nc} (9 first peaks + 6 gap far sides stay)"
+        assert g_nc["edges"] == g_off["edges"], "the control moved the edges; it must change band membership only"
+        bands_of = lambda line: [int(x) for x in line.split()[-1].split(",")]
+        deficit = [a - b for a, b in zip(bands_of(g_off["bands"]), bands_of(g_nc["bands"]))]
+        assert set(deficit) == {0, 6} and deficit.count(6) == 26, f"expected the 6 chain frames to leave exactly 26 bands: {deficit}"
+        assert n_of(g_nc["traces"]) == n_of(g_off["traces"]) + 1 and near(nc) == [3], \
+            f"without the links the 400.25 trace must become valid (3 of 3): {g_off['traces']} -> {g_nc['traces']}, near {near(nc)}"
+    check("the MS1 prune's interior chain links are load-bearing on their own", c19b)
+
+    # 19c: stored order. Check 19's fixture with every MS1 spectrum stored in DESCENDING m/z (the IM array in lockstep)
+    #      must give exactly the ascending fixture's result at 2 and 48 bands, prune off and on: the digest and every
+    #      [det] and [ms1-edges] line. An as-stored stride-97 sample of it would give other band edges, so this pins
+    #      the whole pipeline -- the mzML loader's sort, sortSpectra before MS1 tracing, the prune's own sort -- not
+    #      frame()'s sort alone.
+    def c19c():
+        assert prune_ref, "check 19 must run first"
+        inp_d = os.path.join(work, "prune_desc.mzML")
+        synth(inp_d, n_cycles=21, ms1_extra=prune_extra, ms1_descending=True)
+        first = next(l for l in open(inp_d) if 'name="m/z array"' in l)   # spectrum 0 is an MS1 frame
+        raw = base64.b64decode(first[first.find("<binary>") + 8: first.find("</binary>")])
+        mzs = list(struct.unpack(f"<{len(raw) // 8}d", raw))
+        assert len(mzs) > 1 and mzs == sorted(mzs, reverse=True), f"the fixture's MS1 spectrum is not stored descending: {mzs}"
+        for bands in (2, 48):
+            for prune in ("false", "true"):
+                out, _, det, _ = prune_arm(inp_d, "prune_desc", bands, prune)
+                want_digest, want_det = prune_ref[(bands, prune)]
+                assert digest(out) == want_digest, f"bands {bands} prune {prune}: the descending fixture's spectra differ from the ascending one's"
+                assert det and det == want_det, \
+                    f"bands {bands} prune {prune}: [det]/[ms1-edges] lines differ from the ascending fixture:\n  asc  {want_det}\n  desc {det}"
+    check("MS1 spectra stored in descending m/z give the ascending result, prune off and on", c19c)
+
+    # 19d: a non-finite MS1 m/z is refused after the pick and BEFORE the prune, prune off and on alike. synth packs m/z as
+    #      float64 (19c decodes '<d'), so NaN and inf survive the mzML round trip. The [ms1-prune] line is logged after the
+    #      resident prune, so its absence shows the refusal happens in the pick loop. The stream-fallback passthrough runs
+    #      only on streamed .d/mzPeak input and stays covered by the cluster gates, as flushMS1_ already is.
+    def c19d():
+        for tag, bad in (("nan", float("nan")), ("inf", float("inf"))):
+            inp_n = os.path.join(work, f"prune_{tag}.mzML")
+            synth(inp_n, n_cycles=21, ms1_extra=lambda c: prune_extra(c) + ([(bad, 5000.0, 0.95)] if c == 10 else []))
+            for bands in (1, 48):
+                for prune in ("false", "true"):
+                    r = run(binary, inp_n, os.path.join(work, f"{tag}_b{bands}_{prune}.mzML"),
+                            extra=("-perf:ms1_trace_bands", str(bands), "-perf:ms1_prune", prune), expect_fail=True)
+                    log = r.stdout + r.stderr
+                    assert "non-finite m/z" in log, f"{tag} bands {bands} prune {prune}: not refused for its m/z:\n" + log[-800:]
+                    assert "[ms1-prune]" not in log, f"{tag} bands {bands} prune {prune}: refused only after the load summary, not at the pick"
+    check("a non-finite MS1 m/z is refused before the prune, prune off and on", c19d)
+
+    # 20: dnoise:ms1 (default true) denoises the raw MS1 frames of a Bruker .d, which this suite cannot build. What it
+    #     can pin is the rest of the contract: an mzML is not filtered but skipped, logged and stamped, and
+    #     -dnoise:ms1 false stamps "off" -- both with the spectra of the default run.
+    def c20():
+        import re
+        def stamp(path, key):
+            m = re.search(r'spx:%s"[^>]*value="([^"]*)"' % key, open(path, encoding="utf-8", errors="replace").read(200000))
+            return m.group(1) if m else None
+        on, off = os.path.join(work, "dnoise_on.mzML"), os.path.join(work, "dnoise_off.mzML")
+        r_on, r_off = run(binary, inp, on), run(binary, inp, off, extra=("-dnoise:ms1", "false"))
+        log_on, log_off = r_on.stdout + r_on.stderr, r_off.stdout + r_off.stderr
+        assert "[dnoise] MS1 denoising skipped: the input is not a Bruker .d" in log_on, "the default run did not log the skip:\n" + log_on[-800:]
+        assert stamp(on, "dnoise_ms1") == "skipped (input is not a Bruker .d)", f"spx:dnoise_ms1 = {stamp(on, 'dnoise_ms1')!r} on an mzML at the default"
+        assert "[dnoise]" not in log_off, "-dnoise:ms1 false still logged a [dnoise] line"
+        assert stamp(off, "dnoise_ms1") == "off", f"spx:dnoise_ms1 = {stamp(off, 'dnoise_ms1')!r} with -dnoise:ms1 false"
+        assert digest(on) == digest(off) == digest(out_def), "the spectra depend on dnoise:ms1 on an input it does not filter"
+    check("dnoise:ms1 skips an mzML (logged and stamped), 'false' stamps off, the spectra are unchanged", c20)
+
+    # 21: dnoise:ms1 inverts the loader's m/z through the tdf's MzCalibration table model, but with a Bruker SDK path set
+    #     the loader calibrates through the SDK, so the setup refuses before the load. The input is a .d holding only its
+    #     analysis.tdf (synth_fake_d: no analysis.tdf_bin, the loader cannot read a frame). With OPENMS_BRUKER_SDK_PATH the
+    #     run must be refused naming dnoise:ms1 and the SDK, with no dnoise setup line and no loader output; without it the
+    #     same input must get past the dnoise setup and fail in the loader, which shows the refusal comes first.
+    def c21():
+        fake = synth_fake_d(os.path.join(work, "fake.d"))
+        env = dict(os.environ)
+        for v in ("OPENMS_BRUKER_SDK_PATH", "SPEXTRACTOR_MZPEAK_TDF", "SPEXTRACTOR_TILE_RESIDENT"): env.pop(v, None)
+        setup_line = "MS1 path on the raw frames, before the pick"
+        r = run(binary, fake, os.path.join(work, "fake_sdk.mzML"), expect_fail=True, env=dict(env, OPENMS_BRUKER_SDK_PATH="/nonexistent"))
+        log = r.stdout + r.stderr
+        assert "dnoise:ms1" in log and "Bruker SDK" in log, "OPENMS_BRUKER_SDK_PATH set: not refused naming dnoise:ms1 and the Bruker SDK:\n" + log[-800:]
+        assert setup_line not in log and "[stream]" not in log, "OPENMS_BRUKER_SDK_PATH set: refused only after the dnoise setup or the load:\n" + log[-800:]
+        r = run(binary, fake, os.path.join(work, "fake_table.mzML"), expect_fail=True, env=env)
+        log = r.stdout + r.stderr
+        assert setup_line in log, "no Bruker SDK path: the fake .d did not get past the dnoise setup:\n" + log[-1500:]
+        assert "[stream] streaming load failed" in log, "no Bruker SDK path: the run did not fail in the loader (no analysis.tdf_bin):\n" + log[-800:]
+    check("dnoise:ms1 refuses a Bruker SDK calibration before the load, and gets past its setup without one", c21)
+
+    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2   # + 19b, 19c; + 19d, 21
     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 

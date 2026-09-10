@@ -164,8 +164,10 @@ Full tables, including by charge and by RT tenth, come from
 - **Part of the memory has a route that can preserve output, but it is not dnoise's peak.** 85% of TNBC's
   picked MS1 map lies below the tracer's 100-count threshold and is never traced. The MS1 tracing model
   (`../2026-09-10-streaming-memory/ms1-tracing-model.md`) ranks pruning those centroids at the picker flush
-  first. It is class D only with two conditions coded: band edges drawn from the unpruned spectra, and a
-  per-frame band non-emptiness mask. The model's verifier rated it "partly". It predicts the map at 45,617
+  first. It is class D only with two conditions coded: band edges drawn from the unpruned spectra (a stride-97
+  sample taken at flush), and every band spectrum kept non-empty through a witness chain of sub-threshold
+  peaks. *(Corrected the same day: the second condition was first written as a per-frame band mask, which
+  cannot be built before the whole run's band edges exist.)* The model's verifier rated it "partly". It predicts the map at 45,617
   → ~6,840 MiB (44.5 → 6.7 GiB), but the 13-tile run peak only at ~52 GB, because the window loop then
   binds; a per-tile trim is predicted to take the loop to ~20-25 GiB. None of this is measured. dnoise MS1
   only reached 25.08 GB, at a cost in peptides.

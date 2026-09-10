@@ -2,6 +2,106 @@
 
 ## [Unreleased]
 
+### Changed (2026-09-10) -- output changes: MS1 denoising is on by default
+
+- **dnoise's MS1 filter runs inside the tool, on the raw points before picking** (`dnoise:ms1`, default `true`).
+  It is a bit-identical C++ port of dnoise v0.1.0's default MS1 path: Garrett, Diedrich & Yates III, bioRxiv
+  2026.08.27.747603; MIT, see NOTICE and LICENSES/dnoise-MIT.txt. Per MS1 frame it runs an ion-mobility streak
+  filter (two passes), a halo filter, and the diaPASEF isolation-window gate.
+  - It keeps 12.7% of dataset D's MS1 points and 20.5% of TNBC 009's.
+  - The output is digest-identical to running the tool on dnoise's own filtered `.d`, so the searches recorded for
+    that route apply:
+    - dataset D: Sage −4.3%, MSFragger −4.0% peptides;
+    - TNBC 009: +1.5% and −0.5%;
+    - entrapment FDR inside the control's interval on D, just below it on TNBC 009.
+  - New reference digests: D `e43672a0`, TNBC 009 `3aafd0b5`.
+  - Memory at one cell per tile, against the prune-on default: D peak 25.90 → 22.48 GB (−13%), TNBC 009
+    31.97 → 25.17 GB (−21%); wall D 4:13 → 3:41 (−13%); on TNBC 009 the wall change depended on the node and the run (−15% to +3%
+    across three shared-node pairs).
+  - Bruker `.d` input only. Other inputs are not filtered, and the header records it (`spx:dnoise_ms1`).
+  - It refuses in milliseconds, naming the escape, when `trace:native_ms1_neighbors` > 0, or when a point's
+    flight-time index, scan index or raw intensity cannot be recovered exactly from the loader's values.
+  - `-dnoise:ms1 false` restores the previous output. Defaulting it on was the user's decision, taken with the
+    dataset D result in hand.
+
+### Fixed (2026-09-10) -- the dnoise port's second review; digests unchanged on every accepted input
+
+- **AccumulationTime is read as opentims reads it**: the tdf's text is parsed in the classic locale, whole, finite and
+  above 0. A decimal-comma locale used to turn "99.953" into 99. A frame above 100 ms (a correction below 1, several
+  raw counts per intensity) is refused at setup, and a corrected intensity at or above 2^24 has its own refusal.
+- **Every sqlite call of the tdf reader is checked**: each prepare, `SQLITE_DONE` after every row loop, the optional
+  `DiaFrameMsMsWindows` table decided from `sqlite_master` instead of from a failed query, and sqlite's own error text
+  in the refusal; the calibration and axis-bound readers likewise. A corrupt page used to end the windows loop as if
+  complete (1,554 of 3,000 windows on a probe; no gate at all on a one-page table). NULL `ScanNumBegin`/`ScanNumEnd`
+  are refused.
+- **Frames values are type- and range-checked before narrowing**: `NumScans`, `NumPeaks`, `MsMsType`, `TimsCalibration`
+  and `MAX(NumScans)` must be stored integers in range, and an MS1 frame with points needs a scan. The refusal names the
+  frame and the column; `NumScans` −1 used to become 4,294,967,295.
+- **The 1/K0 scan tables are built per TimsCalibration row over the scans of the MS1 frames that use it**, not over
+  the run's `MAX(NumScans)`, so an unused row or scans no MS1 frame has no longer refuse a run. The window gate keeps
+  the run's maximum, as dnoise does.
+- **The loader's m/z model is checked on the first MS1 frame**, not after a batch of 256, and before the load when a
+  Bruker SDK path is set (`OPENMS_BRUKER_SDK_PATH`): the loader then calibrates m/z through the SDK, which the TOF
+  recovery cannot invert.
+- **Every MS1 frame is denoised exactly once.** The resident pick filters an MS1 frame before its ion-mobility skip,
+  as the streaming consumer does, and a per-frame bitmap refuses a frame delivered twice or a non-empty MS1 frame never
+  delivered.
+- **A non-finite MS1 m/z is refused right after the pick**, on both load paths, prune on or off, and past the stream
+  fallback. It used to pass silently; sorted out of order around it, the band builder could drop every trace between
+  two band edges. The `[ms1-prune]` line keeps its `bad_mz` field, now always 0.
+- The resident load frees the filter's per-thread scratch right after the pick (up to ~4 GiB at 100 threads), and a
+  stream fallback zeroes the `[ms1-hist]` counters.
+- `dnoise:iterations 0` skips the streak filter only; the halo filter and the window gate still run (the help said it
+  kept every point).
+- **`scripts/sync_cluster.sh` deploys as one transaction on the node.** It uploaded sources and headers before taking
+  the lock, and a failed unit test or build restored only the `.cpp`. It now stages every file with checksums, takes
+  the lock, runs both unit tests (`test_dnoise_ms1`, `test_tdf_load`) from the stage, promotes by rename, re-checks the hashes after the build, writes the
+  provenance only on commit, and restores every promoted input on any failure.
+- Comments: opentims computes `(uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5)`, the order the recovery
+  inverts; the tdf reader no longer claims to share opentims' SQLite library outside an in-tree build.
+- Left as they are, on purpose: no runtime self-test of the gate against third-party compiler flags, no ledger charge
+  for the filter's scratch, the 2^24 intensity bound and the recovery's search bounds.
+
+### Changed (2026-09-10) -- byte-identical
+
+- **The point recovery moved into `DnoiseMs1.h`** (`spx::dnoise::recover`), inside its contraction-off region, where
+  the unit test reaches it; `DnoiseRun` maps its refusals to the same messages.
+- **`DnoiseMs1.h` refuses more floating-point flags at compile time**: a compiler that announces reciprocal or
+  associative math, no signed zeros or ARM fast FP (`__RECIPROCAL_MATH__`, `__ASSOCIATIVE_MATH__`,
+  `__NO_SIGNED_ZEROS__`, `__ARM_FP_FAST`). Only clang still slips past: `-freciprocal-math`, `-fassociative-math` and `-fno-signed-zeros` on every target, and
+  `-funsafe-math-optimizations` and `-ffp-model=fast` on x86-64.
+- **`-ffp-contract=off` stays on for the whole tool.** Builds for FMA-capable targets such as arm64 or `-march=haswell`
+  are now contraction-free like the cluster reference; default x86-64 builds and all pins are unchanged.
+
+### Tests (2026-09-10)
+
+- e2e 22 → 24 checks. **19d**: a NaN or infinite MS1 m/z is refused before the prune, at 1 and 48 bands, prune off and
+  on. **21**: a `.d` holding only an `analysis.tdf` is refused before any loader output when `OPENMS_BRUKER_SDK_PATH` is
+  set, and without it gets past the dnoise setup and fails in the loader.
+- `tests/test_dnoise_ms1.cpp`: the point recovery on both benchmark files' metadata (every TOF bin, every scan also at
+  ±1 ulp, every raw count below 2^20 and every 7th up to 2^24, each refusal), the delivery bitmap, and `iterations 0` still running the halo and
+  the gate.
+- `tests/test_tdf_load.cpp`, new, built only where SQLite3 is found: temporary tdfs with absent, column-less and
+  corrupt window tables, a corrupt Frames page and out-of-range Frames values.
+- CI: negative compile steps for the refused flags; `build.yml` runs the `dnoise_ms1` and `tdf_load` ctests in the full
+  tool build; the Linux leg runs `tests/test_sync_cluster_txn.sh` (a fake node behind ssh/scp shims) against
+  `scripts/sync_cluster.sh`.
+
+### Performance (2026-09-10) -- byte-identical
+
+- **Picked MS1 centroids the tracer can never use are dropped at load** (`perf:ms1_prune`, default `true`).
+  - The prune keeps every peak above `trace:noise_threshold_int`, plus each spectrum's first and last peak and a
+    minimal chain of sub-threshold witnesses. The band edges are sampled before pruning. Together these keep every
+    MS1 band spectrum and the tracer's input exact.
+  - Digests are identical with the prune off and on on both benchmark files, and on dnoise-filtered input.
+  - Peak at one cell per tile, with dnoise off: D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB.
+- **A probe for a trim between tiles** (`SPEXTRACTOR_TILE_TRIM=1`). This is an analysis instrument: the tile-count
+  analysis is in docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.
+
+### Fixed (2026-09-10)
+
+- `--helphelp` no longer aborts. The `tile:` option group had no registered subsection.
+
 ### Performance (2026-09-08/09) -- all of it byte-identical
 
 Four changes, verified on both benchmark files against the pinned digests, so the peptide sets are

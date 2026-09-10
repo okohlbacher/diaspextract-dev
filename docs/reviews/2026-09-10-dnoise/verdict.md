@@ -6,6 +6,20 @@
 > TNBC 009, so the surviving-map bound is not a bound on the long file; 201.9 M centroids is 3,851 MiB, not
 > 4,038; removal is a monotone staircase in intensity (kill rule 4 fails at the raw-point level); and the
 > real dnoise v0.1.0 defaults are ±3 TOF, two iterations, halo ON and both MS1 gates on.
+>
+> **Superseded, 2026-09-10 (later the same day).** The user decided to implement dnoise's MS1 path inside
+> SpeXtractor and turn it on by default, after seeing the measured cost (real-dnoise-evaluation.md). This
+> document's design is not what is being built:
+> - The algorithm is now known exactly from the v0.1.0 source, and a rewrite reproduces the binary's output.
+>   The streak sweep of section 3 is not dnoise. "Iterations > 1 is vacuous" is false: 1 vs 2 passes differ
+>   by 24,906 points on one D frame.
+> - The port runs all three MS1 stages at dnoise's defaults, not stage 1 with the halo off. It sits in the
+>   tool's MS1 flush before picking, not in the loader: scan, TOF and raw intensity are exactly recoverable
+>   there, so no OpenMS rebuild is needed.
+> - "0 GB at the shipped default" is wrong. With dnoise-filtered input at one tile, peaks fell about 9-12%
+>   (cross-node comparison). Once MS1 is small, tile count becomes a strong memory lever.
+> - Nothing was taken from the paper alone: the port follows the MIT source line by line. The MIT notice ships
+>   with it (LICENSES/, NOTICE).
 
 ## 1. The verdict in five lines
 

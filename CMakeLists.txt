@@ -14,16 +14,41 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# src/DnoiseMs1.h reproduces dnoise's MS1 window gate bit for bit only without floating-point
+# contraction: an FMA flips 3 of dataset D's 24 boxes, and Apple clang on arm64 contracts by default.
+# The header guards its own arithmetic; the flag keeps the translation units around it honest too, and
+# matches the cluster's in-tree build, where OpenMS compiles with it but does not export it.
+set(SPX_NO_FP_CONTRACT $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
+
 # The tool itself cannot be built without a PATCHED OpenMS: it includes
 # <OpenMS/FORMAT/TdfMzCalibration.h>, which scripts/apply_openms_patches.sh installs into the
 # OpenMS tree, and calls BrukerTimsFile::lastMzCalibration, which the same patch adds. No released
 # OpenMS package contains either. The calibration model, however, is a self-contained header, so
-# it can be compiled and tested anywhere -- which is what CI does on every platform.
+# it can be compiled and tested anywhere -- which is what CI does on every platform. So is the
+# dnoise MS1 port (src/DnoiseMs1.h).
 option(SPEXTRACTOR_TESTS_ONLY "Build only the OpenMS-independent tests (portability CI)" OFF)
+# The dnoise port ships inside the tool, so both builds compile and register its unit test (it needs no OpenMS).
+enable_testing()
+add_executable(test_dnoise_ms1 tests/test_dnoise_ms1.cpp)
+target_include_directories(test_dnoise_ms1 PRIVATE src)
+target_compile_options(test_dnoise_ms1 PRIVATE ${SPX_NO_FP_CONTRACT})
+add_test(NAME dnoise_ms1 COMMAND test_dnoise_ms1)
+# src/TdfLoad.h reads analysis.tdf through sqlite3, so its test builds wherever SQLite is found (not on the Windows
+# portability leg). It includes the calibration model as the patched OpenMS installs it; the shim maps that include onto
+# src/TdfMzCalibration.h, the same file.
+find_package(SQLite3 QUIET)
+if(SQLite3_FOUND)
+  configure_file(src/TdfMzCalibration.h ${CMAKE_CURRENT_BINARY_DIR}/shim/OpenMS/FORMAT/TdfMzCalibration.h COPYONLY)
+  add_executable(test_tdf_load tests/test_tdf_load.cpp)
+  target_include_directories(test_tdf_load PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/shim)
+  target_compile_options(test_tdf_load PRIVATE ${SPX_NO_FP_CONTRACT})
+  target_link_libraries(test_tdf_load PRIVATE SQLite::SQLite3)
+  add_test(NAME tdf_load COMMAND test_tdf_load)
+endif()
 if(SPEXTRACTOR_TESTS_ONLY)
   add_executable(test_calibration_cpp tests/test_calibration_cpp.cpp)
   target_include_directories(test_calibration_cpp PRIVATE src)
-  enable_testing()
+  target_compile_options(test_calibration_cpp PRIVATE ${SPX_NO_FP_CONTRACT})
   add_test(NAME calibration_golden
            COMMAND test_calibration_cpp ${CMAKE_CURRENT_SOURCE_DIR}/tests/calibration_golden.json)
   return()
@@ -35,6 +60,7 @@ find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLi
 
 add_executable(spextractor src/spextractor.cpp)
 target_link_libraries(spextractor PRIVATE OpenMS SQLite::SQLite3)
+target_compile_options(spextractor PRIVATE ${SPX_NO_FP_CONTRACT})
 target_compile_definitions(spextractor PRIVATE SPEXTRACTOR_VERSION="${PROJECT_VERSION}")
 # The source carries the same number as a fallback for builds that do not go through this file
 # (the in-tree OpenMS build); refuse to configure if the two have drifted.

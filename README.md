@@ -111,6 +111,8 @@ sage sage.json -o results pseudo.mzML
 | `-perf:malloc_trim` | `true` | return the allocator's free pages at the two phase boundaries (glibc). Trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition (the loop re-faults the returned pages cold); byte-identical output either way. Off when time, not memory, is the constraint |
 | `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output**: measured, it is slightly *more* sensitive on a large file (+2.0% Sage peptides at unchanged entrapment FDR) for 1.75× the memory and ~1.7× the wall |
 | `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (exact partition with a halo). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both gate datasets (set overlap 99.4% on dataset D, 89–99% on dataset A); 1 = off |
+| `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 13–21% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 13–21%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
+| `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: dataset D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB |
 | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
 | `-trace:band_edges` | `acquisition` | the integer detector's per-window band edges come from the tdf's metadata (the digitizer's last bin) instead of the window's resident peaks, so a streaming reader can reproduce them. Measured neutral on both benchmark files (Sage +1/+1, MSFragger 0/−3, entrapment +0.00/+0.01 points); `slab` reproduces the pre‑2026‑09‑10 output |
 | `-tile:cells_per_tile` | 0 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. Memory becomes one tile's once the streaming readers land (steps 3-5 of the tiling plan); on today's resident source it is a correctness switch |
@@ -189,12 +191,24 @@ by raw counts. The two statements are about different things and both have been 
 python3 test/test_spextractor.py build/spextractor
 ```
 
-Thirteen end-to-end checks against a synthetic acquisition: isotope ownership, the charge floor,
-parameter validation, thread-count determinism, mass-trace extension across missing cycles, and
-that the shipped detector is the one that actually runs. No fixtures, no framework, no network.
+Twenty-four end-to-end checks against a synthetic acquisition cover:
+- isotope ownership and the charge floor;
+- parameter validation;
+- thread- and tile-count invariance;
+- mass-trace extension across missing cycles;
+- that the shipped detector is the one that actually runs;
+- that the MS1 prune changes no output, with negative controls that must change it;
+- that a non-finite MS1 m/z is refused before the prune;
+- that `dnoise:ms1` refuses a Bruker SDK calibration before the load.
 
-`tests/` additionally holds the calibration unit tests and the entrapment-FDR scoring used for the
-benchmark record.
+No fixtures, no framework, no network. The suite's only Bruker `.d` holds an `analysis.tdf` and no
+frame data, so it cannot run the in-tool dnoise filter. That filter is covered by
+`tests/test_dnoise_ms1.cpp` (gate boxes, filter rules and the per-point recovery), by
+`tests/test_tdf_load.cpp` (the tdf reader on corrupt, incomplete and out-of-range tables; built only
+where SQLite3 is found) and by the cluster digest gates.
+
+`tests/` additionally holds the calibration, dnoise and tdf-reader unit tests and the entrapment-FDR
+scoring used for the benchmark record.
 
 ## Layout
 

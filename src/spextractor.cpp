@@ -25,6 +25,7 @@
 // redefines the struct.
 #include <OpenMS/FORMAT/TdfMzCalibration.h>
 #include "TdfLoad.h"   // loadTdfCalibration: sqlite3, tool-only
+#include "DnoiseMs1.h"   // [dnoise] the dnoise v0.1.0 MS1 port (header-only; tests/test_dnoise_ms1.cpp compiles the same code)
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
@@ -48,6 +49,8 @@
 #include <vector>
 #include <cstdlib>     // getenv
 #include <cstring>     // memcpy
+#include <optional>
+#include <time.h>      // clock_gettime(CLOCK_THREAD_CPUTIME_ID): [dnoise] filter CPU
 #ifdef __GLIBC__
 #include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
 #endif
@@ -1675,6 +1678,320 @@ namespace
     }
   };
 
+  /// The MS1 band partition's halo in units of trace:mass_error_ppm: detectTraces_ widens every band by
+  /// this many tolerances on each side, and the load-time MS1 prune is exact only because its hop is
+  /// derived from the same number. There is deliberately only this one. [ms1-prune]
+  constexpr double kBandHaloPpmMul = 20.0;
+
+  /// MSSpectrum::select right-sizes the peaks but reserves every data array at its OLD size (OpenMS MSSpectrum.cpp:49,
+  /// 71, 93): without this a selected spectrum keeps its Ion Mobility array's capacity for every peak it lost, 4 B each
+  /// (+2.3 GB resident on dataset D's pruned MS1 map). [ms1-prune] [dnoise]
+  inline void shrinkDataArrays(MSSpectrum& s)
+  {
+    for (auto& a : s.getFloatDataArrays()) a.shrink_to_fit();
+    for (auto& a : s.getIntegerDataArrays()) a.shrink_to_fit();
+    for (auto& a : s.getStringDataArrays()) a.shrink_to_fit();
+  }
+
+  /// [ms1-finite] Refuses an input with a non-finite MS1 m/z. Nothing after the pick is defined on one, prune on or off:
+  /// sortByPosition leaves finite m/z out of order around a NaN while isSorted() stays true, a NaN band edge leaves two
+  /// band cores owning nothing, and MassTraceDetection's m/z search matches anything. Rethrown past the stream fallback.
+  struct Ms1MzError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
+  inline void requireFiniteMs1Mz(const MSSpectrum& s)
+  {
+    for (Size i = 0; i < s.size(); ++i)
+      if (!std::isfinite(s[i].getMZ()))
+        throw Ms1MzError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                         "[ms1] MS1 spectrum has a non-finite m/z (" + std::to_string(s[i].getMZ()) + ") at peak " + std::to_string(i)
+                         + " of " + std::to_string(s.size()) + " after peak picking; the input is malformed and the run is refused", s.getNativeID());
+  }
+
+  /// [ms1-prune 2026-09-10] Picked MS1 centroids at or below trace:noise_threshold_int, dropped at load.
+  /// MassTraceDetection never traces them (its work map keeps (double)intensity > noise only), yet they
+  /// are ~81% of dataset D's picked MS1 map. Two things still read them, and both are kept exact:
+  ///  (i)  the band EDGES are quantiles of a stride-97 m/z sample of the whole map, so the sample is taken
+  ///       here, from the sorted spectrum BEFORE a peak is removed, and detectTraces_ uses it;
+  ///  (ii) a band spectrum EXISTS iff any peak lies in the band's range, and one whose peaks are all
+  ///       sub-threshold is still a SCAN to MassTraceDetection (it counts against min_sample_rate; an
+  ///       absent one does not). So a spectrum keeps its first and last peak plus the fewest sub-threshold
+  ///       witnesses that leave no two consecutive kept peaks more than hop (relative m/z) apart. A band
+  ///       range with its halo is at least 2 hop / (1 - hop) of its lower bound wide, so a range that
+  ///       holds any peak holds a kept one -- with a factor-2 margin over floating-point rounding.
+  /// Brute-forced against a model of the band builder and MassTraceDetection's filter: 0 of 360,968 band
+  /// checks differ, 37,119 without the witnesses. Never removes a spectrum or strips the IM array.
+  struct Ms1Prune
+  {
+    struct Counts { long long picked = 0, survivors = 0, kept = 0, at_noise = 0, nan = 0, bad_mz = 0; };
+    bool on = false;              ///< perf:ms1_prune
+    bool no_witness = false;      ///< SPEXTRACTOR_MS1_PRUNE_NO_WITNESS=1: survivors only -- a negative control, NOT exact
+    bool no_chain = false;        ///< SPEXTRACTOR_MS1_PRUNE_NO_CHAIN=1: interior chain links dropped, anchors kept -- a negative control, NOT exact
+    double noise = 0.0;           ///< trace:noise_threshold_int, the very double MassTraceDetection is given
+    double hop = 0.0;             ///< trace:mass_error_ppm x 1e-6 x kBandHaloPpmMul
+    std::vector<double> sample;   ///< the stride-97 m/z sample of every spectrum pruned so far, taken unpruned
+    size_t frames = 0, sample_n = 0;   ///< spectra pruned; the sample size their picked counts imply
+    Counts total;
+
+    void reset() { std::vector<double>().swap(sample); frames = sample_n = 0; total = Counts(); }
+
+    /// One spectrum: sort by m/z (a no-op on a picked one), write the m/z values detectTraces_ would
+    /// sample to @p samp, then keep the survivors and the witnesses. The chain runs once to count, and a second
+    /// time to collect only when it removes a peak: a spectrum it would not shrink costs no index vector and no select.
+    void frame(MSSpectrum& s, double* samp, Counts& c) const
+    {
+      s.sortByPosition();
+      const Size n = s.size();
+      for (Size i = 0; i < n; i += 97) *samp++ = s[i].getMZ();
+      const Size none = (Size)-1;
+      auto reach = [&](Size k, double x) { const double m = s[k].getMZ(); return x <= m + hop * m; };
+      bool finite = true;
+      auto chain = [&](bool count, auto&& take) {   // take(i) for every kept peak, in ascending order
+        Size last = none, cand = none;   // the last kept peak; the farthest sub-threshold peak within its reach
+        for (Size i = 0; i < n; ++i)
+        {
+          const double v = s[i].getIntensity();   // float -> double, as MassTraceDetection reads it
+          const bool surv = v > noise;            // its own test; the complement also drops NaN and == noise
+          const double x = s[i].getMZ();
+          if (count) { c.survivors += surv; c.at_noise += (v == noise); c.nan += (v != v); finite = finite && std::isfinite(x); }
+          if (no_witness) { if (surv) take(i); continue; }
+          if (last != none && reach(last, x)) { if (surv) { take(i); last = i; cand = none; } else cand = i; continue; }
+          if (cand != none)                       // out of reach: the candidate becomes a witness first
+          {
+            if (!no_chain) take(cand);            // (the NO_CHAIN control walks on from it without keeping it)
+            last = cand; cand = none;
+            if (reach(last, x)) { if (surv) { take(i); last = i; } else cand = i; continue; }
+          }
+          take(i); last = i;                      // the first peak, or the far side of a gap nothing bridges
+        }
+        if (cand != none) take(cand);             // the last peak
+      };
+      Size kept = 0;
+      chain(true, [&kept](Size) { ++kept; });
+      c.picked += (long long)n;
+      // A non-finite m/z hides from is_sorted, so the band builder's lower_bound over it lands where the spectrum's
+      // LENGTH decides -- which the prune changes. Both load paths refuse such a spectrum right after its pick, so it
+      // never reaches this line and bad_mz stays 0.
+      if (!finite) requireFiniteMs1Mz(s);   // [ms1-finite] unreachable, both load paths refuse first; throws if a future entry point skips them
+      c.kept += (long long)kept;
+      if (kept == n) return;
+      std::vector<Size> keep;
+      keep.reserve(kept);
+      chain(false, [&keep](Size i) { keep.push_back(i); });
+      s.select(keep);        // peaks and every data array in lockstep
+      shrinkDataArrays(s);   // select right-sizes only the peaks
+    }
+
+    /// Prune every spectrum of @p v that @p take selects, in parallel. A spectrum's sample size does not
+    /// depend on the prune, so the offsets are fixed first; the order is irrelevant (detectTraces_ sorts).
+    void batch(std::vector<MSSpectrum>& v, bool (*take)(const MSSpectrum&))
+    {
+      std::vector<char> sel(v.size());
+      std::vector<size_t> off(v.size());
+      size_t at = sample.size();
+      for (size_t i = 0; i < v.size(); ++i) { sel[i] = take(v[i]); off[i] = at; if (sel[i]) at += (v[i].size() + 96) / 97; }
+      sample.resize(at);
+      std::vector<Counts> cs(v.size());
+      std::exception_ptr err;
+      #pragma omp parallel for schedule(dynamic, 1)
+      for (long i = 0; i < (long)v.size(); ++i)
+      {
+        if (!sel[(size_t)i]) continue;
+        try { frame(v[(size_t)i], sample.data() + off[(size_t)i], cs[(size_t)i]); }
+        catch (...)
+        {
+          #pragma omp critical(ms1_prune_err)
+          if (!err) err = std::current_exception();
+        }
+      }
+      if (err) std::rethrow_exception(err);
+      for (size_t i = 0; i < v.size(); ++i)
+      {
+        if (!sel[i]) continue;
+        const Counts& c = cs[i];
+        ++frames; sample_n += (size_t)(c.picked + 96) / 97;
+        total.picked += c.picked; total.survivors += c.survivors; total.kept += c.kept; total.at_noise += c.at_noise; total.nan += c.nan; total.bad_mz += c.bad_mz;
+      }
+    }
+  };
+
+  /// [dnoise] A refusal of the MS1 port. Rethrown past the stream load's fallback, which would otherwise read
+  /// the whole run a second time only to refuse it there.
+  struct DnoiseError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
+
+  /// [dnoise 2026-09-10] dnoise v0.1.0's default MS1 path (DnoiseMs1.h) on every MS1 frame of a Bruker .d, on the
+  /// raw points, before the pick. The loader hands over m/z, 1/K0 and a corrected intensity, not the integers
+  /// dnoise filters, so all three are recovered and CHECKED per point, and the run is refused rather than
+  /// filtered on anything that does not recover exactly:
+  ///  TOF        the MzCalibration table model's inverse at the frame's factor lies within kTofTol of a bin (the
+  ///             chord misses by bins; the loader's own record, lastMzCalibration(), is checked per batch too);
+  ///  scan       the float32 1/K0 is RationalScan2ImConverter's value of one of the frame's scans, matched in its
+  ///             TimsCalibration row's table within kImTol -- far inside half the smallest step between scans;
+  ///  intensity  opentims stored (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5), and exactly one raw count may give
+  ///             the value: bit-identity needs the raw one (the corrected one flips 9 of 3.1 M kept points on TNBC).
+  /// The arithmetic is DnoiseMs1.h's spx::dnoise::recover (contraction off, unit-tested); this struct turns its refusals
+  /// into messages. A spectrum must be the whole raw frame (Frames.NumPeaks points: no aggregated or centroided frame),
+  /// and every MS1 frame with points must reach the filter exactly once (seen). The kept points are selected in place,
+  /// so a frame the filter empties stays in the map with an empty IM array.
+  struct DnoiseRun
+  {
+    struct Counts { long long frames = 0, emptied = 0, raw = 0, streak = 0, halo = 0, kept = 0; double cpu = 0.0; uint32_t fid = 0; };
+    /// one per thread for one batch: dnoise's Scratch plus the recovered integers (~45 B per raw point in flight)
+    struct Work { spx::dnoise::Scratch w; std::vector<uint32_t> scan, tof, raw; std::vector<uint8_t> keep; std::vector<Size> idx; };
+    bool on = false;                          ///< dnoise:ms1 true on a Bruker .d, set up
+    spx::dnoise::Params p;
+    std::optional<spx::dnoise::Ms1WindowGate> gate;
+    spextractor::TdfDnoiseInputs tdf;
+    std::vector<std::vector<float>> im_asc;   ///< per TimsCalibration row: the float32 1/K0 of each scan its MS1 frames have, ascending
+    std::vector<char> im_falls;               ///< the row's 1/K0 falls with the scan, so its im_asc is reversed
+    Counts total;
+    spx::dnoise::FrameCoverage seen;          ///< the frame ids add() merged, each once
+
+    static double threadCpu_() { timespec ts; return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 : 0.0; }
+
+    /// Read the tdf, build the gate and the scan tables. Empty = ready; anything else is why the run is refused.
+    std::string setup(const std::string& tdf_path)
+    {
+      std::string why;
+      if (!spextractor::loadTdfDnoise(tdf_path, tdf, why)) return why;
+      spx::dnoise::GateBuild g = spx::dnoise::buildMs1WindowGate(tdf.meta, tdf.windows, p);
+      if (!g.error.empty()) return "the dnoise MS1 port cannot build its window gate from this file: " + g.error;
+      gate = std::move(g.gate);
+      for (size_t id = 1; id < tdf.frames.size(); ++id)   // below 1 (AccumulationTime > 100 ms) raw counts share a corrected value
+        if (tdf.frames[id].msms_type == 0)
+          if (std::string r = spx::dnoise::recover::correctionRefusal(id, tdf.frames[id].corr); !r.empty()) return r;
+      // one table per TimsCalibration row, over the most scans an MS1 frame using it has (tdf.ms1_max_scans): a row no MS1
+      // frame uses stays empty and matches nothing. The gate keeps the run's MAX(NumScans), as dnoise does.
+      im_asc.assign(tdf.tims_cal.size(), {});
+      im_falls.assign(tdf.tims_cal.size(), 0);
+      for (size_t ci = 0; ci < tdf.tims_cal.size(); ++ci)
+      {
+        bool falls = false;
+        const std::string r = spx::dnoise::recover::buildScanTable(tdf.tims_cal[ci], tdf.ms1_max_scans[ci], im_asc[ci], falls);
+        if (!r.empty()) return r;
+        im_falls[ci] = falls;
+      }
+      reset();
+      on = true;
+      return std::string();
+    }
+
+    /// The scans each row's table covers, for the setup log: "944", or "944,0" with a row no MS1 frame uses.
+    String scanTables() const
+    {
+      String out;
+      for (size_t ci = 0; ci < tdf.ms1_max_scans.size(); ++ci) out += (ci ? "," : "") + String(tdf.ms1_max_scans[ci]);
+      return out;
+    }
+
+    /// The loader must have calibrated m/z with the model the TOF recovery inverts. Serially, once per batch.
+    void checkLoader() const
+    {
+      if (BrukerTimsFile::lastMzCalibration() != "tdf_table_modeltype1")
+        throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 denoising recovers each point's TOF bin through the MzCalibration "
+                          "table model, and the loader calibrated m/z otherwise; -dnoise:ms1 false runs without MS1 denoising", BrukerTimsFile::lastMzCalibration());
+    }
+
+    /// One MS1 spectrum as the loader delivered it, filtered in place. @p k is the calling thread's, @p c the frame's.
+    void frame(MSSpectrum& s, Work& k, Counts& c) const
+    {
+      using spx::dnoise::recover::Refusal;
+      const double cpu0 = threadCpu_();
+      const uint32_t fid = frameIdOf(s.getNativeID());
+      const Size n = s.size();
+      auto refuse = [&](const String& what) {
+        return DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] " + what + "; -dnoise:ms1 false runs without MS1 denoising", s.getNativeID()); };
+      const bool has_im = s.containsIMData();
+      switch (spx::dnoise::recover::frameCheck(tdf.frames, fid, n, has_im, has_im ? s.getFloatDataArrays()[s.getIMData().first].size() : 0))
+      {
+        case Refusal::none: break;
+        case Refusal::frame: throw refuse("an MS1 spectrum is not an MS1 frame of the input's analysis.tdf");
+        case Refusal::peaks:
+          throw refuse("frame " + String(fid) + " arrived with " + String(n) + " of its " + String(tdf.frames[fid].num_peaks) + " raw points: only a whole raw frame can be denoised (no frame aggregation, no loader centroiding)");
+        default: throw refuse("frame " + String(fid) + " carries no 1/K0 per point");   // Refusal::im
+      }
+      const spextractor::TdfDnoiseInputs::Frame& fr = tdf.frames[fid];
+      ++c.frames; c.raw += (long long)n; c.fid = fid;
+      if (n == 0) { c.cpu += threadCpu_() - cpu0; return; }
+      const auto& im = s.getFloatDataArrays()[s.getIMData().first];
+      const TofAxis& ax = tofAxis();
+      const double b = ax.factor(fid), corr = fr.corr;
+      const std::vector<float>& asc = im_asc[fr.cal];
+      const bool falls = im_falls[fr.cal] != 0;
+      k.scan.resize(n); k.tof.resize(n); k.raw.resize(n);
+      for (Size i = 0; i < n; ++i)
+      {
+        const float v = s[i].getIntensity();
+        double t = 0.0; int hits = 0;
+        switch (spx::dnoise::recover::recoverPoint(ax.cal, b, s[i].getMZ(), im[i], v, corr, asc, falls, fr.num_scans, k.tof[i], k.scan[i], k.raw[i], t, hits))
+        {
+          case Refusal::none: break;
+          case Refusal::tof:
+            throw refuse("m/z " + String(s[i].getMZ()) + " in frame " + String(fid) + " is not the MzCalibration table model's value of a TOF bin (" + String(t) + "): the loader calibrated m/z otherwise");
+          case Refusal::scan:
+            throw refuse("1/K0 " + String(im[i]) + " in frame " + String(fid) + " is not the TimsCalibration model's value of one of its " + String(fr.num_scans) + " scans: the loader converted 1/K0 otherwise");
+          case Refusal::intensity_range:
+            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is >= 2^24 = 16777216: the loader's float32 intensity no longer identifies one raw count");
+          default:   // Refusal::intensity
+            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of exactly one raw count (" + String(hits) + " found)");
+        }
+      }
+      const spx::dnoise::FrameCounts fc = spx::dnoise::denoiseMs1Frame(k.scan.data(), k.tof.data(), k.raw.data(), n, fr.num_scans, p, gate ? &*gate : nullptr, k.w, k.keep);
+      c.streak += (long long)fc.after_streak; c.halo += (long long)fc.after_halo; c.kept += (long long)fc.kept; c.emptied += (fc.kept == 0);
+      if (fc.kept != n)
+      {
+        k.idx.clear();
+        for (Size i = 0; i < n; ++i) if (k.keep[i]) k.idx.push_back(i);
+        s.select(k.idx);        // the peaks and every data array in lockstep
+        shrinkDataArrays(s);    // select leaves every data array at its raw capacity
+      }
+      c.cpu += threadCpu_() - cpu0;
+    }
+
+    /// A batch's per-spectrum counts, serially: each denoised frame (a slot with frames 0 is an MS2 spectrum's) marked
+    /// once -- a frame delivered twice is refused, it would be filtered and traced twice.
+    void add(const std::vector<Counts>& v)
+    {
+      for (const Counts& c : v)
+      {
+        if (c.frames == 0) continue;
+        if (!seen.mark(c.fid))
+          throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(c.fid) + " reached the filter twice: the loader delivered it more than once; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(c.fid));
+        total.frames += c.frames; total.emptied += c.emptied; total.raw += c.raw; total.streak += c.streak; total.halo += c.halo; total.kept += c.kept; total.cpu += c.cpu;
+      }
+    }
+
+    /// After the load, serially: every MS1 frame with points (Frames.NumPeaks > 0) reached the filter. Counts cannot
+    /// tell -- a frame delivered twice and a missing one with equal NumPeaks cancel out -- so this reads the marks.
+    void requireComplete() const
+    {
+      if (const size_t miss = seen.firstMissing(tdf.frames))
+        throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(miss) + " (" + String(tdf.frames[miss].num_peaks)
+                          + " raw points in Frames.NumPeaks) never reached the filter: the loader did not deliver every MS1 frame; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(miss));
+    }
+
+    /// The counts and marks back to none: at setup, and when a failed stream load falls back to the resident one, which
+    /// delivers every frame again.
+    void reset() { total = Counts(); seen.reset(); }
+
+    /// The applied parameters and the run's gate size, for the log and spx:dnoise_ms1_params.
+    String params() const
+    {
+      return "mz_half_width=" + String(p.mz_half_width) + " min_feature_length=" + String(p.min_feature_length) + " max_internal_gap=" + String(p.max_internal_gap)
+             + " iterations=" + String(p.iterations) + " min_window_intensity=" + String(p.min_window_intensity) + " min_feature_intensity=" + String(p.min_feature_intensity)
+             + " halo=" + (p.halo ? "true" : "false") + " halo_peak_fraction=" + String(p.halo_peak_fraction) + " halo_mz_idx_half_width=" + String(p.halo_mz_idx_half_width)
+             + " halo_scan_half_width=" + String(p.halo_scan_half_width) + " dia_ms1_window=" + (p.dia_ms1_window ? "true" : "false")
+             + " dia_ms1_mz_pad=" + String(p.dia_ms1_mz_pad) + " dia_ms1_im_pad=" + String(p.dia_ms1_im_pad) + " gate_boxes=" + String(gate ? gate->boxes().size() : (size_t)0);
+    }
+
+    String summary() const
+    {
+      char b[320];
+      snprintf(b, sizeof b, "[dnoise] %s MS1: %lld frames (%lld emptied), %lld raw points -> streak %lld -> halo %lld -> window gate: kept %lld MS1 points (%.2f%%); filter CPU %.1f s",
+               spx::dnoise::kPortedFrom, total.frames, total.emptied, total.raw, total.streak, total.halo, total.kept,
+               total.raw > 0 ? 100.0 * (double)total.kept / (double)total.raw : 0.0, total.cpu);
+      return String(b);
+    }
+  };
+
   class PickCompactConsumer : public FullSwathFileConsumer
   {
   public:
@@ -1716,6 +2033,10 @@ namespace
     /// (an mzML) = no tables, no padding: the slab is its own table.
     std::function<FrameTables()> tablefn;
     const FrameTables& tables() const { return tables_; }
+    /// [ms1-prune] pass 1's run-level MS1 prune and its edge sample; null = every picked peak is kept
+    Ms1Prune* ms1_prune = nullptr;
+    /// [dnoise] the run's MS1 denoising of the raw frames before their pick; null or off = none
+    DnoiseRun* dnoise = nullptr;
 
     /// [perf-load] Pick+compact a BATCH of buffered frames in parallel, then append in arrival
     /// order. OpenMS hands frames over a strictly serial `for (fid..) consumeSpectrum(spec)` loop,
@@ -1836,6 +2157,9 @@ namespace
       // MS1 stays a PeakMap (MassTraceDetection needs it whole), but its pick is NOT small: 1,343
       // frames x ~690k raw peaks = 37% of all peaks, and it used to run serially here (~400 s of
       // LOAD, measured 2026-09-02). Buffer and pick in parallel like MS2; order is kept by index.
+      // [dnoise] the loader chose its m/z model before its first frame: refuse at that frame, not after a whole batch
+      // (flushMS1_ checks every batch again and stays the authority)
+      if (dnoise && dnoise->on && !dn_loader_checked_) { dnoise->checkLoader(); dn_loader_checked_ = true; }
       ms1_buf_.push_back(std::move(s));
       ++frames_seen;
       if (ms1_buf_.size() >= kBatchMS1_()) flushMS1_();
@@ -1855,6 +2179,11 @@ namespace
       LedCharge _raw(LC_SCRATCH, raw_b);
       PeakPickerIM picker = picker_;
       std::exception_ptr pick_err;
+      // [dnoise] per thread for this batch only (freed with it), per frame counts merged below
+      const bool dn = dnoise && dnoise->on;
+      if (dn) dnoise->checkLoader();
+      std::vector<DnoiseRun::Work> dn_work(dn ? (size_t)std::max(1, omp_get_max_threads()) : 0);
+      std::vector<DnoiseRun::Counts> dn_cnt(dn ? (size_t)n : 0);
       #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
       for (int i = 0; i < n; ++i)
       {
@@ -1862,8 +2191,10 @@ namespace
         {
           auto& s = ms1_buf_[(size_t)i];
           ensureIMArrayName(s);
+          if (dn) dnoise->frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);   // [dnoise] the raw points, before the pick
           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
           ensureIMArrayName(s);
+          requireFiniteMs1Mz(s);   // [ms1-finite] before the prune, prune on or off
         }
         catch (...)
         {
@@ -1872,6 +2203,7 @@ namespace
         }
       }
       if (pick_err) std::rethrow_exception(pick_err);
+      if (dn) dnoise->add(dn_cnt);
       if (ms1HistOn_())
         for (const auto& sp : ms1_buf_)
         {
@@ -1879,6 +2211,9 @@ namespace
           for (const auto& pk : sp) { const float v = pk.getIntensity(); ++c[v < 100 ? 0 : v < 300 ? 1 : v < 1000 ? 2 : v < 10000 ? 3 : 4]; }
           for (int k = 0; k < 5; ++k) ms1Hist_()[(size_t)k].fetch_add(c[k], std::memory_order_relaxed);
         }
+      // [ms1-prune] after [ms1-hist] (which counts what was PICKED), before the charge below (which is then
+      // the kept bytes)
+      if (ms1_prune && ms1_prune->on) ms1_prune->batch(ms1_buf_, [](const MSSpectrum&) { return true; });
       { long long mb = 0; for (const auto& s : ms1_buf_) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
       for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
       ms1_buf_.clear();
@@ -1964,6 +2299,7 @@ namespace
     std::vector<uint32_t> scratch_mzq_; std::vector<float> scratch_inten_; std::vector<uint16_t> scratch_imq_;
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
+    bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
     map<WinKey, PeakSlab>& windows_;
     PeakMap& ms1_;
     CompactStats& stats_;
@@ -2226,6 +2562,7 @@ protected:
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
+    registerTOPPSubsection_("tile", "Retention-time cells and tiles (integer detector)");   // without it --helphelp threw ElementNotFound
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run (at a fixed perf:trace_bands; the auto setting 0 ties the band count to the thread count): the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run. DEFAULT 600 since 2026-09-10: on the 30-minute file Sage +0.8% and MSFragger +1.5% with the entrapment FDR 1.16 -> 1.30% (within its interval), on the 2-hour file Sage +0.8%; 300 gains more Sage (+3.4%) at 1.38% entrapment. -1 = one cell = the whole run (the output before the cells).", false, true);
     registerStringOption_("trace:band_edges", "<mode>", "acquisition", "Where the integer detector's per-window flight-time band partition comes from. 'slab': the window's resident peaks' extremes (data-dependent: a reader that holds only some of the frames cannot reproduce them; the default until 2026-09-10, reproduces the earlier pins). 'acquisition' (default since 2026-09-10; measured neutral on both benchmark files: Sage +1/+1, MSFragger 0/-3, entrapment +0.00/+0.01 points): tlo = 0 and thi = the digitizer's last bin (GlobalMetadata DigitizerNumSamples - 1, the absolute bound of every bin index; or the acquisition's upper m/z through the calibration at every frame of the window's frozen table, whichever is larger) -- a run-level constant from metadata that a reader holding only a tile's frames can compute. On the two benchmark files the two sets differ by 0-4 bins at the top and 0-3 at the bottom; on an acquisition whose spectra start well above the axis origin, tlo = 0 rescales every interior edge. With the integer detector, 'acquisition' REFUSES an input without a tdf before loading (the openms fallback cannot provide these edges); -trace:detector openms is the escape.", false);
     setValidStrings_("trace:band_edges", {"slab", "acquisition"});
@@ -2303,6 +2640,17 @@ protected:
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
     registerFlag_("gate:variance_support", "Compute the Pearson co-elution variance over the UNION SUPPORT of the precursor and fragment profiles (points where either is non-zero) rather than the full RT grid G (~1300). Fixes the zero-padding: a fragment present in a handful of grid points is no longer scored against ~1300 implicit zeros, and the score no longer depends on grid size. Only affects gate:coelution=pearson. Retune gate:min_correlation when enabling -- the score scale changes.");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. DEFAULT RAISED 12 -> 48 on 2026-09-07: the earlier sweep found more bands to be WORSE (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a SERIAL band distribution that grew with band count; with that step parallel the order inverts (41.7/27.1/20.4 s at 9.8x/18.4x/32.4x) and 48 was gated on both datasets -- Sage 0.9999 and 0.9994, MSFragger 1.0002 and 1.0203, entrapment FDR 1.26->1.24%% and 1.12->1.07%%. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
+    registerStringOption_("perf:ms1_prune", "<true/false>", "true",
+                          "Drop picked MS1 centroids at or below trace:noise_threshold_int as they are loaded, before "
+                          "they enter the MS1 map. MassTraceDetection never traces such a peak, but the MS1 band partition "
+                          "reads the whole map, so the prune keeps exactly what it reads: the band edges come from the m/z "
+                          "sample taken before the prune, and each frame keeps its first and last peak plus the fewest "
+                          "sub-threshold witnesses that leave no two kept peaks further apart than the band halo (20 x "
+                          "trace:mass_error_ppm), so every band spectrum that exists without the prune still exists. "
+                          "OUTPUT-IDENTICAL (class D): byte-identical spectra either way; only the MS1 map shrinks -- measured at one "
+                          "cell per tile with dnoise:ms1 false, peak memory dataset D 31.99 -> 25.90 GB, TNBC 009 69.11 -> 31.97 GB. Bound "
+                          "to trace:noise_threshold_int -- it has no threshold of its own. false = keep every picked centroid.", false);
+    setValidStrings_("perf:ms1_prune", {"true", "false"});
     registerIntOption_("perf:trace_bands", "<n>", 12, "Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "Fraction of currently-FREE RAM (/proc/meminfo MemAvailable) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
@@ -2359,6 +2707,37 @@ protected:
     registerFlag_("charge:mono_averagine_select", "Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves.");
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. Default 0.05 (= 5x the fragment gate). 0.01 is arguable -- isotopes of one species share mobility, so 0.05 can admit cross-species partners -- but 0.01 has not been measured; change it only behind a peptide-set gate.", false);
 
+    registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
+    registerStringOption_("dnoise:ms1", "<true/false>", "true",
+                          "Denoise every MS1 frame on its raw points before peak picking: a bit-identical port of dnoise v0.1.0's "
+                          "default MS1 path (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT, LICENSES/dnoise-MIT.txt) -- "
+                          "the ion-mobility streak filter, the halo filter and the diaPASEF isolation-window gate on each frame's "
+                          "(scan, TOF, raw intensity), which are recovered from the loaded frame and checked point by point: a run "
+                          "where they do not recover exactly is refused, never filtered approximately (so is trace:native_ms1_neighbors > 0). "
+                          "Bruker .d only: an mzML or mzPeak input is not filtered, which is logged and stamped (spx:dnoise_ms1). "
+                          "DEFAULT ON since 2026-09-10. CHANGES OUTPUT: peptides dataset D -4.3% Sage / -4.0% MSFragger, TNBC 009 +1.5% / "
+                          "-0.5%, entrapment FDR inside the gate (measured with dnoise run as a preprocessor at one cell per tile, and "
+                          "carried over because this in-tool path gives digest-identical output). Against the default perf:ms1_prune true "
+                          "at one cell per tile: peak memory D 25.90 -> 22.48 GB (-13%), TNBC 009 31.97 -> 25.17 GB (-21%); wall D 4:13 -> "
+                          "3:41 (-13%), TNBC 009 10:25 -> 10:46 (no gain on a shared node; its MS1 load got slower, 58.5 -> 68.4 s). "
+                          "-dnoise:ms1 false picks every raw MS1 point (the output before 2026-09-10).", false);
+    setValidStrings_("dnoise:ms1", {"true", "false"});
+    registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: TOF bins on each side of a point's own bin summed per scan (dnoise --mz-half-width).", false, true);
+    registerIntOption_("dnoise:min_feature_length", "<scans>", 5, "Streak filter: OCCUPIED scans a run needs; bridged empty scans do not count (dnoise --min-feature-length).", false, true);
+    registerIntOption_("dnoise:max_internal_gap", "<scans>", 2, "Streak filter: empty scans a run may bridge (dnoise --max-internal-gap).", false, true);
+    registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes, each over the previous pass's survivors; 0 skips the streak filter, and the halo filter and the window gate still run unless dnoise:halo / dnoise:dia_ms1_window are false (dnoise --iterations).", false, true);
+    registerIntOption_("dnoise:min_window_intensity", "<counts>", 0, "Streak filter: raw window sum a scan needs to count as occupied (dnoise --min-window-intensity).", false, true);
+    registerIntOption_("dnoise:min_feature_intensity", "<counts>", 0, "Streak filter: raw sum a run needs over its span (dnoise --min-feature-intensity).", false, true);
+    registerStringOption_("dnoise:halo", "<true/false>", "true", "Halo filter, once, on the streak survivors: keep a point at >= halo_peak_fraction of the most intense survivor in its box outside its own TOF bin (false = dnoise --no-halo).", false, true);
+    setValidStrings_("dnoise:halo", {"true", "false"});
+    registerDoubleOption_("dnoise:halo_peak_fraction", "<f>", 0.15, "Halo filter: the fraction (dnoise --halo-peak-fraction).", false, true);
+    registerIntOption_("dnoise:halo_mz_idx_half_width", "<bins>", 80, "Halo filter: the box's half-width in TOF bins (dnoise --halo-mz-idx-half-width).", false, true);
+    registerIntOption_("dnoise:halo_scan_half_width", "<scans>", 2, "Halo filter: the box's half-width in scans (dnoise --halo-scan-half-width).", false, true);
+    registerStringOption_("dnoise:dia_ms1_window", "<true/false>", "true", "Keep only MS1 points inside one of the run's diaPASEF isolation windows (every DiaFrameMsMsWindows row), padded, in dnoise's own two-point calibration (false = dnoise --no-dia-ms1-window).", false, true);
+    setValidStrings_("dnoise:dia_ms1_window", {"true", "false"});
+    registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window gate: m/z added on both sides of every window (dnoise --dia-ms1-mz-pad).", false, true);
+    registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window gate: 1/K0 added on both sides of every window (dnoise --dia-ms1-im-pad).", false, true);
+
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
     // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
@@ -2379,6 +2758,11 @@ protected:
     setMinInt_("perf:ms1_trace_bands", 0);      // 0 = auto (documented)
     setMinFloat_("perf:mem_fraction", 0.05);
     setMaxFloat_("perf:mem_fraction", 0.95);
+    // [dnoise] dnoise's fields are unsigned, and a negative fraction or pad is not one
+    for (const char* o : {"dnoise:mz_half_width", "dnoise:min_feature_length", "dnoise:max_internal_gap", "dnoise:iterations",
+                          "dnoise:min_window_intensity", "dnoise:min_feature_intensity", "dnoise:halo_mz_idx_half_width", "dnoise:halo_scan_half_width"})
+      setMinInt_(o, 0);
+    for (const char* o : {"dnoise:halo_peak_fraction", "dnoise:dia_ms1_mz_pad", "dnoise:dia_ms1_im_pad"}) setMinFloat_(o, 0.0);
     // deliberate: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
   }
 
@@ -2397,7 +2781,8 @@ protected:
                               double split_valleys, String* span_log, int bands,
                               double split_scan_time,   // the run's cycle time for the splitter, 0 = per trace
                               int in_cat = -1,          // [ledger] the caller's category for `map`, -1 = uncharged
-                              int part_cat = LC_BAND)   // [ledger] where this call's band partition belongs
+                              int part_cat = LC_BAND,   // [ledger] where this call's band partition belongs
+                              Ms1Prune* ms1_prune = nullptr)   // [ms1-prune] the MS1 call only: the pre-prune edge sample
   {
     MassTraceDetection mtd;
     mtd.setLogType(ProgressLogger::NONE); // quiet + thread-safe (called from the parallel window loop)
@@ -2455,8 +2840,10 @@ protected:
       // magnitude across a window, and uniform edges would leave one band holding most of the work.
       auto _te0 = tt_now();
       vector<double> sample;
-      for (const auto& s : map)
-        for (Size i = 0; i < s.size(); i += 97) sample.push_back(s[i].getMZ());
+      if (ms1_prune && ms1_prune->on) sample.swap(ms1_prune->sample);   // [ms1-prune] taken before the prune; the pruned map's own would move the edges
+      else
+        for (const auto& s : map)
+          for (Size i = 0; i < s.size(); i += 97) sample.push_back(s[i].getMZ());
       sort(sample.begin(), sample.end());
       vector<double> edge(bands + 1);
       if (sample.empty()) { edge.assign(bands + 1, 0.0); }
@@ -2464,6 +2851,9 @@ protected:
         for (int b = 0; b <= bands; ++b)
           edge[b] = sample[std::min(sample.size() - 1, (size_t)((double)b / bands * sample.size()))];
       edge.front() = 0.0; edge.back() = std::numeric_limits<double>::max();
+      if (ms1_prune && detOn_())   // [det] condition (i) of the MS1 prune, gated on its own
+      { vector<uint64_t> eb; for (double e : edge) { uint64_t u; std::memcpy(&u, &e, 8); eb.push_back(u); }
+        writeLogInfo_("[ms1-edges] n=" + String(sample.size()) + " bands=" + String(bands) + " fnv=" + String(detDigest_(std::move(eb)))); }
       vector<double> ().swap(sample);
 
       // Partition ONCE (peaks are copied into exactly one core band plus any halo it falls in),
@@ -2499,8 +2889,8 @@ protected:
         {
           // Size each halo from ITS OWN edge: one h derived from edge[b] under-sizes the upper
           // side by the ppm growth across the band.
-          const double lo = edge[b] - edge[b] * ppm * 1e-6 * 20.0;
-          const double hi = edge[b + 1] + edge[b + 1] * ppm * 1e-6 * 20.0;
+          const double lo = edge[b] - edge[b] * ppm * 1e-6 * kBandHaloPpmMul;
+          const double hi = edge[b + 1] + edge[b + 1] * ppm * 1e-6 * kBandHaloPpmMul;
           MSSpectrum t; t.setRT(s.getRT()); t.setMSLevel(1);
           OpenMS::DataArrays::FloatDataArray ia;
           ia.setName(Constants::UserParam::ION_MOBILITY);
@@ -2533,6 +2923,9 @@ protected:
         for (int ci = 0; ci < nchunk; ++ci)
         { for (auto& sp : csub[ci][b]) sub[b].addSpectrum(std::move(sp)); csub[ci][b].clear(true); }
       }
+      if (ms1_prune && detOn_())   // [det] which (frame, band) spectra exist: condition (ii) of the MS1 prune
+      { String cnt; for (int b = 0; b < bands; ++b) cnt += (b ? "," : "") + String(sub[b].size());
+        writeLogInfo_("[det] MS1 band spectra " + cnt); }
       // [ledger] the partition is a COPY of the whole map (plus a 1-5% halo) and lives from here
       // until each band is detected -- charged as ms1_map until now, which named the wrong
       // structure for the largest allocation of the MS1 phase. Hand the charge over at the swap.
@@ -3531,6 +3924,13 @@ protected:
     // Accept mzML, mzPeak, or a Bruker .d directory; FileHandler auto-detects the format
     // (mzPeak -> MzPeakFile; .d -> BrukerTimsFile, requires WITH_OPENTIMS).
     PeakMap ms1_map;
+    // [ms1-prune] one run-level prune (see Ms1Prune), used by the streaming consumer and the resident dispatch alike
+    Ms1Prune ms1_prune;
+    ms1_prune.on = (getStringOption_("perf:ms1_prune") == "true");
+    ms1_prune.noise = getDoubleOption_("trace:noise_threshold_int");
+    ms1_prune.hop = getDoubleOption_("trace:mass_error_ppm") * 1e-6 * kBandHaloPpmMul;
+    { const char* e = std::getenv("SPEXTRACTOR_MS1_PRUNE_NO_WITNESS"); ms1_prune.no_witness = e && *e && *e != '0'; }
+    { const char* e = std::getenv("SPEXTRACTOR_MS1_PRUNE_NO_CHAIN"); ms1_prune.no_chain = e && *e && *e != '0'; }   // its own switch: check 19b
     map<WinKey, PeakSlab> ms2_by_window;
     CompactStats cstat;
     auto winKey = [](double lo, double hi, uint32_t window_group) -> WinKey {
@@ -3570,6 +3970,54 @@ protected:
         break;
       }
     }
+    // the .d loader's configuration; set here because the dnoise setup below predicts the loader's m/z model from it
+    BrukerTimsFile::Config cfg;
+    cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
+    cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
+    // [dnoise] dnoise v0.1.0's MS1 path on the raw frames (DnoiseRun), set up once for the run: every refusal the options
+    // and the tdf can decide comes here, in milliseconds, before the load
+    DnoiseRun dnoise;
+    const bool dnoise_req = (getStringOption_("dnoise:ms1") == "true");
+    if (dnoise_req && FileHandler::getTypeByFileName(in) != FileTypes::BRUKER_TDF)
+      writeLogInfo_("[dnoise] MS1 denoising skipped: the input is not a Bruker .d");
+    else if (dnoise_req)
+    {
+      auto refuse = [](const String& why) {
+        return Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "dnoise:ms1 " + why + " -dnoise:ms1 false runs without MS1 denoising."); };
+      if (getIntOption_("trace:native_ms1_neighbors") > 0)
+        throw refuse("denoises each raw MS1 frame, and trace:native_ms1_neighbors > 0 sums neighbouring frames before SpeXtractor sees them.");
+      // The loader's m/z model, predicted: under the default AUTO strategy an SDK path (the Config's, else
+      // OPENMS_BRUKER_SDK_PATH) makes openTimsDataHandle calibrate m/z through the Bruker SDK, which the TOF recovery
+      // cannot invert. An SDK that then fails to load would leave the table model, so this can refuse a run that would
+      // have recovered: fail-closed. checkLoader() confirms the loader's actual choice during the load.
+      { const char* env_sdk = std::getenv("OPENMS_BRUKER_SDK_PATH");
+        const std::string sdk = !cfg.bruker_sdk_path.empty() ? cfg.bruker_sdk_path : std::string(env_sdk ? env_sdk : "");
+        if (!sdk.empty())
+          throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, but with a Bruker SDK path set (" + String(sdk)
+                       + ") the loader calibrates m/z through the Bruker SDK: unset OPENMS_BRUKER_SDK_PATH to denoise."); }
+      String why_axis;
+      if (!tofAxis().ok && !loadTofAxis(in + "/analysis.tdf", why_axis))   // the TOF recovery runs during the load
+        throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, which is not usable here (" + why_axis + ").");
+      spx::dnoise::Params& p = dnoise.p;
+      p.mz_half_width = (uint32_t)getIntOption_("dnoise:mz_half_width");
+      p.min_feature_length = (size_t)getIntOption_("dnoise:min_feature_length");
+      p.max_internal_gap = (size_t)getIntOption_("dnoise:max_internal_gap");
+      p.iterations = (size_t)getIntOption_("dnoise:iterations");
+      p.min_window_intensity = (uint64_t)getIntOption_("dnoise:min_window_intensity");
+      p.min_feature_intensity = (uint64_t)getIntOption_("dnoise:min_feature_intensity");
+      p.halo = (getStringOption_("dnoise:halo") == "true");
+      p.halo_peak_fraction = getDoubleOption_("dnoise:halo_peak_fraction");
+      p.halo_mz_idx_half_width = (uint32_t)getIntOption_("dnoise:halo_mz_idx_half_width");
+      p.halo_scan_half_width = (size_t)getIntOption_("dnoise:halo_scan_half_width");
+      p.dia_ms1_window = (getStringOption_("dnoise:dia_ms1_window") == "true");
+      p.dia_ms1_mz_pad = getDoubleOption_("dnoise:dia_ms1_mz_pad");
+      p.dia_ms1_im_pad = getDoubleOption_("dnoise:dia_ms1_im_pad");
+      const std::string why = dnoise.setup(in + "/analysis.tdf");
+      if (!why.empty()) throw refuse("cannot be exact on this input: " + why + ".");
+      writeLogInfo_("[dnoise] " + String(spx::dnoise::kPortedFrom) + " MS1 path on the raw frames, before the pick: " + dnoise.params()
+                    + "; " + String(dnoise.im_asc.size()) + " TimsCalibration row(s) over " + String(dnoise.tdf.meta.max_num_scans)
+                    + " scans (MAX(Frames.NumScans), the gate's); scan tables per row over its MS1 frames' scans: " + dnoise.scanTables());
+    }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
     // table regardless), pass 2 reads each tile's MS2 frames through the loader's RT range. The
@@ -3577,9 +4025,6 @@ protected:
     // A/B) holds the whole run and slices it, as before.
     bool tile_source = false;
     PickCompactConsumer::FrameTables run_tables;   // the reader's frozen tables, kept for pass 2
-    BrukerTimsFile::Config cfg;
-    cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
-    cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
     PeakPickerIM spicker;
     {
       Param sp = spicker.getParameters();
@@ -3594,6 +4039,8 @@ protected:
       // [stream] frame-by-frame: pick + compact on arrival, never hold the whole run.
       // Also the ONLY place the reader's NATIVE pre-centroid frame aggregation is reachable.
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
+      consumer.ms1_prune = &ms1_prune;
+      consumer.dnoise = &dnoise;
 #ifdef SPEXTRACTOR_WITH_MZPEAK
       const bool in_mzpeak = (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK);
 #else
@@ -3704,6 +4151,8 @@ protected:
                       + String(cfg.dia_ms2_n_neighbors) + ")" + clk_() + rss_() + mem_());
       }
       catch (const FrameTableError&) { throw; }   // structural: never fall back onto partial slabs
+      catch (const DnoiseError&) { throw; }       // [dnoise] a refusal of the input, not a reader failure
+      catch (const Ms1MzError&) { throw; }        // [ms1-finite] a refusal of the input, not a reader failure
       catch (const Exception::BaseException& e)
       {
         writeLogWarn_(String("[stream] streaming load failed (") + e.getName()
@@ -3744,6 +4193,17 @@ protected:
 
     if (!streamed)
     {
+      // A failed stream attempt may already have delivered part of the run -- MS1 spectra (sampled, pruned and
+      // denoised), window slabs, compaction counts and their ledger charges. The resident load below reads the WHOLE
+      // run again and only appends, so discard all of it first: kept, the delivered frames were loaded twice (silently
+      // wrong with the prune off, a refusal with it on, "not in retention-time order" once partial slabs existed).
+      ms1_map = PeakMap();
+      ms2_by_window.clear();
+      cstat = CompactStats();
+      ms1_prune.reset();
+      for (auto& v : ms1Hist_()) v.store(0, std::memory_order_relaxed);   // [ms1-hist] the failed attempt's picked peaks
+      dnoise.reset();   // [dnoise] counts and frame marks: the resident pick below filters every frame again
+      ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);
       Phase _ph("LOAD(full)");
       FileHandler().loadExperiment(in, exp,
 #ifdef SPEXTRACTOR_WITH_MZPEAK
@@ -3794,15 +4254,24 @@ protected:
     // (e.g. unexpected IM format); an exception escaping an OMP region terminates the process, so
     // capture it and rethrow serially. [par-Crit-1, code-review]
     std::exception_ptr pick_err;
+    // [dnoise] as in flushMS1_: the raw MS1 frames of a .d, before their pick (a frame it empties keeps its IM array,
+    // so the dispatch below keeps it too)
+    if (dnoise.on) dnoise.checkLoader();
+    std::vector<DnoiseRun::Work> dn_work(dnoise.on ? (size_t)std::max(1, omp_get_max_threads()) : 0);
+    std::vector<DnoiseRun::Counts> dn_cnt(dnoise.on ? exp.size() : 0);
     #pragma omp parallel for firstprivate(picker) schedule(dynamic, 16)
     for (long i = 0; i < (long)exp.size(); ++i)
     {
       try
       {
         MSSpectrum& s = exp[i];
+        // [dnoise] before the ion-mobility skip, as the streaming consumer filters every MS1 frame: frame() refuses a
+        // non-empty MS1 frame without 1/K0 and counts an empty one, so no MS1 frame bypasses it and both paths count alike
+        if (dnoise.on && s.getMSLevel() == 1) dnoise.frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);
         if (!s.containsIMData()) continue;
         if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
         ensureIMArrayName(s); // so MassTraceDetection reads per-peak IM (IM-aware tracing) [C-1]
+        if (s.getMSLevel() == 1) requireFiniteMs1Mz(s);   // [ms1-finite] exactly the spectra the prune and the MS1 map take
       }
       catch (...)
       {
@@ -3811,6 +4280,12 @@ protected:
       }
     }
     if (pick_err) std::rethrow_exception(pick_err);
+    dnoise.add(dn_cnt);
+    // [dnoise] each thread's scratch keeps the capacity of its largest frame (up to ~4 GiB at 100 threads): free it with
+    // the pick, not at the end of this block after the prune and the dispatch
+    std::vector<DnoiseRun::Work>().swap(dn_work); std::vector<DnoiseRun::Counts>().swap(dn_cnt);
+    // [ms1-prune] exactly the MS1 spectra the dispatch below keeps, pruned as flushMS1_ prunes a batch
+    if (ms1_prune.on) ms1_prune.batch(exp.getSpectra(), [](const MSSpectrum& s) { return s.containsIMData() && s.getMSLevel() == 1; });
 
     // Serial dispatch: MOVE (not copy) frames into the MS1 map / per-window MS2 maps to avoid
     // transient memory doubling; container inserts aren't thread-safe so this stays serial.
@@ -3850,6 +4325,16 @@ protected:
                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
                     + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
                     + String(ms1_pk) + " peaks (" + String(ms1_pk * 20 / (1024ULL * 1024ULL)) + " MB as PeakMap)." + clk_() + rss_() + mem_()); // [mem]
+      if (dnoise.on)   // [dnoise] after the MS1 load, whichever path picked it: every MS1 frame with points exactly once
+      { dnoise.requireComplete(); writeLogInfo_(dnoise.summary()); }
+      if (ms1_prune.on)
+      { const Ms1Prune::Counts& t = ms1_prune.total;
+        writeLogInfo_("[ms1-prune] picked " + String(t.picked) + " survivors " + String(t.survivors) + " witnesses " + String(t.kept - t.survivors)
+                      + " at_noise " + String(t.at_noise) + " nan " + String(t.nan) + " bad_mz " + String(t.bad_mz) + ": kept " + String(t.kept) + " peaks = "
+                      + String(t.kept * 20 / (1024LL * 1024LL)) + " MB as PeakMap of " + String(t.picked * 20 / (1024LL * 1024LL)) + " MB picked; sample "
+                      + String(ms1_prune.sample.size()) + " m/z from " + String(ms1_prune.frames) + " spectra"
+                      + (ms1_prune.no_witness ? String(" -- SPEXTRACTOR_MS1_PRUNE_NO_WITNESS: survivors only, a negative control, output NOT identical") : String())
+                      + (ms1_prune.no_chain ? String(" -- SPEXTRACTOR_MS1_PRUNE_NO_CHAIN: interior chain links dropped, a negative control, output NOT identical") : String())); }
     }
 
     if (ms1_map.empty())
@@ -3967,14 +4452,29 @@ protected:
     { vector<uint32_t> ri; ri.reserve(ms1_map.size());
       for (const auto& sp : ms1_map) ri.push_back(rtIndex(sp.getRT()));
       ms1_store.setFrames(ri, nullptr); }
+    // [ms1-prune] every MS1 spectrum must have left its m/z sample before losing a peak, or the band edges
+    // would come from a pruned map. Checked here, outside the parallel region an exception cannot leave.
+    if (ms1_prune.on && (ms1_prune.frames != ms1_map.size() || ms1_prune.sample.size() != ms1_prune.sample_n))
+      throw Exception::Precondition(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[ms1-prune] the pre-prune m/z sample covers " + String(ms1_prune.frames)
+            + " spectra (" + String(ms1_prune.sample.size()) + " of " + String(ms1_prune.sample_n) + " m/z) but the MS1 map holds " + String(ms1_map.size())
+            + "; -perf:ms1_prune false keeps every peak");
+    // An exception must not leave the parallel region (terminate): captured inside the single, rethrown after it. This
+    // covers detectTraces_'s own code, the [det] diagnostics included; throws inside its taskloop tasks are not caught here.
+    std::exception_ptr ms1_err;
     #pragma omp parallel
     #pragma omp single
-    ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
-                                             ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands,
-                                             split_scan_time, LC_MS1MAP, LC_MS1BAND);   // [ledger] the partition takes the charge over
+    try
+    {
+      ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
+                                               ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands,
+                                               split_scan_time, LC_MS1MAP, LC_MS1BAND, &ms1_prune);   // [ledger] the partition takes the charge over
+    }
+    catch (...) { ms1_err = std::current_exception(); }
+    if (ms1_err) std::rethrow_exception(ms1_err);
     { const double cap = max_span;
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
     ledSet_(LC_MS1MAP, 0);   // belt and braces: detectTraces_ has already zeroed it
+    vector<double>().swap(ms1_prune.sample);   // [ms1-prune] consumed by the band edges, or unused at one band
     { const long long tb = (long long)(ms1_traces.capacity() * sizeof(Trace) + ms1_store.inten.capacity() * 4
                                        + ms1_store.bins.capacity() * 2 + ms1_store.rt_index.capacity() * 4
                                        + ms1_store.frame_rt.capacity() * 8);
@@ -4654,6 +5154,10 @@ protected:
     out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
+    // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
+    out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
+    out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
+    out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support",
                          (int)(getStringOption_("assembly:require_isotope_support") == "true"));
     // Output format. The extension is authoritative, because that is what a user typing
@@ -5462,6 +5966,18 @@ protected:
       ledSet_(LC_CARRY, cb); }
     carry_out.clear();
     for (const WinKey& k : fkeys) carry_out[k];
+#ifdef __GLIBC__
+    // [tile-trim probe 2026-09-10] Nothing returns the allocator's free pages between tiles -- the in-loop
+    // trim above runs only when there is one tile -- so a tiled loop's RSS ratchets toward the arena pass 1
+    // sized. SPEXTRACTOR_TILE_TRIM=1 walks every arena after tile k is written and before tile k+1 is read;
+    // unset is exactly today's behaviour. Output-identical by construction.
+    static const bool tile_trim = []{ const char* e = std::getenv("SPEXTRACTOR_TILE_TRIM"); return e && *e && *e != '0'; }();
+    if (tile_trim && trim_on && tk + 1 < tiles.size())
+    { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
+      malloc_trim(0);
+      writeLogInfo_("[trim] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
+                    + String(phase_clock_() - _tt) + " s" + mem_()); }
+#endif
     }   // tiles
     }   // the enclosed-phase scope
 

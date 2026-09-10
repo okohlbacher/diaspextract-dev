@@ -3070,7 +3070,7 @@ where neither knob acts. Details: data3-batch.md section 8.
 | control, first / last | 10:16 / 9:24 | 68.94 / 68.02 GB |
 | MS1 trim after band distribution | 9:39 | 65.94 GB |
 | MS1 trim + MS1-only picker batch 64 + trim every 16th flush | 10:20 | **62.22 GB** |
-| pitch 300 (26 tiles) | 8:44 | 68.72 GB |
+| pitch 300 (25 tiles; first recorded as 26) | 8:44 | 68.72 GB |
 | pitch 300 + the same levers | 9:52 | 62.78 GB |
 
 Pitch-600 arms reproduce `bff54a1f`; the pitch-300 pair agree (`725298dd`). The levers take **−6.3 GB
@@ -3104,5 +3104,69 @@ low-scoring ones: 23-56% of the control's faintest intensity quintile, at most 2
 TNBC's MS1-only arm gains net peptides, and only on Sage. None of this was measured at the shipped single
 tile, where the window loop sets the peak.
 
-Not adoptable as a default: MS1 only fails the S gate on D. Details:
-docs/reviews/2026-09-10-dnoise/real-dnoise-evaluation.md.
+As a preprocessor, MS1 only fails the S gate on D. The user decided to run it inside the tool by default anyway
+(next section). Details: docs/reviews/2026-09-10-dnoise/real-dnoise-evaluation.md.
+
+### dnoise MS1 inside the tool, on by default (2026-09-10, stage-2 build fd30bf0e, arm `dnoise_s2a`)
+
+`src/DnoiseMs1.h` ports dnoise v0.1.0's default MS1 path exactly. The tool recovers each MS1 point's flight-time
+index, scan index and raw intensity from the loader's values and filters before picking (`dnoise:ms1`, default
+true). The port reproduces dnoise's keep masks with 0 differing points on 28 D and 24 TNBC 009 frames. The
+whole-file gates reproduce SpeXtractor run on dnoise's own filtered file:
+
+| file | arm (one cell per tile, 100 threads) | digest | kept MS1 points | peak | wall |
+|---|---|---|---:|---:|---:|
+| D | `-dnoise:ms1 false` | `8c1b047f` (old pin) | all | 26.46 GB | 4:23 |
+| D | defaults | `e43672a0` (= dnoise's file) | 118,053,254 | 22.41 GB | 3:44 |
+| D | defaults, 8 threads | `e43672a0` | 118,053,254 | 13.29 GB | 12:07 |
+| TNBC 009 | `-dnoise:ms1 false` | `bff54a1f` (old pin) | all | 34.67 GB | 9:47 |
+| TNBC 009 | defaults | `3aafd0b5` (= dnoise's file) | 649,615,267 | 25.41 GB | 8:18 |
+
+- **New reference digests at the defaults:** D `e43672a0`, TNBC 009 `3aafd0b5`.
+- **Searches carry over** from dnoise's filtered files:
+  - D: Sage 12,917 (−4.3%), MSFragger 12,404 (−4.0%);
+  - TNBC 009: Sage 29,510 (+1.5%), MSFragger 27,808 (−0.5%).
+- **Cost and speed:** the filter costs 355 CPU-s on D and 1,121 on TNBC 009 at 100 threads. The MS1 load still gets
+  faster (D 30.9 → 16.5 s wall), because the picker sees an eighth of the points.
+- **Final-build numbers** (arm `dnoise_s2b`, one cell per tile, every arm at its pin;
+  docs/reviews/2026-09-10-dnoise-port/final-matrix.md):
+  - Defaults: D 22.48 GB at 3:41, TNBC 009 25.17 GB at 10:46.
+  - With `-dnoise:ms1 false`: D 25.90 GB, TNBC 009 31.97 GB.
+  - TNBC 009's MS1 load gets faster on `data` (55.7 → 37.0 s) but not on `spock` (58.5 → 68.4 s), so its wall
+    change depends on the node.
+
+### MS1 prune, output-identical (2026-09-10)
+
+`perf:ms1_prune` (default true) drops picked MS1 centroids at or below `trace:noise_threshold_int` at load. A
+witness chain and a pre-prune edge sample keep band membership and the tracer's input exact
+(docs/reviews/2026-09-10-streaming-memory/data7-ms1-prune.md).
+- **Identity:** digests are identical with the prune off and on for D (`8c1b047f`, with all 245 `[det]`/`[ms1-edges]`
+  lines identical), for dnoise-filtered D (`e43672a0`) and for TNBC 009 (`bff54a1f`).
+- **Peak** at one cell per tile, dnoise off (final build, back to back): D 31.99 → 25.90 GB (−19%), TNBC 009
+  69.11 → 31.97 GB (−54%). With dnoise on, the prune takes only 0.14 GB more off D and 1.0 GB more off TNBC 009.
+
+### Why more tiles still leave a large footprint (2026-09-10, instr_tnbc2)
+
+Pass 1 processes the whole run's MS1 and is never tiled. The tile loop's RSS follows the glibc arena that pass 1
+leaves, because freed chunks are re-dirtied tile after tile and nothing trims between tiles.
+
+Peak by tile count, at identical output:
+
+| input | peaks |
+|---|---|
+| TNBC 009, original | 107.2 / 78.1 / 69.1 / 68.8 / 69.5 GB at 1 / 2 / 4 / 7 / 13 tiles |
+| TNBC 009, dnoise-filtered | 97.8 / 48.7 / 24.9 / 20.4 GB at 1 / 4 / 13 / 25 tiles |
+| D, dnoise-filtered | 36.9 / 29.3 / 21.4 / 14.5 GB at 1 / 2 / 3 / 6 tiles |
+
+- **Trimming off:** with `perf:malloc_trim false` the loop runs flat at 60-64 GB instead of climbing from 15 to 49 GB.
+- **Eager trim threshold** (`MALLOC_TRIM_THRESHOLD_=67108864 MALLOC_TOP_PAD_=0`, zero code): it cuts 14-22% of the
+  peak at identical output for 3-6% wall (TNBC 68.7 → 59.0 GB, filtered TNBC 25.2 → 21.4, filtered D 14.5 → 11.3).
+- **`malloc_trim` between tiles:** it takes only 0.8 GB off filtered D, where the growth happens inside a tile.
+- **On the final build, at the defaults** (arm `dnoise_s2b`, identical output in every arm):
+  - TNBC 009 on `data`: 99.70 GB and 9:42 at one tile, against 21.07 GB and 9:57 at 13 tiles with a trim between
+    tiles (20.73 GB with the eager threshold, which nearly triples the MS1 load);
+  - D on ibminode05: 37.44 GB and 3:15 at one tile, against 22.48 GB and 3:41 at 3 tiles.
+  - The tile default, a per-tile trim and the eager threshold are open decisions
+    (docs/reviews/2026-09-10-dnoise-port/final-matrix.md).
+
+Details: docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.

@@ -30,8 +30,44 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Calibration golden test (the C++ that ships)
+      - name: C++ golden tests -- calibration model and dnoise MS1 port (the C++ that ships)
         run: ctest --test-dir build -C Release --output-on-failure
+
+      # DnoiseMs1.h refuses to compile under value-changing floating-point flags (its #error); assert it does, for
+      # every flag whose predefined macro this compiler sets (a '+' joins flags that only act together). GCC sets
+      # __RECIPROCAL_MATH__, __ASSOCIATIVE_MATH__, __NO_SIGNED_ZEROS__ for their flags. clang sets none of these,
+      # and __ARM_FP_FAST for -funsafe-math-optimizations and -ffp-model=fast only on arm64, so its list is what
+      # the guard can see there. The compile without a flag comes first, so a refusal below is the flag's.
+      - name: DnoiseMs1.h refuses unsafe floating-point flags
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case "${{ matrix.cc }}" in
+            gcc*)             FLAGS="-ffast-math -Ofast -ffinite-math-only -freciprocal-math -funsafe-math-optimizations -fno-signed-zeros -fassociative-math+-fno-signed-zeros+-fno-trapping-math" ;;
+            appleclang-arm64) FLAGS="-ffast-math -Ofast -ffinite-math-only -funsafe-math-optimizations -ffp-model=fast" ;;
+            *) echo "::error::no unsafe-flag list for ${{ matrix.cc }}"; exit 1 ;;
+          esac
+          G="$RUNNER_TEMP/guard.cpp"
+          printf '#include "DnoiseMs1.h"\n' > "$G"
+          c++ -std=c++20 -fsyntax-only -I src "$G" || { echo "::error::DnoiseMs1.h does not compile on its own"; exit 1; }
+          fail=0
+          for f in $FLAGS; do
+            # shellcheck disable=SC2086  # ${f//+/ } splits a '+'-joined combination into its flags
+            if c++ -std=c++20 -fsyntax-only ${f//+/ } -I src "$G" 2> "$G.err"; then
+              echo "::error::DnoiseMs1.h compiled under $f"; fail=1
+            elif grep -Eq 'DnoiseMs1\.h:[0-9]+:[0-9]+: (fatal )?error:' "$G.err" && grep -q '#error' "$G.err"; then
+              echo "  ok: $f refused by the #error"
+            else
+              cat "$G.err"; echo "::error::$f broke the compile, but not through the DnoiseMs1.h #error"; fail=1
+            fi
+          done
+          exit $fail
+
+      # scripts/sync_cluster.sh's deploy transaction (stage, lock, unit tests from the stage, rollback, fail-closed
+      # provenance) against a fake node; it never contacts a host. One leg is enough: it tests a bash script.
+      - name: Deploy transaction harness (scripts/sync_cluster.sh against a fake node)
+        if: matrix.os == 'ubuntu-latest'
+        run: bash tests/test_sync_cluster_txn.sh
 
       - name: Calibration golden test (Python reference implementation)
         run: python3 tests/test_calibration.py

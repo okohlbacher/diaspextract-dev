@@ -1,0 +1,678 @@
+kimi version 0.42.0
+• This is an adversarial review task. I must answer from the inlined text only, no shell commands, no file opening. Let me carefully analyze the code for the attack categories.
+
+  Let me go through systematically.
+
+  **1. Point recovery**
+
+  a) TOF recovery: `ax.cal.mzToTof(s[i].getMZ(), b)` within 1e-6 of integer. m/z from loader is double. Fine. But: multi-segment calibration — `TimsCalibration` rows: frames reference a cal row by Id; multiple rows exist; `fr.cal` indexes tims_cal. OK.
+
+  b) Scan recovery: `scanOf` uses per-calibration table `im_asc[fr.cal]` built over `n_scans = tdf.meta.max_num_scans` — the GLOBAL MAX(NumScans) over ALL frames, not the frame's NumScans! Look at setup:
+
+  ```cpp
+  const size_t n_scans = tdf.meta.max_num_scans;
+  for (const auto& c : tdf.tims_cal)
+  {
+    std::vector<float> v(n_scans);
+    for (size_t s = 0; s < n_scans; ++s) ... v[s] = ...
+  ```
+
+  But the loader (RationalScan2ImConverter / frameToSpectrum) computes 1/K0 for scans 0..frame.NumScans-1 using... which num_scans? In timsTOF, the 1/K0 conversion formula typically uses the frame's own NumScans (C1 coefficient = NumScans in the TimsCalibration row; actually C1 is "NumScans" per calibration row). Hmm. In the inlined code, the formula uses `c[1]` (C1) in `((c[3]-c[2])/c[1])` — the row's own C1, which is the NumScans stored in the TimsCalibration table. But the table built has `n_scans` entries where n_scans = global max. If a frame's actual NumScans is smaller than the global max, then... scanOf maps 1/K0 to scan index via position in the global-max-length table. For the scans that exist in the frame (< fr.num_scans), the values v[s] are the same as long as the formula is indexed by s only — yes, v[s] depends on s and c, not on n_scans. So the first fr.num_scans entries are the loader's values. Fine — indices align. But the check `(uint32_t)scan >= fr.num_scans` refuses scans beyond frame count. OK.
+
+  But wait: OpenMS RationalScan2ImConverter — does it clamp? Some converters clamp scan to [0, NumScans-1]. If loader's value differs... speculative.
+
+  c) The scan table is per TimsCalibration ROW, but frames select `fr.cal`. im_asc has one entry per row. OK.
+
+  d) **A real issue: scanOf matches within kImTol = 1e-6f, and setup requires adjacent gaps > 4e-6. But scanOf picks the NEAREST entry and then checks |asc[i]-v| <= kImTol. If adjacent gap is between 2e-6 and 4e-6... setup requires > 4e-6, so nearest is unique within tolerance. OK. But float vs double: im[i] is float32 (loader stores float32 1/K0). asc entries are `static_cast<float>(1.0/denom)` — computed in double then cast. Does the loader compute the same? Loader: RationalScan2ImConverter::applyFormula in double, then frameToSpectrum's float cast. The comment claims term-for-term identical. Risky but claimed verified. However — the formula reconstruction `V = c[2] + ((c[3]-c[2])/c[1]) * ((double)s - c[4] - c[0])` assumes a specific evaluation order. If OpenMS computes `((c[3]-c[2]) * (s - c[4] - c[0])) / c[1]` instead (different association), results differ by ulps, and float cast usually absorbs it. Verified on two datasets; edge risk noted.
+
+  e) **Intensity recovery**: `corr = 100.0 / atof(sqlite text of AccumulationTime)`. In TdfLoad.h: `f.corr = 100.0 / std::atof(acc text)`. Claim: opentims computes `double(raw) * correction + 0.5` where correction = 100/AccumulationTime parsed via atof of sqlite's text rendering. Plausible. Uniqueness search: r from floor((v-0.5)/corr)-1 to ceil((v+0.5)/corr)+1. For corr>0.5, interval width (1/corr) < 2... Actually candidate count: (v+0.5)/corr - (v-0.5)/corr = 1/corr ≤ 2 when corr ≥ 0.5, plus ±1 margin → up to ~4 candidates. hits != 1 → refuse. Note: `(uint32_t)(r * corr + 0.5)` — r*corr+0.5 computed in double, cast to uint32. opentims: `(uint32_t)(raw * 100 / AccumulationTime + 0.5)`. Is opentims' expression `raw * 100 / at` (i.e., (raw*100)/at) vs `raw * (100/at)`? **Different association!** opentims.cpp: intensity correction — if opentims computes `double(raw) * 100.0 / accumulation_time + 0.5`, that's `(raw*100)/at`, whereas the recovery recomputes `r * corr` where `corr = 100/at`. These differ in rounding! raw*100 can be up to ~4e11, exactly representable in double (raw ≤ 2^32, raw*100 < 2^41 < 2^53 — exact). So (raw*100) is exact, then divide by at: one rounding. Whereas r * (100/at): 100/at rounded, then multiply: two roundings. **These can differ by 1 ulp**, which at the +0.5 boundary flips the truncated result. The boundary: values where (raw*100)/at + 0.5 is just below an integer but raw*(100/at)+0.5 is at or above — near-tie cases. The forward check `if ((uint32_t)(r * corr + 0.5) == (uint32_t)v)` would then reject the true raw and possibly find zero hits → refusal (fail-closed, but on legitimate data). Or worse: find exactly one hit that's the wrong raw. Scenario: true raw r0 gives (r0*100)/at + 0.5 = k - epsilon → v = k-1, but r0*corr+0.5 = k → matches v... no wait, v is fixed from the loader. If the loader computed v = (uint32_t)((r0*100)/at + 0.5) = k-1, and the recovery computes r0*corr + 0.5 = k (≠ k-1), then r0 doesn't match; a neighboring r might match v=k-1 wrongly, or hits==0 → refuse. So legitimate data could be refused or (rare) a wrong raw recovered. This is a genuine concern — depends on opentims' actual expression. The comment says "as opentims computes it; corr = 100/atof(...)". The description says "opentims-corrected: (uint32)(raw*100/AccumulationTime + 0.5)" — the parenthesization raw*100/AccumulationTime = (raw*100)/at. And the code computes r * corr with corr = 100/at. **Mismatch.** The comment in DnoiseRun says "opentims.cpp: double(raw) * correction + 0.5" implying opentims precomputes correction = 100/at once per frame, then raw*correction. If opentims indeed precomputes the correction factor per frame, then it matches. Unverifiable from inlined text — flag as a question/risk: the recovery assumes opentims multiplies by a precomputed factor; if it divides instead, boundary cases break. Given stage-1 verification on real files, presumably checked. Still, worth listing.
+
+  Also **uint32 cast of negative**: `(uint32_t)(r * corr + 0.5)` where r starts at max(0, floor((v-0.5)/corr)-1) ≥ 0, fine. But `(uint32_t)v` when v up to 16777216 fine.
+
+  Another: v check `v >= 0.0f && v < 16777216.0f && v == floor(v)`. Intensities above 2^24: a float can't hold every integer; but opentims stored a uint32 cast into float — the stored float for raw*corr+0.5 ≥ 2^24 may not be an exact integer but the recovery requires v == floor(v) as float. For v ≥ 2^23, all floats are integers anyway (float spacing ≥ 1 at 2^23... at [2^23, 2^24) spacing is 1, so every float IS an integer; above 2^24 spacing 2, still integers). Actually any float ≥ 2^23 is an integer value. So v==floor(v) holds for v ≥ 2^23 automatically. But then the loader's float(v_uint32) rounding: uint32 → float32 rounds to nearest; v < 2^24 condition means recovered v is exact as float only up to 2^24; above that, the float v may correspond to a uint32 value different from v — i.e., the float32 storage loses the low bits of the corrected count, and multiple raw counts map to the same float → hits may be 1 still but wrong raw? For v ≥ 2^24, consecutive float values differ by ≥2, but the check `v < 16777216.0f` refuses those (v ≥ 2^24 → hits stays 0 → refuse). Hmm, that means legitimate high-intensity points (corrected intensity ≥ 16.7M, raw ≥ 16.7M*corr... with corr ~ 100/at, at ~ 100ms corr=1000... wait corr = 100/AccumulationTime where AccumulationTime in ms; typical 100 ms → corr = 1.0; raw counts up to millions → v up to millions < 2^24 usually fine. But a very bright point with low accumulation time could exceed 2^24 → whole run refused. Fail-closed but possible on legitimate data. Note as edge risk: saturation. Also opentims/loader may saturate or the float conversion of large uint32 rounds — covered by refusal.
+
+  Also: **v could be 0 for raw 0** — hits: r from floor((0-0.5)/corr)-1 = negative → max(0, ...) → r=0 → (uint32)(0*corr+0.5)=0 == 0, hit. r=1: (corr+0.5) cast → for corr ≤ 0.5 could be 0 → refused in setup (corr>0.5 required). For corr in (0.5,1), 1*corr+0.5 in (1,1.5) → 1 ≠ 0. OK single hit.
+
+  Zero-intensity points: do they even appear? Bruker frames drop zeros typically. Fine.
+
+  f) **num_peaks check**: `n != fr.num_peaks` → refuse. But the loader hands MSSpectrum with double m/z; does the loader ever drop zero-intensity peaks or duplicate m/z? If BrukerTimsFile filters zero intensities, NumPeaks mismatch → refuse (fail closed). Also **frame aggregation**: `trace:native_ms1_neighbors > 0` refused in main(). Good.
+
+  g) **frames with corr <= 0.5 refused** in setup — good, early.
+
+  h) Multi-segment calibration: `im_asc` per TimsCalibration row; but what about **m/z calibration changing mid-run**? `ax.factor(fid)` per-frame factor — the TofAxis has b_by_frame. lastMzCalibration checked per batch. OK.
+
+  i) **The scan monotonicity check uses global max_num_scans** — if some TimsCalibration row's C1 (its own NumScans) < global max, v[s] for s ≥ C1... formula continues, values still computed; monotonicity presumably still holds (extrapolated). But the loader for a frame with fewer scans only uses first fr.num_scans entries — fine. However, if fr.num_scans > row's C1? Extrapolation — same formula, fine.
+
+  **Issue: frames indexed by fid up to 10^7 — frames vector sized by max Id; `fid >= tdf.frames.size()` check present. msms_type -1 default → refused. Good.
+
+  j) **`scanOf` binary search bug**: "the last entry <= v, else the first". Loop: `for (n = asc.size(); n > 1;) { h = n/2; if (b[h] <= v) b += h; n -= h; }`. Standard branchless lower-bound variant: ends with b pointing at last element ≤ v, or asc.data() if none. Then check asc[i+1] closer. Fine. But if v < asc[0], i=0, checked against tolerance. OK.
+
+  k) **kImTol vs float rounding of loader's IM array**: The loader stores float32 1/K0. The table stores static_cast<float>(double). Both float32 — if both compute identical double then cast, exact equality. Then fabs(asc[i]-v) = 0 ≤ tol. Good — provided double values match term-for-term. The real risk is the formula association. Mentioned.
+
+  l) **IM array could be mean 1/K0 after picking?** No — dnoise runs before the pick. But `ensureIMArrayName(s)` is called BEFORE dnoise->frame in flushMS1_. Does ensureIMArrayName modify values? It presumably renames the array. The mzML path check `containsIMData` after ensure. Fine.
+
+  But in the resident path: `if (!s.containsIMData()) continue;` then dnoise.frame — IM array access via s.getIMData().first. OK.
+
+  m) **Order of checkLoader vs setup**: checkLoader per batch — good because BrukerTimsFile::lastMzCalibration() is global state set during load; but on the streaming path, checkLoader called in flushMS1_ per batch — after frames already loaded with whatever calibration; it throws DnoiseError rethrown past fallback — good fail-closed, though late-ish (after first batch). Acceptable.
+
+  n) **The TOF axis loaded "early" via loadTofAxis preflight** — on streaming path; but for the resident path with dnoise on: `if (!tofAxis().ok && !loadTofAxis(...))` — happens in main before load. OK.
+
+  o) **Rounding of bin**: `std::nearbyint(t)` — depends on FP rounding mode (default nearest). Fine. `bin <= 4294967295.0` check good.
+
+  p) **The intensity forward-check double rounding**: `(uint32_t)(r * corr + 0.5)` — r*corr+0.5 could be e.g. 5.4999999 vs 5.5 — the uniqueness search with ±1 margin catches candidates; but opentims' actual computation `double(raw) * correction + 0.5` in double — matches r*corr+0.5 bit-exactly if corr identical double and compiler doesn't contract (r*corr+0.5 as FMA!). **FMA contraction**: `r * corr + 0.5` may compile to fma(r, corr, 0.5) on the tool's build — CMake adds -ffp-contract=off to spextractor target, good. But the in-tree OpenMS topp build (cluster) — comment says "OpenMS compiles with it but does not export it" — hmm, "matches the cluster's in-tree build, where OpenMS compiles with it" — ambiguous: does the cluster topp compile spextractor.cpp with -ffp-contract=off? It says "OpenMS compiles with it but does not export it" — meaning the flag is present in OpenMS's flags for the topp dir? The sync_cluster.sh reads `CXX_FLAGS` from flags.make for the unit test, but the tool build via `make spextractor` uses whatever OpenMS's build sets. If OpenMS doesn't set -ffp-contract=off for the topp target, then r*corr+0.5 and mzToTof etc. in spextractor.cpp may be contracted, diverging from opentims' double math → false refusals or (worse, if it doesn't fail) wrong raw. Actually wrong raw would require the uniqueness check to pass with a wrong value — the forward check is computed with the same contracted arithmetic, so self-consistent... the check compares against stored v which came from opentims (uncontracted). A contraction difference of 1 ulp near the .5 boundary → hits==0 or hits==2 → refusal. So worst case: false refusal, fail-closed. But also mzToTof in spextractor.cpp vs loader's tofToMz in libOpenMS: contraction differences shift m/z↔tof by ulps; tolerance 1e-6 bins vs true error 2.3e-10 — ulp of TOF bin value (~1e5-1e6) is ~1e-11-1e-10 double ulps... contraction shifts are few ulps, way below 1e-6. Fine. But DnoiseMs1.h itself guards with pragmas/volatile. spextractor.cpp's DnoiseRun::frame is NOT inside the pragma region of DnoiseMs1.h (the GCC optimize pragma applies to functions defined before pop_options — DnoiseRun::frame is in spextractor.cpp, after the include, so NOT covered). The volatile trick is in the gate builder. So the recovery arithmetic relies on -ffp-contract=off for the tool TU, which CMake sets but the cluster in-tree build (make spextractor inside OpenMS build) may not. The sync_cluster.sh unit test compiles with the same flags as the topp target (FL from flags.make) — and the unit test pins the gate boxes, which live in DnoiseMs1.h and are self-guarded; the test would NOT catch contraction in DnoiseRun::frame (that's in spextractor.cpp, not the test TU). So: **flag coverage gap for DnoiseRun::frame on non-CMake builds; mitigated by fail-closed tolerance design but could cause false refusals on boundary points**. Real finding.
+
+  q) **AccumulationTime parsing: atof vs sqlite text**: comment says opentims computes correction from atof of sqlite's own text rendering "in the same process with the same library" — sqlite3_column_text of a REAL column renders with %!.15g or similar; if opentims reads the double directly (sqlite3_column_double) instead, values could differ in last ulp for values whose 15-digit rendering isn't exact. corr derived from that. Both use atof(text)? The comment asserts TimsFrameFromSql computes it from text. Trust but flag.
+
+  Actually also: atof is locale-dependent! atof respects C locale decimal point; if a Qt app set decimal-comma locale... The tool isn't Qt. TdfLoad uses std::atof on "100.0" text. sqlite text rendering uses '.' regardless. atof in a comma-locale would parse "100" then stop at "."? Actually sqlite renders e.g. "100.0"; atof with comma locale parses 100.0? No — stops at '.', gives 100. Then corr = 100/100 = 1.0 wrong. But tool is not Qt; locale is C by default. parseF64 comment mentions "a Qt application may have set a decimal-comma C locale" — that's for dnoise standalone? The tool is a TOPP tool, not Qt app. Minor.
+
+  **2. Fail-closed coverage**
+
+  - DnoiseError caught inside OMP loops via pick_err capture — good in both flushMS1_ and resident loop.
+  - **`dnoise->checkLoader()` in flushMS1_ is called BEFORE the parallel region** — good, serial.
+  - But in the resident path, `dnoise.checkLoader()` before parallel loop — good.
+  - **`scanOf` / frame() throwing inside parallel: captured. `dnoise->add(dn_cnt)` after rethrow check — but in flushMS1_, if pick_err is rethrown, dn_cnt never merged — fine since run aborts. In stream fallback: DnoiseError rethrown past fallback — good. But non-DnoiseError exception (e.g. std::invalid_argument from denoiseMs1Frame for scan >= num_scans — can't happen since scan checked; bad_alloc) → treated as reader failure → falls back to resident load, which retries dnoise on all frames → throws again? In resident load, DnoiseError propagates (no catch). But a transient std::bad_alloc in stream → fallback → resident retries → may succeed — acceptable semantics? bad_alloc fallback fine.
+
+  - **Refusal timing**: setup() reads the tdf up front — good. But the check that the loader's MS1 frame count matches NumPeaks happens per frame during load — late for a mismatch, but that's inherent. However: **the per-frame checks only trigger when a frame is actually processed; MS2 frames never checked — fine.**
+
+  - **A subtle fail-late issue**: `dnoise.setup` requires IM model rational etc. But `tofAxis().ok` load — loadTofAxis refusal pre-load. Good.
+
+  - **Exit codes**: DnoiseError derives from Exception::InvalidValue — TOPP wraps as... fine.
+
+  - **`std::max(1, omp_get_max_threads())` sized dn_work; indexed by omp_get_thread_num() — if nested parallelism changes thread num beyond max_threads? Non-nested here. OK.
+
+  - **checkLoader compares BrukerTimsFile::lastMzCalibration() global — but on the stream path the loader may calibrate per frame with different models? It's a global last-value; if different frames used different models, only last is checked. Multi-calibration m/z (MzCalibration table has multiple rows for different segments?) — timsTOF m/z calibration is global typically. The per-frame factor b handles per-frame variation. OK-ish; flag: lastMzCalibration is "last" — if the loader switched model mid-run, earlier frames calibrated differently and check passes on the last one. TOF recovery tolerance would catch actual mismatch per point though (1e-6 bins) → refuse. So fail-closed anyway.
+
+  **3. Output identity**
+
+  - Order: dnoise BEFORE pick; ms1-hist counts picked peaks AFTER pick — [ms1-hist] runs after pick in flushMS1_ (it iterates ms1_buf_ post-pick). With dnoise on, the histogram now counts the picked peaks of denoised frames — that's intended output change for dnoise on; for dnoise OFF nothing changed (dn false → no frame call). Verify: `if (dn) dnoise->frame(...)` — with dn false, zero effect. ms1_prune unchanged. Good.
+
+  - **But: `dnoise.total` stamping for dnoise off → "none" — fine.
+
+  - **Digest pins: dnoise off runs produce old pins — validated.
+
+  - **Emptied frames**: a frame fully denoised to 0 points stays in the map with empty IM array — then the picker: `if (s.getIMPeakType() != IM_CENTROIDED) picker.pickIMCluster(s)` on an empty spectrum — presumably fine. But Ms1Prune.frame on an empty spectrum: n=0, sample loop none, chain nothing, kept=0==n → return. Fine. MassTraceDetection sees an empty scan — existed before (raw empty frames). But did dnoise-off path have emptied frames? A raw frame with NumPeaks=0 — the loader may skip it entirely (streaming consumer pads empty). On resident path empty spectra kept. Emptied-by-dnoise frame: present in ms1_map where dnoise preprocessor run (external) would produce .d with frame of zero peaks — does the external dnoise-filtered .d then loaded by OpenMS keep the frame? Validation says digests equal, so OK.
+
+  - **ms1-hist counts with dnoise on**: counts picked from denoised — matches external-preprocessor runs? External dnoise writes filtered .d, SpeXtractor picks it → same. OK.
+
+  - **Resident path dnoise ordering vs ms1_prune**: resident: dnoise.frame → pick → prune.batch. Stream: same order. Good.
+
+  - **The prune sample for band edges**: taken before prune, after dnoise — deterministic? sample stride-97 of sorted picked spectrum — deterministic per frame; offsets fixed pre-parallel — order-independent. Good.
+
+  - **Empty frame + `sortByPosition` on empty** fine.
+
+  - **19c sortByPosition**: prune sorts in place; but the SAMPLED m/z written before prune: after sortByPosition — good, matches detectTraces_ expectation of sorted spectra. Note: `s.sortByPosition()` mutates even when prune keeps everything and even when `kept == n` (returns after chain count — wait: `if (kept == n) return;` — sortByPosition already applied). For prune OFF frames not touched. For prune ON frames with nothing to prune, sortByPosition still runs — changes order of equal-m/z peaks? sortByPosition stable? If not stable, ties reorder → output could differ from prune-off path where spectra are sorted later anyway (ms1_map sorted? detectTraces_ sorts spectra by RT; within spectrum, the map for MassTraceDetection... it likely sorts or assumes sorted). The original stage-1 code did sortByPosition unconditionally too, so no regression.
+
+  - **IM array "empty stays empty"**: select with empty idx → arrays empty, shrink. The comment "Never removes a spectrum or strips the IM array" holds.
+
+  - **One more: `shrinkDataArrays` after select in dnoise frame — even when fc.kept != n; good.
+
+  - **Divergence resident vs streaming in checkLoader timing: both per-batch before loop. Resident path calls checkLoader once before the loop (not per batch — it's one loop). Fine.
+
+  - **Determinism of dnoise counters**: dynamic scheduling changes which thread processes which frame, but dn_cnt is per-frame-index (dn_cnt[i]), merged in index order — deterministic. dn_work per-thread scratch: denoiseMs1Frame is a pure function; scratch only working memory — deterministic. Good.
+
+  - **`k.keep` vector resized by keep.assign inside denoiseMs1Frame — per-thread scratch fine.
+
+  - **FrameCounts fc.after_streak etc — deterministic.
+
+  **Issue: intensity float compare `v == std::floor(v)` — NaN intensity: v >= 0.0f false for NaN → hits=0 → refuse. Good fail-closed.
+
+  **4. Fallback reset**
+
+  New reset discards ms1_map, ms2_by_window, cstat, ms1_prune.reset(), dnoise.total, ledger MS1MAP/SLAB. What else accumulates during a partial stream attempt?
+
+  - **`consumer.tables_` / tables_init_**: local to the consumer inside the `if (stream_load)` block — after fallback, the consumer is out of scope? The consumer is constructed inside `if (stream_load) { PickCompactConsumer consumer(...); ... }` — yes scoped. run_tables only assigned on success. OK.
+  - **LedCharge _raw in flushMS1_**: `LedCharge _raw(LC_SCRATCH, raw_b)` — RAII charge released at scope exit; on exception, destructor runs — presumably un-charges. If LedCharge adds on construction and subtracts on destruction, exception-safe. OK.
+  - **ledAdd_(LC_MS1MAP, mb) inside flushMS1_** before moving into ms1_map: partial batches already charged; reset does ledSet_(LC_MS1MAP, 0). LC_SLAB: window slabs charged via slab.bytes()? The reset sets LC_SLAB 0 and LC_MS1MAP 0. But other ledger rows charged during the failed stream: LC_SCRATCH released by RAII; compact store ledger? cstat reset. **Ledger rows for MS2 compaction (LC for compact store?)** — reset sets only two rows explicitly; comment in diff says "compact stats, prune state, dnoise counters and ledger rows". `ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);` — what about a compact-store ledger row (the MS2 compact store bytes, e.g. LC_STORE or similar)? Not visible in the diff. If the streaming consumer charges compact-store bytes per window into a ledger row and the reset doesn't zero it, the ledger over-reports after fallback — cosmetic (report only). Flag as a possible miss. Also `phase_stats_` "LOAD(stream)" entries accumulate — after fallback, phases contain partial stream time — cosmetic.
+  - **`consumer.frames_seen` etc — scoped. `TileProbe` state — global singleton TileProbe::get() — probe-dropped counts; probe only active in probe mode.
+  - **BrukerTimsFile::lastMzCalibration()** global persists — fine.
+  - **tofAxis()** loaded early stays — used by resident path. Good.
+  - **The stream fallback previously kept ms1_map with a count check that refuses — now it discards; is anything WRONGLY discarded? The check at MS1 tracing `ms1_prune.frames != ms1_map.size()` — with reset, consistent. But: what if stream fails BEFORE any MS1 flushed but AFTER... fine.
+  - **`streamed` flag false → resident; `tile_source=false`. run_tables empty — frozen tables from resident slabs. OK.
+  - **exp**: `PeakMap exp;` declared before; resident load appends into exp — if the stream attempt somehow filled exp? No, streaming fills consumer buffers. OK.
+  - **One real potential miss: `ms1_prune.sample` reset — yes reset() clears. And `ms1_prune.total`. Good.
+  - **What about `cstat` ledger charge LC for the compact store (ledAdd during consume)?** Mentioned above. Also `LedCharge` in flush_ for raw MS2 — RAII.
+
+  **5. Memory/performance**
+
+  - dn_work: per-thread Work with scan/tof/raw (4B each) + keep (1B) + idx — ~13B+ per point per thread, "45 B per raw point in flight" comment claims 45B (idx is Size 8B only when kept != n... idx cleared/filled per frame). Per frame ~690k peaks → per thread ~30MB; 100 threads ~3GB on top of the 3.5GB raw buffer. Hmm — significant but transient per batch. Actually scan+tof+raw = 12B, keep 1B, idx up to 8B×kept, Scratch w — dnoise's Scratch includes radix-sort buffers: idx (4B×n), plus column buffers? ~45B claim. OK, but worth noting batch already holds 3.5GB; adding 100×45B×690k ≈ 3.1GB doubles the transient. Peak memory claims measured -15% so fine in practice. Comment: dn_work sized by omp_get_max_threads() but the actual parallel region may use fewer — fine.
+
+  - **Per-frame allocation reuse across frames in batch — k.scan.resize(n) never shrinks: holds max frame size per thread — fine.
+
+  - **shrink_to_fit on every selected array: for every frame that loses points — shrink_to_fit reallocates: cost O(n) copy per array. The prune measured. OK.
+
+  - **`sample.resize(at)` upfront then parallel writes — fine.
+
+  - **Ms1Prune double chain pass: 2x work per spectrum when pruning — negligible.
+
+  - **`std::vector<Counts> cs(v.size())` per batch — fine.
+
+  - **im_asc tables: n_scans (max, ~1000) floats per cal row — tiny.
+
+  **6. Options/defaults/stamps**
+
+  - dnoise:ms1 is string "true"/"false" consistent with other options (perf:ms1_prune). Defaults audit: default ON — intentional, documented.
+  - Bounds: min ints set; **dnoise:halo_peak_fraction has min 0 but no max — fraction > 1 meaningless but dnoise accepts; matches dnoise behavior — acceptable.
+  - **Missing: dnoise:iterations min 0 set; fine.
+  - **Help text claims**: "peak memory D 26.46 -> 22.41 GB (-15%), TNBC 34.67 -> 25.41 (-27%); wall -15%" — but validation section only reports digests and kept points; the numbers come from the preprocessor runs carried over "because this in-tool path gives digest-identical output". Memory of in-tool vs preprocessor could differ (in-tool holds both raw and filtered per batch)... The claim "peak memory D 26.46 -> 22.41" measured with dnoise as preprocessor, carried over — the in-tool dn_work transient (≈3 GB at 100 threads during MS1 batches) means the in-tool peak may NOT be 22.41. **Help text number not measured on the shipped configuration** — real finding (fix-pass item 11 was "help-text figures corrected" — this one still rests on a proxy measurement).
+
+  Also "wall time about -15%" similarly from preprocessor.
+
+  - **Stamps**: spx:dnoise_ms1 "skipped (input is not a Bruker .d)" — but ALSO skipped case: dnoise_req true, .d input, but setup... no, setup failure throws. What about dnoise_req true, .d input, and `SPEXTRACTOR_TILE_RESIDENT`? Still filtered on resident path — dnoise.on true. Stamped with port string. OK.
+
+  - **Stamp value uses dnoise.on — if dnoise ran but input .d had zero MS1 frames? on still true, raw 0 kept 0. Fine.
+
+  - **Check 20 asserts `"[dnoise]" not in log_off`** — with -dnoise:ms1 false; but the band_edges preflight logs "[perf-load]..." not [dnoise]. OK. But wait — `writeLogInfo_("[dnoise] MS1 denoising skipped...")` only when dnoise_req. Good.
+
+  - **The "skipped" stamp for a non-.d input when dnoise:ms1 false stamps "off" — consistent.
+
+  - **What about dnoise on, .d input, but stream fallback after partial denoise: dnoise.total reset, resident re-filters — counters consistent. Stamp fine.
+
+  **7. Tests/deploy**
+
+  - Check 19 asserts `at_noise == 3` — three peaks at exactly 100.0 (cycles 11,12,13 each have 400.2 at 100.0). Sensitive.
+  - 19b: `wit_nc == 9 + 6` — hmm, "9 first peaks + 6 gap far sides stay". Reasonable pins.
+  - 19c descending: good.
+  - 20: only mzML skip; the .d filtering itself not e2e-tested in this suite (can't build .d) — acknowledged in text; covered by cluster gates. Note the gap: **no automated test verifies the in-tool dnoise filter against dnoise's kept set on .d — only manual cluster gates (digests e43672a0/3aafd0b5). If the digest harness isn't wired into CI, regressions in point recovery are caught only by the unit test (gate boxes) — the recovery logic (mzToTof inversion, scanOf, intensity inversion) has NO unit test.** tests/test_dnoise_ms1.cpp pins the port's filter, not the recovery in DnoiseRun (spextractor.cpp). Real gap.
+
+  - **sync_cluster.sh quoting**: 
+    - `CXX=\$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' CMakeCache.txt)` — sed pattern `CMAKE_CXX_COMPILER:[A-Z]*=` — the cache line is `CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++`. `[A-Z]*` matches FILEPATH. OK. But if compiler path contains spaces, `\"\$CXX\"` quoted, good.
+    - `FL=\$(sed -n 's/^CXX_FLAGS = //p' src/topp/CMakeFiles/spextractor.dir/flags.make)` — unquoted expansion `\$FL` intentional for splitting; a flag with spaces would break — standard risk, acceptable.
+    - **Restore on unit-test failure: `mv '${REMOTE_SRC}.bak' '$REMOTE_SRC'`** — restores spextractor.cpp but NOT the headers (TdfLoad.h, DnoiseMs1.h, MzPeakStreamLoad.h, TdfMzCalibration.h) which were already scp'd over the old ones without backup! The header copies are never backed up; on any failure (unit test, build), the source is restored but the headers remain NEW → **src/header drift exactly like the incident the script's comments describe** ("a rename left the cluster building against a stale TdfLoad.h"). The restore claim "source restored, binary and provenance unchanged" is incomplete: headers stay. Next build of the restored .cpp with new headers may fail or differ. **Real deploy bug.** Also on build failure same issue (pre-existing, but now DnoiseMs1.h makes it worse since the restored source might not compile without matching header? Actually restored old source doesn't include DnoiseMs1.h — but old source WITH new TdfLoad.h (which now includes DnoiseMs1.h and needs it present) — new TdfLoad.h includes "DnoiseMs1.h" — present (newly synced), so compiles. But semantics drift.) Still: headers not restored = drift. Also TdfMzCalibration.h overwritten without backup — same. Pre-existing for the other headers; the .bak mechanism only ever covered spextractor.cpp. Flag.
+    - **`cp -p ... || true` then `mv .new`** — if .bak doesn't exist (first deploy), restore `mv` has `|| true` — ok.
+    - **Lock: mkdir lock with trap rmdir EXIT — if ssh connection drops mid-build, does the trap run? ssh remote shell receives SIGHUP; with `set -eu` and trap on EXIT should fire on shell termination. OK-ish.
+    - **The unit test compile uses `\$FL` from flags.make — flags for the topp dir include -ffp-contract=off? CMakeLists sets it for the spextractor target via target_compile_options — in the OpenMS in-tree build, the topp target is defined by OpenMS's CMake, not this CMakeLists!** The in-tree build compiles spextractor.cpp as part of OpenMS TOPP tools — SPX_NO_FP_CONTRACT from this repo's CMakeLists does NOT apply there. Comment says "matches the cluster's in-tree build, where OpenMS compiles with it but does not export it" — confusing. If OpenMS's own flags include -ffp-contract=off globally (some OpenMS builds do? unclear), fine. The unit test pinned with FL = the topp target's flags validates exactly those flags on the gate boxes — good design — but as noted, DnoiseRun::frame isn't in the test TU, so the test can't detect contraction issues in the recovery code.
+    - **`dnoise_unit_test=passed` in provenance — fine.
+    - **`shasum` on macOS locally, `sha256sum` remotely — fine.
+
+  - **CMake**: test_dnoise_ms1 registered in both builds — good. But `enable_testing()` before `if(SPEXTRACTOR_TESTS_ONLY)` and add_test registered in both — fine. **CTest for the full build doesn't include the python e2e or calibration test — pre-existing.
+
+  **8. Anything else**
+
+  - **`#error` check `FLT_EVAL_METHOD != 0`** — FLT_EVAL_METHOD requires <cfloat> — included now. On x86_64 SSE2 it's 0. Good. But `#if defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD != 0` — FLT_EVAL_METHOD is always defined by cfloat. OK. Note: FLT_EVAL_METHOD == -1 (indeterminable) is fine-ish. OK.
+
+  - **`parseF64` change**: uses istringstream classic locale. Grammar pre-checked. Range contract: refuses subnormals/underflow — divergence from dnoise documented. **`in >> v` after grammar check: could the stream parse differ, e.g. "1e999" sets failbit and v = HUGE_VAL → a > DBL_MAX → false. "0e999": nonzero=false, v = 0, `v != 0.0` false → accepted as 0. Rust "0e999" parses to 0 — matches. Good.
+    - **`in.fail()` check but not `in.eof()`— grammar already validated full consumption, stream only converts. num_get for double: may stop early? Grammar ensures format. OK.
+    - **1e-999 with nonzero mantissa: strtod underflows to 0, sets failbit (out-of-range) or not — they check value domain instead: a=0, nonzero → refused. Good.
+    - **Hex? Grammar refuses. OK.
+
+  - **Ms1Prune `no_chain` semantics**: when no_chain, `take(cand)` skipped but `last = cand` — "walks on from it without keeping it" — so reach continues from the dropped link — meaning subsequent decisions identical to keeping it, only the link is absent. Good control design.
+
+  - **`chain(true, ...)` counts survivors even when no_witness — `kept` counting consistent.
+
+  - **In `frame()`, when `!finite`, `c.kept += n` — the log then counts kept == picked for that spectrum — consistent.
+
+  - **Ms1Prune::frame sample write: `*samp++ = s[i].getMZ()` — sample buffer offsets computed with `(v[i].size() + 96)/97` — frame's n may CHANGE? No — prune doesn't change size before sampling; sample written before select. But wait: in flushMS1_, ms1_prune->batch runs on ms1_buf_ AFTER picking; off computed from v[i].size() — same size frame() sees. OK.
+
+  - **dnoise runs BEFORE the pick, prune AFTER — the prune's `picked` counts are post-dnoise. Band edges sample from denoised+picked spectra — deterministic and matches the external-preprocessor digest per validation.
+
+  - **Thread-safety: `dnoise->frame` reads tdf, im_asc, gate — all const after setup. `tofAxis()` — global; const after load? tofAxis() returns reference to global set during preflight; concurrent reads fine.
+
+  - **`ensureIMArrayName(s)` called before dnoise->frame in flushMS1_, and dnoise checks `s.containsIMData()` — consistent. In resident path, dnoise.frame called AFTER `containsIMData()` check but BEFORE ensureIMArrayName — does containsIMData work without the name normalization? getIMData() looks up array by known names; ensureIMArrayName renames to the standard. If loader gives nonstandard name, containsIMData false in resident → skipped from dnoise AND from dispatch (continue) — same as before. In stream, ensure first. Consistent enough; but **asymmetry: stream ensures name before dnoise; resident doesn't ensure before dnoise's containsIMData check inside frame()** — in resident, `s.containsIMData()` in the loop guard is the same check, so a spectrum reaching dnoise.frame has containsIMData true... wait resident loop: `if (!s.containsIMData()) continue; if (dnoise.on && ms1) dnoise.frame(...)`. Inside frame, checks containsIMData again — same result. Fine. But getIMData().first index — consistent.
+
+  - **`DnoiseRun::frame` accesses `s.getFloatDataArrays()[s.getIMData().first]` — if getIMData returns (-1?) when containsIMData false — guarded.
+
+  - **`im[i]` float; `im` array size == n checked.
+
+  - **Empty frame early-return before IM check: n==0 returns AFTER fid/msms/num_peaks checks — good; but doesn't verify IM array for empty frame — fine, no points.
+
+  - **The `refuse` lambda captures `s` and uses s.getNativeID() as the Exception's "what" arg — fine.
+
+  - **`frameIdOf(s.getNativeID())`** — parses "frame=1234" presumably. If nativeID malformed → fid 0 → refused. Good.
+
+  - **Potential identity issue: `DnoiseRun::Counts` `cpu` uses CLOCK_THREAD_CPUTIME_ID — fine.
+
+  - **The stamp `spx:dnoise_ms1_params` when on includes gate_boxes — deterministic.
+
+  - **One more fail-closed gap: `trace:native_ms1_neighbors > 0` refusal happens only when `dnoise_req && .d`. If native_ms1_neighbors > 0 with dnoise on... refused. Good. But what about ms2 neighbors + dnoise? dnoise only touches MS1 — fine.
+
+  - **`SPEXTRACTOR_MZPEAK_TDF` env candidate for TOF axis vs dnoise setup using in + "/analysis.tdf" only — for mzPeak input dnoise skipped anyway.
+
+  - **Streaming: `consumer.dnoise = &dnoise` set even for mzML input (dnoise.on false) — dn false, fine.
+
+  - **Subtle: in flushMS1_, `dnoise->checkLoader()` runs when dn — but BrukerTimsFile::lastMzCalibration() on the STREAM path: the consumer's reader is a BrukerTimsFile — set during load. On RESIDENT path with .d input, loadExperiment → BrukerTimsFile sets it. OK. But on resident path when input is mzPeak with dnoise on? mzPeak → not BRUKER_TDF → skipped. OK.
+
+  - **What if .d input, dnoise on, but stream load and the run has NO MS1 frames in a batch?** n==0 return before checkLoader — fine.
+
+  - **Edge: `dnoise.on` true and MS2 spectra in exp with MS level 1 check — resident loop checks getMSLevel()==1 before dnoise.frame. flushMS1_ only buffers MS1. But does flushMS1_ receive only genuine MS1? It trusts the consumer routing; the fid check inside frame verifies against tdf (msms_type==0). If the loader mislabels (e.g., a frame the tdf says is MS2 delivered as MS1) → refused. Good.
+
+  - **`num_peaks` vs delivered n for frames that the loader pads/merges: refused. Good.
+
+  - **The setup's monotonicity requirement across the GLOBAL max_num_scans for EVERY calibration row — a frame with fewer scans whose row extrapolates non-monotonically beyond its NumScans would refuse the whole run even though no point uses those scans. Over-strict refusal: setup builds v over n_scans = global MAX(NumScans) and requires strict monotonicity over the WHOLE range. A TimsCalibration row used only by frames with NumScans < max could be non-monotonic in the extrapolated region → false refusal. Also rows not referenced by any MS1 frame still must pass. **Over-refusal on legitimate data.** Should build/check only up to the max NumScans among frames referencing that row. Real finding (minor-severity, fail-closed but blocks legit runs).
+
+  - Similarly, corr check only for msms_type==0 frames — good.
+
+  - **loadTdfDnoise: `sqlite3_column_int64(st,2)` num_scans cast to uint32 without bounds check — NumScans > 2^32 wraps; but meta.max_num_scans capped at 1e6; per-frame num_scans unchecked! `f.num_scans = (uint32_t)sqlite3_column_int64(st, 2);` — a corrupt value > 2^32 wraps silently. Then denoiseMs1Frame num_scans bound check... scan >= num_scans per-point check. num_peaks similarly unchecked (cast from int64). NumPeaks mismatch with n would refuse anyway. num_scans wrap: if real NumScans is, say, 2^32+5 (impossible physically, but the file is the contract) → wraps to 5 → scans refused → fail closed. OK-ish. Negative NumScans int64 → huge uint32 → denoise throws > 2^32-1? No — (uint32_t)(-1) = 4294967295 = max, passes the ≤ max check, then scanOf bounds... frames legitimately have positive; corrupt file → probably refusal via other checks. Minor.
+
+  - **Missing `Frames` id upper bound 10^7 consistent with loadTdfCalibration. OK.
+
+  - **AccumulationTime as text: sqlite3_column_text on a REAL — rendering %.15g; opentims TimsFrameFromSql — does it read column_double or text? The comment asserts text+atof. If opentims actually reads the double, then for AccumulationTime values whose %.15g rendering differs from the stored double (possible: 15 significant digits don't uniquely determine a double — need 17), corr differs by ~1 ulp → boundary flips → false refusals. Flag as assumption to verify (they said "as TimsFrameFromSql computes it, with the same library in the same process" — implies verified by reading opentims source; leave as noted risk).
+
+  - **Check 19 `at_noise == 3`**: fixture has 400.2 at exactly 100.0 in cycles 11,12,13 → 3. Also counts at_noise across whole run — any other 100.0s? z-envelopes at 6e5 etc. Fine.
+
+  - **19's sensitivity: `assert "[ms1-prune]" not in log_off` good.
+
+  - **`PRUNE_RE` includes bad_mz — log line updated — consistent.
+
+  - **Test 20 reads only first 200000 chars of mzML for the stamp — header stamps near top; fine.
+
+  - **`check()` count total updated: 6+2+2+1*9 + ... they wrote `6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2` = let's count: previous total expression was 6+2+2+ eight 1s = 18? Original: 6 + 2 + 2 + 1×8 = 18 checks (1..18). New: adds 1+1+2? They added checks 19, 19b, 19c, 20 = 4 checks; old total 18 → new 22. New expression: 6+2+2 = 10, plus eleven 1s? Count the 1s: 1+1+1+1+1+1+1+1+1 = nine 1s... "6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2" — count terms: 6,2,2 then 1×? let me count characters: after "6 + 2 + 2 + " there are: 1, 1, 1, 1, 1, 1, 1, 1, 1 (nine 1s) + 2. So 10 + 9 + 2 = 21. But claims e2e 22/22 in validation. Hmm — count again from the diff: `total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2   # + 19b, 19c`. Terms: 6, 2, 2, then 1×10, then 2 → 10 + 10 + 2 = 22. Counting the "1 +" occurrences in the string: "1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1" — I need to be careful. The old expression: `6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1` = 6+2+2 + eight 1s = 18. New adds "+ 1 + 1 + 2" → replaces? New: 6+2+2+1+1+1+1+1+1+1+1+1+1+2 → that's ten 1s + 2 = 12+2... 6+2+2=10; ten 1s = 10; +2 = 22. Wait is the last "2" accounting for...? Old ended with eight 1s (checks 11..18 = 8 checks). New: checks 1-18: 6+2+2+ eight 1s; then + 1 (19) + 1 (19b) + 2?? 19c and 20 = 2 checks → "+2". So 18+1+1+2 = 22. The text shows after the old eight 1s: "+ 1 + 1 + 2". The diff string "6 + 2 + 2 + 1×10 + 2" = 10 + 10 + 2 = 22. OK consistent with 22/22. Fine.
+
+  Now severe ranking. Let me finalize findings:
+
+  1. **Headers not backed up/restored in sync_cluster.sh on failure** — deploy drift, source restored but headers (TdfLoad.h now, DnoiseMs1.h, MzPeakStreamLoad.h, TdfMzCalibration.h) stay new. Severity high for ops.
+
+  2. **DnoiseRun::frame recovery arithmetic not covered by contraction guards on non-CMake (in-tree) builds**: -ffp-contract=off is only in this repo's CMakeLists; the cluster's in-tree OpenMS topp build doesn't get it; DnoiseMs1.h self-guards but the recovery code (r*corr+0.5, mzToTof inversion) lives in spextractor.cpp outside the pragma. The unit test can't catch it (different TU). Consequence: false refusals near rounding boundaries (fail-closed) — or none if tolerances absorb; intensity exact-match is the sensitive one.
+
+  3. **No unit/e2e test for point recovery** (mzToTof inversion, scanOf, intensity uniqueness) — only the gate boxes are pinned; recovery is validated only by two manual cluster digests. A regression in spextractor.cpp's recovery compiles and passes all tests.
+
+  4. **opentims correction association assumption**: recovery uses r * (100/at); if opentims computes (raw*100)/at or reads AccumulationTime as double rather than text+atof, 1-ulp differences flip boundary points → false refusals on legitimate data (fail-closed) — the claim rests on source-matching not shown here; verified only empirically on two files.
+
+  5. **Over-strict scan-table validation**: monotonicity/separation enforced over the global MAX(NumScans) for every TimsCalibration row, including scan indices beyond any referencing frame's NumScans and rows used by no MS1 frame → legitimate files refused. Fix: build tables per row up to max NumScans of frames referencing that row (and only for rows referenced by MS1 frames).
+
+  6. **Corrected intensity ≥ 2^24 refused** — very bright points (or low accumulation times) make the run refused though dnoise itself would filter fine. Fail-closed but blocks legitimate data. Could recover from... float can't represent; would need raw from blob. Documented behavior at least? Not in help text.
+
+  7. **Fallback reset possibly incomplete**: LC_SLAB/LC_MS1MAP zeroed, but compact-store ledger charges and phase stats from the failed stream attempt are not reset (ledger over-reports; cosmetic). Also `TileProbe` counters? Probe mode only. Also `consumer` state scoped away. Verify no other ledAdd rows accumulate during streaming (LC for compact bytes charged per window in consume).
+
+  Actually, look at the reset: `ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);` — and cstat reset. Compact store bytes ledger — is there a LC_ charged during streaming consume for the compact store? The resident path sets LC_SLAB from slab.bytes() — LC_SLAB covers slabs. Compact store charge may be inside PeakSlab growth (ledger charge inside compact store?) — can't verify from inlined text. Flag as verify.
+
+  8. **Help-text memory/wall figures** measured on the preprocessor configuration and carried over; in-tool adds per-thread Work (~45 B × points × threads ≈ 3 GB transient at 100 threads during MS1 batches) — the quoted 22.41/25.41 GB peaks may understate the shipped configuration. Also "wall -15%".
+
+  9. **parseF64: fine** — clean. Actually check one thing: `digits(true)` after '.' — mantissa accumulation; "e" handling; `body` strips leading '+' — stream accepts leading '+'? They strip by substr(start) which excludes sign, prepend '-' if negative. Good. Edge: s = "+5" → body "5". s="-.5"? grammar: digits() before '.' may be 0; then '.', digits ≥1 → mantissa=1 ok; start after '-' → body = "-" + ".5" → stream parses -0.5. Rust ".5" parses. OK. `nonzero` for exponent digits excluded — right.
+
+  Hmm, one more parseF64 subtlety: mantissa digits counted with `mantissa && s[i] != '0'` — nonzero tracks only mantissa digits. "0.0e5" → zero, ok.
+
+  Also: **istringstream imbue classic then `in >> v`: for input "5" fine; for "1e-310" (subnormal, nonzero mantissa): strtod returns subnormal, may set failbit? They check a >= DBL_MIN → refuse. Consistent with contract. Good.
+
+  10. **`scanOf` when im value exactly between two scans**: gaps > 4e-6, tol 1e-6 → nearest is unique and within tol only if loader value matches a table entry within 1e-6 — loader value should be EXACTLY a table entry (same computation + float cast). If loader's double differs by 1 ulp, float cast almost always identical; borderline float-rounding ties could give adjacent float values differing by 1 float-ulp (~1.2e-7) — within 1e-6. Good margin.
+
+  11. **`im_asc` built for `s` from 0 to max_num_scans-1, but loader scans are 1-based?** TimsTOF scan indices: timsrust/opentims scans 0..N-1? dnoise scan index 0-based per contract ("0-based scan index"). The OpenMS converter: applyFormula(scan) — scan from 0? If the loader uses scan numbers 1..N (1-based), the whole table is shifted by one and scanOf would systematically map scan k to k-1 or refuse. Verified on real files (kept counts match), so presumably right. Note as assumption pinned only empirically.
+
+  12. **`Ms1Prune::frame` sorts but when `kept == n` returns without select — fine. When `!finite`, no prune — and no select — but sample already taken post-sort; the spectrum in the map is now sorted where the unpruned run would store it unsorted until later — wait, does the unpruned path sort MS1 spectra before band building? The band builder's lower_bound requires sorted; presumably detectTraces_ sorts or the prune's comment says "sortByPosition (a no-op on a picked one)". Picked spectra are sorted by construction. The non-finite m/z case: "hides from is_sorted" — a spectrum with NaN m/z stays whole but IS sorted by sortByPosition — does sorting a NaN-containing spectrum differ from the unpruned path's later handling? If unpruned path never sorts (assumes picked order), then prune ON changes peak ORDER of a NaN spectrum vs prune OFF → band builder lower_bound over unsorted (UB-ish behavior differs) → output divergence between prune on/off on NaN spectra! The comment acknowledges NaN hides from is_sorted and says "stays whole" — but it did NOT stay unsorted: sortByPosition ran. Whether that changes downstream behavior depends on the band builder; the brute-force check "0 of 360,968 band checks differ" presumably had no NaN spectra. **Edge: NaN-m/z spectra may change behavior via the sort, contradicting "stays whole, and is counted" intent.** Minor/weird-input only. Actually fix 8 was "frames with a non-finite m/z are not pruned" — but they're still SORTED. If output-identity with prune-off matters for NaN spectra, sort must be skipped too. List as edge finding.
+
+  Also bad_mz counting: `c.kept += n` but `kept` local remains from chain — return before use. Fine.
+
+  13. **`select` with `keep` and then `shrinkDataArrays` — for Ms1Prune: fix 1 added shrink. OK.
+
+  14. **flushMS1_ dn_cnt vector sized n only when dn; dnoise->add(dn_cnt) guarded by dn. In resident, dn_cnt sized exp.size() when on; add unconditional `dnoise.add(dn_cnt)` — when off, empty. Fine.
+
+  15. **Empty dn_work when dn false but `dn_work.at(...)` only called under dn. Fine.
+
+  16. **exceptions inside `#pragma omp parallel for` captured — but `ms1_prune->batch` in flushMS1_ called AFTER rethrow check — its own internal capture. Good.
+
+  17. **The `ms1_err` capture around detectTraces_ single: catches in single, rethrows after `if (ms1_err)` — but the rethrow happens INSIDE... no: the try/catch is inside the single region; `if (ms1_err) std::rethrow_exception` — is that inside the parallel region? Looking at the diff:
+
+  ```
+  #pragma omp parallel
+  #pragma omp single
+  try { ms1_traces = detectTraces_(...); }
+  catch (...) { ms1_err = std::current_exception(); }
+  if (ms1_err) std::rethrow_exception(ms1_err);
+  ```
+
+  The `if (ms1_err)` — indentation suggests it's OUTSIDE the `#pragma omp single` but still inside `#pragma omp parallel`? The two pragmas: `#pragma omp parallel` then `#pragma omp single` apply to the next structured block. `#pragma omp single` applies to the `try{...}` block ONLY? A try block is a structured block — so single covers just the try. The catch clause... hmm, `#pragma omp single` followed by `try {...} catch {...}` — the try-catch is one statement (a try-block is a selection? Actually a try-block is a block-statement? The grammar: statement includes try-block). So single applies to the whole try-catch statement. Then `if (ms1_err) rethrow` is the NEXT statement, executed by ALL threads of the parallel region (outside single). ms1_err is shared, written by single thread — but is there a barrier between single and the if? `#pragma omp single` has an implicit barrier at the end (unless nowait). So all threads see ms1_err after the barrier. If set, ALL threads rethrow the same exception_ptr — **an exception escapes the parallel region from every thread** → std::terminate? The fix-pass item 10 says "exception containment around the MS1 tracing call" and the comment says "captured inside the single, rethrown after it". "After it" must mean after the parallel region — but from the inlined diff, the rethrow appears immediately after the catch, with no visible end of the parallel region. The diff context lines show:
+
+  ```
+  +    catch (...) { ms1_err = std::current_exception(); }
+  +    if (ms1_err) std::rethrow_exception(ms1_err);
+       { const double cap = max_span; ...
+  ```
+
+  The following line is a normal statement — if the parallel region ended before `if (ms1_err)`, there'd need to be a closing brace for the parallel block. `#pragma omp parallel` followed by `#pragma omp single` — a parallel region whose body is a single construct alone: `#pragma omp parallel` newline `#pragma omp single` newline statement — the parallel's structured block is the single construct (nesting without braces). So the parallel region ENDS after the single/try-catch statement. Then `if (ms1_err) rethrow` is OUTSIDE the parallel region — serial, safe. OK — that's actually valid: parallel { single { try-catch } }, then serial rethrow. Good. But wait — does this pattern hold with the code as shown? `#pragma omp parallel` `#pragma omp single` `try {...} catch (...) {...}` — yes, parallel's block = single's block = try-catch statement. Clean. But fragile: anyone adding a statement between... fine.
+
+  Hmm, but there's a subtlety: the OLD code had `#pragma omp parallel / #pragma omp single / ms1_traces = detectTraces_(...)` — same pattern. OK.
+
+  18. **throws inside detectTraces_'s taskloop tasks not caught — acknowledged in comment. An exception escaping a task → terminate. Pre-existing behavior of detectTraces_? Comment says "throws inside its taskloop tasks are not caught here" — acceptable documented.
+
+  19. **checkLoader() in flushMS1_ called before parallel but AFTER tables_init etc — cheap. On resident path, checkLoader before the parallel pick — good. But resident checkLoader happens even when exp has no MS1 (all MS2): fine.
+
+  20. **Exit codes**: DnoiseError is InvalidValue → TOPP returns... probably INPUT_FILE_CORRUPT or similar. Fine.
+
+  21. **`p.halo_peak_fraction` double from option, no max bound; >1 makes halo keep only points... matches dnoise semantics (it would filter aggressively) — user choice. OK.
+
+  22. **`dnoise:min_window_intensity` int option → uint64 cast; bounded min 0. Int max 2^31 — dnoise u64 — fine.
+
+  23. **Stamps when `dnoise_req` true and input .d but setup succeeded and yet no MS1 frames processed (all empty?) — total zero; stamp "raw 0 kept 0". Fine.
+
+  24. **`spx:dnoise_ms1` stamp when input .d and dnoise ran under stream with NO fallback: on=true. Good.
+
+  25. **What about `-dnoise:ms1 true` explicitly with mzML: logged skip, stamp skipped. check 20 covers.
+
+  26. **The `refuse` in main for native_ms1_neighbors: message formatting "…frames." + " -dnoise:ms1 false runs…" — concatenation "…them. -dnoise:ms1…" fine.
+
+  27. **`loadTofAxis` refusal message references preflight; ok.
+
+  28. **MzCalibration "tdf_table_modeltype1" — if loader used modeltype2 (quadratic?) or spline → refused. Good fail-closed.
+
+  29. **Duplicate TimsCalibration Id handling: "a repeated Id: the last row, as the loader's map keeps it" — cal_id search keeps LAST match (ci overwritten). Comment says loader's map keeps last — matches if loader inserts overwriting. Trust.
+
+  30. **GlobalMetadata duplicates: last wins in the map loop (*slot overwritten per row). dnoise/timsrust — MetadataReader: first or last wins? If timsrust errors on duplicates or takes first... The port contract claims bit-identity; duplicate-key behavior unspecified here. Minor.
+
+  31. **sqlite3_column_text rendering of AccumulationTime for an INTEGER-typed column**: if AccumulationTime stored as INTEGER (e.g., 100), column_text renders "100", atof → 100.0 — same as double. Fine.
+
+  32. **`out.meta.max_num_scans` = MAX over ALL frames incl MS2 — the gate builder uses max_num_scans for IM conversion (timsrust uses... global max). Matches dnoise which reads MAX(NumScans) too presumably. OK.
+
+  33. **DiaFrameMsMsWindows DISTINCT — dnoise uses union of every window row; DISTINCT dedupes identical rows — union unaffected. OK. But NULL filtering: WHERE IsolationMz/Width NOT NULL — dnoise/timsrust behavior with NULLs? If timsrust errors or treats as 0... unspecified; minor.
+
+  34. **`ScanNumEnd <= ScanNumBegin` dropped after u32 wrap cast — matches dnoise wrapping cast per comment.
+
+  35. **Performance: dn_work per thread `Work` includes dnoise Scratch with radix buffers (~4 arrays × n × 4B) — claim 45B/point. 100 threads × 690k × 45 ≈ 3.1GB. During MS1 batch with 256 frames buffered (3.5GB), the parallel loop allocates per-thread buffers on first use → peak ~6.6GB transient vs 3.5 before. The memory claim "-15%" (22.41GB peak) — plausible still below prune-off peak 26.46. OK but ties to finding 8.
+
+  36. **k.keep uint8 per point; idx reserve absent (push_back per kept) — kept could be ~n; push_back amortized fine.
+
+  37. **flushMS1_ histogram [ms1-hist] counts PICKED intensities — unchanged position relative to pick; with dnoise on it counts picked-from-denoised — matches preprocessor runs. Clean.
+
+  38. **`ms1_prune.batch` take lambda `return true` — prunes every buffered MS1 — ms1_buf_ contains only MS1. OK.
+
+  39. **Determinism across thread counts: dnoise per-frame independent; counters per-frame merged in order; CPU timing only in logs/stamps? `filter CPU %.1f s` in summary log only, not stamped. Good — stamps stay deterministic.
+
+  Wait — actually is `total.cpu` in params() or stamps? summary() only → log. Stamps: params() (no counts) + points (raw/kept) — deterministic. Good.
+
+  40. **`checkLoader` per batch on stream: `BrukerTimsFile::lastMzCalibration()` — a static/global; thread-safe read after load started? Called from the consumer thread serially. OK.
+
+  41. **The mzPeak path with dnoise stamp "skipped" even though mzPeak may embed a .d — by design.
+
+  42. **`tofAxis().ok` reuse across band_edges preflight and dnoise — loaded once, consistent.
+
+  43. **Potential double-count in prune log after fallback: reset — handled.
+
+  44. **sync_cluster.sh: the unit-test failure message says "source restored" — headers not (finding 1). Also `mkdir -p .../spextractor_unit` then scp of test file — if scp of test fails under `set -e`, deploy aborts mid-way after headers synced — partial sync again.
+
+  45. **`sed -n 's/^CXX_FLAGS = //p'` — flags.make path assumes Makefiles generator; if the cluster build uses Ninja, flags.make doesn't exist → FL empty → unit test compile without flags → could pass while the real build contracts. The build below uses `make spextractor` — so Makefiles. OK consistent.
+
+  46. **Test 19's vacuity guard** is good (picked > kept, wit > 0). 19b pins deficit exactly. 20 pins stamps. Sensitive enough. But **19/19b/19c/20 all run resident mzML only — the streaming flushMS1_ dnoise+prune interplay (cross-batch offsets, emptied frames in stream, per-batch checkLoader) is untested anywhere automated** — acknowledged in comments for prune; for dnoise it's only cluster gates. List.
+
+  47. **Emptied frames in streaming consumer**: a dnoise-emptied MS1 frame — after picking (no-op on empty?) it stays in ms1_buf_, added to ms1_map as empty spectrum. In the preprocessor-equivalent run (external dnoise writes .d with zero-peak frame), the .d LOADER may SKIP zero-peak frames entirely (the streaming reader "a raw frame with no peaks" is padded EMPTY in the frame table for MS2... for MS1 in pass 1, does the loader deliver zero-peak MS1 frames as spectra or skip them?). If external-dnoise .d (zero-peak MS1 frames) loaded by SpeXtractor SKIPS those frames but the in-tool path KEEPS them as empty spectra in ms1_map, then ms1_map differs (extra empty scans) — MassTraceDetection min_sample_rate denominators differ? Empty spectrum = a scan with no peaks — MassTraceDetection counts scans? The ms1-prune comment says a spectrum whose peaks are all sub-threshold "is still a SCAN to MassTraceDetection (it counts against min_sample_rate; an absent one does not)". So an emptied frame present as empty spectrum vs absent CHANGES tracing! Validation claims digest equality between in-tool and external-preprocessor runs — so apparently the loader delivers zero-peak MS1 frames too, or no frame was fully emptied on these files (total.emptied counted — "frames (%lld emptied)" suggests nonzero possible). If a future file empties a frame in-tool but the external pipeline drops it, digests diverge — but that's comparing two different pipelines; within in-tool it's self-consistent. The e2e "-perf:ms1_trace_bands 1 with emptied frames completes" — completes, but identity with preprocessor path at emptied frames only holds if the loader also keeps them. Trust validation but flag the equivalence assumption.
+
+  Actually wait — the digest comparison "equal to SpeXtractor run on dnoise's own filtered .d files" — that run used the same loader on filtered files; if the loader skips zero-peak frames, then equality implies either no emptied frames or consistent handling. The counters printed emptied frames — if emptied > 0 in those runs and digests matched, then handling is consistent (loader delivers empty MS1 frames). OK, covered empirically. Don't push hard; mention as assumption.
+
+  48. **`kImTol` float vs `std::fabs(asc[i] - v)` — float subtraction promoted... fabs of float → double; fine.
+
+  49. **scanOf binary search**: `for (size_t n = asc.size(); n > 1; )` — b advances; standard. Let me verify correctness: invariant: answer in [b, b+n). h = n/2; if b[h] <= v, answer in [b+h, b+n) → b += h, n -= h. else answer in [b, b+h) → n = h (n -= h gives n - h = n - n/2 = ceil(n/2) = h when... n - n/2 for n even = n/2 = h. For n odd: n - n/2 = (n+1)/2 > h. Hmm — else branch should set n = h but code sets n -= h unconditionally only in the if branch? Code: `if (b[h] <= v) b += h; n -= h;` — n -= h happens REGARDLESS. In the else case, we should narrow to [b, b+h) i.e., n = h, but n -= h gives n-h which for odd n is (n+1)/2 ≠ h... wait for the else case we keep b, and new n should be h. n - h = n - n/2. For n=3, h=1: n-h = 2 = h+1. That keeps one element too many ([b, b+2) instead of [b, b+1)). Hmm, but is it wrong? The standard "branchless lower bound" idiom is exactly this:
+
+  ```
+  while (n > 1) { h = n/2; if (b[h] <= v) b += h; n -= h; }
+  ```
+
+  Hmm, let me recheck. The classic: 
+  ```
+  size_t n = size; const T* b = base;
+  while (n > 1) { size_t h = n/2; if (b[h] <= v) { b += h; } n -= h; }
+  ```
+  Hmm no — classic is `n -= h` when advancing and `n = h` otherwise? Let me just test mentally with asc = [1,2,3], v=1. n=3,b→1. h=1: b[1]=2 <= 1? No. n -= 1 → n=2. Now b→1, n=2, range [1,2] but correct candidates only [1]. h=1: b[1]=2<=1? No. n=1. Loop ends. b→1. i=0 — last entry <= v is index 0 (1<=1). Correct answer here by luck.
+
+  asc=[1,2,3], v=0.5: h=1, b[1]=2>0.5, n=2; h=1: b[1]=2>0.5, n=1; b→asc[0]=1. i=0. Then check asc[1] closer? |2-0.5|=1.5 vs |1-0.5|=0.5 → i=0. |1-0.5|>tol → -1. Correct.
+
+  Case where the extra element matters: we want "last entry <= v". asc=[1,5,6,7], v=5. n=4,h=2: b[2]=6<=5? No. n=2. b→1,range[1,5]. h=1: b[1]=5<=5 yes → b+=1 →b→5, n=1. i=1 → 5. Correct.
+
+  Try to break it: asc=[1,2,10,11], v=9. n=4,h=2: b[2]=10<=9? No → n=2 (should be n=2: [1,2]) correct by coincidence (n-h=2=h). n=2,h=1: b[1]=2<=9 yes → b+=1→b→2, n=1. i=1. last<=9 is index1. Correct.
+
+  Odd case: asc=[1,2,3,4,5], v=2. n=5,h=2: b[2]=3<=2? No → n=3 (n-h=3). Correct range should be [1,2] (n=2). Now range [1,2,3] — includes 3 > v. h=1: b[1]=2<=2 yes → b+=1 → b→2, n=2. h=1: b[1]=3<=2? No → n=1. b→2. i=1 → last entry <= v is index 1 (value 2). Correct.
+
+  Try: asc=[1,2,3,4,5], v=1. n=5,h=2: 3<=1? No → n=3. range[1,2,3]. h=1: 2<=1? No → n=2. range[1,2]. h=1: 2<=1? No → n=1. b→1, i=0. Correct.
+
+  Hmm the invariant is: answer (last <= v) lies within [b, b+n)? After else with n -= h: range [b, b+n-h). For n odd, n-h = (n+1)/2 = h+1: range includes b[h] which is > v — but the answer (last <= v) is still within [b, b+h) ⊆ [b, b+h+1). So the wider range is a superset — still contains the answer. Termination: n decreases each iteration (h ≥ 1 when n > 1). Final b points to... let me think the final element is the answer? With supersets, does b end exactly at the last <= v? Test asc=[1,2,3], v=2: n=3,h=1: b[1]=2<=2 yes → b+=1→b→2(idx1), n=2. h=1: b[1]=3<=2? No → n=1. b→idx1=2. Correct.
+
+  asc=[1,2,3,4,5,6,7], v=4. n=7,h=3: b[3]=4<=4 yes→b→idx3, n=4. h=2: b[2]=6<=4? No→n=2. h=1: b[1]=5<=4? No→n=1. b→idx3=4. Correct.
+
+  Try to construct failure: need final b pointing past the last <= v. The supersets only ever include extra elements > v beyond b[h]... when we're in else-branch we don't move b. b moves only when b[h] <= v, to b+h — and everything ≤ b[h] ≤ v... elements between old b and b+h that are > v can't exist (sorted ascending: b[h] <= v and ascending → all before are <= b[h] <= v). So b never passes the last <= v. And it converges to it. The idiom is correct. OK, scanOf clean.
+
+  50. **`(uint32_t)scan >= fr.num_scans` check after scanOf — table built over global max; a value matching an entry beyond frame's NumScans → refused. Could a loader 1/K0 for scan k < num_scans accidentally match an entry at k' >= num_scans? No — strictly monotonic, values unique; the value for scan k matches entry k. Fine.
+
+  51. **`std::vector<char> im_falls` etc fine.
+
+  52. **`DnoiseRun::setup` refuses when `corr >= 1e6`** — `!(corr > 0.5 && corr < 1e6)` — AccumulationTime tiny (corr ≥ 1e6) refused — arbitrary but fail-closed; uniqueness search width grows as corr... for corr > 1, fewer candidates; the 1e6 bound guards loop bound (v+0.5)/corr small — fine.
+
+  53. **Intensity inversion loop `for (r = ...; r <= r_end; r += 1.0)` — r and r_end doubles; for v up to 2^24, (v±0.5)/corr up to 3.4e7 (corr ≥ 0.5)... doubles represent integers exactly to 2^53 — fine. Loop count ≤ ~4 + margin. Fine.
+
+  54. **`(uint32_t)(r * corr + 0.5)` when r*corr+0.5 ≥ 2^32?** v < 2^24 and hits compared to (uint32_t)v — r*corr+0.5 ≈ v ± small, no overflow. Fine.
+
+  55. **What if two MS1 spectra share the same frame id (e.g., loader splitting one frame into multiple spectra by IM segment)?** n != num_peaks → refused. Good.
+
+  56. **MS1 profile vs centroided input**: if the .d loader is configured to centroid MS1 in the loader (e.g., some config), num_peaks mismatch or TOF recovery fails → refused. Good.
+
+  57. **`frameIdOf` on native IDs like "frame=1234 scan=..."? Parsing robustness unknown — refuse on fid==0. If a native ID parses a wrong number... can't assess; the check fid < tdf.frames.size() && msms_type==0 && n == num_peaks gives decent cross-validation. A collision (wrong fid but same num_peaks and msms_type 0) would then filter against the WRONG frame's calibration/scan table — TOF factor b = ax.factor(fid) wrong → mzToTof misses integer → refuse (probabilistically near-certain). Fail-closed enough.
+
+  58. **CMake: test_dnoise_ms1 added before SPEXTRACTOR_TESTS_ONLY check — but in TESTS_ONLY mode OpenMS isn't found — fine, test doesn't need OpenMS. In full mode, the test is built too — good (fix 9). But `add_test` in full build without enable_testing? enable_testing() called before — good.
+
+  59. **SPX_NO_FP_CONTRACT generator expression: `$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>` — MSVC gets nothing; does MSVC contract by default? /fp:precise doesn't contract FMA unless /arch:AVX2 with... MSVC does contract with /fp:fast only. Default /fp:precise allows contraction? MSVC performs FMA contraction under /fp:precise when /arch:AVX2? Actually MSVC: "By default, /fp:precise ... the compiler may use FMA"? Historically MSVC does contract under /fp:precise on ARM64? Unclear — flag as portability question: no MSVC guard, and _M_FP_FAST only catches /fp:fast. Windows CI builds only TESTS_ONLY which compiles test_calibration_cpp and test_dnoise_ms1 — the unit test PINS the boxes, so contraction would fail the test on CI. Self-checking. OK fine.
+
+  60. **The `#error` guard placement in DnoiseMs1.h applies to every TU including it — spextractor.cpp includes it → whole tool refused under fast-math. Good.
+
+  61. **volatile in builder + pragma: fine.
+
+  62. **Docs: "tests/test_dnoise_ms1.cpp compiles the same code" — true for the header.
+
+  63. **`summary()` buffer 320 chars — params could be long but summary only numbers — fine.
+
+  64. **`params()` includes gate_boxes — but gate built with params; deterministic. Stamped — good provenance.
+
+  65. **Missing stamp for prune already existed. OK.
+
+  66. **`registerTOPPSubsection_("tile", ...)` added — the missing tile; fine.
+
+  67. **Default `dnoise:ms1` string option rather than flag — consistent with perf:ms1_prune. Fine.
+
+  68. **`setValidStrings_` for dnoise:halo etc — done.
+
+  69. **Interaction: dnoise on + perf:ms1_prune on + trace:noise_threshold_int changed by user — prune bound to noise threshold, dnoise independent — fine.
+
+  70. **Interaction: dnoise + trace:native_ms1_neighbors refused; dnoise + SPEXTRACTOR_PICK_MZ_MODE env — picker mode changes picked output but dnoise before pick unaffected. Fine.
+
+  71. **`dnoise.frame` before `pickIMCluster`, but also before `ensureIMArrayName` SECOND call — fine.
+
+  72. **Resident path: dnoise.frame runs for `s.getMSLevel() == 1` — including spectra that are MS1 but lack IM? Guarded by containsIMData continue earlier — consistent with dispatch. But wait: MS1 spectra WITHOUT IM data are skipped from dnoise AND from ms1_map (dispatch requires containsIMData) — so consistent.
+
+  73. **A .d MS1 frame delivered with IM data but msms_type check uses tdf — fine.
+
+  74. **Memory: dn_work vectors persist across batches? Declared inside flushMS1_ → per batch, freed. "per thread for this batch only (freed with it)". Good. But dn_work allocated EVERY batch: malloc churn, negligible.
+
+  75. **`std::vector<DnoiseRun::Counts> dn_cnt(dn ? n : 0)` — value-init zeros. Good.
+
+  76. **`omp_get_max_threads()` sizing vs actual thread count in the region — at() bounds-check throws if exceeded → captured → refuse. Fine.
+
+  77. **Resident path: `dn_cnt` sized exp.size() but add() merges ALL entries including non-MS1 (zero counts) — fine.
+
+  78. **The prune double-pass: `chain(true, ...)` then possibly `chain(false, ...)` — chain(true) also computes `finite` — but when no_witness... fine. Edge: chain lambda captures c and finite by ref; in count mode accumulates. In collect mode (`count=false`) — wait, the lambda signature `chain(bool count, auto&& take)` — inside, `if (count) { c.survivors ... }` — good. But in collect mode, `surv` etc recomputed — deterministic. Fine.
+
+  79. **`keep.reserve(kept)` — kept from count pass; collect pushes exactly kept. Good.
+
+  80. **19c: descending fixture — the mzML loader doesn't sort; prune's sortByPosition handles; prune OFF path relies on later sort — pinned equal. Good test.
+
+  81. **Anything about `ms1HistOn_()` — counts after pick — unchanged.
+
+  82. **Test 19 asserts `[ms1-prune]` absent in log_off — good.
+
+  83. **Performance of checkLoader string compare per batch — trivial.
+
+  84. **`DnoiseError` derives from InvalidValue — caught by `catch (const Exception::BaseException&)` in the stream fallback — order: DnoiseError catch placed BEFORE BaseException — yes, `catch (const DnoiseError&) { throw; }` before the BaseException handler. Good. But FrameTableError also before. OK.
+
+  85. **What about DnoiseError thrown from flushMS1_ → propagates through consumeSpectrum? It's captured by pick_err and rethrown inside flushMS1_ — propagates up through the streaming load try → caught by DnoiseError handler → rethrown. Good.
+
+  86. **But DnoiseError thrown during the STREAM attempt's MS2 phase? dnoise only in flushMS1_. OK.
+
+  87. **partial ms1_map from a failed stream with DnoiseError: rethrown past fallback — run aborts, no output. Fail-closed. Good.
+
+  88. **std::invalid_argument from denoiseMs1Frame (scan >= num_scans — impossible after checks; n > 2^32 — possible on absurd input) → caught by pick_err → rethrown → stream catch(BaseException)? std::invalid_argument is NOT an OpenMS BaseException → `catch (...)`? The stream try block catches FrameTableError, DnoiseError, BaseException — a std::exception propagates uncaught → TOPP top-level catches std::exception? Probably. On the resident path, pick_err rethrow → main_ level → TOPP wraps. Exit code nonzero either way. OK-ish: a std::invalid_argument escaping would bypass the friendly "-dnoise:ms1 false" hint — but it's unreachable given prior checks (scan < num_scans enforced; n == num_peaks ≤ 2^32? num_peaks is uint32 so n ≤ 4.3e9; n > 2^32-1 possible only if num_peaks == 2^32... no, uint32 max IS 2^32-1, so n ≤ max → the n check never fires. num_scans uint32 likewise. So invalid_argument unreachable. Fine.)
+
+  89. **`fr.num_scans` used for denoiseMs1Frame's num_scans — but dnoise standalone uses the frame's NumScans too. Consistent.
+
+  90. **`im_asc` size could be huge if max_num_scans = 1e6 (bound) × rows — 4MB/row fine.
+
+  91. **Missing: no bound on number of TimsCalibration rows / windows — bounded by file.
+
+  92. **`loadTdfDnoise` leaves db open on some fail paths? fail lambda closes. The final path closes. The `return fail(...)` after prepare failures — closes. OK. One: after the GlobalMetadata loop, `sqlite3_finalize(st); st = nullptr;` — fine.
+
+  93. **GlobalMetadata loop: `if (sqlite3_prepare_v2(...) == SQLITE_OK)` — if prepare FAILS (no GlobalMetadata table), it silently continues with empty meta → gate builder errors "no AcquisitionSoftware" → refusal with decent message. OK.
+
+  94. **Now the biggest conceptual one to double check — output identity for dnoise OFF.** Changes when off: shrinkDataArrays in prune (fix 1 — capacity only, no value change; byte-identical output claimed and validated via pins). The prune's two-pass refactor — validated. DnoiseRun code all guarded by dn/dnoise.on. flushMS1_ adds dn vectors (empty), checkLoader guarded. Resident: guarded. Stamps: spx:dnoise_ms1 "off" — **new meta values in the header for dnoise-off runs! Output mzML header now contains spx:dnoise_ms1/_params/_points even when off — the "old pins" (8c1b047f/bff54a1f) presumably digest spectra not header; if any downstream byte-compares whole files, header changed. The [det] lines identical claimed. Byte-identity of the mzML is NOT preserved for dnoise off vs pre-stage-2 (new stamps). The prune's class-D claim "byte-identical spectra either way" — spectra yes, header no (was already true for prune? prune stamps existed? spx: stamps for prune? not shown). The validation says "identical [det] lines" for dnoise off — digests equal. Semantic digest normalizes headers presumably. Fine — but state: the mzML header gains three cvParams even when off. Acceptable/intended (provenance), but "output identical for dnoise off" holds only for spectra, not the file bytes. Worth one line.
+
+  95. **`ms1_prune.batch` on the resident path: take lambda requires containsIMData && MSLevel 1 — matches dispatch. On stream: take = true over ms1_buf_ — ms1_buf_ only gets IM MS1? presumably. Consistent.
+
+  96. **The fallback reset now ALSO discards when prune is off — previously spectra stayed and "silently wrong with the prune off" per comment — fixed. Good.
+
+  97. **`ledSet_(LC_SLAB, 0)` — but LC_SLAB is re-set later from slab.bytes() on resident; ok.
+
+  98. **Anything the reset forgets: `run_tables`? Only assigned on success — but is it assigned BEFORE the exception in partial success? `run_tables = consumer.tables();` only in `if (streamed && ...)`. streamed set only at the end. OK. `frame_table_src` reset to "slab"? It's set inside the streamed block; on fallback path remains "slab" initial. Good. `phase_stats_` LOAD(stream) entry remains — cosmetic. `consumer.frames_seen` logged only on success.
+
+  99. **`TileProbe::get()` state — probe-dropped MS2 frames during failed stream: probe is an env-gated analysis mode; not reset — niche.
+
+  100. **Empty-but-successful run stamps: fine.
+
+  Severity ranking for the final list:
+
+  1. sync_cluster.sh: headers (and TdfMzCalibration.h) overwritten without backup and NOT restored on unit-test/build failure — source/header drift on the node, exactly the failure mode the script exists to prevent; "source restored" message is now false for headers. (Deploy, high.)
+
+  2. In-tree (non-CMake) builds don't get -ffp-contract=off, and the contraction-sensitive recovery code in DnoiseRun::frame (r*corr+0.5, mzToTof) sits in spextractor.cpp outside DnoiseMs1.h's pragma/volatile guards; the node unit test compiles only the header, so it cannot detect contraction in the recovery. Boundary points flip → false refusals (fail-closed) — or, before the first refusal, nothing detects it. Fix: apply the same flag/pragma to the tool TU in the OpenMS topp CMake, or move recovery arithmetic into guarded inline functions in the header, and extend the unit test to pin recovery on pinned doubles.
+
+  3. No automated test of point recovery at all: scanOf/mzToTof/intensity-inversion live in spextractor.cpp; test_dnoise_ms1.cpp pins only the port's filter/gate; e2e can't build .d. The only evidence is two manual digests. A regression (e.g., OpenMS changing the loader's float cast) compiles green and is caught only on the cluster — at run time, hours in, or as a refusal. Fix: factor recovery into a testable header function + golden vectors from D/TNBC (mz, im, intensity, frame → scan, tof, raw), or add an e2e mini-.d fixture (sqlite + blobs are constructible in python).
+
+  4. Recovery assumes opentims computes raw*(100/at) with the correction factor precomputed from atof(sqlite text); if opentims actually evaluates (raw*100)/at in one expression or reads AccumulationTime as a REAL column (sqlite3_column_double), the recovered corr differs by ~1 ulp and boundary points (corrected value at k-0.5 exactly) yield hits==0 → refusal on legitimate data. Since "bit-identity needs the raw one", a wrong-but-unique hit is also conceivable. Verified only on two files; the tolerances (1e-6 bins, exact integer match) mean any such drift fails loudly — acceptable, but the assumption should be pinned by a source citation and a test (ties into 3).
+
+  Actually wait — can a wrong-but-unique hit happen? If corr is 1 ulp off, the forward map r → (uint32)(r*corr+0.5) shifts which r maps to v only at exact boundary .5 ties. The true raw r0 maps to v under opentims arithmetic; under shifted arithmetic, r0 maps to v-1 or v+1, and r0∓1 might map to v → unique hit, wrong raw → silent divergence from dnoise's kept set on those points. This is the dangerous version: NOT fail-closed, silent. The halo ratio uses raw values; a ±1 raw difference flips kept points at 0.15 fraction boundaries — exactly like the "9 of 3.1M" example. So item 4 is potentially silent corruption, not just refusal. Elevate.
+
+  5. Scan-table validation over global MAX(NumScans) for every TimsCalibration row: (a) rows are checked over scan indices no frame uses (extrapolated region of the rational model can be non-monotone), (b) rows referenced by no MS1 frame still must pass — both refuse legitimate runs. Fix: build/check per-row only up to max NumScans over frames referencing that row.
+
+  6. Corrected intensity ≥ 2^24 (or non-integer floats — impossible ≥2^23; or negative) → hits==0 → whole run refused though dnoise would handle the frame fine. Bright-point saturation: opentims uint32 → float32 rounds above 2^24, so inversion is genuinely ambiguous there; refusal is principled, but it means the tool refuses data dnoise itself processes. Document in help/error; consider reading the raw blob (tof index too) instead of inverting when out of range — or at least state the bound.
+
+  7. Help-text memory/wall claims ("26.46 → 22.41 GB", "wall about −15%") were measured on the preprocessor configuration and carried over; the in-tool path adds per-thread Work scratch (~45 B × raw points × threads, ≈3 GB at 100 threads during MS1 batches on D) inside the same MS1-phase peak that already holds the 3.5 GB raw buffer. The shipped default's peak was not measured here (validation section reports only digests/points). Fix: measure the in-tool peak and correct the help text, or drop the numbers.
+
+  8. Fallback reset: ledger rows other than LC_MS1MAP/LC_SLAB charged during the failed stream (compact-store bytes, LC_SCRATCH if any LedCharge leaks past an exception — RAII should cover, verify) and phase_stats_ "LOAD(stream)" entries survive; cstat/ms1_prune/dnoise.total now reset — good. The reset also runs when the stream failed BEFORE any delivery (harmless). One real question: `LedCharge _raw(LC_SCRATCH, raw_b)` in flushMS1_ — if the exception escapes mid-batch, does the dtor un-charge? If LedCharge is add-on-ctor/sub-on-dtor it's fine; verify. Also `ms1Hist_()` counters accumulated from the partial stream are NOT reset → after fallback, [ms1-hist] double-counts the frames delivered before the failure → the histogram log line is wrong (diagnostic only, not output). Check: ms1Hist counters — reset doesn't touch them. Real (minor) miss in the reset. Also consumer's `frames_seen` — scoped, fine.
+
+  9. NaN-m/z spectrum handling in Ms1Prune::frame: sortByPosition() runs BEFORE the !finite bail, so prune-on reorders a NaN-carrying spectrum that prune-off would pass through in picked order; the comment claims such spectra "stay whole", but the band builder's lower_bound over a NaN spectrum lands by length — and the sort may change which peaks precede the NaN vs the unpruned path. Only matters on corrupt/NaN input; if "kept whole" is the intent, skip the sort for non-finite spectra too (sort first into a copy? you need sorted order for the sample — take the sample from the sorted copy but leave the spectrum untouched). Edge case.
+
+  Hmm wait — actually does prune-off path sort MS1 spectra before the band builder? The prune's docstring says "sortByPosition (a no-op on a picked one)". Picked spectra come out sorted from pickIMCluster, so sort is a no-op normally. NaN spectrum: picked output order with NaN — pickIMCluster output is sorted by cluster m/z; a NaN in picked output is weird. The brute-force verification excluded NaN. Keep as minor.
+
+  10. Emptied-frame equivalence with the preprocessor pipeline rests on the loader delivering zero-peak MS1 frames as spectra (in-tool keeps them: "an emptied frame stays with an empty Ion Mobility array"); if the .d loader skips zero-peak frames when reading dnoise's filtered files, the two pipelines diverge on any run with total.emptied > 0 — the digest match on D/TNBC either had emptied == 0 or proves consistent handling; pin it with a test or state which. (The e2e run "with emptied frames completes" only proves no crash.) Actually validation says "-perf:ms1_trace_bands 1 with emptied frames completes" — doesn't say digest-equal. And summary counts emptied — if D/TNBC had 0 emptied, the equivalence claim "equal to SpeXtractor run on dnoise's own filtered .d files" never exercised an emptied frame. Finding: no digest evidence for emptied-frame identity; an emptied frame present in ms1_map changes MassTraceDetection's scan count (min_sample_rate denominator) vs a skipped frame. Medium.
+
+  11. Stamps: for dnoise off the header gains three new cvParams — so "dnoise off = old pins" holds for the digest/spectra, not for file bytes; fine if the pin is semantic (it is), but say so. Minor/informational.
+
+  12. lastMzCalibration() is a LAST-value global: if the loader ever calibrated different frames with different models mid-run, checkLoader sees only the last; per-point TOF tolerance (1e-6 bins) catches the discrepancy anyway → fail-closed. Informational.
+
+  13. 1-based vs 0-based scan indexing, and the exact RationalScan2ImConverter evaluation order, are pinned only empirically (2 files); a different NumScans convention would shift every scan by one and either refuse (monotonic table mismatch at edges) or silently misassign — the strict per-point match within 1e-6 makes silent misassignment essentially impossible (each scan's 1/K0 is ≥8.8e-4 apart vs 1e-6 tol), so a wrong convention refuses rather than corrupts. Good fail-closed design; note the empirical-only pin (ties into 3).
+
+  Actually — could a shifted-by-one scan index still match within tolerance? Values are ≥ 8.8e-4 apart; tol 1e-6. No. So refusal. Fine.
+
+  14. Test-suite gaps: 19/19b/19c/20 all resident mzML; flushMS1_'s dnoise+prune path (per-batch checkLoader, cross-batch sample offsets, dn_work sizing under dynamic scheduling, emptied frames in streaming) has no automated coverage — acknowledged for prune in the suite header comment, but the dnoise-on-streaming interplay is new and only cluster-gated. Also: check 20 asserts "[dnoise]" not in log_off, which would break if any unrelated future [dnoise]-prefixed log line is added (e.g., a skip warning for a different reason) — mild brittleness. Also PRUNE_RE pins the exact counter line format — brittle but intended.
+
+  15. Small: `total = ... + 1 + 1 + 2` comment says "+ 19b, 19c" — and 19 and 20 rolled into the constant; cosmetic. Skip (no style remarks — but miscount risk is functional... 18+4=22 matches "22/22". fine, skip).
+
+  16. `DnoiseRun::Counts` `raw` overflow? long long, fine.
+
+  17. sync_cluster.sh: `if [ -z "$CXX" ] || [ -z "$FL" ] || ! { ...; }` — FL empty for non-Makefiles generator handled; also `\$FL` unquoted word-splitting is intended; flags containing quoted paths with spaces break — standard. The log `cat` on success prints compile noise into deploy output — fine.
+
+  18. On unit-test failure, exit code 2 same as build failure — fine.
+
+  19. The lock trap: `trap 'rmdir ...' EXIT` — if the ssh session is killed by SIGKILL network drop, remote shell gets SIGHUP → EXIT trap runs. OK.
+
+  20. One more: `scp -q tests/test_dnoise_ms1.cpp` ships the test but the DIRT CHECK covers `tests/test_dnoise_ms1.cpp` — yes included in git status paths. Good. But the dirt check does NOT include CMakeLists.txt (changed here!) nor bench scripts it ships... pre-existing scope; CMakeLists isn't deployed to the in-tree build anyway. The provenance `tool_headers_sha256` now covers DnoiseMs1.h. OK.
+
+  21. `parseF64` — one more corner: `body` for input like "5." — grammar: digits ≥1, '.', digits 0 — mantissa = 1 ≥ 1 OK; body "5." → stream parses 5.0, ptr at end? `in >> v` consumes "5." fully (num_get accepts trailing '.'). Rust "5." parses to 5.0. Match. ".5" handled. "5.e3"? grammar allows (d+.d* then exp) — Rust allows "5.e3"? Rust f64 from_str: "5.e3" — I believe Rust accepts "5." and "5.e3"? Rust's grammar: Number ::= Digits '.'? Digits? Exp? — hmm, Rust accepts "5.e3"? Actually I think Rust rejects "5.e3"... The Rust grammar per docs: 'inf', 'infinity', 'nan', or Number where Number = [+-]? (Digits '.' Digits? Exp? | '.' Digits Exp? | Digits Exp? | Digits '.'?). Hmm "5.e3": Digits '.' then Exp — the production "Digits '.' Digits? Exp?" — yes I believe Rust accepts "5.e3"? Not sure. Not worth flagging — GlobalMetadata values are sqlite-rendered doubles, always "X.Y" form or integer. Skip.
+
+  22. istringstream construction per metadata value — 6 values, fine.
+
+  23. **DnoiseMs1.h removal of `#include <version>` and the __cpp_lib_to_chars branch — now one path; the comment says num_get goes through strtod in C locale "correctly rounded" — glibc strtod is correctly rounded; MSVCRT strtod historically NOT correctly rounded (pre-UCRT? UCRT strtod is correctly rounded? Actually MSVCRT's strtod was not correctly rounded for years; UCRT improved?). The classic-locale num_get on MSVC uses... if not correctly rounded, gate values off by 1 ulp vs Rust → box flips → but the unit test pins D's boxes and runs on Windows CI → would catch. Self-checking. OK.
+
+  24. macOS libc++ istringstream double parse — fine.
+
+  25. **`std::atof` locale in TdfLoad.h**: atof uses current C locale; sqlite text always has '.'; under a comma-decimal locale atof("100.0") = 100 → corr = 1.0 instead of... wait AccumulationTime 100.0 → atof gives 100 either way ("100.0" → parses "100" stops at '.', = 100.0 — same!). For fractional like "2.5": comma-locale atof gives 2.0 vs 2.5 → corr 50 vs 40 → wrong → but then the forward-check uniqueness fails → refusal (fail-closed). TOPP tools don't setlocale typically. Informational; actually fix pass item 5 made parseF64 locale-safe for the gate, but corr still uses locale-sensitive atof — inconsistent hardening. Minor.
+
+  26. **`im_falls` computed from `v[1] < v[0]` with n_scans > 1 — a model where 1/K0 first rises then falls (non-monotonic) is caught by the monotonicity check. Good.
+
+  27. **scanOf assumes loader's scan 0 ↔ table index 0 — verified empirically. (Covered in 13.)
+
+  28. **`kImTol` is float 1e-6f; comparison `std::fabs(asc[i] - v) <= kImTol` in double — fine.
+
+  29. **checkLoader error message passes lastMzCalibration() as the exception VALUE — fine.
+
+  30. **Order of option registration: dnoise subsection registered — good; "The missing tile: TOPP subsection is registered" — tile subsection added, good.
+
+  31. **`setMinInt_` loop over dnoise options — `dnoise:min_window_intensity` is int-registered, min 0 — but the option's upper: int32 max → uint64 cast fine.
+
+  32. **Anything about `perf:ms1_trace_bands 1 with emptied frames` — fine.
+
+  33. **Detect: dnoise on + `-trace:detector openms`: dnoise still applies (MS1 filter before pick, detector irrelevant) — consistent.
+
+  34. **Interaction with SPEXTRACTOR_LOAD_ONLY: returns before... dnoise already applied during load — fine, load-only diagnostics.
+
+  35. **The `dn` frames: `if (dn) dnoise->checkLoader();` per flush — but what if a batch contains zero MS1 frames? flushMS1_ n==0 returns before. fine.
+
+  36. **Potential double application**: could a spectrum pass through dnoise twice (e.g., resident path where exp spectra were ALSO processed in a partial stream)? The reset discards ms1_map, and exp is freshly loaded by loadExperiment — the consumer's buffered spectra were separate objects moved into ms1_map which is reset. No double-filtering of the same object. And dnoise filter is idempotent anyway? Applying dnoise to already-filtered points: raw recovered again, filter deterministic, kept set ⊆ already kept — second pass would filter again (streak on survivors differs? The recovered "raw" are the same raw counts; denoiseMs1Frame on the subset re-run — streak filter is NOT idempotent necessarily (runs over survivors of previous iteration internally but re-running the whole filter on filtered points could drop more: iterations each recompute on survivors — a second external application would apply `iterations` more passes). But reset prevents double application. Good.
+
+  37. **The reset discards ms2_by_window slabs but their ledger bytes: ledSet_(LC_SLAB, 0) covers.
+
+  38. **What about `exp` from a PREVIOUS partial resident attempt? Single attempt. fine.
+
+  39. **19b's `wit_nc == 9 + 6`** — magic numbers tied to fixture; fine, pinned.
+
+  40. **test 19 `assert (got["bands"] is not None) == (bands > 1)`** — good.
+
+  Also verify claim in finding about ms1Hist not reset: ms1Hist_() counters — in flushMS1_, `if (ms1HistOn_())` adds per batch. After a partial stream + fallback, the resident path... does the resident path even do ms1-hist? Not shown; the hist is only in flushMS1_ (streaming). So partial stream batches counted, then fallback → resident path doesn't hist → log would show partial hist. Minor diagnostic-only. Include briefly in finding 8.
+
+  41. **`dnoise.total` reset in fallback — but `dnoise` gate/im_asc stay — reused by resident. Good, setup not re-run (fine, same file).
+
+  42. **`tofAxis()` loaded preflight with `loadTofAxis(in + "/analysis.tdf", ...)` only if `!tofAxis().ok` — if band_edges preflight already loaded from a DIFFERENT candidate (SPEXTRACTOR_MZPEAK_TDF)... input is .d here. fine.
+
+  43. Edge: **input .d but `FileHandler::getTypeByFileName` fails to detect** (e.g., uppercase .D)? Then "not a Bruker .d" → skipped filtering while the loader might still read it as .d → unfiltered run stamped "skipped". Detection consistency: the same getTypeByFileName drives tile_source; the actual load uses FileHandler auto-detect. If FileHandler loads a .d that getTypeByFileName didn't recognize... both use extension presumably. If it can happen, dnoise silently skipped on a real .d — but then ms1 frames arrive unfiltered and dnoise.on false → no checks → output without filtering, stamped skipped. Minor edge; getTypeByFileName on a directory ending .d — fine.
+
+  44. **msms_type values**: MS1 = 0 in tdf. PASEF MS2 = 8/9? check == 0 right.
+
+  45. **loadTdfDnoise: frames with MsMsType NULL** → column_int → 0 → treated as MS1! A NULL MsMsType frame would be counted MS1; loader behavior? Corrupt file; num_peaks check likely refuses. Minor.
+
+  46. **`Frame.msms_type = sqlite3_column_int`** int fine.
+
+  47. **`cal` search linear per frame — O(frames × cals) fine.
+
+  48. **`t1_by_frame`/TofAxis factor(fid) — the TOF axis b_by_frame loaded by loadTofAxis separately from loadTdfDnoise — two sqlite reads of the same file; consistent.
+
+  49. **Now think about whether `ax.cal.mzToTof` inverse exists check: tolerance 1e-6 bins with true error 2.3e-10 — margin 4000x. A WRONG calibration model (e.g., loader used spline) — checkLoader catches. Loader used table model with different factor — per-frame factor from b_by_frame matches loader's per-frame? TofAxis.factor(fid) — the loader's own per-frame factor presumably from the same MzCalibration T1 per frame — loadTofAxis reads TimsCalibration? It reads MzCalibration table t1_by_frame... The earlier loadTdfCalibration builds t1_by_frame from MzCalibration table (Frame, T1). Loader uses same → consistent.
+
+  50. **One potential real identity bug: `im` array — the loader's float32 1/K0 — but does the OpenMS loader store 1/K0 or "inverse reduced ion mobility" (1/K0 vs 1/k0 reduced)? Same thing here. The mzML writer stamps "mean inverse reduced ion mobility". Fine.
+
+  51. **getIMData().first — index into float arrays; ensureIMArrayName before in stream; resident: containsIMData true implies getIMData valid. Fine.
+
+  OK also address each attack category explicitly, stating clean areas:
+
+  - Cat 2 (fail-closed): mostly clean — OMP capture both paths, DnoiseError past fallback, setup-time refusals. Gaps: none major; the scanOf/frame-level refusals happen during load (mid-run, but that's inherent); note checkLoader happens at first batch (after first 256 frames loaded — minutes, fine). Exit codes fine. Area: clean except items noted.
+
+  - Cat 5 (memory/perf): clean-ish; note scratch ~3GB transient and shrink_to_fit costs measured; counters deterministic. Clean.
+
+  - Cat 6: covered findings 7, 11.
+
+  - Cat 7: covered.
+
+  Let me also double-check finding 1 severity ordering vs finding 4 (silent wrong raw). Silent corruption of kept set is the worst output-identity violation. But it's conditional on an unverified assumption about opentims internals; the author asserts they matched opentims source ("as opentims computes it"). Still, adversarial review: the association question (raw*corr vs raw*100/at) is a genuine arithmetic concern even IF opentims precomputes correction = 100/at — wait, if opentims precomputes `correction = 100.0 / at` once per frame and then `(uint32)(raw * correction + 0.5)`, then the recovery matches exactly. The description in the prompt says "opentims-corrected: (uint32)(raw*100/AccumulationTime + 0.5)" — written as raw*100/AccumulationTime. And code comment says "opentims.cpp: double(raw) * correction + 0.5". Two different parenthesizations in the materials! `(raw*100)/at` vs `raw*(100/at)`. If the prompt's parenthesization is literal opentims code `raw * 100 / AccumulationTime` (left-assoc: (raw*100)/at), and the recovery uses r*corr — they differ. Boundary analysis: both are within 1 ulp of the true value; the cast boundary is at exact .5 fractional part — (raw*100)/at + 0.5 hits an integer exactly when? Requires exact tie; doubles rarely tie but DO: e.g. at=100ms: (raw*100)/100 = raw exactly (raw*100 exact, /100 exact when raw*100 divisible appropriately — 100 = 4*25; raw*100/100: computed as (raw*100)/100 — raw*100 exact integer ≤ 2^41, division by 100: raw*100/100 = raw exactly if raw*100 is divisible... division rounds to nearest; raw*100/100 = raw exactly since raw*100 = raw*100 (representable) and /100 gives exactly raw (raw ≤ 2^32 < 2^53, exact). So corrected = raw + 0.5 → cast truncates → raw. And r*(100/100.0)=r*1.0=r → r+0.5 → r. Same. For at = 16.666 ms etc., ties differ. So the discrepancy only matters for non-exact divisions near .5 ties. Given AccumulationTime text like "16.6" — 100/16.6 not exact — boundary points exist with probability ~1ulp per point... a tie requires the fractional part to be EXACTLY .5 in double — measure-zero but happens for specific (raw, at) pairs; across 6.5e8 points, expected number of exact ties is tiny unless the arithmetic systematically produces them (e.g., at dividing 100 evenly: at=0.8 → 100/0.8 = 125 exact → corrected = raw*125 + 0.5 exact tie EVERY point → cast truncates consistently; both computations identical again since 100/at exact. The risky case is at where 100/at inexact AND (raw*100)/at differs from raw*(100/at) at a tie — requires (raw*100)/at to land exactly on k+0.5: possible for specific raw). So: rare, real, silent-or-refusal. Keep as finding with appropriate framing: verify the exact expression in opentims.cpp; if it is `raw * 100 / at` the recovery must use `(r * 100.0) / at` (and note r*100 overflows uint32? r*100 as double is exact — use double).
+
+  Hmm, actually also opentims might do `raw as f64 * 100.0 / at + 0.5` in Rust (timsrust) — dnoise uses timsrust; the loader uses opentims C++. The description says opentims-corrected. OK.
+
+  Ranking final (most severe first):
+
+  1. Recovery arithmetic may not match opentims at ties (silent divergence or false refusal) — combined with: no test pins the recovery. Actually let me split: 1 = association/atof assumption (correctness of the core inversion, silent-corruption potential); 2 = no automated coverage of recovery (test gap making 1 and future regressions undetectable except on cluster); 3 = sync_cluster header restore gap; 4 = contraction guard doesn't cover DnoiseRun::frame on the in-tree build; 5 = over-strict scan-table monotonicity (false refusals on legit multi-calibration files); 6 = emptied-frame equivalence with preprocessor pipeline undemonstrated (output identity of the carry-over claim); 7 = help-text memory/wall numbers from the wrong configuration; 8 = intensity ≥ 2^24 refusal (documented? blocks legit bright data); 9 = fallback reset leftovers (ms1-hist counters, phase stats, verify ledger/RAII); 10 = NaN-m/z spectra still sorted before the !finite bail; 11 = atof locale sensitivity inconsistent with parseF64 hardening; 12 = dnoise-off header gains stamps (byte-identity caveat); 13 = streaming dnoise+prune untested (acknowledged partially); 14 = check 20's "[dnoise] not in log_off" brittleness.
+
+  Also state clean areas: OMP exception containment (clean, both paths), deterministic counters under dynamic scheduling (clean), option bounds/valid strings (clean), parseF64 rewrite (clean, modulo locale note on atof elsewhere), 19/19b/19c sensitivity (strong, non-vacuous by construction), Ms1Prune two-pass refactor (clean), fallback reset of ms1_map/slabs/cstat/prune/dnoise (correct direction, fixes real double-load bug), stamps params determinism (clean: cpu time kept out of stamps — good).
+
+  Wait, also double-check: `summary()` includes `filter CPU %.1f s` in log only — log lines differ between runs anyway (timestamps), fine.
+
+  One more check on flushMS1_ ordering claim: "[ms1-prune] after [ms1-hist] (which counts what was PICKED)" — hist counts picked peaks INCLUDING sub-noise (that's the point of the hist). With dnoise on, picked set smaller — hist changes vs dnoise-off — intended (hist is a diagnostic of the actual run). Fine.
+
+  And check: in flushMS1_, `dnoise->add(dn_cnt)` AFTER `if (pick_err) rethrow` — good.
+
+  And `dn_cnt[(size_t)i]` indexed per frame — counts per frame; `dnoise->frame` may throw mid-frame after `++c.frames; c.raw += n;` — counts partial; but run aborts anyway. Fine.
+
+  Also `c.emptied += (fc.kept == 0)` — includes n==0 frames (fc.kept==0) — frames that were ALREADY empty count as "emptied"? n==0 early return happens BEFORE denoiseMs1Frame — c.emptied not incremented there (return before). Wait: `if (n == 0) { c.cpu += ...; return; }` — before the denoise call, so emptied not counted for raw-empty frames. Good.
+
+  Also — subtle: `if (fc.kept != n)` select; for n==0 skipped. Good.
+
+  Another: dnoise on a frame where picker would later produce zero picked peaks — fine.
+
+  Let me also reconsider #10 NaN: is it plausible the prune's sort changes a NaN spectrum vs prune-off? Prune-off: spectrum goes to ms1_map in picked order (sorted except NaN confusion). Prune-on: sortByPosition — std::sort with NaN comparator = UB-ish ordering but deterministic given same input/STL. detectTraces_'s band builder lower_bound over the spectrum... The comment says NaN spectrum "stays whole" — but the sort DID run; if sortByPosition with NaN produces a different order than picked order, prune-on changes the peak order in the map → could change output → violates output-identity for prune on/off on NaN input. The stated intent ("Such a spectrum stays whole") is violated by the sort. Real but corner-case. Keep as lower finding.
+
+  Also the sample: written AFTER sort for all spectra — for NaN spectra the sample is from the sorted order, whereas... prune-off has no sample at all (no prune → band edges from full map at detectTraces_ time? The sample mechanism exists to reproduce edges; with prune off, detectTraces_ samples the map directly). For NaN spectra, prune-on's sorted sample vs prune-off's unsorted sample → edge differences possible. Same finding.
+
+  Also check 19's `bad_mz == 0` assertion — fixture has no NaN. The NaN path has no test. Include in test-gap finding or the NaN finding.
+
+  Now the "most severe first" numbered list. I'll write it concisely with location, scenario, fix. Also explicitly clean areas list at the end.
+
+  Length: substantial but structured. Let's write.
+
+To resume this session: kimi -r session_37e53043-41cd-4915-b09d-99c46973f647
+exit=0

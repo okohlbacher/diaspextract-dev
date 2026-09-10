@@ -1,0 +1,727 @@
+kimi version 0.42.0
+• This is an adversarial review task — everything is inlined, no tool calls needed. I need to carefully analyze both changes.
+
+  Let me work through the code carefully.
+
+  **A. DnoiseMs1.h review**
+
+  1. Streak filter. Look at the "skipping windows with fewer occupied scans than min_feature_length" shortcut: `if (n_occupied != 0 && n_occupied >= p.min_feature_length)`. If n_occupied < min_feature_length, no run can have >= min_feature_length occupied scans — correct, since a run has at most n_occupied occupied scans. But wait — `n_occupied != 0` is redundant but harmless. OK.
+
+  But: `w.touched.clear()` — note `touched` is not sorted when counting occupied, fine. Then spans built over sorted touched. Run building: `if (open && touched[q] - touched[last] > max_internal_gap + 1) close()`. Note `count` — when a new run opens, `count = 0` then incremented. But on `close()` when count < min_feature_length, returns without adding span — correct.
+
+  Hmm, one subtle issue: in `close()`, `count` is captured. The lambda closes over `first, last, count`. Fine.
+
+  The min_feature_intensity span sum: `for q = first; q <= last; ++q total += w.sum[w.touched[q]]`. But touched[q] between first and last may include scans that are NOT occupied (zero sums or below window intensity). The comment says "sub-floor scans included". Per spec "a run with >= 5 OCCUPIED scans whose span sum >= min_feature_intensity" — span sum over whole span. OK matches.
+
+  But wait: `w.sum[sc]` values from this window — touched contains all scans with any point in window. Sums of zero-intensity points: a scan with only zero-intensity points has sum 0, not occupied. Included in span sum (adds 0). Fine.
+
+  Potential bug: `w.stamp.assign(num_scans, 0)` and `w.sum.resize(num_scans)`. `num_scans` is size_t. scan[i] < num_scans checked. OK.
+
+  Overflow: `w.sum[sc] += v[j]` — u64 sum of u32 intensities; at most m points per scan, m < 2^32, so max sum < 2^64. OK.
+
+  The early-stop shortcut: "A pass that removes nothing is a fixed point." True since streakPass is deterministic function of live points. OK.
+
+  Two pointers: `while (t[lo] < lo_val) ++lo;` — `lo` starts 0, but lo is only advanced as c increases, and lo_val is nondecreasing in c. Yes since c increases across blocks (tof sorted). `hi` similarly. But careful: `while (hi < m && t[hi] <= hi_val) ++hi;` — hi never reset; hi_val nondecreasing. OK.
+
+  Radix sort: `for (shift = 0; shift < 32 && (shift == 0 || (max_tof >> shift) != 0); shift += 11)`. Shifts 0, 11, 22, 33? No: condition ensures shift=22 runs if max_tof >> 22 != 0, i.e., bits 22..31 present. 22+11=33 covers bits 22..32 — but shift 22 digit is `(tof >> 22) & 2047` = bits 22..32, bit 32 doesn't exist in u32 so fine. If max_tof has bit 31 set, max_tof >> 22 != 0, shift 22 runs, covers bits 22-32 (only up to 31 exist). Good. But wait: what if max_tof == 0? Then only shift 0 runs — all zeros, fine. Stability: LSD with counting sort per digit, stable. `start` array sized 2049; digit index +1 used for counting; fine.
+
+  Hmm, potential issue: `w.id.swap(w.idx)` after the loop — id now holds sorted order. OK.
+
+  2. Halo. Reference = streak survivors. Points judged = survivors too. For each point at scan r, TOF ti: window scans [r-2, r+2] clamped, TOF [t-80, t+80] saturating, excluding every point whose TOF == t (the whole column, not just itself — matches spec "EXCLUDING every point whose TOF == t").
+
+  Implementation: `if (*q != ti && hinten > best)`. Since the survivors per scan are sorted by TOF (stable by scan over TOF order), lower_bound per scan row works. Exclusion by `*q != ti` excludes all points with that TOF value. OK.
+
+  `best == 0 keeps`: if best == 0, then threshold 0.15*0 = 0, and I >= 0 always true (u32 cast to double ≥ 0). So keep. Matches.
+
+  Compare: `(double)I >= 0.15 * (double)best`. 0.15*best as double — Rust: `i as f64 >= 0.15 * best as f64`. Same. NaN? intensities are u32, no NaN.
+
+  Potential subtle issue: the "excluding every point whose TOF == t" — but the point itself is included in htof arrays of its own scan; lower_bound range includes points with TOF==ti which are skipped. Fine.
+
+  But wait — spec says best = max intensity over survivors with scan in [s-2, s+2] and TOF in [t-80, t+80], excluding column t. Implementation matches.
+
+  v_hi computation: `sw >= num_scans - 1 - r ? num_scans - 1 : r + sw`. num_scans is size_t, r < num_scans. num_scans - 1 - r ≥ 0 since r ≤ num_scans-1. OK. If num_scans == 0? denoiseMs1Frame: if n>0, scan[i] >= num_scans throws, so num_scans ≥ 1 when n>0. But if n==0 return early. Halo only when m>0 so num_scans ≥ 1. OK.
+
+  3. Gate. parseF64: Rust's f64 parse. Concern: Rust accepts "5." and ".5" — grammar allows d+.d* and d*.d+. The pre-check: digits() then optional '.' then digits(); mantissa counts total digits, requires ≥1. "5." → mantissa 1, ok. ".5" → ok. "+.5" ok. But then `body = (s[0]=='-' ? "-" : "") + s.substr(start)` — wait, `start` is after the sign. If s = "-1.5", start=1, body = "-" + "1.5". If s="+1.5", start=1, body = "1.5" (from_chars doesn't accept '+'). Good.
+
+  Edge: s = "-" alone → mantissa 0 → false. s = "." → false. OK.
+
+  from_chars for double: correctly rounded per C++17? Actually std::from_chars floating-point is required to be correctly rounded (round to nearest) — yes, since C++17 the standard mandates... Actually, from_chars is specified to match strtod in C locale with correct rounding ("the value is rounded..."). Hmm, from_chars spec: "the pattern is the expected form of the subject sequence in the "C" locale for strtod" and rounding is to nearest after parsing. There were quality issues with some implementations but okay.
+
+  Rust's f64 parse also accepts "inf", "infinity", "nan" case-insensitively — port refuses those (documented: "inf, nan... refused"). That's a deliberate divergence — but the metadata values are never inf/nan in practice. It would set an error where dnoise proceeds. Actually would dnoise proceed? If MzAcqRangeLower parsed to inf... it would produce garbage gate but not refuse. The port refuses the run. Divergence in behavior, but arguably only on corrupt metadata. Could mention as minor.
+
+  More important: **Rust's f64 parse accepts "1e5" etc. — handled. What about leading zeros, fine.** What about exponent overflow "1e400"? Rust parses to inf; port refuses (from_chars gives result_out_of_range → ec != errc → false). Documented.
+
+  Now the gate math:
+
+  - `tof_slope = (sqrt(mz_max) - tof_intercept) / tof_max_index`. If DigitizerNumSamples == 0? parseU32 of "0" gives 0 → division by zero → inf slope. Does Rust guard? timsrust from_boundaries would divide by zero too, giving inf. Then t0 = (sqrt - intercept)/inf = 0... In Rust f64 division by zero gives inf, no panic. Port: same IEEE. Probably matches. Edge case.
+
+  - mz_min -= 5 could make mz_min negative if MzAcqRangeLower < 5 → sqrt(negative) = NaN. fmax with NaN: asU32(fmax(floor(fmin(t0,t1)),0.0)) — fmin/fmax ignore NaN (return the other operand). If tof_intercept is NaN, t0 = NaN... fmin(NaN, t1) = t1? fmin(NaN, NaN)=NaN. Hmm. Rust's f64::min/max have same NaN semantics (return the non-NaN operand). So likely matches. OK.
+
+  - The volatile trick: `volatile double scaled0 = scan_slope * (double)scan_begin;` — write to volatile forces the product to be rounded to double, then `im0 = scan_intercept + scaled0` is a separate add. This prevents FMA fusion. GCC optimize pragma also applied. Note: GCC's `#pragma GCC optimize("fp-contract=off")` — is "fp-contract" a valid GCC optimize option? GCC supports `#pragma GCC optimize ("fp-contract=off")`? Actually GCC documentation: the optimize pragma takes function options; -ffp-contract is a valid option and can be set per-function. There have been bugs where fp-contract pragma doesn't work reliably... Actually there's a known GCC issue that `#pragma GCC optimize` may disable other optimizations or interact oddly, but fp-contract=off should work. Also note: GCC's `#pragma GCC optimize` historically **resets** other command-line optimization options for those functions?? No — `#pragma GCC optimize("...")` adds options on top? Actually the optimize pragma **replaces** the optimization options with the specified ones plus defaults... The known behavior: `#pragma GCC optimize("O2")` sets -O2 for subsequent functions, potentially overriding -O3 from the command line. But with just "fp-contract=off", the functions keep command-line options plus this one? Per GCC docs: "the optimize pragma... arguments can either be numbers or strings... suitable for use with the -O option, or option names". Functions compiled with the pragma use the options as if appended to the command line. But there's a documented caveat: "#pragma GCC optimize is not suitable in production code" and historically it resets to the default optimization level? Yes! Known gotcha: `#pragma GCC optimize` resets optimization flags to those specified, **ignoring command-line -O flags**? Let me recall precisely: The docs say the optimize attribute/pragma causes the function to be compiled with the specified optimization options, **and options not specified revert to the default (not the command line)**. Actually from GCC manual: "This attribute is used mainly for debugging purposes. It is not suitable in production code." And behavior: options given are used *in addition to* command line? There are longstanding bug reports (GCC PR 86558 etc.) that `__attribute__((optimize))` doesn't inherit -O2 from the command line and can miscompile. Hmm. I believe the actual behavior: `#pragma GCC optimize("fp-contract=off")` — the optimization level becomes the default (-O0) plus specified options? From the manual: "the optimize pragma is used to set additional optimization options for functions... The '#pragma GCC optimize' pragma is not recommended for general use... Arguments can either be numbers or strings... Each function affected is compiled as if the options appeared on the command line" — hmm, ambiguous. Known bug: functions with optimize attribute are compiled at -O0 if no -O specified in the attribute? I recall that using __attribute__((optimize("O3"))) is fine, but attribute optimize with non-level options like "fp-contract=off" resets -O level to command line default? There was a real GCC bug where __attribute__((optimize)) ignored -f options from command line. This is a genuine concern to raise: on GCC, buildMs1WindowGate might be compiled at -O0 (performance only, gate built once — no big deal) but more importantly, whether fp-contract=off actually takes effect via the pragma has had bugs. GCC contracts by default with -ffp-contract=fast (default for non-ISO... GCC defaults to fast when not in strict ISO mode? GCC default: -ffp-contract=fast unless -std=c++XX (strict) — for C++ GCC defaults to... GCC defaults -ffp-contract=fast for both C and C++ unless -std= strict ISO? Actually GCC: "The default is -ffp-contract=fast" historically; since GCC 14 with -std=c23... For C++ GCC historically enables contraction at -O2 by default? I believe GCC default is fast even with -std=c++20? Hmm: GCC documentation states default is -ffp-contract=fast unless ISO C mode (-std=c99 etc.) requested... For C++, -std=c++20 IS an ISO mode, so default would be off? There was a change: GCC 14 made -ffp-contract=on default for ISO C. For C++ I think fast is the default. Regardless, the review should raise: pragma may not reliably disable contraction on all GCC versions, and x86-64 baseline has no FMA anyway (needs -march with FMA), while ARM64 clang contracts by default.
+
+  Also: the t0/t1 computation `(sqrt(...) - tof_intercept) / tof_slope` — contraction can't fuse subtraction+division, fine. But `mz_lo - p.dia_ms1_mz_pad` etc fine.
+
+  One more FP issue: the clang pragma `#pragma clang fp contract(off)` placed inside the function body — clang's pragma applies to statements following it in the block; placing it at the top of the function body covers the rest. But does it apply to the lambda `number` defined... the lambda doesn't do FP. Fine. But wait — does clang's pragma apply when the pragma appears before variable declarations etc.? Yes, applies to the enclosing block scope from that point.
+
+  However — the claim "an explicit -ffp-contract=fast overrides it — hence also the volatile". Volatile defeats fusion anyway. OK.
+
+  Now, a real potential bug in the gate: **`num_scans` from `meta.max_num_scans` is the max over ALL frames (MS1 and MS2)** — spec says so, matches dnoise. Fine.
+
+  `b.scan_hi = min(asU32(...), num_scans - 1)` — clamped here, and fromBoxes also clamps. Spec: "clamped to Nscan-1". OK.
+
+  s0/s1: `s0 = (fmax(im0, im1) + im_pad - scan_intercept) / scan_slope` — im0 = intercept + slope*begin, im1 = intercept + slope*end; slope negative (im_min < im_max), so im1 < im0. fmax(im0,im1)=im0 (begin). scan_lo = floor(min(s0,s1)): s0 corresponds to... whatever, mirrors dnoise.
+
+  Evaluation order concern: `im0 = scan_intercept + scaled0` — matches Rust `intercept + slope * scan` unfused. OK.
+
+  Now **`asU32`: Rust `f as u32` saturating: for v in (0, 1) returns 0 — trunc. `static_cast<std::uint32_t>(v)` truncates. v >= 4294967296.0 → max. Note: for v between u32::MAX (4294967295.0) and 2^32, e.g. 4294967295.5 → cast gives 4294967295 — fine. NaN → `!(v > 0)` → 0. Negative → 0. Good.
+
+  **parseU32**: Rust's `str::parse::<u32>()` — does Rust accept a leading '+'? Yes, Rust's from_str for integers accepts an optional '+'. Digits only. Overflow → error. Matches. But DigitizerNumSamples metadata might be stored as "600000" fine.
+
+  Hmm wait — one thing: `parseU32` rejects empty and non-digits; Rust also rejects whitespace. Good.
+
+  **Now the streak filter vs spec**: "sum intensities per scan over alive points with TOF in [c-3, c+3]" — the implementation sums per scan over the window's points. Occupied iff sum > 0 AND >= min_window_intensity (default 0; sum>0 implies >=0). Matches.
+
+  "a new run starts when the scan step exceeds max_internal_gap+1 (3)" — `touched[q] - touched[last] > p.max_internal_gap + 1`. With gap=2: step > 3 breaks, i.e., steps ≤ 3 bridge (up to 2 empty scans between). Spec: "max_internal_gap+1 (3)". Hmm wait — step between consecutive occupied scans of 3 means 2 empty scans in between = max_internal_gap. Step 3 > 3? No, 3 is not > 3, so bridged. Step 4 (3 empty) breaks. Correct.
+
+  "a run with >= 5 OCCUPIED scans whose span sum >= min_feature_intensity (0) accepts [first, last]" — min_feature_intensity default 0: `if (p.min_feature_intensity > 0)` skipped, so total not even computed; span accepted. Note spec says span sum >= 0 always true. But subtle: if min_feature_intensity == 0, the check is skipped — equivalent. OK.
+
+  "points with TOF == c whose scan lies in an accepted span survive" — yes, mark block [k, kb).
+
+  **The n_occupied early-skip shortcut**: `if (n_occupied != 0 && n_occupied >= p.min_feature_length)`. This skips span building when fewer occupied scans than min length — a run can have at most n_occupied occupied scans, so no accepted span; nothing marked. Exact. OK.
+
+  BUT — subtle bug candidate: `n_occupied` counts occupied over `touched`, computed BEFORE sorting — order irrelevant. OK.
+
+  **Zero-intensity points and duplicates**: duplicates (scan, TOF) — handled as separate points; sums add both; block iteration covers all at TOF c. Halo: duplicates both judged, both in reference. Matches dnoise presumably (validated by fuzzing).
+
+  **iterations=0**: loop doesn't run, m=n, c.after_streak = n. Spec: "0 keeps every point". OK.
+
+  **Halo counting sort by scan**: `w.row.assign(num_scans + 1, 0)` — num_scans could be huge (say 1000) fine. Memory: row vectors of num_scans. OK.
+
+  Potential issue: **halo `sw >= num_scans - 1 - r`** — if sw (halo_scan_half_width) is huge (size_t), `num_scans - 1 - r` no underflow since r ≤ num_scans-1. OK. `v_hi = r + sw` could overflow size_t? sw huge → r+sw overflow wraps — but only evaluated if `sw >= num_scans-1-r` false, i.e., sw < num_scans ≤ 2^32, so no overflow. OK.
+
+  **`hpos` u32**: m < 2^32 checked. OK.
+
+  Now, is there an actual bug in halo exclusion? Spec: "EXCLUDING every point whose TOF == t". The Rust presumably excludes points whose TOF index == ti across all window scans. Implementation does `*q != ti`. Yes.
+
+  Hmm — but one more: the halo reference includes the point's own scan r itself (vs ranges include r). Yes spec includes s.
+
+  Now potential divergence: **the halo in dnoise operates on scan indices of the frame... vs the port uses same.** OK.
+
+  **FrameCounts c.after_halo set after halo; if halo off, after_halo = m** — code sets `c.after_halo = m;` unconditionally after the halo block; if p.halo false, m unchanged. Good. Gate loop sets keep. kept counts. Good.
+
+  Now the validation claims: 3000 random frames against a transliteration. Fine.
+
+  **Compile-guard issue**: `w.touched` is cleared per window but `w.stamp` uses `window` counter incremented per block; `window` is u32; at most one per point block, m < 2^32 blocks... actually blocks ≤ m, so window < 2^32, and stamp values never collide with 0 since window starts at 1. But wait — `w.stamp.assign(num_scans, 0)` per pass: O(num_scans) per pass. Fine.
+
+  Overflow in `w.sum[sc] += v[j]` u64: fine.
+
+  **A subtle one**: In streakPass, `w.mark.assign(m, 0)` then compact reads mark[j] for j<m. OK.
+
+  **Another**: `detail::compact` doesn't resize the vectors down — m shrinks logically. Fine.
+
+  **Real issue candidate**: In `streakPass`, the two-pointer window `[lo, hi)` persists across blocks within one pass, and `touched` per block. But `lo`/`hi` are initialized 0 at pass start — good. However `while (t[lo] < lo_val) ++lo;` — if lo_val is large, lo advances; t sorted ascending so fine.
+
+  Hmm wait, there's an edge: blocks with same TOF processed once (kb). But what about points with TOF in [c-3, c+3] belonging to scans — sums include ALL alive points in that TOF range, including points at TOF c itself and neighbors. Yes.
+
+  **Now — the important one the prompt hints at: "saturating at 0" for TOF window, and halo saturation — done.**
+
+  Let me look for an actual bug in the radix sort early-termination: condition `(shift == 0 || (max_tof >> shift) != 0)`. Consider max_tof = 0xFFFFF (bits 0-19). shift 0: runs. shift 11: max_tof >> 11 = 0x7 ≠ 0, runs (bits 11-21). shift 22: max_tof >> 22 == 0, stops. Bits 22+ all zero. Sorted correctly. Consider max_tof with bit 22 set only in a high value... covered since >>22 != 0. What if max_tof = 1<<22 exactly? >>22 = 1, runs shift 22 covering bits 22-32. Good.
+
+  But — bug: `std::array<std::size_t, 2049> start{}` per pass on stack — 16KB stack, fine.
+
+  Now **Ms1WindowGate::fromBoxes merge adjacency**: "touching intervals (lo <= hi + 1) merge, which leaves membership unchanged" — merging [0,5] and [6,10] into [0,10] — since integer TOF, no integer between 5 and 6, membership unchanged. Guard for hi == u32max avoids overflow. OK.
+
+  contains: partition_point over per-scan sorted merged intervals. `iv.second < tof` → first interval with second >= tof; check tof >= first. Correct.
+
+  fromBoxes: `per_scan(num_scans)` — num_scans up to 2^32? max_num_scans u32; if huge (e.g., 100M), per_scan vector of 100M vectors = huge memory (2.4GB). dnoise would too? Practical non-issue.
+
+  Now **the clamp `lo = min(b.scan_lo, num_scans - 1)`** — but if b.scan_lo > num_scans-1 and scan_hi too, then lo=hi=num_scans-1 and the box's TOF interval gets added to the last scan! Wait: if scan_lo > num_scans-1 (whole box beyond last scan), clamping both to num_scans-1 adds the interval to scan num_scans-1 — points at that scan with matching TOF would incorrectly pass the gate. But does dnoise do the same? scan_hi was already clamped in builder, but scan_lo is NOT clamped in builder — if scan_lo >= num_scans, then lo=min(scan_lo, num_scans-1)=num_scans-1, hi=num_scans-1, interval added. dnoise's fromBoxes — the spec says "scan bounds are clamped onto the last scan" — per the header comment: "A box with tof_hi < tof_lo is skipped; scan bounds are clamped onto the last scan". If dnoise clamps the same way, identical. Can scan_lo exceed num_scans-1? scan_lo = floor(min(s0,s1)) where s derived from scan begin/end ≤ actual scan counts, plus 0.05 pad inverted — pad expands by ~59 scans, so yes scan_lo could theoretically... scan_lo corresponds to the HIGH im side (im0, begin) minus pad... s0 = (max(im)+pad - intercept)/slope — slope negative; larger im → smaller scan. The pad shifts bounds outward by 59 scans on each side; scan_lo = floor of the lower scan bound minus 59... could scan_lo still exceed num_scans-1? That would need the window's scan range beyond the run's scans entirely — possible if DiaFrameMsMsWindows has rows with ScanNumBegin > max NumScans (mismatched method vs acquisition). Rare. If dnoise does the identical clamp, bit-identity holds regardless. Can't verify; flag as "verify dnoise does the same clamp" — but the author claims verified against binary on real data. Edge case only on corrupt metadata. I'll mention briefly.
+
+  Now, **the biggest hinted hazard: GCC push_options/optimize("fp-contract=off")**. Known GCC behavior: `#pragma GCC optimize` — functions are compiled with options *as if appended to the command line*? Let me recall the manual: "This pragma allows you to set global optimization options for functions defined later in the source file... the options are a comma-separated list... Each option... is similar to the corresponding command-line option." And the known caveat from the manual for the optimize attribute: "the optimize attribute should be used for debugging purposes only. It is not suitable in production code." And importantly, GCC bug: attribute optimize **clears** options inherited from command line in some versions, e.g. functions get -O0. Actually I recall: `__attribute__((optimize("O2")))` works; `optimize("fp-contract=off")` — the function is compiled with default optimization level?? There's GCC PR 88001 etc. The safest review statement: on GCC the pragma may silently not do what's expected, and the binary should be tested compiled with GCC -O3 -march=native (FMA) with ONLY the pragma (no -ffp-contract=off) to prove the guard works; the unit test "fails with the guards removed" presumably on Apple clang — a GCC+FMA check is needed. Also: CMake only adds the flag for the spextractor target and the two test targets; if the project is built in-tree inside OpenMS (the docs mention in-tree build), the flag/pragma story differs. The volatile makes it robust anyway — good defense. But the t0/t1 tof computations don't have volatile... do they need it? Contraction only fuses a*b+c patterns (FMA). t0 = (sqrt - intercept)/slope — no a*b+c. mz bounds: `mz_lo = iso - width/2.0` — width/2.0 then subtract: division can't contract. `iso * ...`? no. s0/s1: (fmax + pad - intercept)/slope — no mul-add. sqrt fine. So only scan computation had a*b+c. Also `tof_slope = (sqrt(mz_max) - tof_intercept)/tof_max_index` no contraction. So the only contraction hazard is im0/im1, guarded by volatile. OK.
+
+  But hmm — is there an a*b+c in `mz_min -= 5.0`? no. `edge[b] * ppm * 1e-6 * kBandHaloPpmMul` in spextractor.cpp — not gate-related.
+
+  Now — **potential real bug #1 candidate in the gate**: the `im_of` formula uses Nscan = max NumScans over all frames, and `im_of(scan) = im_max + ((im_min - im_max)/Nscan)*scan`. In the builder: `scan_slope = (im_min - scan_intercept) / num_scans` where num_scans = max_num_scans. Then for the box, `invert` uses s = (im - intercept)/slope. The spec says "scans from im_of(ScanNumBegin) and im_of(ScanNumEnd) padded by 0.05 1/K0 -> scan floor/ceil". The code converts scan→im then back im→scan with pad. That matches dnoise (convert then invert). OK.
+
+  **Wait, actual bug hunt in s0/s1**: `s0 = (fmax(im0,im1) + pad - intercept)/slope`; im0 corresponds to scan_begin (smaller scan, larger im since slope negative). fmax = im0 = im(begin). s0 = (im(begin) + pad - intercept)/slope → scan value slightly LESS than begin (since +pad in im, divide by negative slope). So s0 is the lower scan bound. scan_lo = floor(min(s0,s1)). s1 = (min(im) - pad - intercept)/slope → scan slightly more than end. scan_hi = ceil(max). OK.
+
+  Now, the spec says "the exclusive end used as if inclusive" — uses scan_num_end directly. matches.
+
+  **i64→u32 wrap for scan numbers**: `static_cast<std::uint32_t>(r.scan_num_begin)` — negative begin wraps huge; then im calc uses that. Matches Rust `as u32`. Then s0 computed from a wrapped value... bit-identical to Rust since same wrap. OK.
+
+  **Drop ScanNumEnd <= ScanNumBegin** in u32-wrapped space — matches tdf/mod.rs.
+
+  Now **halo: "excluding every point whose TOF == t"** — one subtlety: does dnoise exclude by TOF column or by exact (scan,tof) of the point? Header point 4 says "the reference skips EVERY point in the point's own TOF column (that is what spares a streak)". OK consistent.
+
+  **Now the claimed perf shortcut: "two pointers instead of binary search per window"** — verified above as exact.
+
+  **"stopping passes early once a pass removes nothing"** — exact (deterministic).
+
+  **"counting sort by scan for the halo"** — produces (scan, tof) order; halo inner loop per scan uses lower_bound within scan's TOF-sorted range. Exact regardless of order since best is a max over a set. The keep decision per point is independent (simultaneous). OK.
+
+  **"evaluating the gate only on halo survivors"** — gate is ANDed last; streak/halo don't consult the gate, so evaluating gate only on survivors gives the same keep mask. Exact.
+
+  Now **B. The prune.**
+
+  The claim: prune keeps survivors (> noise), first/last peak of each spectrum, and witness chain so consecutive kept peaks ≤ c = h apart relative. Band b covers [MZBegin(lo), MZBegin(hi)) with lo = edge[b]*(1-h)... actually code: `lo = edge[b] - edge[b]*ppm*1e-6*20`, hi similarly with edge[b+1]. The claim: hi - lo ≥ 2h·lo/(1-h) ≥ c·lo.
+
+  Check: hi = e_{b+1}(1+h), lo = e_b(1-h) where h = 20·ppm·1e-6 = hop. Since e_{b+1} ≥ e_b: hi - lo ≥ e_b(1+h) - e_b(1-h) = 2h·e_b = 2h·lo/(1-h). The hop guarantee: consecutive kept peaks m, x with x ≤ m + h·m, i.e., x ≤ m(1+h), i.e., x - m ≤ h·m. For a peak p in [lo, hi): is there a kept peak in [lo, hi)? Consider consecutive kept peaks m < x straddling... If p is unpruned peak in band, is some kept peak in [lo,hi)? The witnesses guarantee gap ≤ h·m where m is the lower kept peak. If p lies between kept m and x: p - m ≤ x - m ≤ h·m. Is m ≥ lo? Not necessarily: m could be < lo ≤ p. Then we need m ≥ lo or x ≤ hi... hmm. Suppose m < lo and x > hi. Then gap x - m > hi - lo ≥ 2h·lo/(1-h). But gap ≤ h·m < h·lo. Contradiction since h·lo < 2h·lo/(1-h). So not both outside: either m ≥ lo (m in band, since m < p < hi) or x ≤ hi (x in band since x > p ≥ lo). So some kept peak in [lo, hi). Good — factor-2 margin. But floating point: `reach` computes `x <= m + hop*m` — m + hop*m could itself FMA-contract! `m + hop * m` is an a*b+c pattern! If compiled with contraction, fma(hop, m, m) has single rounding — slightly different from separate mul+add. hop*m rounds up or down; the margin analysis: x - m ≤ h·m exactly is the requirement, and hi - lo has factor-2 margin, so 1 ulp differences don't matter ("with a factor-2 margin over floating-point rounding"). OK.
+
+  But wait — the band membership uses `MZBegin(lo)` = lower_bound(lo), i.e., first peak with mz >= lo, and MZBegin(hi) → range [lo, hi) — peaks p with lo ≤ p < hi. Our argument needs strict/non-strict care: x ≤ hi vs x < hi. Suppose x == hi exactly: x not in band [lo,hi). And m < lo. Then x - m > hi - lo still holds (x-m = hi - m > hi - lo since m < lo). Same contradiction. But boundary: contradiction requires gap > hi - lo ≥ 2h·lo/(1-h) and gap ≤ h·m < h·lo... m < lo so h·m < h·lo ≤ half of hi-lo. Fine, margin holds.
+
+  Hmm, but actually the argument needs: if both outside, gap > hi - lo. m < lo ≤ p... wait p in band, m < p? m is previous kept peak, m < p? kept peaks are sorted, m is the kept peak immediately before x, p lies between (m < p < x since p unkept between consecutive kept). Yes.
+
+  So band spectra existence preserved. But ALSO: the claim says "band membership, spectrum counts and the tracer's work content are unchanged". Wait — band membership of SURVIVORS unchanged trivially (survivors kept). The concern is only which spectra appear in each band (any peak). Preserved. And edge sample taken pre-prune. Preserved. RTs preserved (spectra not removed). IM array kept in lockstep via select. 
+
+  Now hunt for real issues in B:
+
+  **1. sortByPosition() before sampling.** The unpruned pipeline sampled `s[i]` for i stride 97 over the spectrum AS STORED (after loader sortByPosition per the dist code comment "spectra arrive m/z-sorted (loader sortByPosition)"). The prune calls s.sortByPosition() then samples. If spectra were already sorted, no-op — same sample. If not sorted (resident path?), the original code sampled unsorted order... but original detectTraces_ sampled from map in whatever order; prune's sortByPosition changes which m/z are sampled if input unsorted. But sortByPosition is claimed no-op on picked spectra. PeakPickerIM output sorted? The [R3] comment says "spectra arrive m/z-sorted (loader sortByPosition)". For the resident path, is sortByPosition called? The prune now does it, so after prune spectra are sorted — if previously some spectrum was unsorted, dist code used lower_bound only if src_sorted else scan; sorted now → different (but correct?) Actually if unsorted before, old code sampled unsorted order; prune sorts then samples → different edges → different output. But presumably always sorted in practice. Minor note.
+
+  More important: **does prune's sortByPosition change peak ORDER relative to unpruned run?** If sort is stable or input already sorted, no change. OpenMS sortByPosition sorts by m/z — if input unsorted, pruning changes relative order vs unpruned run → band spectra could have different peak order → MassTraceDetection output could differ (it sorts internally though). Edge case; mention.
+
+  **2. The sample vector and detectTraces_ swap.** In detectTraces_: `if (ms1_prune && ms1_prune->on) sample.swap(ms1_prune->sample)`. But this branch is inside `if (bands > 1)`. If bands == 1 (perf:ms1_trace_bands 1), the sample is never used — fine, no edges needed. But the precondition check before: `ms1_prune.frames != ms1_map.size()` throws even when bands == 1. With bands == 1... frames should still equal map size since every MS1 spectrum is pruned at load. But in streaming path — does the consumer prune ALL MS1 spectra? `ms1_prune->batch(ms1_buf_, take=true)` — yes all. Resident: batch over exp spectra with take = containsIMData && msLevel==1, and dispatch moves exactly containsIMData && ms1 into ms1_map. Equal. But — **what about spectra that are MS1 but lack IM data?** Dispatch: `if (!s.containsIMData()) continue;` — not in ms1_map, not pruned. Consistent.
+
+  **What if ms1_prune.on but the run mixes paths?** Reset handled on fallback.
+
+  **3. `sample_n` vs `sample.size()` check**: `sample_n += (c.picked + 96)/97` per spectrum where picked = n (spectrum size). But off[] was computed with `(v[i].size()+96)/97` — v[i].size() BEFORE prune (batch computed offsets before frame() ran — frame() doesn't change size until select at end; size() at offset time is pre-prune). c.picked = n pre-prune. Consistent. But note frame() writes `*samp++ = ...` for i stride 97 — count = ceil(n/97) = (n+96)/97. For n=0: (0+96)/97 = 0. Loop writes 0. OK.
+
+  **Empty spectra**: n=0, keep empty, select not called (keep.size()==n==0), spectrum stays empty. Sample contributes 0. In old code, stride-97 sample of empty spectrum: none. Same. Band: empty spectrum has no peaks → no band spectrum either way. But spectrum COUNT for MassTraceDetection: the map still contains the empty spectrum either way. OK.
+
+  **4. Exactly-at-noise peaks**: prune drops v == noise (v > noise is the survivor test). MassTraceDetection keeps (double)intensity > noise_threshold_int — strictly greater. So == noise peaks are never traced — dropping them is safe for tracing; they matter only as band-spectrum witnesses, handled by the witness chain. at_noise counted: fixture asserts at_noise == 3. OK. Note the comment: "3.54 M centroids at exactly 100.0" on real data — handled.
+
+  **5. NaN intensity**: v != v counted, and `surv = v > noise` false for NaN → NaN peaks dropped unless witnesses. Can a NaN-intensity peak be a band witness need? Band membership depends on m/z only, and NaN peaks' m/z still count in old code for band existence! If a spectrum's only peak in a band range is a NaN-intensity peak, old code: band spectrum exists (membership checks m/z). New: NaN peak could be dropped if not needed as witness... but witnesses are chosen by m/z gaps regardless of intensity — a NaN peak is sub-threshold so candidate witness; kept if needed to bridge gaps. So its m/z-presence is preserved by the chain exactly like other sub-threshold peaks. But wait — NaN m/z? `s[i].getMZ()` NaN would break ordering; `reach` with NaN x: x <= ... false → treated as out of reach → pushed as kept (far side of gap). Actually NaN x: reach(last, x) false; cand handling; then `keep.push_back(i)` — NaN peaks always kept (can't be within reach). Hmm, but sortByPosition with NaN m/z — undefined ordering but deterministic? std::sort with NaN violates strict weak ordering — UB-ish but deterministic in practice. Old code: MZBegin(lo) with NaN in spectrum — isSorted() false probably → scan fallback with `s[i].getMZ() >= lo` false for NaN → NaN peaks excluded from bands. New: NaN m/z peak kept in map, still excluded by band comparisons. Sample: stride-97 sample includes NaN m/z → sort(sample) with NaN — UB comparator! Could produce different edges between prune on/off? No — sample identical pre-prune in both cases? No! In old path (prune off) the sample is taken from the same spectra (NaN present too) inside detectTraces_. Same NaNs, same sort call. std::sort on identical input → same result? std::sort is deterministic for a given implementation/input. Same input vector → same output. OK identical. NaN m/z is pathological anyway.
+
+  **6. The `[ms1-edges]` digest line and sample.swap ordering**: In detectTraces_, after swap, `sort(sample)`, edges computed, then `vector<double>().swap(sample)` — sample (the pruned struct's) was swapped INTO local, so ms1_prune->sample is now empty — later `vector<double>().swap(ms1_prune.sample)` after the call is a no-op safety. Fine.
+
+  But — **edge digest uses `String(sample.size())`** after sort, fine.
+
+  **Wait, a real one**: `edge[b] = sample[min(sample.size()-1, (size_t)((double)b/bands*sample.size()))]` — unchanged from before. OK.
+
+  **7. The edges when prune on but ms1_prune->sample taken from STREAMING consumer batches vs detectTraces_ sampling order.** Old code: `for (const auto& s : map) for i stride 97: sample.push_back(s[i].getMZ())` — map order = order spectra added. New: sample built in batch order = arrival order of ms1_buf_ flushes = same order as addSpectrum calls. Same order. And detectTraces_ sorts sample anyway ("the order is irrelevant (detectTraces_ sorts)"). Even quantile indices after sort → identical. Yes since sort makes order irrelevant; only multiset matters. But floating point — sample values identical since same spectra. Identical multiset → sorted identical. Good.
+
+  **8. The OpenMP race in batch()**: `sample.resize(at)` before parallel region; each thread writes sample.data()+off[i] — disjoint ranges. OK. `cs[i]` per-index. err capture in critical. But: `#pragma omp parallel for schedule(dynamic,1)` over `long i`. frame() may throw (select can throw bad_alloc; sortByPosition...). Caught. OK.
+
+  **Race candidate**: `Ms1Prune::frame` calls `s.select(keep)` — per-spectrum, fine. But `sample.data() + off[i]` — off[i] computed from pre-prune sizes; frame writes exactly (n+96)/97 doubles. No overlap. OK.
+
+  **But: `take(v[i])` evaluated serially before; sel for all; frames counter incremented post-loop only for sel. In streaming path take = always true. Fine.
+
+  **9. frames != ms1_map.size() check**: In streaming path, are there MS1 spectra added to ms1_map NOT passing through batch? flushMS1_/flush_ — the prune is in the MS1 branch of flush_ (shown: after ms1 pick loop, `if (ms1_prune && ms1_prune->on) ms1_prune->batch(ms1_buf_, ...)`). Is there any other route that adds MS1 spectra to ms1_map? Presumably all MS1 go through ms1_buf_. But what about the FIRST pass of the tiled reader — pass 1 is MS1-only; MS2 frames read per tile later. MS1 spectra pruned in pass 1. OK.
+
+  But — **the fallback reset issue**: if stream attempt fails partway and falls back to resident (`!streamed`), ms1_prune.reset() clears sample and counts, but "Spectra it already added to ms1_map stay there (they always did)". Then resident load fills exp... but does the resident path then ADD MORE spectra to the same ms1_map that already holds streamed ones? The comment says the count check then refuses. OK by design.
+
+  **10. THE hinted one: "-perf:ms1_trace_bands 1"** — with bands==1, sample never consumed, but prune still prunes. MassTraceDetection on the whole pruned map: does the prune change its behavior? MassTraceDetection counts EVERY spectrum it receives as a scan (sample-rate). Pruned map has same spectra (none removed), same survivors. Sub-threshold peaks: does MassTraceDetection read them? It filters peaks by > noise when building its work map — with witnesses present but sub-threshold, they're filtered out the same. So identical. But wait — does MassTraceDetection's chrom_peak_snr apex gate or anything read sub-threshold? No, > noise filter. OK. So bands==1 identical too — EXCEPT the map passed has different peak counts, and MassTraceDetection might do something O(peaks) like... no, only filtered peaks matter. Claim holds.
+
+  Hmm — but one more: with bands==1 and prune on, `vector<double>().swap(ms1_prune.sample)` after — fine.
+
+  **11. Witness chain correctness detail**: The chain: for each peak i: if within reach of last kept → if survivor keep & update last; else cand = i (the FARTHEST sub-threshold within reach — since iterating in m/z order, cand gets overwritten by later peaks, so cand = last (farthest) sub-threshold within reach). When out of reach: push cand as witness, last=cand, re-test reach from cand. If still out of reach → push i regardless (survivor or not!). Note: `keep.push_back(i); last = i;` — this pushes a sub-threshold peak that's out of reach of even the candidate — "the far side of a gap nothing bridges". Wait, can that happen? If x (current peak) is out of reach of cand (farthest within reach of last)... then gap between last kept and x can't be bridged? Hmm — actually consider: last=100, cand=100.5 (within reach), x=101.2 out of reach of cand(100.5) if hop*100.5 < 0.7? hop=3e-4 → reach ≈ +0.03. So x=101.2 out of reach. Push cand, then x still out of reach → push x. But could an intermediate chain... cand was the farthest within reach of last; between cand and x there are no other peaks (x is next). So minimal. But pushing x when sub-threshold: is that needed? The gap from cand to x exceeds hop — cannot be bridged (no peaks in between). For band-spectrum existence, we need every band range containing a peak to contain a kept one. If x sub-threshold and we DIDN'T keep it: band range containing x but not cand or next kept... x is the first peak after a gap; the band containing x — does it contain another kept peak? Not necessarily! So x must be kept. That's the "first/last peak" anchor generalization. Correct design.
+
+  End of spectrum: `if (cand != none) keep.push_back(cand)` — keeps the trailing candidate = effectively the last peak if trailing peaks are sub-threshold. But what if the last peak is a survivor already kept and cand none → fine. What if last peaks sub-threshold and within reach — cand = the last (farthest) one → kept. But if trailing sub-threshold peaks NOT within reach of last kept — they'd have been pushed during iteration. So final kept peak = last peak of spectrum always? If the last peak is sub-threshold and within reach of last kept, cand = last peak (farthest within reach = last in iteration order, since cand overwritten). Yes last peak kept. First peak: i=0, last==none → `keep.push_back(0)`. Good.
+
+  **12. `select()` memory question (Q4)**: "peaks and IM array in lockstep, into right-sized buffers" — OpenMS MSSpectrum::select(indices) — does it shrink capacity? If select reallocates into right-sized buffers, capacity released. The comment claims so. Peak RAM measured 31.82 → 26.49 GB so empirically fine. select presumably keeps the float data arrays in lockstep. Fine.
+
+  **Does the flush transiently double memory?** batch() allocates sample (doubles, (peaks/97)*8 bytes ≈ tiny) and cs. select moves into right-sized buffers — transient 2x per spectrum, small. OK — answer: nothing found beyond per-spectrum transient.
+
+  **13. The e2e fixture vacuity (Q6)**: c19 checks: prune on vs off digest equal for bands 1,2,48; counters show wit > 0, at_noise == 3; no-witness control changes traces or bands. Concerns:
+  - `assert "[ms1-prune]" not in log_off` — but log_off includes... the option description isn't printed. OK.
+  - The no-witness assertion: `g_nw["traces"] != g_off["traces"] or g_nw["bands"] != g_off["bands"]` — for bands==1, no [det] band lines (gated bands>1); traces must differ. With bands==1, without witnesses, spectra with no survivors... wait at bands==1, does witness absence change anything? MassTraceDetection counts every spectrum as a scan; all spectra still exist (witnesses only affect peak content, not spectrum existence, at bands==1 — no band partition at all!). With bands==1 the map is traced directly: spectrum count same (prune never removes spectra), sub-threshold peaks filtered by MassTraceDetection anyway. So no-witness at bands==1 changes NOTHING — hence the fixture only runs nowit for bands > 1. Right, the code does `if bands > 1`. Good — they noticed.
+  - Could it pass vacuously? wit > 0 asserted; digest equality across 1/2/48; no-witness changes traces for 2 and 48. Seems genuinely load-bearing. One gap: the no-witness check compares to g_off, not g_on — fine.
+  - at_noise == 3: cycles 11,12,13 have 400.2 at exactly 100.0 → 3. Good.
+
+  Potential vacuity: with bands=2/48 the edge sample — "Each cycle's lowest peak is its stride-97 m/z sample" — spectra have ~10 peaks, stride 97 → only index 0 sampled = lowest m/z. Yes.
+
+  **14. `sample.swap` in detectTraces_ when prune on but the call is for MS2?** detectTraces_ default arg ms1_prune=nullptr; only MS1 call passes it. MS2 calls with default → sample from map normally. OK. But the MS1 call passes &ms1_prune even when `ms1_prune.on == false`? Look: `ms1_traces = detectTraces_(..., &ms1_prune)` — always passed. Inside: `if (ms1_prune && ms1_prune->on) sample.swap(...)` else sample from map. With prune off, samples map directly. But the sample from map with prune off — spectra unsampled by prune; sample built in map order. Same as before. OK.
+
+  BUT — **with prune OFF, `[ms1-edges]` line gated `if (ms1_prune && detOn_())`** — ms1_prune is non-null (points to struct) even when off → edges line printed even when prune off. The e2e checks edges equal between off and on — good, that's intended: the edges with prune off come from map sampling, with on from pre-prune sample — should be identical. And c19 asserts equality. Good.
+
+  **15. `[det] MS1 band spectra` gated `if (ms1_prune && detOn_())`** — same, prints when off too. c19 asserts bands line equality on vs off — good.
+
+  **16. Hmm, potential real bug: `ms1_prune.frames != ms1_map.size()` precondition — but ms1_map also gets spectra added BEFORE any pruning in the streaming path?** No, prune happens in flush_ before addSpectrum. OK.
+
+  But — what about the **mzML stream-fallback path with `streamed == false`**: prune batch called on exp.getSpectra() BEFORE dispatch. The batch take-predicate matches dispatch. But dispatch moves spectra into ms1_map — prune happened pre-move. Good.
+
+  **Wait — actually there's an ordering bug candidate in the resident path**: `ms1_prune.batch(exp.getSpectra(), ...)` is called AFTER the parallel pick loop but the pick loop skips spectra without IM data (`if (!s.containsIMData()) continue;`). The batch predicate `s.containsIMData() && s.getMSLevel() == 1`. Spectra without IM aren't dispatched. Consistent.
+
+  **17. `total.kept - t.survivors` in the log line: "witnesses kept - survivors"** — but kept includes first/last anchors that ARE survivors... survivors counted separately, witnesses = kept - survivors counts anchors+witnesses+forced sub-threshold. Label "witnesses" loosely. Cosmetic, skip.
+
+  **18. Concurrency (Q5)**: The omp parallel for in batch: exceptions captured. `#pragma omp critical(ms1_prune_err)` — named critical, fine. `if (err) std::rethrow_exception(err)` outside region. Good. Shared counters: cs per-index, no atomics needed. schedule(dynamic,1). OK.
+
+  But — **MSSpectrum::select and sortByPosition thread safety**: per-spectrum objects, disjoint. OK.
+
+  **19. Now the claimed identity hole: "the stride-97 edge sample is taken from the unpruned sorted spectra at flush and handed to detectTraces_"** — subtle: the sample is taken INSIDE frame() per spectrum, but offsets were computed from `v[i].size()` BEFORE any pruning in this batch — but frame() calls sortByPosition() FIRST, then samples, then prunes. Since sample per spectrum taken pre-prune. Good. But if an EXCEPTION occurs mid-batch (one spectrum throws), err rethrown, sample partially filled — run aborts anyway. OK.
+
+  **20. What about `frames` counting when the same run calls batch multiple times (streaming: many flushes)?** frames accumulates; sample accumulates; offsets relative to sample.size() at batch start. Good.
+
+  **21. The `hop` and the halo arithmetic vs band halo**: band lo uses edge[b]*(1-h) where h = ppm*1e-6*20 exactly equals hop? hop = getDoubleOption_("trace:mass_error_ppm")*1e-6*kBandHaloPpmMul; band: `edge[b] - edge[b]*ppm*1e-6*kBandHaloPpmMul` where ppm read via getDoubleOption_ at detectTraces_ time — same option value. FP: `edge - edge*h` vs `edge*(1-h)` — the claim in the prompt used (1-h) form; code uses sub form. Both fine for the inequality argument up to ulps; margin factor 2 covers. OK.
+
+  **22. NaN intensity in MassTraceDetection comparison**: prune's `surv = v > noise` — MassTraceDetection: `(double)intensity > noise_threshold_int` — identical. NaN → false both. So NaN peaks never traced; dropping them safe except band existence — covered by witness logic. OK.
+
+  **23. float→double compare**: `const double v = s[i].getIntensity();` — Peak1D intensity is float; conversion to double exact; compare with noise double — matches MassTraceDetection reading the same float. Yes.
+
+  **24. Anything about `SPEXTRACTOR_MS1_PRUNE_NO_WITNESS` changing the sample?** no_witness still samples pre-prune (sample written in frame() regardless). And kept = survivors only. Band spectra may vanish → negative control. Good design.
+
+  **25. tile trim env**: malloc_trim between tiles gated `#ifdef __GLIBC__`, output-identical. `trim_on` required too. Fine. But — malloc_trim between tiles while `all_out` reserved... perf only. OK.
+
+  **26. select() and IM array lockstep**: "peaks and IM array in lockstep" — MSSpectrum::select handles float data arrays. Claim: "Never removes a spectrum or strips the IM array." OK.
+
+  Now — **the strongest candidate bugs to report**:
+
+  (A1) **GCC `#pragma GCC optimize("fp-contract=off")` caveat**: GCC documents the optimize attribute/pragma as debugging-only; historically it does NOT reliably apply -f options per-function in all versions, and there are reports it can reset other flags (e.g. drop command-line -O level or -march for those functions, or fail to disable contraction). The defense-in-depth (volatile) does cover the one a*b+c site, so bit-identity likely holds anyway — but then the pragma + CMake flag are belt on top of the volatile; the risk is the pragma miscompiling or silently not doing anything while giving false confidence. Recommend: rely on volatile (provably sufficient), or verify on GCC x86-64 with -march=native (FMA) without the CMake flag. Actually — wait, there's a subtlety: with `#pragma GCC optimize` anything, GCC may compile those functions at a DIFFERENT optimization level? The pragma without an -O option keeps command-line -O. I believe options accumulate. But there IS a known GCC bug where __attribute__((optimize)) disables inlining into callers or mis-applies. I'll report it as a portability risk with the concrete failure mode and recommend a CI configuration (Linux GCC -O3 -march=x86-64-v3, no CMake flag) to prove the volatile alone suffices — the test claims to pin D's boxes and "fails with the guards removed" (on Apple clang arm64 presumably), but GCC+x86 FMA is a different contraction path.
+
+  Hmm, actually another genuine FP issue: **`std::sqrt` and contraction aside, x87 excess precision?** x86-64 uses SSE2 — fine. 32-bit x87 would be a hazard but C++20 macOS/Linux 64-bit only. Skip.
+
+  (A2) **from_chars float on libstdc++/libc++ availability**: `#if defined(__cpp_lib_to_chars)` — this macro is defined when integer from_chars exists (C++17), NOT float! __cpp_lib_to_chars covers integer to_chars/from_chars since C++17; floating-point from_chars has its own macro `__cpp_lib_to_chars` bumped value 201611L vs... Actually: __cpp_lib_to_chars 201611L = integer only; the float support uses the SAME macro name with a later value? Let me recall: P0068? Floating-point from_chars is P0067 (same paper as integer). libstdc++ implemented float from_chars in GCC 11; the macro __cpp_lib_to_chars remained 201611L until... GCC bumped __cpp_lib_to_chars to 201611L only. There's no separate macro for FP from_chars! That's the known problem: you cannot detect FP from_chars support via feature-test macro reliably. libc++ defines __cpp_lib_to_chars 201611L with integer-only for a long time — that's exactly why the code has the `#else` branch for libc++. But the test is `#if defined(__cpp_lib_to_chars)` — libc++ ALSO defines __cpp_lib_to_chars (201611L, integer-only)! So on macOS/libc++, __cpp_lib_to_chars IS defined (integer from_chars exists), and the code would take the from_chars path with `std::from_chars(..., double&)` — which on older libc++ (before macOS 26 availability-gated FP from_chars) **does not compile** (no FP overload) — a build break, or on newer libc++ it's availability-gated → runtime availability issue/compile error depending on deployment target. Wait, the code comment says "libc++ does not define __cpp_lib_to_chars" — that claim is WRONG. libc++ does define __cpp_lib_to_chars (201611L) since it has integer to_chars. Hmm — does it? libc++ has <charconv> integer since LLVM 7, and defines __cpp_lib_to_chars 201611L. Yes it does. The header includes <version> which provides the macro. So on macOS, `#if defined(__cpp_lib_to_chars)` is TRUE, the istringstream fallback is dead code, and `std::from_chars` for double on libc++ < LLVM 18(?) → compile error. FP from_chars landed in libc++ 18/19 partially and is availability-gated on Apple platforms. This is a genuine bug: the feature test is wrong; should test e.g. `__cpp_lib_to_chars >= 2023xxL`? Actually there's still no distinct macro; libc++ added `__cpp_lib_to_chars` FP detection via... I don't think a macro exists; common practice: `#if defined(__cpp_lib_to_chars) && !defined(_LIBCPP_VERSION)` or check `__cpp_lib_to_chars >= 201611L` plus compiler. Hmm wait — is that right? Let me double check: libc++ charconv: integer from_chars C++17; floating-point from_chars landed in LLVM 19 (partial, availability-gated on Apple for to_chars general?). And feature-test macro __cpp_lib_to_chars is defined as 201611L by libc++ — and the comment in the code says "libc++ does not define __cpp_lib_to_chars: its floating-point from_chars is recent and availability-gated (macOS 26)". Maybe recent libc++ UNDEFINES the macro when FP is unavailable? I don't believe libc++ conditionally omits it. Actually checking memory: libc++'s <charconv> defines _LIBCPP_AVAILABILITY_TO_CHARS_FLOATING_POINT etc. The feature test macro __cpp_lib_to_chars — cppreference says it's 201611L for the integer facility, and there was discussion of bumping for FP but I believe the value remains 201611L even with FP support. So the macro cannot distinguish. Given CI runs on macOS (tests.yml presumably multi-platform) and the test builds, maybe their CI macOS has LLVM 19+ with FP from_chars available... but availability-gated — compiling for older deployment targets would error. This is a REAL finding: the guard claims a fallback for libc++/macOS but the preprocessor condition never selects it there (or, if libc++ truly doesn't define the macro in their SDK version, fine — but then when Apple ships FP from_chars, the macro appears and code switches paths silently). Actually wait — maybe libc++ didn't define __cpp_lib_to_chars at all until FP support was complete? Hmm. Checking my memory of libc++ <version>: it does define __cpp_lib_to_chars 201611L. I'm fairly confident (libc++ has defined it since ~LLVM 8). So the comment "libc++ does not define __cpp_lib_to_chars" is factually wrong, and the #else branch is dead on macOS. On macOS 26 SDK with availability — FP from_chars is marked availability macOS 26 → using it with a lower deployment target gives a compile error (or weak-link). So: macOS builds with older SDK/deployment target break at compile time. And the project CI's macOS build presumably passes because the runner is new. Report as finding with fix: explicitly test `!defined(_LIBCPP_VERSION)` (or a dedicated configure check) for the FP from_chars path, and keep istringstream for libc++.
+
+  Hmm, but I should be careful — I can't verify libc++ macro state from here. I'll phrase with appropriate confidence: on libc++ __cpp_lib_to_chars is defined (integer-only support predates FP support by years), so the `#else` fallback is likely never taken on macOS, contradicting the comment; if their SDK genuinely lacks FP from_chars the build fails rather than falling back. Fix: `#if defined(__cpp_lib_to_chars) && !defined(_LIBCPP_VERSION)` (or a CMake check_cxx_source_compiles probe).
+
+  Also: the istringstream fallback claim "an out-of-range value sets failbit" — for "1e400" num_get sets failbit and v=HUGE_VAL; fine. But grammar pre-check passes "1e400" then stream fails → parseF64 false → error. Rust would accept 1e400 as inf. Divergence documented ("out-of-range literals refused"). OK, minor.
+
+  (A3) **`volatile double` + clang pragma**: fine. But `volatile` doesn't prevent contraction of `scan_intercept + scaled0` with something else — there's nothing else. OK.
+
+  (A4) **The gate built with max_num_scans over ALL frames; denoiseMs1Frame's num_scans is the FRAME's NumScans.** contains() checks scan >= numScans() (gate's scans = max). If a frame has fewer scans than max, points have scan < frame NumScans ≤ max — fine. Consistent with dnoise presumably.
+
+  (A5) **Streak pass `w.stamp.assign(num_scans, 0)` but scan validation `scan[i] >= num_scans` uses the frame's num_scans — while the gate uses max scans. Spec says frame's NumScans. OK.
+
+  (A6) **A subtle streak bug hunt — the `occupied` lambda captures w.sum but sums persist across blocks via stamp. When computing n_occupied BEFORE sorting touched... fine.**
+
+  (A7) **Halo `best` includes points with intensity 0? max starts 0; zero intensities never raise best; best==0 keeps. Matches "best == 0 keeps".**
+
+  (A8) Now think about **the halo comparing `(double)I >= 0.15*(double)best`**: 0.15*best — best up to 2^32; product exact? 0.15 not exact; rounding matches Rust (same IEEE ops). Fine.
+
+  (A9) **`dnoise` stage 1 streak sums per scan: "sum intensities per scan over alive points with TOF in [c-3, c+3]... a scan is occupied iff its sum > 0"** — but points with intensity 0 contribute 0 — a scan with only zero-intensity points is unoccupied but its points can still SURVIVE if in an accepted span ("points with TOF == c whose scan lies in accepted span survive" — includes zero-intensity points). Implemented: mark loop over block [k,kb) regardless of intensity. Matches spec point 3.
+
+  (A10) **Potential mismatch: run counting uses touched scans = scans with ≥1 point in window. Occupied requires sum>0. A run's span [first,last] are occupied scans' positions. Fine.**
+
+  (A11) **Rust `touched[q] - touched[last]` u32 subtraction — no underflow since sorted ascending. OK.**
+
+  (A12) **The prune `reach` lambda: `x <= m + hop*m` — but band guarantee needs gap ≤ h·m where the inequality hi-lo ≥ 2h·lo/(1-h) assumed reach uses SAME h. hop = ppm*1e-6*20; band h = ppm*1e-6*20.0 — identical expression? band: `edge[b]*ppm*1e-6*kBandHaloPpmMul` — evaluation order: ((edge*ppm)*1e-6)*20; hop: ((ppm*1e-6)*20). Different rounding! But the inequality argument has factor-2 margin; ulp-level differences irrelevant. The prompt's claim "hi - lo >= 2h*lo/(1-h) >= c*lo" with margin covers this. OK.
+
+  (B1) Now the **really important one for B — hinted: "ANY path where the map is pruned but the edges are sampled from the pruned map."** Consider: prune on, but `perf:ms1_trace_bands` = 1 → no edges needed. Bands > 1 → sample.swap. What about **the MS2 detectTraces_ calls**: ms1_prune not passed → fine. What about **the tiled path where MS1 tracing happens... once**. Hmm, what about **`diag:dump_ms1_tsv`**? reads traces, not map.
+
+  What about a path where ms1_prune.on is true but the MS1 map was NOT built through the consumer/batch: e.g. **`SPEXTRACTOR_TILE_RESIDENT=1` forced resident while stream_load true**: streamed stays false? If force_resident, tile_source=false; then does the streaming consumer still run? "SPEXTRACTOR_TILE_RESIDENT=1 forces the resident source for a same-build A/B" — so streamed=false, resident path runs, prune batch over exp — handled. The `ms1_prune.reset()` is called in `if (!streamed)` — resets consumer's partial state. But if consumer ran pass 1 (MS1 pruned into ms1_map) and then something made streamed false mid-way... ms1_map retains pruned spectra; reset() wipes counts; resident load appends exp's MS1 to the SAME ms1_map → map holds both pruned-streamed and pruned-resident spectra, but frames count only resident → frames != map.size() → refuse. Deliberate. OK.
+
+  (B2) **What if `ms1_prune.on` but input is mzML via the STREAMING path?** "the streaming source needs the Bruker loader: a .d only" — mzML → tile_source false... but does the streaming consumer still run for mzML? `if (stream_load)` block constructs consumer and sets consumer.ms1_prune — for mzML, does streamed become true? There's a "stream-fallback" — presumably mzML can't stream → streamed=false → reset → resident. Handled.
+
+  (B3) **First/last anchor subtlety**: the "first and last peak" — for n=1: i=0 pushed as first; cand none at end. kept={0}. Good.
+
+  (B4) **Bug candidate in frame(): `for (Size i = 0; i < n; i += 97) *samp++ = s[i].getMZ();` — writes ceil(n/97) doubles; offsets allocated (v[i].size()+96)/97 with size() BEFORE frame — but could another thread's select() have changed v[i].size() before offsets computed? No — offsets computed serially before parallel loop.**
+
+  (B5) **The `[ms1-prune]` log line printed only in the RESIDENT path?** The log block after dispatch is inside `if (!streamed)`? The line appears in the dispatch section after `exp.clear` — in streaming path ms1_map filled by consumer; the shown log line "Split into MS1 + ... windows (picked)" — is that executed in streaming mode too? The diff context: after the `if (!streamed) { ... }` block? The shown region includes the parallel pick loop over exp — that's resident-only (`!streamed`). The prune log line sits there. So in streaming mode no [ms1-prune] summary line — cosmetic. But c19 uses synthetic mzML → resident → line present. OK.
+
+  (B6) **`ms1_prune.batch` in resident path happens even if streamed partially... reset clears. OK.**
+
+  (B7) — **THE big one: sample multiset vs. what old code sampled — old code sampled `map` which is ms1_map — the SAME spectra. But in the STREAMING path, old code (pre-change) sampled ms1_map at detectTraces_ time; new code samples at flush. Same spectra, same m/z values → same multiset. BUT: ms1 spectra order in ms1_map vs flush order — irrelevant post-sort. Identical.**
+
+  (B8) **Empty MS1 spectrum edge**: an MS1 spectrum with 0 peaks: batch counts frames++; map gets empty spectrum; old code: stride sample none; band: no spectrum. MassTraceDetection counts the empty spectrum as a scan in both. OK.
+
+  (B9) **What about MS1 spectra NOT delivered to the consumer in streaming (probe-dropped)?** frames_probe_dropped is for MS2. MS1 all pass through. OK.
+
+  (B10) **`(long)v.size()` overflow?** spectra count < 2^31 per batch (kBatch). OK.
+
+  (B11) **Exceptions in `frame()` from `s.select` etc. — after err rethrown, `frames` not updated for the successful ones — process aborts anyway. OK.**
+
+  (B12) — hmm, one more subtle prune identity issue: **MassTraceDetection "counts EVERY spectrum it receives as a scan"** — prune never removes spectra. ✓. But **does the band partition's `s.clear(true)` + map ordering change?** Band spectra per chunk in same order. Kept peaks preserve relative order (select preserves order). Band spectrum content identical. ✓
+
+  (B13) **`t.reserve(i1 - i0)` etc. unchanged.**
+
+  (B14) — **The `isSorted()`/sortByPosition interplay**: prune calls sortByPosition() on every MS1 spectrum at load. Old code: were MS1 spectra sorted before detectTraces_? The dist code: `src_sorted = s.isSorted()` with unsorted fallback scan. If any MS1 spectrum was unsorted pre-change (possible? picked spectra are sorted), old code used the scan fallback for that spectrum — same membership. Post-change, spectrum sorted → lower_bound path — same peaks. Edge sample: old code sampled unsorted array; new samples sorted — DIFFERENT sample values possible! If any spectrum is unsorted, edges may differ → output differs. The comment claims "sort by m/z (a no-op on a picked one)". PeakPickerIM output — is it guaranteed m/z-sorted? pickIMCluster sorts presumably. For the resident mzML path, spectra come from loadExperiment then pickIMCluster. If a spectrum is already centroided (getIMPeakType() == IM_CENTROIDED), the picker is SKIPPED — the raw centroided spectrum goes in as loaded. Is an mzML guaranteed m/z-sorted? NO in general! An unsorted centroided MS1 mzML spectrum: pre-change, detectTraces_ samples it unsorted; post-change, prune sorts it then samples → different stride-97 sample → different quantile edges → different output. Also the witness chain REQUIRES sorted order (relative-gap logic on sorted m/z); on an unsorted spectrum the chain's gap analysis is wrong — but sortByPosition fixes that first. The divergence is only the sample: pre-change sample came from the unsorted order. So output-identical fails for unsorted input spectra. Realistically: is this reachable? OpenMS MSExperiment load may or may not sort; mzML files are virtually always m/z-sorted. But "output-identical" as claimed is conditional on sorted input; the e2e fixture writes sorted peaks (order = sorted by mz). Worth reporting as a conditional-identity caveat with fix: sample BEFORE sorting? But the witness chain needs sorted order... sample from the original order: save the stride-97 values before sortByPosition. Actually frame() could sample first, then sort — that reproduces old behavior exactly (old code sampled the map as-is; if map unsorted, old band code used scan-fallback and old sample was unsorted-order). Hmm but old code sampling unsorted gives a different multiset than sorted — so to be exactly identical, sample must be pre-sort. Wait but actually old code's sample came from the ms1_map spectra as stored — never explicitly sorted — so yes pre-sort order. So fix: take the sample before sortByPosition() in frame(). But ALSO: prune's select() changes the spectrum; if original unsorted and prune leaves it sorted (sortByPosition), the band code now takes lower_bound path vs old scan path — same peaks, same order? scan-fallback preserved original order; sorted path produces sorted order → band spectrum peak ORDER differs → MassTraceDetection... it sorts internally by m/z? MassTraceDetection builds work map sorted by intensity then traces; m/z order within spectrum probably doesn't affect output. IM array moves in lockstep both ways. Likely output-identical anyway, but the edge SAMPLE is the real divergence. Report as finding (moderate, input-dependent).
+
+  (B15) — **The fixture check `assert (got["bands"] is not None) == (bands > 1)`**: with prune off and bands>1, the [det] MS1 band spectra line is gated `if (ms1_prune && detOn_())` — ms1_prune pointer non-null even when off (passed always). So prints for off too. ✓ consistent with the assertion. But wait — the MS1 detectTraces_ call passes `&ms1_prune` unconditionally — yes. OK.
+
+  (B16) — **What if `trace:noise_threshold_int` differs between the prune binding and the MS1 MassTraceDetection call?** prune.noise = getDoubleOption_("trace:noise_threshold_int"); MS1 call passes getDoubleOption_("trace:noise_threshold_int") — same. ✓ But detectTraces_ uses `noise` param for the mtd param — MS1 call passes the same option. ✓.
+
+  (B17) — **c19 fixture: "the hit in cycle 14 is float32 nextafter(100): a survivor"** — the intensity array in the mzML is 32-bit float (`b64f(vals, double=False)`? spectrum() uses `inten` with MS:1000521 32-bit float). nx100 computed as nextafterf(100) — yes float32. 100.0 exactly → at_noise. Good.
+
+  (B18) — **Q4 memory: `s.select(keep)` — does OpenMS MSSpectrum::select release capacity?** I recall OpenMS MSSpectrum::select(const std::vector<Size>&) — implemented via... I believe it does keep-if-selected copying into the same container or a new one. If it copies in place (std::remove_if style + resize), capacity NOT released → the 26.49 GB peak includes slack. Measured improvement 31.82→26.49 suggests big savings; but whether select shrinks-to-fit — the comment asserts "into right-sized buffers". Can't verify; flag as verify-or-measure item? The task says answer from text. The comment claims right-sized; measured peak dropped 5.3 GB. I'll note: if select() doesn't actually release capacity (implementation-dependent), the witness approach's memory win is overstated; check. Mild.
+
+  (B19) — **Flush transient doubling**: batch() writes sample then prunes; select per-spectrum transient 2x per spectrum only. The edge sample doubles are ~0.08 B/peak. No 2x map transient. The later dist code copies into band maps — pre-existing. Nothing new. State "nothing found" mostly.
+
+  (B20) — **`sample.swap(ms1_prune->sample)` leaves ms1_prune->sample holding the OLD local `sample` (empty vector just constructed)** — local sample was empty at that point (just declared). After swap, struct's sample empty; fine. Then the precondition check earlier used ms1_prune.sample.size() — before the call. ✓.
+
+  (B21) — **The precondition check `ms1_prune.sample.size() != ms1_prune.sample_n`**: sample_n computed from c.picked; sample.size() from offsets — consistent. But frames check: streaming path — every MS1 spectrum pruned in flush_ and added. frames incremented per batch. map.size() = total spectra added. ✓. But: does the streaming consumer add MS1 spectra ANYWHERE else, e.g. first-MS1-frame special handling? Can't tell; the check would catch it (fail-safe: throws). Good design.
+
+  (B22) — **The `no_witness` env var + `reset()` doesn't reset `no_witness`** — reset keeps on/noise/hop/no_witness — correct, those are config. ✓
+
+  (B23) — **Thread/tile invariance**: batch parallel per-spectrum, independent; sample offsets deterministic (serial prefix). Tiles: MS1 prune happens at load before tiling; MS1 traces computed once globally? The MS1 map is global (not per tile). ✓.
+
+  (B24) — hmm, **`schedule(dynamic, 1)` with per-spectrum variance — fine.**
+
+  (B25) — **One more prune subtlety: witnesses keyed to `noise` but MassTraceDetection's apex gate is `peak_int > chrom_peak_snr * noise` — stricter for apexes, but membership is > noise. Prune bound to membership threshold — conservative direction correct (keeps everything traceable). ✓
+
+  (B26) — **What about peaks with intensity exactly at noise but NEGATIVE or -inf?** v > noise false → sub-threshold. MassTraceDetection same. ✓
+
+  (B27) — **sortByPosition also sorts the IM array in lockstep?** MSSpectrum::sortByPosition sorts peaks and data arrays together in OpenMS — yes it does. ✓
+
+  (B28) — **What about spectra where `keep.size() == n`** (no prune possible): select skipped — spectrum untouched, capacity kept. ✓ good.
+
+  (B29) — **A subtle one: `c.survivors += surv` counts survivors even in no_witness mode. ✓**
+
+  (B30) — **`sel[i] = take(v[i])` but in streaming `take = return true` — all. Resident: containsIMData && MSLevel 1 — matches dispatch exactly. ✓**
+
+  Now the A-side remaining checks:
+
+  (A13) — **`w.row` sized num_scans+1 with num_scans from the FRAME; the halo reference = streak survivors of THIS frame. ✓ spec.**
+
+  (A14) — **Halo scanning: `for r in 0..num_scans` then for i in row[r]..row[r+1] — points judged in (scan,tof) order; mark by hpos. ✓ simultaneous semantics: all decisions use the survivor set, not progressively pruned. ✓ (mark applied via compact after all decisions).**
+
+  (A15) — **`v_lo = r >= sw ? r - sw : 0` — sw=2 size_t; r size_t. ✓**
+
+  (A16) — **`t_hi` saturation `ti <= u32max - mw ? ti + mw : u32max` ✓**
+
+  (A17) — **lower_bound over `ht + row[vs]` — htof sorted per scan? htof filled "stable by scan over TOF order" — counting sort by scan over a TOF-sorted array → within each scan, TOF ascending. ✓ stable.**
+
+  (A18) — **Streak `sum` includes only alive points (post-previous-pass). Pass 2 input = pass 1 survivors. ✓ `iterations` passes. Early stop exact. ✓**
+
+  (A19) — **What if `num_scans == 0` and n > 0 → throws (scan >= 0 always true since unsigned ≥ 0... wait scan[i] >= num_scans with num_scans=0 → any scan[i] >= 0 → true → throws for the first point). ✓ consistent with "dnoise panics".**
+
+  (A20) — **Gate AND: `gate == nullptr || gate->contains(...)`. When buildMs1WindowGate returns nullopt (no gate), caller passes nullptr presumably. ✓ spec: no gate = keep.**
+
+  (A21) — **FrameCounts kept counts gated points. ✓**
+
+  (A22) — **Potential divergence: `tof_of(mz)` for mz_lo - pad < 0 → sqrt negative = NaN → fmin/fmax NaN handling — fmin(NaN, t1) returns t1; if both NaN → NaN → floor(NaN)=NaN → fmax(NaN, 0.0)=0.0 → asU32(0)=0. Rust f64::min/max same semantics (ignore NaN). floor/ceil of NaN = NaN, f64::max(NaN, 0.0) = 0.0 in Rust? Rust f64::max returns the non-NaN operand. asU32 of 0.0 → 0. C++ fmax(NaN, 0)=0. Same. ✓ But tof_hi for window entirely below range: t0,t1 both NaN → fmax(t1,t0)=NaN → ceil NaN → fmax→0 → asU32(0)=0; tof_lo=0 → box [0,0] NOT skipped (tof_hi >= tof_lo)! Points with tof 0 in scan range would pass via this degenerate box. Does Rust produce the same? Same NaN semantics → same box. Bit-identical presumably. OK.**
+
+  (A23) — **`isolation_width / 2.0` — could be negative width? Garbage in → garbage same-as-Rust out. ✓**
+
+  (A24) — **RunMeta strings "exactly as stored" — leading/trailing spaces would fail parseF64; Rust parse also fails on whitespace. ✓**
+
+  (A25) — **Rust u32 parse accepts "+123"; also accepts leading zeros "007". parseU32: '+' then digits; from_chars accepts leading zeros. ✓ But Rust does NOT accept empty or "_". ✓**
+
+  (A26) — **Hmm, parseF64 exponent: "1e" → digits()==0 after e → false ✓. "1e+" → false ✓. "1.5e3" ✓. What about "0x1p3"? from_chars with chars_format::general does NOT parse hex unless format specified — default general → "0x..." would parse "0" and leave ptr at 'x' → r.ptr != end → false. But grammar pre-check rejects 'x' anyway. ✓**
+
+  (A27) — **from_chars rounds correctly (round-to-nearest) per standard — matches Rust's correctly-rounded parse. In practice libstdc++ uses fast_float or strtod-based; correctly rounded. ✓**
+
+  (A28) — **istringstream path: classic locale; grammar pre-checked; strtod_l correctly rounded claim — glibc strtod is correctly rounded; musl too; macOS strtod correctly rounded. ✓ but the path is likely dead (see A-finding).**
+
+  (A29) — **A subtle one: the `#pragma GCC optimize` region covers buildMs1WindowGate only; Ms1WindowGate::fromBoxes and detail::asU32 etc. defined BEFORE the pragma? Order in file: Ms1WindowGate, detail (asU32, parseU32, parseF64), then pragma push, buildMs1WindowGate, pop, FrameCounts, Scratch, detail compact/streakPass, denoiseMs1Frame. So only the builder is covered. The halo/streak have no FP (except halo ratio — a pure compare, no contraction possible). ✓ The t0/t1 (tof) computation in builder covered. ✓**
+
+  But wait — **is there contraction hazard in `(std::sqrt(mz_lo - pad) - tof_intercept) / tof_slope`? No mul-add.** And `mz_min -= 5.0`. And in fromBoxes none. ✓ Also `tof_slope = (sqrt(mz_max) - tof_intercept)/tof_max_index` — division, no FMA. So the ONLY contraction-sensitive spot is im0/im1 (mul + add). Volatile covers. Good analysis to report: guards are adequate, but GCC pragma reliability is the risk (also note: GCC `optimize` pragma is documented not for production; if it silently fails, volatile still saves you; the CMake flag is the real defense on GNU — but the header claims to work "whatever the including translation unit's flags" — for in-tree OpenMS builds without the CMake flag, on GCC x86-64-v3 with -ffp-contract=fast (GCC default IS fast), the volatile is the ONLY guard. Is volatile sufficient on GCC? A volatile store/load forces the product to memory — cannot fuse. Yes sufficient.)
+
+  Hmm — one more: **`-ffp-contract=off` for AppleClang in CMake: fine. But what about MSVC?** Generator expression only adds for GNU/Clang/AppleClang; MSVC defaults /fp:precise which allows contraction? MSVC /fp:precise does NOT contract by default? Actually MSVC contracts under /fp:fast or with #pragma float_control? MSVC: /fp:precise (default) — the compiler may still contract? MSVC documentation: contraction is enabled by default at /fp:precise?? I believe MSVC does FMA contraction by default with /arch:AVX2? There's `#pragma float_control(precise, on)`. The volatile guards it anyway. And the clang pragma won't compile on MSVC (#if defined(__clang__) false for MSVC... clang-cl defines __clang__; `#pragma clang fp contract(off)` supported in clang-cl? Possibly not — clang-cl might warn/ignore. Volatile saves. Minor note.
+
+  (A30) — **Contraction of `p.halo_peak_fraction * (double)best` with the compare — no add. ✓**
+
+  (A31) — **One thing in the prompt spec: "sum intensities per scan over alive points with TOF in [c-3, c+3] (inclusive, saturating at 0)" — implementation includes the points at TOF c themselves — presumably dnoise does (window includes own column). ✓ spec says so.**
+
+  (A32) — **"a new run starts when the scan step exceeds max_internal_gap+1 (3)"** — implementation breaks when step > max_internal_gap + 1, i.e. step ≥ 4 → gap of 3 empty scans breaks; max_internal_gap=2 → up to 2 empty bridged. Step 3 = 2 empties bridged ✓.
+
+  (A33) — **Wait, actually check spec wording: "a new run starts when the scan step exceeds max_internal_gap+1 (3)". Hmm — if max_internal_gap = 2, step threshold: exceeds 3, i.e. step > 3 breaks. Implementation: `> p.max_internal_gap + 1` → > 3 ✓.**
+
+  Now — **the `n_occupied` shortcut vs `min_feature_intensity`**: skip when n_occupied < min_feature_length — but could a run with fewer occupied still... no, run needs ≥ min_feature_length occupied. ✓ exact.
+
+  **What about `min_feature_length = 0`?** Then `count < 0`? count is size_t; `count < p.min_feature_length` = count < 0 false → every close() accepts (even empty runs — but close only called when open with count ≥ 1). Also the early skip `n_occupied >= 0` always true but `n_occupied != 0` required — with min_feature_length 0 and 0 occupied scans, no spans anyway. Matches Rust? Rust's loop over occupied scans would also find no runs. ✓
+
+  **iterations passes over PREVIOUS survivors — pass 2 uses compacted arrays ✓.**
+
+  Now — potential **streak two-pointer bug across PASSES**: lo/hi reset at pass start ✓ (local).
+
+  **`w.touched` cleared per block but if the early-skip triggers, touched not sorted — fine.**
+
+  **`w.spans` cleared per accepting block ✓.**
+
+  OK — now think about **ordering: "stable LSD radix sort by TOF... set semantics make the tie order irrelevant"** — the streak sums are commutative (u64 addition no FP), halo max commutative, so tie order truly irrelevant. ✓ Except... `sum[sc] += v[j]` u64 — commutative exact. ✓
+
+  **Duplicate (scan, tof) with different id — kept independently. The keep mask by input position. ✓**
+
+  Now **the e2e `run()` with `env` — SPEXTRACTOR_DET=1 needed for [det] lines — prune off arm: `assert "[ms1-prune]" not in log_off` — the log line printed only when prune on ✓.**
+
+  **c19: "1 band is exact trivially; 2 and 48 are the real test"** — with bands=1, no edge sample consumed, no band partition → digest equality is trivial but still exercises witness... actually with bands=1 the prune only matters if MassTraceDetection reads sub-threshold peaks — it doesn't. So bands=1 equality is vacuous-ish but harmless; bands 2/48 do the work, plus no-witness control. Also the precondition check (frames vs map size) runs at bands=1 too. Fine.
+
+  **Vacuity check on `wit > 0`**: asserted. `picked > kept` asserted. `at_noise == 3` asserted. digest equality asserted per band count. no-witness divergence asserted for bands 2, 48. Solid. One hole: **the fixture never verifies that the prune with witnesses ON gives the same BAND SPECTRA CONTENT — only counts via [det] band spectra line (String counts per band)** — `g["bands"]` regex `\[det\] MS1 band spectra \S*` captures counts per band, not content. If a band spectrum existed in both but with different PEAKS (e.g., witnesses swapped), traces could still match... but the digest of output spectra equality covers the final output. MassTraceDetection ignores sub-threshold peaks, so band content beyond survivors can't affect traces. Band COUNTS match + edges match + traces digest match + final digest match. Sufficient.
+
+  **Another c19 hole**: the [ms1-edges] fnv digest compares on vs off — good, edges identical. ✓
+
+  Now **finding about `[ms1-edges]` and `detDigest_` when prune off**: gated `ms1_prune && detOn_()` — non-null even off ✓ prints. So c19's edges comparison valid.
+
+  **Hmm — one more potential REAL bug in B: the stride-97 sample in the OLD code path sampled `map` AFTER `map` was potentially modified?** No — sampling first thing in bands>1 block. Pre-change identical. ✓
+
+  **And: sample swap means detectTraces_ no longer samples the map — but for the MS2 calls (ms1_prune null) unchanged. ✓**
+
+  **The `kBandHaloPpmMul` replaced literal 20.0 in band lo/hi — identical value. ✓**
+
+  Now **memory Q4 deeper**: `Ms1Prune::reset()` swaps sample to empty ✓. The sample vector (~137M peaks/97*8B ≈ 11 MB) trivial. select() capacity: OpenMS MSSpectrum::select — I genuinely recall it as: creates new spectrum? Let me think: OpenMS `MSSpectrum::select(const std::vector<Size>& indices)` — it moves selected peaks... I believe implementation: `MSSpectrum tmp; ... *this = std::move(tmp)`? Not sure. The comment claims right-sized; measured RSS supports. I'll note as verify item, low severity.
+
+  Also **`ledAdd_(LC_MS1MAP, mb)` computed AFTER prune → ledger charge smaller — consistent.**
+
+  Now assemble the numbered findings, most severe first:
+
+  1. **Feature-test macro bug for FP from_chars (A)**: `#if defined(__cpp_lib_to_chars)` doesn't detect floating-point from_chars; libc++ defines it for the integer facility. The comment ("libc++ does not define __cpp_lib_to_chars") is wrong; on Apple platforms FP from_chars is availability-gated, so the from_chars path can fail to compile (or weak-link) exactly where the fallback was intended, and the fallback is dead code there. Fix: `#if defined(__cpp_lib_to_chars) && !defined(_LIBCPP_VERSION)` or a CMake try_compile probe. Severity: build portability, high-ish. Wait — should double check: does libc++ define __cpp_lib_to_chars? Yes — libc++ has integer charconv and defines the macro 201611L. I'm confident. And floating-point from_chars in libc++: implemented LLVM 15? Actually libc++ floating-point from_chars (general format) landed partially in LLVM 15 (only some formats?) — there was long-standing incompleteness; Apple gated availability. The code comment says macOS 26 availability-gated — meaning with current SDKs it exists but gated. So on macOS with older deployment target: compile error "unavailable". Real finding.
+
+  2. **Unsorted-input conditional identity (B)**: frame() sortByPosition() before sampling changes the stride-97 sample (and potentially peak order) vs the pre-change code for any spectrum that isn't already m/z-sorted (reachable: mzML input that is already IM_CENTROIDED skips pickIMCluster; mzML doesn't guarantee m/z order). Then edges shift → output differs → "OUTPUT-IDENTICAL" false. Fix: sample before sorting (reproduces old sample exactly), or document/assert sortedness (s.isSorted() check and refuse/fallback). Hmm — but sampling before sorting means the sample comes from unsorted order — matching old code. But the witness chain needs sorted; so: sample first (old semantics), then sort, then prune. That's the fix. But careful: does the old code sample pre- or post- any sort? Old: detectTraces_ sampled map as-is. Prune's sort changes the map spectra order post-prune (the map now sorted whereas before unsorted) → band dist uses lower_bound path instead of scan — same peak set, but peak ORDER in band spectra differs from old (old preserved unsorted order). Does MassTraceDetection care about in-spectrum order? It iterates spectra peaks building a work list, sorts by intensity... apex list sorted; trace extension walks scans — I believe order-independent. But byte-identical claim can't be guaranteed. Also the pruned survivors in old code would be sub-threshold peaks present in band spectra — MassTraceDetection filters them. So the main divergence is the edge sample. Report it.
+
+  3. **GCC pragma reliability (A)**: `#pragma GCC optimize("fp-contract=off")` — GCC docs say optimize attribute/pragma is for debugging, and per-function -f options have had bugs; if it silently no-ops, the volatile still guards the single contraction-sensitive expression — so suggest testing GCC -O3 -ffp-contract=fast -march=x86-64-v3 WITHOUT the CMake flag to prove volatile sufficiency (the unit test "fails with the guards removed" was presumably clang/arm64). Also GCC's default is -ffp-contract=fast, and in-tree OpenMS builds don't get the CMake flag — volatile is the only guard there; that path should be pinned in CI. Also MSVC/clang-cl unaddressed (pragma unknown, no CMake flag) — volatile-only.
+
+  4. **Gate degenerate-box behavior for out-of-range/corrupt metadata** — matches Rust NaN semantics presumably; can't verify without dnoise source; recommend a fuzz case with isolation_mz < pad (NaN sqrt) against the binary. Low.
+
+  5. **fromBoxes scan_lo clamp adds interval to last scan when scan_lo > num_scans-1** — a box entirely beyond the run's scans folds onto scan num_scans-1 instead of vanishing. If dnoise's DiaMs1Gate does the same, fine; the header doesn't pin this. Concrete scenario: DiaFrameMsMsWindows row with ScanNumBegin > max NumScans (method mismatch). Fix: skip boxes with scan_lo >= num_scans (if dnoise does), else pin in test. Medium-low.
+
+  6. **select() capacity release unverified (B Q4)** — if MSSpectrum::select doesn't shrink, capacity retention; measured peak says otherwise; verify or it's fine. Low.
+
+  7. **Contraction in prune's `reach` (`x <= m + hop*m`)**: m + hop*m is FMA-contractible; spextractor.cpp gets -ffp-contract=off via CMake for GNU/Clang — but the in-tree OpenMS build path may not, and MSVC not covered. Margin factor 2 makes a 1-ulp flip harmless for the band-membership proof (hi-lo ≥ 2h·lo/(1-h) vs hop·lo) — 1 ulp of hop·m can't cross a factor-2 gap. State: found, benign, but note reliance on the margin; no fix needed. Actually also `hi = edge + edge*ppm*1e-6*mul` — contractible? edge*(ppm*1e-6*mul) + edge — could FMA flip the band edge by 1 ulp vs the no-prune build... but that computation is IDENTICAL in prune on/off (same code, same flags) — identity between configurations preserved regardless. ✓ Not an identity issue; only a partition-exactness issue vs MassTraceDetection's tolerance — pre-existing.
+
+  8. **Halo exclusion check**: exclusion is by TOF value `*q != ti` — excludes ALL points at that TOF across window scans ✓ matches spec. Nothing found.
+
+  9. **Streak shortcuts**: two-pointer monotonicity ✓; early-stop fixed point ✓; n_occupied skip ✓. Nothing found.
+
+  10. **Concurrency**: batch() disjoint sample offsets, per-index counts, named critical, rethrow outside region ✓. dnoise Scratch per-thread documented ✓. Nothing found. One nit: exceptions in frame() leave cs[i] zeroed and sample partially written, but the run aborts via rethrow — fine.
+
+  11. **E2e fixture**: genuinely load-bearing (wit>0, at_noise==3, no-witness divergence required for bands 2/48). Noted gap: bands==1 leg asserts nothing about witnesses (can't), fine; [det] band line compares counts only — acceptable given final digest. One real concern: `assert "[ms1-prune]" not in log_off` — the string "[ms1-prune]" also appears in... the option description? printUsage only on -help. And in the throw message "[ms1-prune] the pre-prune m/z sample covers..." — only on failure. OK. Also `nx100` in cycle 14 intensity — via 32-bit float array ✓. Vacuity: low risk.
+
+  12. **The `reach` lambda reads `s[k].getMZ()` for the kept peak and compares to current x — after sort ✓.**
+
+  13. **`total.kept - t.survivors` labeled witnesses includes forced far-side anchors — cosmetic only, skip (they said no style remarks; this is a logging semantics nit — mention in one line?).** The e2e asserts kept == surv + wit, consistent by construction. Skip.
+
+  14. **The `sample_n` accounting when an exception occurs mid-batch** — abort, fine.
+
+  15. **What about `perf:ms1_prune` + `SPEXTRACTOR_MS1_PRUNE_NO_WITNESS` together in c19 asserts equality of keys... they only run nowit for divergence check ✓.**
+
+  16. **Zero-intensity points in halo: a zero point is kept iff 0 >= 0.15*best — best>0 → dropped; best==0 → kept. Matches Rust double compare ✓.**
+
+  17. **Scratch reuse across frames with different num_scans: stamp/sum/row re-assigned per call ✓. mark.assign ✓.**
+
+  18. One more potential A bug: **`streakPass` uses `w.sum[sc] += v[j]` where sum values from a PREVIOUS window could leak if stamp collides** — window counter monotonic, no reuse. ✓ But `w.stamp.assign(num_scans, 0)` each pass and `window` starts at 0 → first ++window = 1 ✓.
+
+  19. **`Ms1WindowGate::contains` partition_point requires intervals sorted by second — merged sorted by construction (sorted input, merging preserves). ✓**
+
+  20. **fromBoxes: `if (merge)` uses `g.iv_.back()` — back is the last interval of THIS scan? `g.iv_.size() > g.row_.back()` — row_.back() is the count at scan start ✓.**
+
+  Also check: **merge condition `iv.first <= back.second + 1`** — adjacency merge changes nothing membership-wise ✓ and dnoise does the same per comment.
+
+  21. **B: `off[i]` type size_t; sample.resize(at) — at computed serially ✓; `sample.data() + off[i]` — for sel false, off[i]=at (current) but frame not called ✓.**
+
+  22. **B: What if `take` true but spectrum has 0 peaks: (0+96)/97 = 0 → offset advances 0 ✓; frame writes nothing; keep empty; select not called (0==0) ✓; frames++ ✓; map gets empty spectrum ✓; old code: empty spectrum in map, sample nothing ✓ identical.**
+
+  23. **B subtle: `ms1_prune.batch(exp.getSpectra(), ...)` — exp contains MS2 too; take false; frames not counted ✓; dispatch moves MS2 to windows ✓.**
+
+  24. **B: the precondition check runs BEFORE the `#pragma omp parallel single` — deliberate ✓.**
+
+  25. **B: ms1_map count check `ms1_prune.frames != ms1_map.size()`** — streaming path: does flushMS1_ handle MS1 spectra interleaved... all MS1 through ms1_buf_ ✓ (per the code shown). But — the consumer's `flushMS1_()` is called in consumeSwathSpectrum_ before MS2 buffering; MS1 arrive-first assumption. Prune inside flush_ for the ms1_buf_ branch — shown in the hunk at the MS1 pick loop ("ms1_buf_"). Wait, actually the hunk shows flush_() handling both buf_ (MS2) and ms1_buf_ — and the prune call `ms1_prune->batch(ms1_buf_, ...)` — placed after the ms1 hist, before ledger ✓.
+
+  26. **Anything about `-perf:ms1_trace_bands 0`?** Option is int, "1 = off"; ms1_bands < 1 → 1 ✓.
+
+  27. **The tile-trim env (SPEXTRACTOR_TILE_TRIM)** — glibc only, between tiles, output-identical by construction ✓. But it's gated `tile_trim && trim_on && tk+1 < tiles.size()` — requires perf:malloc_trim true too; the log says probe. Fine. Note: malloc_trim in the middle of an OpenMP-off region — serial ✓.
+
+  Also potential issue: **the `[ms1-prune]` summary line uses `t.kept * 20 / ...` with long long ✓.**
+
+  28. **A: `denoiseMs1Frame` keep vector assignment `keep.assign(n,0)` then only survivors set — ✓ pure function.**
+
+  29. **A: "evaluating the gate only on halo survivors" — gate ANDed last on compacted array; `w.id[j]` maps back to input position ✓ ids preserved through compactions ✓.**
+
+  30. **A: radix sort `w.idx2[start[...]++]` — standard stable counting sort ✓. `start` size 2049 with digit+1 prefix — `start[d+1] += start[d]` converts counts to positions; write index `start[digit]++` ✓.**
+
+  31. **A: `max_tof` computed pre-sort for digit count ✓. n up to 2^32-1: idx u32 ✓.**
+
+  32. **A possible real one: `for (unsigned shift = 0; shift < 32 && (shift == 0 || (max_tof >> shift) != 0); shift += 11)` — 3 digits cover 33 bits ✓.**
+
+  33. **B: could `hop` be 0 (mass_error_ppm = 0)? Then reach = x <= m — no peaks within reach unless equal m/z; every peak kept as far-side anchor → kept == picked, prune drops nothing... wait survivors kept, sub-threshold: each becomes cand then pushed as witness or far-side → all kept. Band halo h=0 → band width = e_{b+1}-e_b ≥ 0... hi-lo could be 0 if equal edges! Duplicate sample values → edge[b]==edge[b+1] → empty band range [lo,hi) with lo>hi possible? lo = e(1-0)=e_b, hi = e_{b+1}; if e_b == e_{b+1}, band empty — MZBegin(lo)==MZBegin(hi) → no spectrum. Old code same ✓ identity holds (prune keeps everything, trivially identical). ✓**
+
+  34. **B: negative mass_error_ppm? Option presumably bounded. Skip.**
+
+  35. **B: `kBatch_()` flushing — prune per flush batch; sample accumulates across batches ✓ offsets from sample.size() ✓.**
+
+  36. **B: What if MS1 spectra arrive AFTER MS2 (interleaved)?** Comment says MS1 arrives first; if not, flushMS1_ handles. Prune unaffected.
+
+  37. **A — one more careful look at the halo reference for scans near boundaries: v window [r-2, r+2] clamped to [0, num_scans-1] ✓ spec "(clamped)".**
+
+  38. **A — `sw >= num_scans - 1 - r` when sw=2, num_scans=3, r=2: num_scans-1-r=0, sw>=0 → v_hi = 2 = num_scans-1 ✓. r=0: 2 >= 2 → v_hi = 2 ✓ (clamp). ✓**
+
+  39. **A: parseF64 "body" for s="-0.5": start=1, body = "-" + "0.5" ✓. For s="+": mantissa 0 → false ✓.**
+
+  40. **A: `parseU32` doesn't reject "+0"? Rust accepts "+0" ✓.**
+
+  Now — is there anything about **dnoise semantics not matching spec in the port** I can catch internally? The spec says min_window_intensity: "occupied iff its sum > 0 (and >= min_window_intensity, default 0)". Implementation: `sum > 0 && sum >= min_window_intensity` ✓.
+
+  Spec: "a run with >= 5 OCCUPIED scans (not span) whose span sum >= min_feature_intensity (0)" — implementation computes span sum only when min_feature_intensity > 0 — for 0, always passes ✓ equivalent.
+
+  Hmm wait — actually one potential subtle bug in the run logic: when `open && step > gap+1`, it calls `close()` then `open=false`, then `if (!open) { open=true; first=q; count=0; }` then `last=q; ++count`. ✓. But `close()` uses `first`/`last`/`count` — last still the previous run's last at close time ✓ (last updated after).
+
+  Another: the early-skip `n_occupied >= p.min_feature_length` — n_occupied counts occupied scans in the WHOLE window; a run within it has fewer or equal ✓.
+
+  BUT — wait, there's a REAL subtle issue in the run detection: runs are computed over `touched` scans — touched = scans having ≥1 point in the TOF window. A scan in the window with sum 0 is "touched but not occupied" and acts as a GAP. Spec: "occupied scans form runs, a new run starts when the scan step exceeds..." — step measured between occupied scans, unoccupied scans (incl. zero-sum ones) are just holes ✓ same.
+
+  41. **Duplicate (scan,TOF) points and the halo exclusion**: point excluded column includes its duplicates ✓.
+
+  42. **What about points with tof index near u32max and halo t_hi = u32max — lower_bound range ✓.**
+
+  43. **A: `w.cursor.assign(w.row.begin(), w.row.end()-1)` ✓ then counting placement stable ✓.**
+
+  44. **A: `hpos` u32 cast of j — m < 2^32 ✓.**
+
+  45. **A: `num_scans` param is size_t; gate built with u32 num_scans; contains takes u32 scan — scan values < num_scans ≤ 2^32 ✓ but if frame num_scans > 2^32? size_t num_scans could exceed u32 range — stamp/sum sized num_scans; gate's contains(u32) truncates scan! denoiseMs1Frame's scan indices are u32 anyway (input type), so scan < 2^32 ✓. Gate numScans u32 ✓. Fine.**
+
+  Now also the prompt asks specifically: "resident/mzML path, the stream-fallback reset, -perf:ms1_trace_bands 1, thread/tile/batch invariance" — covered: fallback reset ✓ with deliberate refuse; bands 1 ✓; thread invariance ✓ (deterministic per-spectrum work, order fixed serially); tile invariance: MS1 map is global; tiles only affect MS2 windows — prune at load, tile-independent ✓. Batch invariance: flush batch boundaries don't affect per-spectrum prune or the sample (offsets independent of batching? offsets depend on sample.size() at batch start = sum of previous batches — deterministic regardless of batch size? kBatch fixed... if kBatch varies (env?), the sample contents identical multiset; order may differ with batching? sample order = arrival order of spectra in flush order = same as map order regardless of batch boundaries ✓ deterministic).
+
+  **One more B candidate — the e2e "245 [det]/[ms1-edges] lines identical" on D ✓ real data.**
+
+  **Now Q: does anything else read the MS1 map besides detectTraces_ and the count check?** E.g., ms1_store.setFrames uses ms1_map RTs (spectra not removed ✓). diag:dump_ms1_tsv reads traces. Charge inference reads MS1 traces. Precursor seeding: "no MS1 ion-mobility frames" check ✓ unaffected. Anything reading sub-threshold MS1 peaks downstream — e.g., precursor m/z refinement from MS1 map directly?? The header comment says MassTraceDetection is the only reader. If some other stage (e.g., mono-isotope refinement, mzEstimator) reads ms1_map after detectTraces_ — map is CLEARED by detectTraces_ ("taken by non-const ref and CLEARED") — so no. ✓ But wait — detectTraces_ clears the map; but the [ms1-prune] precondition check happens before ✓.
+
+  Hmm, but what about **when bands == 1, the map is NOT distributed/cleared the same way?** detectTraces_ with bands==1: does it clear the map? "map is taken by non-const ref and CLEARED as soon as MassTraceDetection has consumed it" — presumably both paths. Not prune-related.
+
+  **One more genuinely suspicious thing in B: `sample.swap(ms1_prune->sample)` then `sort(sample)` — but the PRUNE's sample was built by appending per-spectrum samples in flush order; the OLD code built sample in map order. Same order? map order = addSpectrum order = flush order ✓. And sorted anyway. ✓**
+
+  **And the [ms1-edges] digest: `String(sample.size())` printed AFTER sort; eb from edge values bit-copied ✓ deterministic.**
+
+  OK also **NOTICE/licensing**: MIT attribution present ✓; SPDX headers ✓. Fine.
+
+  **CMake: SPX_NO_FP_CONTRACT genexp with GNU,Clang,AppleClang — comma list in CXX_COMPILER_ID genexp ✓ valid. Applied to spextractor target and both tests ✓. But NOT to the in-tree OpenMS build (documented) — volatile covers.**
+
+  Now, is there any REAL correctness bug I can pin with higher confidence? Let me re-examine the halo exclusion once more against spec: "best = max intensity over survivors with scan in [s-2, s+2] (clamped) and TOF in [t-80, t+80] (saturating), EXCLUDING every point whose TOF == t". Implementation ✓.
+
+  Streak once more: "for each distinct TOF index c, sum intensities per scan over alive points with TOF in [c-3, c+3]" — implementation iterates blocks of distinct c ✓. "a scan is occupied iff its sum > 0" ✓. "occupied scans form runs, a new run starts when scan step exceeds max_internal_gap+1 (3)" ✓. "a run with >= 5 occupied scans whose span sum >= min_feature_intensity accepts [first,last]" ✓. "points with TOF == c whose scan lies in an accepted span survive" ✓ — note: points at OTHER TOF indices in the window are NOT kept by c's spans — only TOF == c block ✓ code marks only [k, kb).
+
+  Hmm wait — is that right per dnoise? The spec says "points with TOF == c whose scan lies in an accepted span survive" ✓ implemented.
+
+  One more: **passes each over previous survivors — pass 2's windows consider only pass-1 survivors** ✓ compacted.
+
+  Potential issue: **`min_feature_length` shortcut `n_occupied != 0`** — with min_feature_length=5 and n_occupied=5 but all in runs of 2+3... skip not triggered (5>=5) → spans computed, no accepted → mark none ✓ correct just slower.
+
+  Now, the one that nags me: **`while (t[lo] < lo_val) ++lo;` — lo is shared across blocks but if a later block's lo_val were SMALLER... c strictly increases across blocks, lo_val = max(c-hw, 0) nondecreasing ✓. hi similar ✓. But `lo` could pass points belonging to the current block? lo_val ≤ c so t[lo] stops at first ≥ lo_val; block starts at c ✓.**
+
+  And `hi` starts 0 at pass begin; first block advances to cover [0, hi_val] ✓.
+
+  OK. Another check on **the prune witness minimality**: "minimal chain" — cand is the FARTHEST sub-threshold within reach; keeping the farthest maximizes next reach ✓ greedy optimal for chain covering. Minimality doesn't matter for identity, only gap coverage ✓.
+
+  Edge: **two consecutive survivors far apart with no sub-threshold between** — gap can't be bridged; x pushed (survivor) ✓ band containing peaks between? There are none between. But a band range between m and x contains NO peaks — fine, nothing to preserve. But wait: what if a band range contains x but not m, and x is a survivor — kept anyway ✓. All survivors kept always ✓.
+
+  **Sub-threshold peak exactly at band edge lo: kept-ness irrelevant — membership needs ANY kept peak in range; chain ensures ranges containing peaks contain kept peaks — proven above ✓.**
+
+  One hole in the proof I should double check: the argument requires that for consecutive kept m < x, x - m ≤ h·m OR there is no unpruned peak strictly between... Actually the chain guarantees: consecutive kept peaks are either within hop-reach OR have no peaks between them at all (gap nothing bridges: x pushed because out of reach of cand means no peaks between cand and x; but between last-kept and cand there were peaks — all ≤ cand? cand is the farthest within reach of last; peaks between last and cand are within reach... they're NOT kept. So consecutive kept m=cand_prev... hmm, actually the guarantee is: for consecutive kept (m, x): either x within reach of m, or the peaks strictly between m and x are EMPTY (none). Let me verify: out-of-reach case: last=m, cand=c (farthest within reach of m); current x out of reach of m: push c (kept), then if x within reach of c: x kept (if survivor) — consecutive kept (c, x) within reach ✓. If x out of reach of c: push x — consecutive kept (c, x) with NO peaks between c and x (x is the next peak after c... wait, cand was the last peak before x in iteration order — peaks between m and x are ≤ c = cand. So between c and x: none ✓). So consecutive kept pairs satisfy: within reach OR adjacent in the full peak list. For the band argument: band range [lo,hi) containing unpruned peak p. If p kept ✓. Else p between consecutive kept m,x. If adjacent-in-full-list case — impossible (p between them). So within reach: x - m ≤ hop·m (via the FP compare). Then both-outside contradiction as before ✓. Solid. Margin: hi - lo ≥ 2h·e_b where lo = e_b(1-h) → hi-lo ≥ 2h·lo/(1-h)·(1±ulps). Gap ≤ h·m + 1ulp. Need h·m < hi - lo when m < lo: h·lo·(1-h)^{-1}·2 vs h·lo — margin ≈ 2x ≫ 1ulp ✓.
+
+  But — one FP nit: `reach` uses `x <= m + hop*m`. hop*m rounds; m + (hop*m) rounds — contraction would fuse to fma(hop,m,m). Either way x - m ≈ h·m ± 2 ulp. Fine.
+
+  **Now the count check subtlety**: `ms1_prune.frames != ms1_map.size()` — in the STREAMING path, is ms1_map EXACTLY the pruned spectra? consumer adds to ms1_ (same map) ✓. Nothing else adds MS1 spectra ✓ presumably.
+
+  **What if `perf:ms1_prune` on and input has MS1 spectra WITHOUT IM data in resident path** — not dispatched, not pruned, consistent ✓. Streaming: do non-IM MS1 spectra reach ms1_buf_? Streaming is .d-only, always IM ✓.
+
+  Now compile the final list. Also explicitly say "nothing found" for: halo/streak shortcut equivalence (verified), concurrency, e2e vacuity (minor notes), memory transient (nothing beyond per-spectrum), NaN/at-noise handling (correct), thread/tile/batch invariance (holds).
+
+  Severity ordering:
+
+  1. (High, build correctness) __cpp_lib_to_chars misuse — libc++/macOS. Actually wait — will it COMPILE on current macOS? FP from_chars availability-gated (macOS 26+ per comment). CI builds on macos-latest with default deployment target... if FP from_chars is availability-marked, use with lower target → hard error at compile. Their CI passes (tests.yml updated to run the new test) — maybe CI's Xcode/SKD is new enough with matching deployment target. But the comment's claim "libc++ does not define __cpp_lib_to_chars" is simply false, meaning the intended fallback never engages on the platform it was written for; on any libc++ where FP from_chars is absent or gated, this is a compile break, not a fallback. Also — subtle: even where it compiles, the two paths could round differently? Both claim correctly-rounded. OK.
+
+  Hmm, actually let me reconsider: does libc++ define __cpp_lib_to_chars? I'm quite sure yes (201611L) since LLVM ~8 with integer charconv. And FP from_chars in libc++: unimplemented for a long time; landed ~LLVM 18-19?; Apple availability macros gate it. So yes, on macOS the #if branch is taken and may not compile depending on SDK/deployment target. Confident finding.
+
+  2. (High-ish, identity) unsorted centroided input spectra → sortByPosition before sampling changes edge sample vs pre-change code. Reachable via mzML input already IM_CENTROIDED (picker skipped). Also any path where picked spectra aren't sorted. Fix: sample before sort, or verify sortedness and skip prune (fall back) when not sorted... simpler: take sample from original order first (exactly reproducing old sampling), then sort for the witness logic. But then the pruned spectrum is sorted while the old one wasn't → band spectra peak ORDER differs (old scan-fallback preserved original order; new lower_bound gives sorted order). For output-identity need MassTraceDetection order-independence — likely but unproven. Cleanest: if !s.isSorted(), don't prune that spectrum at all AND sample it — reproduces old behavior exactly. That's the fix to propose.
+
+  Wait — actually is that reachable in the streaming path? Streaming is .d, picker always runs? "if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s)" — same skip in flush_. A .d spectrum marked IM_CENTROIDED pre-pick... possible for pre-processed .d? Edge. Resident mzML is the main reachability. Keep as finding with the fix: skip prune for unsorted spectra (and note isSorted() is O(n), fine).
+
+  Hmm — but also: does the OLD code even produce deterministic output on unsorted spectra? Yes deterministic. So identity claim fails there. Real.
+
+  3. (Medium) GCC optimize pragma reliability + uncovered toolchains (MSVC, clang-cl, in-tree build without CMake flag): the volatile covers the one contraction site — prove it with a CI job (GCC, -O3 -march=x86-64-v3, WITHOUT -ffp-contract=off) since today the pinned-boxes test presumably runs with the CMake flag AND pragma AND volatile, never isolating the volatile. Also GCC documents the pragma as not-for-production; risk it mis-applies (e.g. drops -O or miscompiles) — belt: guard could be removed entirely in favor of volatile if proven. Medium.
+
+  4. (Medium-low) fromBoxes scan_lo clamp folds out-of-range boxes onto the last scan (box with scan_lo > num_scans-1 adds its TOF interval to scan num_scans-1 rather than vanishing). Verify dnoise v0.1.0's DiaMs1Gate::from_boxes does the identical clamp; if not, bit-identity breaks for methods whose DiaFrameMsMsWindows exceed max NumScans. Fix: skip boxes with scan_lo >= num_scans if reference skips; pin with a test either way.
+
+  5. (Low) select() capacity release assumption — if MSSpectrum::select doesn't shrink-to-fit, the memory win is smaller than claimed and the ledger line (20 B/peak × kept) undercounts resident bytes. Measured peak 31.82→26.49 GB suggests real release; verify select's implementation or measure per-spectrum capacity. Also the ledger's 20 B/peak model now systematically understates the MS1 map if capacity retained. Low.
+
+  6. (Low) prune `reach` FMA contractibility — benign given factor-2 margin; note only because the CMake flag doesn't cover all build paths; no fix needed. Actually also `m + hop*m` — 1 ulp flip either way; margin covers ~10^13 ulps. Nothing.
+
+  7. (Low) parseF64 divergence on inf/nan/out-of-range metadata literals: Rust accepts "inf"/"1e999" → gate calibrated on inf; port refuses the run. Deliberate and documented, but it IS a behavioral divergence from dnoise on corrupt metadata — bit-identity contract phrased as "default MS1 denoising"; fine to keep, but note the contract is "identical on inputs dnoise accepts to finite values". Also Rust accepts "infinity", "NaN" etc. Low.
+
+  8. Fixture notes: c19 is genuinely load-bearing (counters + no-witness control); gaps: (a) the no-witness control only asserts traces OR band-counts differ — a fixture where witnesses matter only through band-spectrum EXISTENCE (counts) passes the `bands` arm, fine; (b) the [det] band spectra line compares per-band COUNTS, not content — acceptable because MassTraceDetection only reads > noise peaks and final digest is compared; (c) at bands==1 the witness machinery is not falsified (can't be — no partition) — fine. Also: the fixture never runs the STREAMING path (synthetic mzML → resident) — the consumer-side prune (flush_ batch, the streaming count check) is e2e-covered only by dataset D digests, not by a test in the repo. Worth one line: the streaming branch of ms1_prune (consumer.ms1_prune) has no synthetic e2e coverage; a .d fixture or an mzPeak-based stream test would cover it. Hmm — streaming requires Bruker .d; the harness has synth_tdf/mzPeak fixtures (c18 uses mzPeak with SPEXTRACTOR_MZPEAK_TDF). mzPeak can stream? "the streaming source needs the Bruker loader: a .d only, never an mzML or an mzPeak" — so streaming needs real .d — can't fixture synthetically easily. Note it.
+
+  9. Also: **`assert "[ms1-prune]" not in log_off`** — but with prune off, `ms1_prune.on==false`, no batch, no log ✓. But the throw message contains "[ms1-prune]" — only on failure which would fail the arm anyway. OK.
+
+  10. One more potential real issue in B — **`ms1_prune.batch(exp.getSpectra(), ...)` runs BEFORE the dispatch, but AFTER the pick loop that skips non-IM spectra. What about MS1 spectra that fail picking with exception? pick_err rethrown before batch ✓.**
+
+  11. **`frame()` writes to `samp` BEFORE pruning — but what if `s.sortByPosition()` THROWS mid-batch (bad_alloc)? partial sample, rethrow, abort ✓.**
+
+  12. Streaming flush_ prune placement: "after [ms1-hist] (which counts what was PICKED), before the charge below" ✓ histogram unchanged ✓.
+
+  13. **`ledAdd_(LC_MS1MAP, mb)` after prune — ledger consistent; but `[ms1-prune]` log line in resident path uses t.kept*20 — fine.**
+
+  14. Now — the prompt asked: "does select() release capacity; any path that transiently doubles memory at the flush" — batch() itself: keep vector per spectrum (transient), sample growth (small), no map-level doubling ✓. select transient per spectrum ~2x that spectrum — bounded by largest MS1 spectrum (~MBs) ✓ negligible.
+
+  15. **Shared counters (Q5)**: ms1Hist atomics pre-existing; prune Counts per-index ✓. detOn_() reads ✓. Nothing found.
+
+  16. Anything about **`static const std::map rows` env probe near the diff top — pre-existing ✓ not part of change.**
+
+  17. **NOTICE attributions fine.**
+
+  One more careful look at a potential **off-by-one in the stride sample count**: old code `for (i=0; i<n; i+=97)` → ceil(n/97) samples. Prune offset `(n+96)/97` = ceil ✓. frame writes same loop ✓. sample_n from c.picked = n ✓ consistent.
+
+  **n=0**: old code loop writes 0; (0+96)/97 = 96/97 = 0 ✓.
+
+  **A non-obvious one: `Size` type of MSSpectrum::size() vs size_t in batch — consistent.**
+
+  **One more on A: `keep` vector and `FrameCounts` — `c.after_streak = m` set even when iterations==0 → m=n ✓.**
+
+  **Gate built per RUN; denoiseMs1Frame called per frame with frame's num_scans — contains() bounds against gate's scans ✓.**
+
+  What about **halo when num_scans (frame) < ... v window clamp uses frame num_scans ✓ spec says [s-2,s+2] clamped — to frame's scans presumably ✓.**
+
+  I think I should also mention: **the `#pragma clang fp contract(off)` inside the function only covers statements AFTER it lexically within the block — the lambda `number` is defined after, fine; but the t0/t1/volatile computations are after ✓. However the pragma does NOT extend into helper functions called (std::sqrt etc. — no contraction there) ✓.**
+
+  And: **clang pragma requires Clang 14+; older clang errors on unknown pragma? `#pragma clang fp contract` — older clang warns -Wunknown-pragmas (not error) ✓.**
+
+  Also **GCC: `#pragma GCC optimize("fp-contract=off")` — actually I recall GCC accepts -ffp-contract as a per-function option? There's GCC PR saying fp-contract is not a "optimization" option usable with the optimize attribute in some versions ("fp-contract=off" may be rejected: "bad option -ffp-contract=off to attribute optimize"?). Hmm — actually I believe GCC's optimize attribute accepts it since it's a -f option; but historically some -f options are disallowed ("not allowed in optimize attribute"). If rejected it's a warning + ignored → silently no guard (volatile saves). Worth verifying on the oldest supported GCC. Fold into finding 3.
+
+  Also missing: **`tests.yml` runs ctest which now includes dnoise_ms1 ✓; CMake SPEXTRACTOR_TESTS_ONLY path adds the test ✓; the full build (non-tests-only) does NOT add the dnoise test? The option block returns early; in the full build is test_dnoise_ms1 built? The diff only shows the TESTS_ONLY branch adding it. In the full build (with OpenMS), the dnoise test may not be wired — check: diff shows add_executable only under SPEXTRACTOR_TESTS_ONLY. So the pinned-boxes unit test runs only in portability CI, not in the real (cluster/OpenMS) build — acceptable? It means the guard-removal pin isn't exercised in the primary build. Minor process note.**
+
+  Also **the header is included by spextractor.cpp? The diff doesn't show an #include of DnoiseMs1.h in spextractor.cpp — the prune change doesn't use dnoise. Maybe the dnoise integration (trace:detector integer?) includes it elsewhere. Not reviewable from the diff; note nothing.**
+
+  Let me also double-check **finding 1 more carefully** — the code: `#if defined(__cpp_lib_to_chars)` with `#include <version>`. On libstdc++ (GCC ≥ 11) FP from_chars exists → OK. On libc++: macro defined (integer), FP from_chars availability: libc++ implemented FP from_chars in LLVM 15?? Hmm. Let me recall libc++ status: "Floating-point from_chars" — libc++: to_chars FP implemented (LLVM 14-ish?), from_chars FP LONG unimplemented (charconv FP from_chars was the missing piece; status pages listed P0067 partially). I recall from_chars floating-point landed in libc++ 17/18 with availability annotations on Apple (macOS 14.4? 26?). The code comment says availability-gated macOS 26 — plausible (Apple gates new symbols). So on Apple clang with deployment target < macOS 26: `std::from_chars(const char*, const char*, double&)` is marked unavailable → compile error. UNLESS Apple clang's header doesn't mark from_chars FP with availability (they did for to_chars). Either way, the #else fallback being unreachable on libc++ contradicts the header's own comment — strong finding regardless of exact availability version. Confidence high that the guard is wrong-headed; the concrete failure depends on toolchain versions. Fix: use `#if defined(__cpp_lib_to_chars) && !defined(_LIBCPP_VERSION)` or a configure-time probe (check_cxx_source_compiles) — probe is most robust.
+
+  Also — subtle second layer: even on libstdc++, `__cpp_lib_to_chars` is 201611L defined since GCC 8 (integer), but FP from_chars only since GCC 11 → GCC 8-10: macro defined, FP overload missing → compile error. Same bug on old GCC. Strengthens finding 1. Fix the same.
+
+  Now also double-check the istringstream fallback correctness for "+.5e2" type inputs — grammar pre-checked; imbue classic; `in >> v` — num_get parses longest valid — "body" strips leading '+'. ".5e2" → 50 ✓. Trailing chars impossible (grammar). fail on range ✓. OK.
+
+  One more possible A issue: **`parseU32` rejects strings with whitespace ✓ Rust same. But Rust's parse::<u32> ALSO rejects '+' only string ✓.**
+
+  Now think whether there's an issue with **`GateBuild.error` when acquisition_software present but empty string ""** — != "Bruker otofControl" → no pad; Rust same ✓.
+
+  **Missing DigitizerNumSamples "0"**: parseU32 ok → tof_max_index=0 → tof_slope = diff/0 = inf (or 0/0=NaN if mz_min==mz_max). Rust: same IEEE (no panic on f64 div). tof conversions → (x - ic)/inf = -0 or 0... floor → 0... boxes degenerate [0,0]? Both Rust and port identical IEEE ✓. Rust `as u32` of NaN → 0; asU32 ✓ same.
+
+  **`(sqrt(mz_lo - pad) - ic)/slope` when slope inf → ±0 ✓ same.**
+
+  OK. One more B thing — **the env var SPEXTRACTOR_MS1_PRUNE_NO_WITNESS read at main_() once ✓; reset() doesn't clear it ✓ desired.**
+
+  **The `no_witness` + edges: sample still pre-prune ✓ so edges identical; only band spectra differ → that's the control ✓.**
+
+  Also, **c19's nx100 for cycle 14: intensity 100.0f's nextafter is a survivor barely; with apex gate snr*noise (3*100=300) — cycle 10 apex 500 ✓ > 300. Trace forms with prune off? The fixture claims without witnesses it's 3 of 3 scans → trace; with witnesses 3 of 9 → no trace (min_sample_rate 0.5)... wait that means with full prune ON (witnesses kept) there's NO trace at 400.25, and with prune OFF also no trace (spectra exist) → equal ✓; no-witness → trace appears → differs ✓. And with bands=1: no partition; MassTraceDetection receives ALL spectra regardless (map has all spectra; witnesses irrelevant to scan count) → no trace in all arms → equality trivial; no-witness at bands 1 would ALSO be identical → correctly excluded from the control. ✓ consistent with my earlier analysis.
+
+  Hmm — wait, one thing: at bands=2/48 with prune OFF, the all-sub-threshold spectra land in the band containing 400.2-400.38 → band spectrum exists → scan counted → 3/9 → no trace. With prune ON + witnesses: chain keeps 400.2 (100.0), 400.28?, 400.38... the comment says "the chain drops 400.24" — kept witnesses still in band range → band spectrum exists ✓ same scans → no trace ✓ equal. ✓ The math: hop at 400 ≈ 0.12; gaps 400.2→400.28 (0.08 ✓ within), 400.28→400.38 (0.10 ✓)... wait then why is 400.24 dropped? 400.2→400.24 within reach → cand=400.24; 400.28 within reach of 400.2 (last kept=400.2? no—). Let me trace: peaks 400.2 (I=100, sub since >100 false), 400.24, 400.28, 400.38 (all 50). i=400.2: last==none → kept (first peak? no — first peak of spectrum is 200/300/450...). Eh, depends on cycle. Cycle 11-13 extras: [(400.2,100.0),(400.24,50),(400.28,50),(400.38,50)] plus the base envelope peaks at 601-612. last kept = some 612 peak? reach from 612 to 400? No — 400 < 612, reach tests x <= m + hop*m with x=400.2 < m — true! reach is one-sided (x ≤ upper bound only, no lower bound!). Since sorted ascending, x > m always for i > last. OK fine — x=400.2 comes BEFORE 601 in sorted order. Sorted: 400.2, 400.24, 400.28, 400.38, 601.3, ... first peak = 400.2 → kept as first anchor. Then 400.24 within reach → cand; 400.28 within reach of 400.2? 400.28 ≤ 400.2+0.12 ✓ → cand=400.28; 400.38 ≤ 400.32? 400.2*hop = 0.120 → 400.32 — 400.38 > 400.32 → out of reach! push cand=400.28 as witness; reach from 400.28: 400.28+0.12=400.40 ≥ 400.38 ✓ → 400.38 sub → cand=400.38; next 601.3 survivor: reach from 400.28? 601 > 400.4 → push cand 400.38, reach from 400.38: no → push 601.3 (survivor, far side). So kept: 400.2, 400.28, 400.38 + envelope ✓ "the chain drops 400.24" ✓ witnesses=2 per such cycle ✓. Great — consistent.
+
+  So at_noise == 3: cycles 11,12,13 have the 400.2@100.0 ✓.
+
+  Now, are there other **exactly-100 peaks**? Cycle 14's nx100 > 100 survivor. Cycles 6,10: 150 survivors. 450/200/300 @150 survivors. Base envelope: 6e5 etc ✓.
+
+  OK. Now finalize. Also mention explicitly "nothing found" areas:
+  - Streak/halo shortcut equivalence (two-pointer, early-stop, n_occupied skip, radix/counting sort, gate-on-survivors): verified exact; nothing found.
+  - Zero-intensity & duplicate handling: matches spec; nothing found (given the spec).
+  - Overflow/saturating casts: asU32 correct; u64 sums; nothing found.
+  - Concurrency: batch() partitioning, exception capture, per-thread Scratch: nothing found.
+  - Thread/tile/batch invariance of the prune: holds.
+  - at-noise/NaN intensity semantics: match MassTraceDetection; nothing found.
+  - e2e: load-bearing, not vacuous (with caveats listed).
+  - Tile trim env probe: fine.
+
+  Also one more: **"[ms1-edges] line printed when prune off too" — intended for A/B ✓.**
+
+  And: **the precondition throw message suggests "-perf:ms1_prune false keeps every peak" ✓ actionable.**
+
+  Also possibly worth noting: **`ms1_prune.sample` is swapped-away inside detectTraces_ only when bands>1; when bands==1 and prune on, the sample (~11 MB) lives until `vector<double>().swap(ms1_prune.sample)` after the call ✓ released.**
+
+  And: **when `ms1_prune.on` but the MS1 detectTraces_ is never reached (early exit before), sample retained — trivial.**
+
+  Also — **the `frames != ms1_map.size()` check could false-positive if ms1_map legitimately contains spectra not seen by the prune: e.g., streaming path where MS1 spectra are ALSO added by another consumer route — can't see; the check converts any such case into a loud refusal (safe direction) ✓.**
+
+  Severity ordering final:
+
+  1. FP from_chars feature-test wrong (compile break on libc++/macOS & GCC 8–10; fallback dead where intended).
+  2. Unsorted MS1 input (already-centroided mzML or picked unsorted) breaks output-identity: sortByPosition before sampling changes the edge sample vs legacy path; fix = skip prune for unsorted spectra (sample anyway) or sample pre-sort + prove order-independence.
+  3. GCC/MSVC/clang-cl contraction guard gaps: GCC optimize pragma documented debugging-only/may be ignored or rejected; MSVC & in-tree builds have no flag; volatile is the only real guard — add a CI config that proves volatile alone (GCC -O3 -march with FMA, no flag) — currently untested isolation.
+  4. fromBoxes folds boxes with scan_lo > num_scans-1 onto the last scan — verify dnoise does the same; if it skips, identity breaks on method/acquisition NumScans mismatch; pin with a unit test either way.
+  5. Streaming-side prune (consumer.flush_) has no e2e coverage in the repo (synthetic input is mzML → resident); only dataset D digest pins it; the c19 fixture can't reach it.
+  6. select() capacity-release assumption & the 20 B/peak ledger model after prune — verify; memory claims otherwise measured.
+  7. parseF64 inf/nan/out-of-range refusal is a documented but real divergence from dnoise on corrupt metadata; contract should say "identical for finite metadata".
+  8. reach() contraction nit — benign (factor-2 margin), noting for completeness since not all build paths get -ffp-contract=off.
+  9. Full (non-TESTS_ONLY) build doesn't register the dnoise unit test — the guard-pinning test runs only in portability CI.
+
+  Also small: witnesses count in log includes forced anchors (labeling) — skip per "no style".
+
+  Also should I mention: **`sample.swap` in detectTraces_ when ms1_prune->on but bands>1 — after swap, ms1_prune->sample empty; the later precondition... the precondition check is BEFORE the call ✓.**
+
+  And the **`[ms1-edges]` digest line when sample empty → edges all 0 then front 0 back max ✓ same both arms.**
+
+  Format: numbered list, most severe first, each with location, scenario, fix. Explicit "nothing found" statements per area. No padding. Let me write it.
+
+To resume this session: kimi -r session_9529ee2b-c21f-4e9f-a997-3d7e6ab66e8e
+exit=0

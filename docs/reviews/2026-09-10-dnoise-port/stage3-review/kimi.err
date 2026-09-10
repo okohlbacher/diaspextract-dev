@@ -1,0 +1,1419 @@
+kimi version 0.42.0
+• The user wants an adversarial review of the fix pass G diff. Everything is inlined. They say "Do not run any shell command" and "Everything you need is inline." But they also list files to read at the end. The instruction says "You may be given a list of repository files to read at the very end; the inlined text below is the same bytes. Answer from this document; do not try to build, run or test anything." Then at the end: "Read these files before answering: ..."
+
+  Conflicting: everything is inline and no shell commands, but they ask to read files. Reading with the Read tool isn't a shell command. The inlined text is claimed to be the same bytes, but some regions of spextractor.cpp are only partially inlined (only changed regions with context). The full DnoiseMs1.h and TdfLoad.h are inlined. The prompt says read the files — I could read them to check for regions not inlined (e.g. parts of spextractor.cpp outside the shown ranges). That seems reasonable and permitted (Read is not a shell command).
+
+  Let me think about what to do: do the review from the inline text primarily, but read the listed files to fill gaps. That could be a lot of reading (spextractor.cpp is 6075 lines). I can read the files myself or delegate. Given the depth required, I'll read the key files myself for the parts not inlined, particularly:
+
+  - spextractor.cpp around the areas not shown (e.g., where requireComplete is called — line 4328 shown; the stream fallback reset at 4200 shown; the resident loop shown; what about pass 2 tile loop reading MS2 per tile — dnoise only on pass 1; check whether requireComplete runs in tile_source mode... In tile mode, pass 1 reads MS1 only, so all MS1 frames are delivered in pass 1 — good).
+
+  Key areas to attack, let me think carefully about each decision and look for defects.
+
+  Let me analyze each fix in depth from the inline text.
+
+  **Decision 1: AccumulationTime parse + corr guards**
+
+  parseF64: grammar [+-]? digits with optional '.' and exponent, then conversion via istringstream imbued with classic locale. Question: is istringstream num_get conversion bit-identical to strtod/atof C locale? parseF64 claims correctly rounded via strtod. Reasonable.
+
+  Edge: parseF64 requires magnitude in [DBL_MIN, DBL_MAX] or zero — refuses subnormals and underflow. AccumulationTime like "1e-320" would be refused; that's fail-closed, fine.
+
+  But wait — opentims' atof on text like " 99.958" (leading space) would parse 99.958, whereas parseF64 refuses. If a real tdf stored AccumulationTime as TEXT with leading space, opentims would accept it and the tool would refuse — false refusal on arguably valid data. Minor; Bruker writes REAL. REAL rendering: sqlite3_column_text on a REAL renders with %!.15g by default — e.g. 99.958 → "99.958". For REAL 100.0 → "100.0". parseF64 accepts "100.0" fine. INTEGER 100 → "100" fine.
+
+  The comment in TdfLoad.h lines 174-178 acknowledges the shared-SQLite caveat. In-tree the tool resolves libOpenMS's bundled sqlite3 — but does the tool actually use the same SQLite as opentims inside libOpenMS? opentims is a separate library (libopentims?) linked into OpenMS. The comment says the brute force showed few-ulp corr changes never recover a wrong raw. OK.
+
+  One real concern: opentims computes corr = 100.0 / atof(text) where text is what *its* sqlite renders; the tool computes 100.0 / parseF64(text) where text is what *its* sqlite renders. If the two SQLite libraries render a REAL differently (15-digit round-trip differences), corr differs by ulps, and then recovery of raw could differ... but the recovery searches raws and verifies (uint32)(r*corr+0.5) == v — with a slightly different corr, a raw could fail to match (refusal, fail-closed) or — could a wrong raw match? The comment says brute force over every raw below 2^24: refused points but never wrong raw. Actually if corr differs, (uint32)(raw*corr'+0.5) might equal v for the true raw still (since intervals are wide at corr≈1) — mostly fine.
+
+  Hmm, but the bigger identity question: the recovery uses corr both for setup check and point recovery. If corr is computed as 100.0/at where at parsed from text, and opentims computed the same — bit-identical. Fine.
+
+  `correctionRefusal` checks corr >= 1.0 && corr < 1e6. But there's a subtle issue: setup loops over frames with msms_type == 0 and calls correctionRefusal(id, corr). Frames with msms_type == 0 but num_peaks == 0 also get checked — fine.
+
+  Note: setup refuses corr<1 for any MS1 frame, even one with 0 peaks. Fine, fail-closed.
+
+  The message: "AccumulationTime T ms exceeds 100 ms, so opentims' intensity correction 100/T = c < 1...". They print `100.0 / corr` for T. corr = 100.0/at; 100.0/corr may not equal at exactly (double rounding) — e.g. at=99.958: corr = 100/99.958 rounded; 100/corr ≈ 99.958 within an ulp; printing with ostream default precision (6 significant digits) → "125" for 125. Test expects "AccumulationTime 125 ms exceeds 100 ms" — corr = 100/125 = 0.8 exactly; 100/0.8 = 125 exactly. OK.
+
+  **Decision 2: #error guard**
+
+  Added __RECIPROCAL_MATH__, __ASSOCIATIVE_MATH__, __NO_SIGNED_ZEROS__, __ARM_FP_FAST. Fine. CHANGELOG mismatch is a known open item.
+
+  **Decision 3: -ffp-contract=off tool-wide; CHANGELOG line; ctest in build.yml** — fine.
+
+  **Decision 4: sqlite checks in TdfLoad.h**
+
+  loadTdfDnoise: checks prepares, DONE, schema lookup for DiaFrameMsMsWindows. Looks thorough.
+
+  Potential issue: the sqlite_master query uses `type IN ('table','view')`. If DiaFrameMsMsWindows is a view, the subsequent SELECT works. OK.
+
+  Potential issue: `SELECT MAX(NumScans) FROM Frames` — they now require SQLITE_ROW; MAX always returns exactly one row (NULL if empty). Then check INTEGER type unless NULL. If Frames is empty, v stays 0... wait: `{ long long v = 0; if (sqlite3_column_type(st,0) != SQLITE_NULL && !int_in(...)) return fail(...); out.meta.max_num_scans = (uint32_t)v; }`. If NULL (empty table), max_num_scans = 0, then later "no Frames rows" refused since out.frames.size() < 2. Good.
+
+  But subtle: MAX over a table where some NumScans are INTEGER and some TEXT: MAX returns the TEXT (TEXT sorts above INTEGER in sqlite). int_in fails (type TEXT) → refused. Good, matches comment.
+
+  But what if MAX returns a REAL because all NumScans stored as REAL (e.g. 944.0)? Then refused: "MAX(Frames.NumScans) 944.0 is not an INTEGER". Is that a false refusal on valid Bruker data? Real Bruker tdfs store NumScans as INTEGER. The Frames table in real tdf has declared types; values inserted by Bruker are integers. The per-row check also requires SQLITE_INTEGER. A REAL 944.0 cell would be refused per row too. Pre-existing behavior: cast (uint32_t)sqlite3_column_int64 would convert 944.0 → 944 silently. Now refused. The agent claims real Bruker tdfs unaffected. Acceptable fail-closed.
+
+  NumScans range check: [0, max_num_scans] where max_num_scans is the global MAX. That's what the verifier asked.
+
+  MsMsType range [INT_MIN, INT_MAX]: values other than 0/9 accepted — pre-existing; frames with other types just aren't MS1. Note: an MS1 frame is msms_type == 0; Bruker also uses MsMsType 0 for MS1. OK.
+
+  Wait — one important check: in the Frames loop, `int_in(2, 0, out.meta.max_num_scans, scans)` — max_num_scans is uint32_t; passed as long long hi — implicit conversion fine.
+
+  `cell()` lambda: reads sqlite3_column_text AFTER the row — fine since we're mid-row.
+
+  One more: the AccumulationTime parse happens for EVERY frame including MS2 — pre-existing (opentims correction applies to all frames; actually old code did it too via atof). Now a TEXT "abc" AccumulationTime on an MS2-only frame refuses the whole run even though dnoise never touches MS2 frames. Is that a new false refusal? Old code: atof("abc") = 0 → corr = inf → setup refused only MS1 frames with corr outside (0.5, 1e6). For MS2 frames old code didn't check corr at all; corr = inf stored but unused. New code refuses ANY frame whose AccumulationTime text doesn't parse — including MS2 frames. Real Bruker tdfs always have numeric AccumulationTime. But a corner: AccumulationTime NULL on an MS2 frame → old code: sqlite3_column_text NULL → "has no AccumulationTime" fail. Same. Edge: MS2 frame with AccumulationTime = 0 (stored)? parseF64("0") gives at=0, !(at>0) → refuse "not a positive decimal number". Old: corr = 100/0 = inf, stored, never checked for MS2. New: refusal. Is a 0 AccumulationTime on an MS2 frame plausible in valid data? Unlikely. It's a behavior change but arguably fail-closed. Might be worth noting as a low-severity finding: validation applied to frames dnoise never reads. Actually wait — could opentims itself fail to load such a frame? TimsFrameFromSql computes corr for every frame; atof("abc")=0 → division by zero → inf; opentims might still deliver. The tool refuses before the loader. Low.
+
+  **Decision 5: covered above.**
+
+  **Decision 6: per-row scan tables**
+
+  loadTdfDnoise computes ms1_max_scans[ci] = max NumScans over MS1 frames referencing row ci. setup builds table over need[ci].
+
+  Issue: the per-point check `scan < fr.num_scans` retained (recoverPoint checks (uint32_t)s >= num_scans). Good.
+
+  Edge: MS1 frame with num_scans N but the table built over max MS1 NumScans M >= N. Points of a frame with fewer scans: scanOf matches within table of size M; check s < N catches scans beyond the frame's own. Good.
+
+  Edge: what about MS1 frames whose cal row is also used with more scans by another MS1 frame — fine.
+
+  need[ci] == 0 (row referenced only by MS2 frames): empty table; scanOf returns -1 → any MS1 frame using it would be refused... but no MS1 frame uses it (by construction need==0 means no MS1 frame references it). Fine.
+
+  Potential defect: `buildScanTable(tdf.tims_cal[ci], tdf.ms1_max_scans[ci], ...)` — but what if an MS1 frame has num_scans 0 and num_peaks 0 (allowed: empty MS1 frame)? It contributes 0 to need. If that's the only MS1 frame on the row, table empty; frame has 0 peaks so frame() returns early before using table (n==0 check after ++c.frames). Good — recoverPoint never called.
+
+  But wait: the frame with n == 0 path: frame() calls frameCheck first — n==0 == num_peaks passes; im not needed. Then `++c.frames; c.fid = fid; return`. Then add() marks it seen. requireComplete only requires frames with num_peaks > 0 to be seen. An empty MS1 frame IS marked (harmless). Consistent with FrameCoverage test ("an empty MS1 frame that arrives is marked").
+
+  Hmm, but here's a subtle one: does the resident path deliver empty MS1 frames at all? If the loader drops zero-peak MS1 frames, old code: resident loop `if (!s.containsIMData()) continue;` before dnoise — moved after now. With the move, if the loader doesn't deliver an empty MS1 frame (num_peaks==0), requireComplete doesn't demand it (num_peaks>0 required). Fine.
+
+  **Decision 7: SDK refusal + first-frame checkLoader**
+
+  Setup refuses when cfg.bruker_sdk_path non-empty OR env OPENMS_BRUKER_SDK_PATH non-empty. Question: does the loader actually honor OPENMS_BRUKER_SDK_PATH? Claimed from reading loader source. Can't verify from inline text; trust.
+
+  False refusal scenario: OPENMS_BRUKER_SDK_PATH set by a site module for other tools → dnoise refuses every .d run. That IS a real operational concern; the message names the escape hatch and says to unset. The scope decision explicitly accepted this as fail-closed. Not a defect per instructions ("An SDK that then fails to load would leave the table model, so this can be a false refusal; that is fail-closed").
+
+  But: cfg.bruker_sdk_path — the tool never sets it; default empty. OK.
+
+  checkLoader on first MS1 spectrum: consumeMS1Spectrum_ calls dnoise->checkLoader() before buffering. dn_loader_checked_ member added. Note: this runs on the streaming path. Resident path: checkLoader called before the pick loop at 4259. Fine.
+
+  Wait — timing: on the streaming path, the check happens on the first MS1 frame — but has the loader already calibrated? lastMzCalibration() is set when the loader opens the handle, before first frame. OK.
+
+  **Decision 8: resident dnoise.frame before containsIMData skip + FrameCoverage**
+
+  Resident loop: `if (dnoise.on && s.getMSLevel() == 1) dnoise.frame(...)` before the skip. frame() with n>0 and no IM → refuses; with n==0 counts and marks. Streaming: every MS1 spectrum is delivered to consumeMS1Spectrum_? The streaming loader delivers MS1 frames via consumeMS1Spectrum_ regardless of IM data. Consistent.
+
+  Now the identity question: previously (pre-fix), resident MS1 frames without IM data were skipped (not denoised, not picked). Now: an MS1 frame WITH IM data gets denoised the same (frame() called before skip; containsIMData true → proceeds). Same behavior for IM-carrying frames. For non-IM MS1 frames with points: previously skipped silently (and then the dispatch also skipped them); now refused. On a valid Bruker .d via loadExperiment, do MS1 frames always carry IM arrays? Presumably yes. Fail-closed.
+
+  But identity concern: `dnoise.frame` is called for MS1 spectra before checking `containsIMData`. For a valid .d all MS1 frames have IM data, so the set of frames denoised is unchanged, and counts identical. OK.
+
+  FrameCoverage in add(): counts slot with frames==0 skipped (MS2 spectra in the resident loop have dn_cnt[i].frames==0; fid defaults 0 — skipping avoids marking fid 0). In flushMS1_, dn_cnt sized n (MS1 batch only) — every slot is an MS1 frame. If dnoise->frame throws mid-batch, add() is never called (pick_err rethrown first). Fine.
+
+  Wait, there's an issue: in flushMS1_, if dn is true, every spectrum in ms1_buf_ is an MS1 spectrum. frame() is called for all. Counts.frames incremented per frame. OK.
+
+  Duplicate detection: add() throws DnoiseError for a duplicate fid. In the streaming path, when is add() called? At line 2206 in flushMS1_. If it throws, it propagates out of flushMS1_ → consumeMS1Spectrum_... Actually flushMS1_ is called from consumeMS1Spectrum_ and consumeSwathSpectrum_ and finish(). An exception from flushMS1_ propagates to the loader's consumeSpectrum call — per the doc, "Consumer exceptions reach this catch unwrapped" (the stream-fallback catch). DnoiseError is rethrown. Good.
+
+  requireComplete() at 4328 runs for both paths (the block both reach). For the streaming path in tile_source mode: pass 1 reads MS1 only — all MS1 frames delivered. Good. But wait — what about `SPEXTRACTOR_LOAD_ONLY` early return at 4141-4143? It returns EXECUTION_OK before requireComplete — that's a perf probe, fine.
+
+  Now — identity: does requireComplete/add change output on accepted inputs? Only throws on anomalies. Reset: dnoise.reset() in fallback; note reset also clears `total` — previously `dnoise.total = Counts()`. Equivalent.
+
+  One question: `seen` marks happen in add() which is called per batch (streaming) or once (resident). If the streaming load fails AFTER some batches were merged (marks set) and falls back, reset clears. Good. But: what if the streaming load fails mid-flushMS1_ AFTER dnoise.add(dn_cnt) but later in the batch (e.g., prune throws Ms1MzError... no, that's rethrown as refusal; or compactify throws)? Then ms1_map already has the moved spectra — the fallback resets ms1_map = PeakMap() and dnoise.reset(). Good.
+
+  Hmm wait, actually there's a subtle problem: in flushMS1_, `dnoise->add(dn_cnt)` is called at line 2206 BEFORE ms1 prune and before moving spectra into ms1_. If a later batch's frame() throws DnoiseError → rethrown past fallback → run refused. Fine.
+
+  **Decision 9: free scratch** — swap with empty after add. dn_cnt freed too. No output effect. But note the ledger comment — skipped deliberately.
+
+  **Decision 10: zero ms1Hist_ in fallback** — cosmetic.
+
+  **Decision 11: requireFiniteMs1Mz**
+
+  flushMS1_: called after pick, inside try — caught by the omp catch, stored in pick_err, rethrown after the parallel region. Ms1MzError propagates; the stream catch rethrows it (line 4155). Good.
+
+  Resident loop: called at 4274 after ensureIMArrayName, only for MSLevel 1. Note: only for spectra with IM data (the skip at 4271 continue happens before). An MS1 spectrum WITHOUT IM data never gets requireFiniteMs1Mz — but it also never gets picked nor enters ms1_map (dispatch skips it). Pre-existing skip; the prune never sees it. Fine.
+
+  But wait — dnoise off, resident path, MS1 without IM data: skipped, unpicked, not in map. Same as before. OK.
+
+  Ms1MzError message: uses std::to_string(s[i].getMZ()) — NaN prints "nan". Fine.
+
+  Placement in flushMS1_: after `ensureIMArrayName(s)` following the pick. But note there's an earlier `ensureIMArrayName(s)` before dnoise->frame (line 2193). Fine.
+
+  Now — check 19d: input mzML with NaN m/z. Wait: the mzML path — streaming? For mzML, tile_source false; stream_load true but BrukerTimsFile().loadDIAStreaming is for .d; for mzML... Looking at the code: `if (stream_load)` block: `in_mzpeak` false for mzML; then `BrukerTimsFile().loadDIAStreaming(in, consumer, cfg)` — for an mzML? Hmm, that would throw (not a .d), caught by the generic catch → fallback to resident load. So mzML goes through the resident path: the pick loop at 4262 → requireFiniteMs1Mz at 4274 → Ms1MzError thrown, captured, rethrown. The "[ms1-prune]" line is at 4330 — after the pick loop — so absence shows refusal at pick. But the assertion also requires "[ms1-prune]" not in log... and the run must fail (expect_fail). Ms1MzError is an Exception::InvalidValue → TOPP catches → nonzero exit. Good.
+
+  Hmm wait — for the mzML fallback: the FIRST attempt (loadDIAStreaming on an mzML) — does it fail cleanly? Pre-existing behavior; check 19d passes per the report (24/24).
+
+  One more identity question for requireFiniteMs1Mz: it runs after the pick on every MS1 spectrum — pure read, no mutation. Only throws on non-finite. On accepted inputs (all finite), no change. Good.
+
+  But the prune's `Ms1Prune::frame` still does sortByPosition before checking finite — but unreachable since refusal happens earlier. Except: prune batch is called with spectra already checked. OK.
+
+  **Decision 12: recovery refactor into recover::**
+
+  Key identity risks: operation order and types. Compare old inline code vs recoverPoint:
+
+  Old:
+  ```
+  const double t = ax.cal.mzToTof(s[i].getMZ(), b), bin = std::nearbyint(t);
+  if (!(std::fabs(t - bin) <= kTofTol && bin >= 0.0 && bin <= 4294967295.0)) throw...
+  const long scan = scanOf(asc, falls, im[i]);
+  if (scan < 0 || (uint32_t)scan >= fr.num_scans) throw...
+  const float v = s[i].getIntensity();
+  uint32_t raw = 0; int hits = 0;
+  if (v >= 0.0f && v < 16777216.0f && v == std::floor(v))
+    for (double r = ..., r_end = ...; r <= r_end; r += 1.0)
+      if ((uint32_t)(r * corr + 0.5) == (uint32_t)v) { raw = (uint32_t)r; ++hits; }
+  if (hits != 1) throw...
+  k.tof[i] = (uint32_t)bin; k.scan[i] = (uint32_t)scan; k.raw[i] = raw;
+  ```
+
+  New recoverPoint:
+  ```
+  hits = 0;
+  t = cal.mzToTof(mz, b);
+  const double bin = std::nearbyint(t);
+  if (!(...)) return Refusal::tof;
+  const long s = scanOf(asc, falls, im);
+  if (s < 0 || (uint32_t)s >= num_scans) return Refusal::scan;
+  if (v >= 16777216.0f) return Refusal::intensity_range;   // NEW: separates >= 2^24
+  ...
+  if (v >= 0.0f && v < 16777216.0f && v == std::floor(v))
+    for (...) if (...) { found = ...; ++n; }
+  hits = n;
+  if (n != 1) return Refusal::intensity;
+  tof = ...; scan = ...; raw = found;
+  ```
+
+  Difference: the intensity_range refusal now fires before the hits search for v >= 2^24 — previously, v >= 2^24 fell into `if (v >= 0.0f && v < 16777216.0f ...)` false → hits 0 → "not opentims' correction of exactly one raw count (0 found)". Now separate message. Same refusal outcome. NaN: v >= 16777216.0f is false for NaN → proceeds; v >= 0.0f false → n=0 → Refusal::intensity. Test covers. Note old code: NaN → same path. Same behavior, different message? Old message for v >= 2^24: "is not opentims' correction of exactly one raw count (0 found)"; new: ">= 2^24" message. Message change only.
+
+  Scan check difference: old `(uint32_t)scan >= fr.num_scans` — same.
+
+  The equivalence probe claims 0 differences over 13M points across compilers. That's claimed, not independently verifiable here, but the code reads verbatim-equivalent.
+
+  scanOf moved verbatim. buildScanTable matches old setup loop term-for-term: `double V = c[2] + ((c[3]-c[2])/c[1]) * ((double)s - c[4] - c[0]);` — old code same. Yes.
+
+  One identity trap: GCC `#pragma GCC optimize("fp-contract=off")` region now covers recover:: functions; the tool compiles spextractor.cpp with -ffp-contract=off anyway. The non-inlining note (+0.5ns) is perf only.
+
+  Template over Cal: instantiated with TdfMzCalibration in the tool. mzToTof is the same function. OK.
+
+  frameCheck: old order was frame → peaks → (frames/raw counted) → im check after n==0 early return. New: frameCheck does frame, peaks, then `n != 0 && (!has_im || im_n != n)` → im. Old: the im check came AFTER `if (n == 0) return`. New frameCheck: n==0 → skips im check. Equivalent. But note: old code counted ++c.frames BEFORE the im check; the im check threw without counting. New: frameCheck throws before ++c.frames too. Equivalent ordering of throws.
+
+  Wait, one difference: old code checked `if (n != fr.num_peaks)` throw; then `++c.frames; c.raw += n; if (n==0) return;` then IM check. New: frameCheck checks im BEFORE counting, but for n>0 without IM both throw. Same refusal.
+
+  Hmm, but there's a behavior change in what happens first for n==0 frames: both count and return. Same.
+
+  **Refusal message for correctionRefusal >= 1e6**: "is not invertible" — 4.2 says setup's corr >= 1e6 refusal now prints 6 significant digits. Wait — the old message: "opentims' intensity correction 100 / AccumulationTime = " + std::to_string(corr) + " is not invertible". std::to_string prints 6 decimals. New uses ostringstream default (6 sig digits). Message changed slightly (std::to_string(1.000042) = "1.000042"; ostringstream << 1.000042 = "1.00004"). Cosmetic.
+
+  **Decision 13: iterations help** — done; test added.
+
+  **Decision 14: sync_cluster.sh**
+
+  Let me scrutinize the new script.
+
+  Local side:
+  - `set -euo pipefail`, cd to repo root.
+  - NODE=${1:-ibminode05}. But usage: `sync_cluster.sh [node] [--allow-dirty]`. If user runs `sync_cluster.sh --allow-dirty` (no node), NODE becomes "--allow-dirty"! Pre-existing? Old script: NODE=${1:-ibminode05} too — same bug pre-existing. Old usage text? Old script also had NODE=${1:-ibminode05} and checked "${2:-}" != "--allow-dirty". So pre-existing quirk, not a regression. Hmm, but the usage line is new and documents "[node, default ibminode05] [--allow-dirty]" — same as before presumably. Not new.
+
+  - INPUTS includes tests/test_tdf_load.cpp. Dirty check over $INPUTS only (SHIP files not dirty-checked — pre-existing: old script checked `git status --porcelain -- "$SRC" src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp` — shipped tools not checked either; test_tdf_load.cpp added. Consistent.)
+
+  - Basename-collision check: good.
+
+  - Local trap: `trap 'rm -rf "$TMP"; [ -z "$STAGE" ] || [ "$HANDED" = 1 ] || ssh "$NODE" "rm -rf $STAGE" || true' EXIT`. Careful: STAGE contains $R/.deploy.stage.XXXXXX — quoted inside ssh command. OK.
+
+  - SHA256SUMS written with basename paths via sed 's#  .*/#  #'. Node side: `sha256sum -c --quiet SHA256SUMS` run in $S (cd "$S"). Filenames are basenames; staged files are scp'd flat into $STAGE. Good.
+
+  - txn.sh heredoc with 'TXN' quoted — no local expansion. Good.
+
+  - `scp -q $INPUTS $SHIP "$TMP/SHA256SUMS" "$TMP/txn.sh" "$NODE:$STAGE/"` — scp renames to basename in dest dir. txn.sh lands as $STAGE/txn.sh. Good.
+
+  - Final: `ssh "$NODE" "bash $STAGE/txn.sh $STAGE $GITREV $R $TOOLS $TESTS > $STAGE.log 2>&1 < /dev/null; rc=\$?; cat $STAGE.log; exit \$rc"`. GITREV may contain "+dirty" — no spaces, fine.
+
+  Node side txn.sh:
+  - set -euo pipefail. Args positional.
+  - `trap 'rm -rf "$S"' EXIT` first, then mkdir LOCK, then `trap finish EXIT`. If mkdir LOCK fails (lock held), the first trap fires: rm -rf "$S" — the stage dir — good, and exits 1 via the || { ...; exit 1; }. Wait: `mkdir "$LOCK" 2>/dev/null || { echo ...; exit 1; }`. exit 1 triggers EXIT trap → rm -rf $S. Node unchanged. S4 checks this.
+
+  - finish(): rc=$? at entry. Hmm — a classic bash pitfall: `rc=$?` must be the FIRST command in the trap function. Here finish() starts with `rc=$?; set +e`. But wait — when the trap fires, $? at function entry is the exit status at trap time. Since `rc=$?` is the first statement, fine.
+
+  - Rollback loop: `for f in $PROMOTED` — restores from $S/bak or rm -f. touch after mv. Good.
+
+  - Provenance restore logic: requires BOTH binary_sha256 and libopenms_sha256 match. Uses grep -qx "binary_sha256=$(sha ...)" — full-line match. Good.
+
+  - COMMITTED=1 set BEFORE mv "$PROV.tmp" "$PROV"? Line: `COMMITTED=1; mv -f "$PROV.tmp" "$PROV"`. If mv fails (unlikely), COMMITTED already 1, finish would skip rollback and report "post-commit step failed" — binary built, provenance missing. Acceptable; minor. Actually if the mv fails there's no provenance and no rollback — tree has new inputs, new binary, old provenance was moved to $S/prov.prev which... finish with COMMITTED=1 skips the prov.prev handling entirely, so prov.prev is deleted with rm -rf $S. Old provenance lost, none written. Edge case, very unlikely (same filesystem). Not worth a finding? Maybe low.
+
+  - Post-commit steps: deploys.log append, .bak, cp suite/tools, chmod. If any fail, finish reports "COMMITTED ... but a post-commit step failed". OK.
+
+  - Signal traps: HUP/INT/TERM → exit N. The comment says a trapped signal waits for the running command — bash semantics: trap on signal runs after the current foreground command completes. make is the foreground command; with `trap 'exit 143' TERM`, when TERM arrives during make, bash waits for make to finish? Actually bash runs the trap handler after the currently executing command completes — but make receives SIGTERM too? No — SIGTERM was sent to the transaction's pid only (the harness kills the txn pid). make is a child in the same process group; kill by pid only hits bash. Bash defers trap until make exits. Then exit 143 → EXIT trap → finish → rollback. S9 tests this. OK.
+
+  - But note: `trap 'rm -rf "$S"' EXIT` is replaced by `trap finish EXIT` at line 83. Between line 80 and 83, mkdir lock happens. Fine.
+
+  - The unit test compile: uses $FL from flags.make plus -I$U/src -I$U/inc. Note the real tool compile also has CXX_INCLUDES (OpenMS includes etc.), but the unit tests are dependency-free (test_dnoise_ms1 includes only DnoiseMs1.h + TdfMzCalibration.h via shim; test_tdf_load includes TdfLoad.h which includes <OpenMS/FORMAT/TdfMzCalibration.h> — resolved by -I$U/inc shim — and <sqlite3.h> via -I$SQL_INC). Wait — does test_tdf_load include "DnoiseMs1.h"? TdfLoad.h includes "DnoiseMs1.h" — quoted include searches the includer's directory first: $U/src/TdfLoad.h... wait, TdfLoad.h is copied to $U/src, and DnoiseMs1.h is at $U/src/DnoiseMs1.h. The test file is at $U/tests/test_tdf_load.cpp including "TdfLoad.h" — quoted include searches $U/tests first (no TdfLoad.h there), then -I paths: -I$U/src → found. TdfLoad.h at $U/src includes "DnoiseMs1.h" → same dir $U/src → staged bytes. And <OpenMS/FORMAT/TdfMzCalibration.h> → -I$U/inc. Good — all staged bytes. The "tree_include" mutant fails 18 assertions, confirming.
+
+  - $FL contains the tool's CXX_FLAGS but NOT CXX_INCLUDES — so test_dnoise_ms1 compiles without OpenMS includes; it's dependency-free. And without -fopenmp? FL includes -fopenmp per 4.3 node facts. Tests don't need omp. Fine.
+
+  - SQLite detection: first include dir with sqlite3.h from CXX_INCLUDES; `${i#-I}` strips -I. But CXX_INCLUDES entries may use `-isystem /path` (see harness's set_flags: includes `-isystem %s/contrib/include`). `${i#-I}` on "-isystem /path" doesn't strip → checks "-isystem /path/sqlite3.h" → not found. Harmless (just skips that dir). But also splits "-isystem" and "/path" as separate words; "/path" has no -I prefix → checks "/path/sqlite3.h" — actually works by accident for -isystem since the next word is the bare path. Fine.
+
+  - libsqlite3.a linked directly with -lpthread -ldl -lm. OK on Linux. On the fake node it's ar'd.
+
+  - promoted.sha256: built from SHA256SUMS via awk matching basename. Post-build `sha256sum -c --quiet promoted.sha256` run from... cwd at that point is $S (cd "$S" at line 88; later `cd "$BUILD"` happens AFTER the recheck at line 149). promoted.sha256 contains absolute dest paths. sha256sum -c with absolute paths works anywhere. Good.
+
+  - Hmm, `sha256sum -c --quiet` — --quiet with -c: GNU coreutils supports. On the node (Linux) fine.
+
+  - The lock: mkdir atomic. Stale lock handling: none — a stale lock refuses forever with "owner unknown" or the owner line. Pre-existing behavior had the same issue (mkdir lock). The reviewer prompt asks about stale-lock handling — none exists; a crashed deploy leaves the lock. Actually finish() removes it via rmdir on any exit — including signals (HUP/INT/TERM trapped; EXIT trap runs on exit from signal trap). SIGKILL would leave it. Pre-existing risk, arguably worth a low finding.
+
+  - Old script behavior preserved? Old script: dirty check, scp sources/headers/suite/golden/bench tools/launcher, chmod 771 launcher, patch check, lock, backup .cpp, unit test, build, provenance with same fields, deploys.log. New: all kept, plus tdf_load test, plus ship of test logs. Provenance fields: src_sha256, calibration_header_sha256, tool_headers_sha256, git, built, binary_sha256, openms, epd_sha256, epd_patch_markers, masstrace_move_markers, libopenms_sha256, dnoise_unit_test=passed, tdf_load_unit_test=%s. Old had same minus tdf_load. Good.
+
+  One issue: old script chmod 771'd launch.sh; new does too (line 170). OK.
+
+  Another: the old script created /scratch/kohlbach/spextractor_unit via mkdir -p before scp. New: UT dir created post-commit (mkdir -p "$UT" "$TESTS"). Good.
+
+  Potential issue: `sha256sum -c --quiet SHA256SUMS` — if a staged file is missing (scp partially failed?), scp would have failed. TORN test covers corruption.
+
+  - `echo "$S pid $$ $(date -Is)" > "$LOCK/owner" || true` — with set -e, redirect failure... || true covers.
+
+  - One more: `scp -q ... "$NODE:$STAGE/"` — if STAGE contains spaces — no.
+
+  - The case check on STAGE: `"$R"/.deploy.stage.??????` — mktemp template XXXXXX gives 6 chars. Good; and sets STAGE="" before exit so the local trap doesn't rm something weird. But note: if ssh itself fails, STAGE is empty → case fails → REFUSED. But `STAGE=$(ssh ...)` under set -e: if ssh exits nonzero, the assignment fails and set -e exits immediately — before the case. Then the EXIT trap: STAGE empty → just rm TMP. OK.
+
+  - Actually wait, subtle: `STAGE=$(ssh "$NODE" "mktemp -d $R/.deploy.stage.XXXXXX")` — command substitution failing causes set -e exit. Fine.
+
+  - Handed=1 set after scp; if scp fails (set -e exit), trap removes stage remotely. Good.
+
+  - A dropped ssh channel during the transaction: txn.sh writes only to its log; the outer ssh command's `cat $STAGE.log` might SIGPIPE? cat runs after txn completes (rc captured). If the channel drops while txn runs, sshd sends HUP to the shell running the remote command... The remote command is `bash $STAGE/txn.sh ... > log 2>&1 < /dev/null; rc=$?; cat ...`. If ssh drops, the remote bash (the sh -c equivalent) gets SIGHUP; txn.sh is a child — bash waits; HUP trap in txn.sh: exit 129 deferred until... hmm, actually the HUP goes to the remote shell, which may forward? The remote shell isn't bash -c with traps; sshd runs `$SHELL -c "..."`. Non-interactive bash receiving SIGHUP while waiting for a foreground child: bash runs the trap after the child exits? No — non-interactive bash without a HUP trap dies on SIGHUP but the child continues (orphaned, redirected to file, stdin /dev/null). Actually when the parent shell dies, the child keeps running because its output goes to the file, not the channel. The claim "a dropped channel cannot kill it with SIGPIPE" holds: stdout is the log file. SIGHUP to the process group? sshd typically sends HUP to the session. If txn.sh gets HUP, its trap 'exit 129' defers until the current command (make) finishes, then finish rolls back. Hmm — but that means a dropped channel mid-build causes a ROLLBACK of an otherwise good build. Acceptable fail-closed.
+
+  OK, the deploy script looks solid. The harness is extensive (27 checks).
+
+  One gap I should check: does the new script still upload the e2e suite to the same place? cp "$S/test_spextractor.py" ... "$TOOLS/" — yes.
+
+  Now let me think about **remaining defect candidates** more carefully.
+
+  **A. `Ms1MzError` thrown inside flushMS1_'s omp region — captured and rethrown. Then in the stream try/catch, rethrown past fallback. But ALSO: requireFiniteMs1Mz is called in flushMS1_ which runs during the mzML fallback attempt too? No — for mzML, the streaming attempt is loadDIAStreaming on an mzML which fails immediately; consumer never sees MS1. Fine.
+
+  **B. The resident-path ordering change (dnoise.frame before containsIMData)**: For a .d resident load with dnoise ON: pre-fix, an MS1 spectrum without IM data was skipped (continue) — NOT denoised. Post-fix it is refused by frame() if n>0. On valid Bruker data, does loadExperiment ever yield an MS1 frame without IM data? Unlikely. Fail-closed change, intended by decision 8.
+
+  But here's a REAL identity question: in the resident loop pre-fix, dnoise.frame was called AFTER containsIMData check — so frames without IM were never counted. Post-fix they are counted/refused. On accepted inputs (all MS1 have IM), identical. OK.
+
+  **C. requireComplete in tile_source streaming mode**: pass 1 sets cfg.dia_ms2_rt_lo=inf, hi=-inf so no MS2 frames. All MS1 frames delivered → consumeMS1Spectrum_ for each. requireComplete passes. Then pass 2 (tile loop) — does it create another consumer with dnoise pointer? The doc says "tile pass 2 has load_ms1 false and no dnoise pointer" (4.2 load-mode analysis). If pass 2 delivered MS1 frames again and dnoise.frame were called, add() would refuse duplicates. Claimed it doesn't happen. I should verify in spextractor.cpp — the tile loop region isn't inlined. This is worth checking by reading the file. Actually the prompt says answer from this document; the inlined regions don't show pass 2. But they explicitly ask me to read the repo files. I can read spextractor.cpp around the tile pass 2 to confirm dnoise isn't wired there.
+
+  **D. `dn_loader_checked_` and the resident path**: resident path calls checkLoader at 4259 unconditionally before the pick loop. OK.
+
+  **E. The streaming consumer in non-tile .d mode (stream_load true, tile_source false?)** — wait, tile_source is true for any .d with stream_load and no TILE_RESIDENT. Hmm: `tile_source = !in_mzpeak && !force_resident && type == BRUKER_TDF`. So .d streaming always uses the two-pass tile source now. Pass 1 MS1 only. requireComplete after the MS1 load block at 4328 — yes, reached before the tile loop.
+
+  **F. What if dnoise is on and the input is .d but stream fails BEFORE any MS1 frame, then resident load delivers all frames** — marks cleared by reset. Good.
+
+  **G. What if the stream succeeds but delivered zero MS1 frames (frames_seen==0)?** Then requireComplete refuses the first MS1 frame with num_peaks>0 — fail closed. Good.
+
+  **H. `frameIdOf`** — parses native id. If loader emits a native ID format frameIdOf parses to 0 → Refusal::frame. Pre-existing.
+
+  **I. Decision 5 type check on MsMsType**: `int_in(1, INT_MIN, INT_MAX, type)`. Fine.
+
+  **J. The `ms1_max_scans` and gate interplay**: gate uses global MAX(NumScans) — unchanged. Scan tables per-row need. But: buildScanTable's separation check `v[s] - v[s-1] > 4*kImTol` is now over need[ci] scans only. Old behavior: refused if ANY TimsCalibration row failed over global max. New: TNBC-like row with 918 scans in a 40,000-max file is accepted (intended fix). But note: the check for a row referenced by MS1 frames with max 918 scans no longer checks scans 919..40000 — but no MS1 frame has those scans, and recoverPoint checks s < fr.num_scans. So no MS1 point can land in the unchecked region. Sound.
+
+  BUT: consider an MS1 frame whose NumScans is, say, 918 referencing row ci, and ANOTHER MS1 frame with NumScans 944 on the same row. need = 944; table covers all. Fine.
+
+  Consider a file where the pole sits at scan 1000, MS1 frames use scans 0..918 — table builds (separation holds over 0..917; pole at 1000 outside). Accepted. Points all have scan < 918. Fine.
+
+  **K. False refusal: `correctionRefusal` for corr >= 1e6**: AccumulationTime <= 1e-4 ms — unrealistic. Fine.
+
+  **L. accumulate: `String(tdf.ms1_max_scans[ci])` in scanTables — uint32 fine.
+
+  **M. buildScanTable over n_scans == 1**: falls = false (n_scans > 1 false); separation loop doesn't run; returns empty. Table of 1. scanOf works. Test covers.
+
+  **N. parseF64 on "99.958" whole-text requirement**: sqlite column_text of a REAL 99.958 renders... SQLite's %!.15g gives "99.958". parseF64 accepts. INTEGER 100 (if stored as integer) → "100" accepted. What about REAL 0.1 rendering "0.1"? Fine.
+
+  REAL exponent form: SQLite renders e.g. 1e-05 as "1e-05"? %!.15g uses %g-style with e for small. parseF64 accepts exponent. And opentims' atof accepts too, same value? atof("1e-05") = 1e-05; parseF64 same. OK.
+
+  **O. SQLite version rendering difference**: the known caveat, documented.
+
+  **P. test_tdf_load.cpp**: uses `ALTER TABLE ... DROP COLUMN` — requires SQLite >= 3.35. CI where SQLite found is newer presumably. The bundled is 3.49. OK.
+
+  In testFrames, `dShaped()` frames have TimsCalibration column; `UPDATE Frames SET TimsCalibration = 7 WHERE Id = 3` → refused "unknown TimsCalibration". Good.
+
+  corruptMiddleLeaf: parses page. Fine.
+
+  One thing: test uses `std::filesystem::temp_directory_path()` and cleans up. OK.
+
+  **Q. CMake**: find_package(SQLite3 QUIET) — module exists since CMake 3.14. CMakeLists requires? Need to check cmake_minimum_required — not shown in the diff. The reviewer asks about CMake 3.16: FindSQLite3 exists in 3.14+, and SQLite::SQLite3 target since 3.14. OK. Windows: SQLite not found → test skipped; dnoise test unaffected. `configure_file(... COPYONLY)` fine.
+
+  **R. build.yml ctest step**: `ctest --test-dir spextractor/build ... -R 'dnoise|tdf_load'` then greps for "Test +#[0-9]+: $t". ctest output format: "    Test #1: dnoise_ms1 ..." — grep -Eq "Test +#[0-9]+: dnoise_ms1" matches. Also "The following tests passed:" lines list test names without #. OK. `--no-tests=error` guards empty match. Not vacuous.
+
+  But wait — does the tool build (SPEXTRACTOR as part of OpenMS build in build.yml) register these tests? CMakeLists.txt adds them at top level of the spextractor CMake project. In build.yml the build is `cmake --build spextractor/build` — tests built by default (add_executable is in ALL). ctest --test-dir spextractor/build — test registration requires enable_testing()/include(CTest) — presumably present (tests.yml runs ctest with TESTS_ONLY). In the full build, are tests added? The CMakeLists diff shows test_tdf_load added unconditionally (when SQLite3 found) — not behind SPEXTRACTOR_TESTS_ONLY. And test_dnoise_ms1 was already outside that guard (line: target_include_directories(test_dnoise_ms1 ...) before the if(SPEXTRACTOR_TESTS_ONLY)). So both register in the full build. But does the full-tool build's CMake find SQLite3? The OpenMS build tree — CMake runs in spextractor/ subdir? "cmake --build spextractor/build" suggests a separate build dir configured earlier. SQLite3 likely found on ubuntu/macos runners. If not found, tdf_load isn't registered and the grep fails the step — loud, not silent. Good.
+
+  **S. tests.yml negative compile**: uses `c++` — on the matrix legs, is `c++` the matrix compiler? matrix.cc gcc*/appleclang-arm64; the step uses bare `c++` rather than the selected compiler — on ubuntu with matrix.cc=gcc-13 etc., is `c++` the update-alternatives default (system gcc-11/12)? If the matrix installs gcc-13 but `c++` points to gcc-12, the flags still trigger the same macros on any GCC. Acceptable but slightly loose. Hmm, can't verify how matrix.cc is used elsewhere. The macro-based guard fires for any GCC with those flags. Fine-ish. Also `-fsyntax-only` on a file including DnoiseMs1.h — the #error fires at preprocess. Good. The grep check: `grep -Eq 'DnoiseMs1\.h:[0-9]+:[0-9]+: (fatal )?error:'` && grep -q '#error' — GCC prints `#error "..."` line in the diagnostic? GCC prints: `src/DnoiseMs1.h:79:2: error: #error "DnoiseMs1.h needs..."`. The err text contains '#error'. clang similar. OK, not vacuous.
+
+  Note: `gcc*)` FLAGS includes `-fassociative-math+-fno-signed-zeros+-fno-trapping-math` — the combination that makes GCC define __ASSOCIATIVE_MATH__? GCC defines __ASSOCIATIVE_MATH__ with -fassociative-math alone? Actually -fassociative-math requires -fno-signed-zeros and -fno-trapping-math to take effect; GCC warns "‘-fassociative-math’ disabled; other options take precedence" without them, and the macro __ASSOCIATIVE_MATH__ is only defined when effective. So the combined flags. But is `-freciprocal-math` alone defining __RECIPROCAL_MATH__? Yes. And -funsafe-math-optimizations enables reciprocal? -funsafe-math-optimizations enables -fno-signed-zeros, -fno-trapping-math, -freciprocal-math, -fassociative-math (reciprocal and associative? -funsafe-math-optimizations turns on -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math). So __NO_SIGNED_ZEROS__ and __RECIPROCAL_MATH__ defined. Guard fires. 4.1 measured these. OK.
+
+  **T. test/test_spextractor.py check 21**: fake .d, expects refusal before setup line with SDK set. The setup line check: `setup_line not in log and "[stream]" not in log`. And without: setup line present + "[stream] streaming load failed". Note: with the fake .d (no tdf_bin), the streaming load fails → fallback message logged → then the RESIDENT load (loadExperiment) also fails (no tdf_bin) — the run exits nonzero. assert "[stream] streaming load failed" in log. Verified 24/24 on node.
+
+  Check 19d: `assert "[ms1-prune]" not in log` — for the mzML path. Since the resident pick loop throws before the summary at 4330. But wait — is the [ms1-prune] line also printed in some earlier phase? No. OK.
+
+  **U. The `requireFiniteMs1Mz` in flushMS1_ is called for EVERY MS1 spectrum — including on .d where dnoise emptied a frame** (n==0, loop trivial). Fine.
+
+  **V. Now the subtle identity risk — reordering `cfg` before the dnoise setup**: cfg is now constructed at 3974 and used later at 4127 (loadDIAStreaming) and tile-source branch sets dia_ms2_rt_lo/hi at 4058. Same values as before (construction moved earlier but no reads in between that mutate). loadTofAxis at 3999 — pre-existing order? Pre-fix: dnoise setup block came before cfg construction; loadTofAxis inside dnoise block. Now cfg constructed before dnoise block; nothing else reordered. The axis preflight at 3953-3972 may set tofAxis().ok already. No output effect.
+
+  **W. The log-line change** (setup line) — 19d/21 rely on "MS1 path on the raw frames, before the pick" which remains. Fine.
+
+  **X. IMPORTANT — one thing to check: `DnoiseRun::frame` in the streaming path uses `dn_work.at(omp_get_thread_num())`** — pre-existing. dn_work sized omp_get_max_threads(). OK.
+
+  **Y. `Counts.fid` and add() marking**: In flushMS1_, dn_cnt indexed by batch position i; each frame() sets c.fid. If a frame has n==0, frame() sets c.fid and c.frames=1 → marked. Good. What if two spectra in one batch have the same fid (shouldn't happen)? add() refuses. Good.
+
+  But here's a real edge: **Counts slot with frames==0 skipped** — in flushMS1_, if dnoise->frame threw for spectrum i (captured), pick_err set; after the loop `if (pick_err) std::rethrow_exception(pick_err);` happens BEFORE `dnoise->add(dn_cnt)` (line 2205 before 2206). So partial counts never merged. Good.
+
+  **Z. requireComplete() runs at 4328 — inside the block guarded by what?** Looking at the context: it's inside the block that both paths reach (the `{ ... }` after exp.clear). For the streamed path, exp is empty and this block still runs (ms1_map filled by consumer). Yes — the block starting ~4310 runs unconditionally. OK.
+
+  **AA. What about `dnoise.on` true but input .d loaded via mzPeak-converted... SPEXTRACTOR_MZPEAK_TDF?** Not relevant.
+
+  **BB. Resident path with dnoise on but NOT .d input**: dnoise.on is only set for BRUKER_TDF (else branch logs skip). So resident loop's `dnoise.on &&` guards. mzML: dnoise.on false → dnoise.add(dn_cnt) with empty vector → no-op. requireComplete skipped (dnoise.on false). Good.
+
+  **CC. FrameCoverage::firstMissing iterates frames.size() — sized to max Frames.Id + 1, up to 10M — fine.
+
+  **DD. Now — a potentially REAL defect: `seen.mark` grows seen_ to fid+1. fid validated by frameCheck < frames.size(). OK.
+
+  **EE. The sqlite_master COLLATE NOCASE lookup**: real Bruker table is "DiaFrameMsMsWindows" exactly. A VIEW over it resolves. Attached DBs not used. OK.
+
+  **FF. The PRAGMA table_info(Frames) in loadTdfCalibration** — if Frames is a VIEW, table_info works for views too. OK.
+
+  **GG. What about `loadTdfCalibration` fallback when frames_have_cal false but MzCalibration missing → prepare fails → sqlfail with message "Frames has no MzCalibration column, and MzCalibration cannot be read: no such table". Good.
+
+  **HH. Now, a candidate real bug: in `loadTdfDnoise`, the windows schema check `type IN ('table','view')` — but the subsequent query on a view with INSTEAD OF... fine.
+
+  **II. AccumulationTime REAL rendering and opentims**: opentims reads AccumulationTime how? Via rusqlite as f64 probably (not text)! Wait — the whole premise: "opentims' intensity correction corr = 100/AccumulationTime" — the stage-2 context says opentims does atof on the sqlite TEXT rendering (TimsFrameFromSql computes it with atof). Hmm, actually the premise text says: "opentims-corrected: (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5)" and the finding says "std::atof on AccumulationTime... mirroring opentims' atof". And TdfLoad comment: "as TimsFrameFromSql's atof is under opentims' locale guard". So opentims reads the column as text and atofs it. Both read via their own sqlite3 library (opentims bundles its own sqlite? opentims uses... uncertain). Documented caveat. OK.
+
+  **JJ. One more on parseF64 — "100.042" REAL**: sqlite renders "100.042" — parses → corr < 1 → refused at setup with the new message. Good.
+
+  But here's a subtle one: **REAL 99.958 stored in sqlite is the double nearest to 99.958; rendered with 15 digits "99.958"; parsed back → same double?** 99.958 needs 15 sig digits: "99.958" has 5 sig figs — round-trips trivially. Some values like 99.95799999999999? If Bruker stores such a double, sqlite 15-digit rendering "99.958" parses to nearest(99.958) ≠ stored. Then opentims (atof on the same rendering) gets nearest(99.958) too — same. The tool and opentims both read the RENDERING, so they agree regardless. The only divergence is if the two SQLite libraries render differently (documented).
+
+  **KK. Now decision 11's e2e 19d on a mzML: with dnoise on? dnoise skips non-.d. The check runs default options (dnoise:ms1 default true but input mzML → skipped). Fine.
+
+  **LL. Missing test: decision 6's cluster pin... covered by unit tests + two_rows tdf test.
+
+  **MM. Check: `test_dnoise_ms1.cpp` includes "TdfMzCalibration.h" — in CMake, target_include_directories(test_dnoise_ms1 PRIVATE src) — resolves src/TdfMzCalibration.h. Good. In the deploy script unit build: -I$U/src and -I$U/inc — "TdfMzCalibration.h" resolves via $U/src. Good.
+
+  **NN. `#include <climits>` added to TdfLoad.h for INT_MIN — present.
+
+  **OO. spextractor.cpp `Ms1MzError` uses `std::to_string(s[i].getMZ())` — NaN → "nan" or "-nan"; fine.
+
+  **PP. Wait — check the exception thrown by requireFiniteMs1Mz inside Ms1Prune::batch: batch catches all into err and rethrows — fine (unreachable anyway).
+
+  **QQ. Now hunt for a REAL remaining bug. Let me think about the **stream fallback + requireComplete** more carefully in a failure mode: streaming load fails partway (e.g. corrupt tdf_bin at frame 5000). Some MS1 batches were filtered and merged; marks set. Fallback resets dnoise (marks cleared), loads resident, re-filters, marks again, requireComplete passes. Digests on the cluster gate r2d_fb vs r1d_res — reported passing pre-pass; fix pass says the digest pins NOT yet re-run on the fix binary (4.4). That's a validation gap, explicitly acknowledged. Should I flag it? It's listed in 4.4 as known open — the instructions say re-report only if beyond them. It's the crucial identity evidence, but the equivalence probe substitutes partially. I'll note it as a residual validation gap (not a code defect) — maybe fold into "could not check" or a low finding.
+
+  **RR. The `-ffp-contract=off` tool-wide + GCC pragma interaction**: recoverPoint under GCC is compiled with the pragma attribute optimize("fp-contract=off") — the tool's TU also has -ffp-contract=off flag. Same semantics. Non-inlining is perf only.
+
+  BUT — one subtle thing: `#pragma GCC optimize` can RESET other optimization flags? No — optimize("fp-contract=off") just adds that option. However, known GCC gotcha: functions under `#pragma GCC optimize` are compiled as if with -O0? No, that's a myth; it merges options. But there IS a known issue: `#pragma GCC optimize("fp-contract=off")` — the argument form optimize("fp-contract=off") is treated as -ffp-contract=off. OK.
+
+  **SS. Another candidate: `scanOf` binary search** — verbatim copy. The loop `for (n = asc.size(); n > 1;)` finds last entry <= v... Let me verify against old: identical text. Yes, verbatim.
+
+  **TT. `recoverPoint` passes `im` (float) to scanOf — same as before.
+
+  **UU. `(uint32_t)(r * corr + 0.5) == (uint32_t)v` — v is float; (uint32_t)v for v < 2^24 exact. Same as old.
+
+  **VV. Setup's `reset()` call at 1872 before on=true: clears counts/marks — no effect on fresh object. Harmless.
+
+  **WW. Now `requireComplete` — is it called on the streaming path when `SPEXTRACTOR_LOAD_ONLY` is set? Returns early at 4143 — no requireComplete. Perf probe only. Fine.
+
+  **XX. The tile pass 2**: need to confirm no dnoise wiring. I'll grep the actual file.
+
+  **YY. Potential NEW false refusal: `frameCheck` im_n vs n — `s.getFloatDataArrays()[s.getIMData().first].size()`. Pre-existing semantics.
+
+  **ZZ. `loadTdfDnoise` — the Frames loop reads columns by index from "SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration FROM Frames". If the Frames table LACKS the MzCalibration column that's fine here (not selected). Pre-existing.
+
+  **AAA. Hmm — one possibly significant false-refusal: `int_in(1, INT_MIN, INT_MAX, type)` requires MsMsType stored as INTEGER. Real Bruker tdfs: MsMsType INTEGER. Fine.
+
+  **BBB. The `no_metadata` refusal: "cannot read GlobalMetadata: no such table: GlobalMetadata" — check has(why, "GlobalMetadata") ✓.
+
+  **CCC. Now let me look at `tests/test_sync_cluster_txn.sh` for vacuous checks.
+
+  - ok() uses eval of string; `[ $(records) = 1 ]` — records greps deploys.log.
+  - S9: kill -TERM to pid from owner file. The owner file contains "$S pid $$ date" — sed extracts pid. The txn's $$ is the txn bash pid. Killing it mid-build: make is a child. When txn bash exits 143 → finish → rollback. But make keeps running orphaned? The harness waits: `wait_gone $O/building; sleep 0.5` — building removed at make's end. Then checks tree_is v6 (restored). But make might STILL be writing bin/spextractor after rollback — the check `tree_is` only checks inputs, and `[ ! -e $PROV ] || prov_truthful`. Since the killed build's make finishes writing bin/spextractor possibly AFTER rollback restored inputs — provenance check is the guard: prov absent (parked stale) or truthful. The S9 ok at line 209 passes if no provenance. And make writing bin/spextractor after rollback is exactly the real-world scenario the FAIL-CLOSED message addresses. OK.
+
+  - S5: `grep -rl v7 $N --exclude="*.log" --exclude=libsqlite3.a` — checks no v7 bytes. Note: deploys.log would contain... v6 only since B refused. OK.
+
+  - One vacuous-risk: `wait_for $O/building` — if the build never creates 'building', wait_for times out after 60s and returns false, but the harness doesn't check its return at 180 — then deploy B runs after A finished... then S5's expectations would fail (rcb might be 0 if A done). Actually if A finished before B starts, B commits v7 and S5 checks fail loudly. Not vacuous.
+
+  - `snap()` excludes .deploy.stage.*.log and build_sync logs — because those legitimately change. But it INCLUDES the stage dir itself if left behind — clean() separately checks no stage dirs remain. snap compares mtimes with 1s granularity on macOS (stat -f %Fm seconds). They sleep 1 before snapping in S2. But S4: `S=$(snap)` right after... line 171: S=$(snap) after S3b stuff, then deploy v5 (refused by lock) then compare. If the refusal is fast within the same second as a legit earlier change... mtimes equal anyway since nothing changed. Actually the risk: refusal so fast that a changed file would keep the same mtime second — but nothing should change, so equal snap = pass. If the buggy script DID change something within the same second, mtime granularity could hide it — but shasum of content is in the snapshot too. Content hash would catch content change; mtime changes masked only if content identical — harmless. OK.
+
+  - `install_script` sed replaces /scratch/kohlbach → $R and /ceph/... → $N/ceph. In the script, R, TOOLS, TESTS are the only places with real paths (4.3 claims). Also the heredoc txn.sh contains $R etc. as PARAMETERS (passed as args) — the local script substitutes them into the ssh command line: `bash $STAGE/txn.sh $STAGE $GITREV $R $TOOLS $TESTS` — contains /scratch/kohlbach → replaced. And "run: scripts/apply_openms_patches.sh $OMS" inside txn — $OMS is a var. OK.
+
+  - The harness shim `ssh` runs `bash -c "$*"` — the script's ssh invocation `ssh "$NODE" "rm -rf $STAGE"` (in local EXIT trap) — $* after shift = the command. OK.
+
+  - One issue: the local trap at line 41 uses `ssh` — during harness, shimmed. Fine.
+
+  **DDD. Check `.github/workflows/tests.yml` matrix guard: `if: runner.os != 'Windows'` for negative compile; case on matrix.cc: gcc* and appleclang-arm64; any other cc (clang on Linux?) → error exit. If matrix has clang legs on Linux, the step fails with "no unsafe-flag list" — would break CI. 4.3 says "GCC flag sets; AppleClang arm64 set" — implies matrix.cc only has those. Can't verify; flag as check-if. Hmm. The `*) echo "::error::no unsafe-flag list"; exit 1` — deliberate loud failure. If the matrix includes other compilers (e.g. plain "clang"), CI goes red — but the implementers would have seen it. Assume matrix matches. Low risk.
+
+  **EEE. Now — think hard about NEW FALSE REFUSALS on valid Bruker data.** The most consequential candidate I can construct:
+
+  **AccumulationTime REAL rendering + parseF64 subnormal/domain rule**: parseF64 refuses values whose magnitude is not in [DBL_MIN, DBL_MAX] — e.g. AccumulationTime rendered as "9.9958e-05"? No wait, that's ~1e-4 > DBL_MIN. AccumulationTime is ~100 ms. Never subnormal. OK.
+
+  **A REAL stored as e.g. 0.1 rendering "0.1"** fine.
+
+  **What about AccumulationTime = 100.0 exactly (stored REAL)**: renders "100.0" → at=100 → corr = 1.0 → correctionRefusal: corr >= 1.0 → empty. Accepted. Good (old code: corr > 0.5 accepted too).
+
+  **Accumulator "100" INTEGER → "100" → corr 1.0 ✓.
+
+  **Frames.NumPeaks type**: Bruker stores INTEGER ✓.
+
+  **TimsCalibration C0..C9 read via column_double** — REAL or INTEGER both convert; NULL → 0.0. Pre-existing.
+
+  **What about a TimsCalibration row with Id 0?** int_in(0, 0, ...) allows 0; cal_id.push_back(0); frames referencing 0 → ci found. Fine.
+
+  **A frame with TimsCalibration id present but the row ModelType != 2** → refused (pre-existing).
+
+  **MS2 frames with NumScans > max?** Impossible (max is the MAX).
+
+  **ms1_max_scans sized tims_cal.size() ✓.
+
+  **GG2. The one I want to double-check: `out.meta.max_num_scans` when MAX is NULL (empty Frames) = 0 → then per-row NumScans check `int_in(2, 0, 0, scans)` — no rows anyway → "no Frames rows". ✓
+
+  **HH2. `buildMs1WindowGate` unchanged.
+
+  **II2. Identity of the moved resident dnoise.frame call w.r.t. the PRUNE sample**: The prune samples pre-prune m/z — dnoise selects peaks BEFORE the pick; prune after pick. Order unchanged: dnoise → pick → finite check → prune. In flushMS1_, requireFiniteMs1Mz inserted between pick and prune — no effect on finite inputs. ✓
+
+  **JJ2. `ms1_hist` zeroing**: log-only.
+
+  **KK2. DnoiseRun::frame's early `n == 0` return happens AFTER c.fid = fid — so empty frames are marked ✓ (consistent with requireComplete not requiring them, but marking is harmless).
+
+  **LL2. Wait — here's a possible inconsistency: streaming path delivers EVERY MS1 spectrum including... does the streaming Bruker loader deliver MS1 frames with ZERO peaks? Frames with num_peaks == 0: the loader's MS1 loop — does it skip empty frames? If the loader skips them, they're never marked; requireComplete only requires num_peaks > 0 — consistent. If the loader DELIVERS them (empty spectrum), frame() counts and marks. Either way consistent. ✓
+
+  **MM2. Now the **resident path + frameIdOf on non-.d** — dnoise.on false, skip. ✓
+
+  **NN2. What about dnoise.on true on .d RESIDENT load where loadExperiment delivers MS1 frames sorted differently — frame identity via frameIdOf(nativeID) — pre-existing.
+
+  **OO2. Exception safety of add() throwing mid-merge**: total partially merged (some frames counted, then throw). The run is refused anyway (DnoiseError propagates past fallback). No output. ✓
+
+  **PP2. `requireComplete` exception at 4328 — thrown OUTSIDE any try; propagates up through main_ — TOPP catches as InvalidValue → error exit. Message includes escape hatch. ✓
+
+  **QQ2. One more careful look at **the decision-7b refusal ordering**: it's thrown BEFORE loadTofAxis and BEFORE dnoise.setup. The e2e asserts no setup line, no [stream]. ✓. But note: it throws even when the SDK path points to a VALID SDK that would calibrate fine but with a model the recovery can't invert — correct fail-closed.
+
+  **But**: `cfg.bruker_sdk_path` — Config default is empty string? 4.2 says the tool never sets it. Also — does BrukerTimsFile's AUTO strategy check the ENV var itself, or does openTimsDataHandle? If the loader checks env at a different layer, prediction may mismatch; checkLoader remains the authority during load. The refusal is a pre-check only. Fine.
+
+  **RR2. Hmm — WAIT. A real one: the dnoise setup's SDK refusal happens for ANY .d input with dnoise:ms1 true — including when `SPEXTRACTOR_MZPEAK_TDF` is used... not relevant.
+
+  But here's a scenario: **a user running with the Bruker SDK intentionally (SDK path set) on a .d where the SDK calibrates via the SAME table model**. lastMzCalibration() might return "tdf_table_modeltype1" even under SDK? The setup refuses before the loader runs, based on prediction. The comment acknowledges false-refusal possibility. Fail-closed by design decision. Not a defect given scope.
+
+  **SS2. Now let me look for what stage 2 asked that got DROPPED silently:**
+
+  Verifier for codex#2 also said apply to loadTdfCalibration and loadTdfAxisBounds — done (both updated with prepare checks, DONE checks). loadTdfAxisBounds: prepare checked at 62-63, loop DONE check at 84. But note: the early-break paths (ok=false) skip the DONE check — fine, already failing. Also loadTdfAxisBounds uses std::strtod — locale-sensitive! strtod in a comma locale would parse "99.990834" as 99! Wait — loadTdfAxisBounds' num() uses std::strtod on the GlobalMetadata text. If LC_NUMERIC is de_DE, strtod("99.990834") stops at '.' → parses 99, end != txt+nbytes → "not a finite number" → refused. So it fails closed (refusal), not silent wrongness. Hmm — but that IS a false refusal in a comma locale for the axis bounds. Pre-existing (this code predates the pass; the diff only touched the prepare/DONE checks). And the dnoise gate's parseF64 is locale-independent; the axis bounds use strtod — inconsistent but pre-existing and fail-closed. Worth a low note? The finding kimi#10 was only about AccumulationTime. The verifier didn't ask to fix loadTdfAxisBounds parsing. Pre-existing, fail-closed. I'll mention briefly.
+
+  Verifier codex#6 wanted "For an MS1 frame, NumPeaks > 0 requires NumScans >= 1" ✓ (line 287-288). "Check that MAX(NumScans) is SQLITE_INTEGER (NULL = 0)" ✓.
+
+  Verifier kimi#5 wanted need[ci] computed over msms_type==0 frames ✓; "need[ci]==0: leave im_asc[ci] empty" ✓ (buildScanTable with 0 scans → empty); "Keep the per-point check" ✓; "Log need[]" ✓ scanTables.
+
+  Verifier codex#1 wanted mark/complete/reset in a header struct unit-tested ✓ (FrameCoverage in DnoiseMs1.h, testCoverage).
+
+  Verifier codex#7: free scratch ✓.
+
+  Verifier codex#9: zero ms1Hist_ ✓.
+
+  Verifier codex#8: all five sub-items ✓ (requireFiniteMs1Mz def at 1700, flushMS1_ 2197, resident 4274, catch 4155, prune branch 1773, log suffix dropped 4335-4336 — verify the suffix drop: current text at 4334-4337 shows no bad_mz suffix string ✓, numeric bad_mz kept in the line ✓).
+
+  Verifier codex#12: help text ✓; header comment ✓ (line 97); test rename ✓; gate-side check ✓.
+
+  Verifier kimi#2/codex#11: recover:: factored ✓; sync_cluster.sh:73 -I flag — hmm! The verifier's TEST note said: "One change in sync_cluster.sh:73: add -I/scratch/.../OpenMS/FORMAT so the node test finds the deployed TdfMzCalibration.h." The new script instead builds in a staged layout with $U/inc/OpenMS/FORMAT — better (staged bytes). Deviation is an improvement. ✓
+
+  Verifier codex#3/kimi#3: transactional script ✓ + harness committed ✓ + CI Linux leg ✓.
+
+  Decision 15: comment fixes ✓ (DnoiseMs1.h:25-26, spextractor.cpp:1828, TdfLoad.h:171-178).
+
+  So all 15 decisions appear implemented. Now hunt for DEFECTS introduced:
+
+  **Candidate 1: `frameCheck`'s `frames[fid].num_peaks` is uint32_t; n is Size (size_t). n != num_peaks comparison fine.
+
+  **Candidate 2: In `DnoiseRun::frame`, the frameCheck call: `has_im ? s.getFloatDataArrays()[s.getIMData().first].size() : 0`. getIMData() returns pair — .first index. If containsIMData() true but getIMData().first out of range? Pre-existing pattern.
+
+  **Candidate 3: THE ONE I SHOULD CHECK — `Ms1MzError` derives from Exception::InvalidValue; the constructor signature (file, line, function, message, value). DnoiseError same. requireFiniteMs1Mz passes s.getNativeID() as value ✓.
+
+  **Candidate 4: `String(miss)` etc. fine.
+
+  **Candidate 5: flushMS1_ dnoise->add can now THROW DnoiseError (duplicate). flushMS1_ is also called from consumeSwathSpectrum_ (line 2231) — exception propagates through loader to the catch → rethrown (DnoiseError). ✓ And from finish() at 2249 — called at 4128 inside the try ✓.
+
+  **Candidate 6: The resident pick loop schedule(dynamic, 16) with dn_work.at(omp_get_thread_num()) — dn_work sized max threads ✓.
+
+  **Candidate 7: **A REAL ONE?** — In the resident path, `dnoise.add(dn_cnt)` at 4283: dn_cnt sized exp.size(). For MS2 spectra, Counts{} frames=0 → skipped ✓. For MS1 spectra — EVERY MS1 spectrum gets frame() called (dnoise.on && MSLevel 1) before the IM skip ✓. So every delivered MS1 frame marked. requireComplete then requires all tdf MS1 frames with peaks delivered. Does loadExperiment deliver every MS1 frame of a .d? 4.2 claims yes. If it drops zero-peak MS1 frames, num_peaks==0 → not required ✓. But what if loadExperiment drops MS1 frames WITH peaks in some configs (RT range?)? The resident path is used for full loads only (or fallback). cfg used by loadExperiment? loadExperiment(in, exp, types, log_type_) — no cfg — reads everything. ✓
+
+  **Candidate 8: **Streaming + `SPEXTRACTOR_TILE_RESIDENT=1`**: tile_source false; the .d is streamed via loadDIAStreaming with normal cfg (both MS1 and MS2). requireComplete at 4328 ✓ (streamed=true path reaches the block? yes, block at 4310 runs for both).
+
+  **Candidate 9: What if streaming succeeds and `dnoise.on` but consumer.dnoise was set — yes at 4043.
+
+  **Candidate 10: Now **tile pass 2** — I really should check the actual file to confirm dnoise isn't invoked in pass 2 and requireComplete isn't re-run. Let me grep.
+
+  Also verify there are no OTHER call sites of dnoise.frame or requireComplete.
+
+  **Candidate 11: **Digest identity of moved dnoise.frame in resident loop**: pre-fix, resident MS1 frames WITHOUT IM data were not denoised but ALSO not picked and not added to ms1_map (dispatch skips no-IM). Post-fix identical for those (refused if n>0 — but on accepted inputs, none exist). For frames WITH IM data: denoised identically. The pick order and parallel scheduling unchanged (same loop, same schedule). Output identical. ✓
+
+  **Candidate 12: **`requireFiniteMs1Mz` before/after prune interplay in flushMS1_**: pre-fix, prune kept bad-mz spectra whole (bad_mz++). On accepted inputs (finite), no change. ✓
+
+  **Candidate 13: **2^24 boundary message change**: old code — wait, was there a 2^24 check pre-fix? Old code: v < 16777216.0f required for the search; v >= 2^24 → hits=0 → generic message. New: dedicated intensity_range. Same refusal. ✓
+
+  **Candidate 14: **gcc `optimize` pragma and the enum/template**: recoverPoint is a template — does `#pragma GCC optimize` apply to template functions defined in the region? GCC applies pragma options to functions defined within; template instantiations get the options of the template definition context (optimize attributes are recorded per-function at definition). Generally works. The probe ran g++-16 and g++-13 with exact flags and 0 differences. Trust.
+
+  **Candidate 15: **The known open CHANGELOG inaccuracies** (4.4) — explicitly excluded.
+
+  **Candidate 16: test_tdf_load uses `ALTER TABLE ... DROP COLUMN` (SQLite 3.35+, 2021). CMake find SQLite3 could find an ancient one on some platform — test would fail at fixture creation with fixtureFailed exit 2 — loud. Fine.
+
+  **Candidate 17: **Windows CI**: CMakeLists guards test_tdf_load behind SQLite3_FOUND — on Windows not found → skipped. tests.yml negative-compile step excluded on Windows. test_dnoise_ms1 includes <clocale>, <cstdlib> — fine on MSVC. `0x1.6e4c14p+0f` hex float literals — MSVC C++20 supports hex floats (since VS2017 15.9? Actually MSVC supports hexfloat literals in C++17 mode? Hex floating literals are C++17; MSVC supports them from VS2017 15.7-ish with /std:c++17). Pre-existing style? The hex goldens are NEW in this pass (im_gold arrays use hex float literals). If the Windows CI leg compiles test_dnoise_ms1 with an older MSVC... OpenMS CI uses recent VS. CMakeLists presumably sets cxx_std_20. Risky but low. Actually — was test_dnoise_ms1 previously using hex floats? "%a" printing existed. Hex literals are new. VS2019 16.x+ handles them. Low.
+
+  Also `std::nextafter(v, 10.0f)` fine.
+
+  **Candidate 18: **`printf("%a")` in tests — MSVC supports %a since VS2015. ✓
+
+  **Candidate 19: One more look at `loadTdfDnoise` — **`cell(0)` in the MAX check**: after sqlite3_step returned ROW, cell(0) reads column — ✓.
+
+  **Candidate 20: `int_in` lo/hi as long long; INT_MIN from <climits> ✓.
+
+  **Candidate 21: **`out.ms1_max_scans.assign(...)` at 274 placed AFTER the TimsCalibration loop and the empty check ✓ — but BEFORE the Frames loop ✓. If the Frames prepare fails, sqlfail returns — out partially filled but function returns false; caller refuses. ✓
+
+  **Candidate 22: Duplicate Frames.Id rows**: sqlite PRIMARY KEY prevents in real tdfs; if duplicated (no PK in a weird file), later overwrites f — and ms1_max_scans max is monotone ✓. Pre-existing.
+
+  **Candidate 23: **`firstMissing` returns size_t, compared `if (const size_t miss = ...)` — id 0 means none; frame ids start at 1 ✓.
+
+  **Candidate 24: Now, the **`Counts` struct adding `fid`** — `total` also has fid field; total.fid never used — harmless. reset() zeroes ✓.
+
+  **Candidate 25: **`dnoise.add(dn_cnt)` in flushMS1_ — dn_cnt[(size_t)i] per batch position; but `dn_work` indexed by thread. ✓ pre-existing.
+
+  **Candidate 26: **`requireComplete` throws DnoiseError with value "frame=N" ✓.
+
+  **Candidate 27: Let me reconsider **decision 4's NULL window refusal**: `WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL` — rows with NULL IsolationMz are silently skipped (as dnoise does), but NULL ScanNumBegin now refused. Would a real Bruker tdf have NULL ScanNumBegin? No. ✓
+
+  **Candidate 28: **sqlite_master check on case**: `name = 'DiaFrameMsMsWindows' COLLATE NOCASE` ✓ tested with lowercase table.
+
+  **Candidate 29: A VIEW named diaframemsmswindows over a table — works ✓.
+
+  **Candidate 30: What about a tdf where DiaFrameMsMsWindows exists but the SELECT's columns are in a VIEW with different names → prepare fails → sqlfail → refused. Correct per decision (missing column refuses).
+
+  **Candidate 31: Hmm — **the `have_windows` detection with an EMPTY sqlite_master row set**: DONE → false → no gate ✓ tested (absent).
+
+  **Candidate 32: **What if sqlite_master itself is corrupted** → step returns error → sqlfail ✓.
+
+  Now let me also double-check **the e2e total count**: `total = 6 + 2 + 2 + 1*10? Let me count: 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2 = 24. ✓ (was 22, +19d +21 = 24 ✓; README/CONTRIBUTING updated ✓).
+
+  **Negative control** in section 5: pre-fix build fails exactly 19d and 21 — confirms tests bite. ✓
+
+  Now the remaining verification I should do on the actual repo files (since instructed to read them):
+  1. Confirm no other dnoise.frame/requireComplete call sites (esp. tile pass 2).
+  2. Check the region around lines 4415+ (tile loop) for dnoise usage.
+  3. Confirm requireComplete placement is on both paths (already seen at 4328).
+  4. Check that `Ms1MzError` catch exists in the stream fallback (seen 4155).
+  5. Check whether `loadTofAxis` uses loadTdfAxisBounds/loadTdfCalibration (both hardened) — yes presumably.
+  6. Check spextractor.cpp for any other `dnoise.` references.
+  7. Check the `#include` of DnoiseMs1.h from spextractor.cpp — pre-existing.
+
+  Also check whether the resident loop's move of dnoise.frame before containsIMData affects the `IMFormat imf = determineIMFormat(exp, 1)` check at 4227 — runs before the pick loop; unchanged.
+
+  One more potential defect to check in the real file: **the pick_err capture in flushMS1_ vs dnoise->add ordering** — seen ✓.
+
+  And **the `dn_loader_checked_` flag**: if the first consumeMS1Spectrum_ throws DnoiseError from checkLoader (SDK used despite setup refusal impossible, but model mismatch possible), it propagates as DnoiseError → rethrown past fallback ✓. But wait — consumeMS1Spectrum_ is called by the loader; does the loader wrap consumer calls in try/catch and convert exceptions? The doc says "Consumer exceptions reach this catch unwrapped: BrukerTimsFile.cpp:1614 calls consumeSpectrum outside any try" ✓.
+
+  Also check `frameIdOf` — pre-existing.
+
+  Let me now think about whether **anything in decision 6's implementation breaks the TNBC case**: TNBC single row, 918 scans uniform → need = 918 = old behavior (global max 918). ✓ D same (944). So per-row tables equal old ones on both pins ✓ (4.2 states).
+
+  **Subtle FP identity question on buildScanTable refactor**: old setup loop computed into `std::vector<float> v(n_scans)` then reversed; new buildScanTable does `v.assign(n_scans, 0.0f)` then same arithmetic, `falls` computed identically. One difference: old code returned refusal string via `return "..."` from setup; new returns from buildScanTable — same string? Old: "the TimsCalibration model does not separate every scan by more than " + std::to_string(4.0f * kImTol) + " 1/K0". New: identical expression. to_string(4e-6f) → "0.000004". Same.
+
+  The arithmetic expression in buildScanTable vs old setup: old `double V = c[2] + ((c[3] - c[2]) / c[1]) * ((double)s - c[4] - c[0]);` — new identical ✓.
+
+  **Now, an important question: is buildScanTable compiled in the contraction-off region in the TEST too?** test_dnoise_ms1 compiles with -ffp-contract=off flag (CMake SPX_NO_FP_CONTRACT) ✓ and the header pragma covers it.
+
+  **loaderIm in the test** is compiled under GCC push_options optimize fp-contract=off in the test file ✓ (lines added around it).
+
+  OK — now potential issue with **the test's exhaustive intensity loop at corr 100/99.958**: `for (u32 r = 0;; r += r < 2^20 ? 1 : 7)` breaks when v >= 2^24. At corr slightly >1, r up to ~16.7M/1.00042 ≈ 16.77M, v < 2^24 always until raw 2^24/corr... v = (uint32)(r*corr + 0.5) — at r = 16,771,000ish v approaches 16777216. Loop breaks. raws counted > 3M ✓ (2^20 + (16.7M-2^20)/7 ≈ 1M + 2.2M = 3.3M ✓).
+
+  Runtime: TOF loops 634k + 400k bins × 3 recoverPoint calls each with scanOf (binary search ~10 steps) — fine at O2; at O0 in CI? tests.yml builds with what flags? CMakeLists probably no -O flag → -O0. Hmm, the test does ~3.1M recoverPoint calls for TOF + 3.3M×2 intensity + premise 3×2^20... At -O0 each recoverPoint maybe 200ns-1µs → could be tens of seconds to minutes. The verifier said "stride 7 above 2^20 if CI runs -O0". The intensity exhaustive below 2^20 is per-file ~1M iterations plus premise 3M + TOF 3M... ~10M recoverPoint calls at -O0. Each call: mzToTof (a few flops), scanOf binary search over 944 floats (~10 iters), intensity loop ~5 iterations with double mul. ~1-2 µs at -O0 → 10-20 s. Acceptable. Release mode in tests.yml (`ctest -C Release`)? It configures CMAKE_BUILD_TYPE presumably. Fine.
+
+  Now — what about **CMakeLists: `find_package(SQLite3 QUIET)` at top level before `if(SPEXTRACTOR_TESTS_ONLY)`** — wait, the diff shows the tdf_load block inserted after test_dnoise_ms1's add_test and BEFORE `if(SPEXTRACTOR_TESTS_ONLY)`. In TESTS_ONLY mode, is test_dnoise_ms1 outside the guard? The diff context: `target_include_directories(test_dnoise_ms1 PRIVATE src)` etc. then the new block then `if(SPEXTRACTOR_TESTS_ONLY)`. So yes both tests always defined. In the full OpenMS-integrated build, does this CMakeLists get used standalone? Yes ("spextractor/build"). ✓
+
+  But — **`find_package(SQLite3 QUIET)` in the full tool build environment**: the OpenMS build defines its own SQLite? CMake's FindSQLite3 searches system paths; on the cluster node "No system sqlite3.h" (4.3) → SQLite3_FOUND false → test_tdf_load not built in the local build; the DEPLOY script handles it separately with the bundled SQLite. And build.yml CI runners have system sqlite3 (ubuntu/macos) → found ✓. Windows → not found → skipped ✓ consistent with README claim.
+
+  One more: **CMake `SQLite::SQLite3` imported target requires CMake ≥ 3.14** ✓.
+
+  Now let me also sanity check the **harness's `set_version` git commit of scripts dir**: `git -C $D add src tests test bench scripts` ✓.
+
+  And **deploy() runs `bash scripts/sync_cluster.sh fakenode "$@"`** — NODE=fakenode (unused by shims beyond parsing) ✓.
+
+  **The harness S12b: `--allow-dirty` as $2 ✓.
+
+  Now — let me decide what to verify in the actual repo files. The instruction: read the six files. I'll read the key regions of spextractor.cpp not inlined (tile pass 2, any other dnoise references, the includes), and skim DnoiseMs1.h/TdfLoad.h to confirm inline bytes match (spot check), plus the tests. Since "the inlined text below is the same bytes", spot checks suffice. Grep for dnoise usage sites.
+
+  Let me plan the actual work:
+  1. Grep spextractor.cpp for `dnoise` (all references) to enumerate call sites and confirm none in tile pass 2.
+  2. Read the tile loop region (~4415-4700?) to check pass-2 loading.
+  3. Spot-check that current files match the diffs (e.g., read a few regions).
+  4. Check requireComplete is called once, after MS1 load, both paths.
+
+  Also verify: is there any OTHER caller of Ms1Prune::batch? (flushMS1_ and resident — yes both shown.)
+
+  Also: check `frameIdOf` behavior on "frame=..." native ids — pre-existing.
+
+  Also check whether `dnoise.requireComplete()` might be skipped when `ms1_map.empty()` early-return at 4340 — that returns INCOMPATIBLE_INPUT_DATA anyway (an error exit), fine. But note: requireComplete runs BEFORE the ms1_map.empty() check (4328 before 4340) ✓.
+
+  Also `SPEXTRACTOR_LOAD_ONLY` early return skips requireComplete — perf probe only ✓.
+
+  One more thing to check: **does the streaming path in tile mode create the consumer with dnoise BEFORE pass 1 only?** and pass 2 (tile loop) — need to read. Let me grep.
+
+  Additionally, verify `PickCompactConsumer` pass-2 usage: "tile pass 2 has load_ms1 false and no dnoise pointer" per 4.2. If pass 2 used a consumer with dnoise pointer set and load_ms1 false, no MS1 delivered → no frame() calls → fine anyway. But if pass 2 consumer HAD dnoise set and delivered MS2 only, add() never called for MS2? flush_() doesn't call dnoise. ✓
+
+  Also confirm there's no second `dnoise.add` call in the tile loop.
+
+  Let me also think about a **deeper adversarial point on FrameCoverage + the streaming batch merge order**: add() is called per flushMS1_ batch. Marks set incrementally. If a LATER batch throws DnoiseError (a real refusal), the run is refused — fine. If a later batch throws a NON-dnoise error (e.g. Ms1MzError → rethrown; picker error → generic catch → fallback). On fallback, reset() clears marks ✓.
+
+  **A potential missed path**: What if the streaming load throws BETWEEN batches in consumeSwathSpectrum_ (MS2 processing) after many MS1 batches merged → fallback → reset ✓.
+
+  **What if loadDIAStreaming fails after consumer.finish() succeeded (streamed=true set)?** streamed=true is set right after finish; no code between that can throw except the hist logging... 4130-4151: after `streamed = true`, hist logging and writeLogInfo — could writeLogInfo throw? Unlikely. Then the [frames] invariant block can throw FrameTableError → structural, no fallback ✓.
+
+  Now, **is there an output-identity risk from `for (auto& v : ms1Hist_()) v.store(0)` in the fallback?** Only affects the [ms1-hist] log line. Not digest. ✓
+
+  Now let me also think about **`Ms1Prune::frame`'s `if (!finite) requireFiniteMs1Mz(s);`** — after this call (which throws if any non-finite), execution continues to `c.kept += kept;` — but wait: if !finite and requireFiniteMs1Mz throws — always throws when !finite? requireFiniteMs1Mz loops and throws on the FIRST non-finite. `finite` was accumulated as `finite = finite && std::isfinite(x)` over all peaks. So !finite ⟺ some non-finite exists ⟺ requireFiniteMs1Mz throws. ✓ never returns.
+
+  Now the **`bad_mz` field**: c.bad_mz no longer incremented anywhere → always 0 ✓ (the `++c.bad_mz` was replaced). Check: line 1811 still merges total.bad_mz ✓.
+
+  Now **PRUNE_RE and check 19** — bad_mz field in log line ✓ ("bad_mz 0").
+
+  OK. Now also consider: **`s.getNativeID()` in requireFiniteMs1Mz message as the InvalidValue "value" param** — fine.
+
+  Let me now also attack **decision 2's CI negative compile for `-fassociative-math+-fno-signed-zeros+-fno-trapping-math`**: does GCC define __ASSOCIATIVE_MATH__ then? GCC docs: __ASSOCIATIVE_MATH__? Hmm — actually GCC's macro is `__ASSOCIATIVE_MATH__`? Let me think. GCC predefines: __FAST_MATH__, __FINITE_MATH_ONLY__, __RECIPROCAL_MATH__, __NO_SIGNED_ZEROS__, __NO_TRAPPING_MATH__, __ASSOCIATIVE_MATH__? I believe GCC defines `__ASSOCIATIVE_MATH__` when -fassociative-math is in effect. Yes (it's in the family: __RECIPROCAL_MATH__, __NO_SIGNED_ZEROS__, __NO_TRAPPING_MATH__, __ASSOCIATIVE_MATH__, __FINITE_MATH_ONLY__, __FAST_MATH__). And 4.1 measured g++-16 refusing for -fassociative-math — so confirmed empirically by the implementers.
+
+  Also the negative compile uses `-fsyntax-only` — macros are defined regardless. ✓
+
+  Now **clang arm64 `-ffinite-math-only`**: clang defines __FINITE_MATH_ONLY__=1 ✓.
+
+  OK, now also **check 21's env stripping**: pops SPEXTRACTOR_MZPEAK_TDF and SPEXTRACTOR_TILE_RESIDENT — so the fake .d goes the streaming tile path → "[stream] streaming load failed" expected (no tdf_bin → loadDIAStreaming fails). Then fallback: loadExperiment fails too → nonzero ✓. And with SDK path: dnoise setup refuses BEFORE the stream attempt → no "[stream]" ✓.
+
+  But wait — check 21 second arm asserts "[stream] streaming load failed" — with `expect_fail=True`. On the pre-fix build, the negative control says the setup line printed then "[stream] streaming load failed (FileNotReadable)" — meaning even pre-fix the no-SDK arm would pass. The SDK arm is what bites. ✓
+
+  Now — **one genuine concern**: check 21 first arm runs with OPENMS_BRUKER_SDK_PATH=/nonexistent and expects "dnoise:ms1" and "Bruker SDK" in the log and exit nonzero. The refusal message says "...the loader calibrates m/z through the Bruker SDK: unset OPENMS_BRUKER_SDK_PATH to denoise. -dnoise:ms1 false runs without MS1 denoising." wrapped by refuse() as "dnoise:ms1 " + why + " -dnoise:ms1 false runs..." — contains "dnoise:ms1" ✓ "Bruker SDK" ✓.
+
+  Exit code: InvalidParameter → exit 6 presumably ✓ (4.2 measured exit 6).
+
+  Now, let me also examine: **is the SDK refusal bypassed when dnoise:ms1 true but input is NOT .d?** The else-if chain: skip message for non-.d ✓.
+
+  **Is it bypassed for .d when `trace:native_ms1_neighbors > 0`?** That refusal comes first ✓ both refusals.
+
+  Now let me think about whether the **`cfg` move broke the axis preflight** at 3953-3972: it references loadTofAxis — unchanged. ✓
+
+  Alright — now one more deep look at **TdfLoad.h `loadTdfDnoise` AccumulationTime TEXT rendering of a REAL with COLUMN AFFINITY**: Frames.AccumulationTime declared REAL in real tdfs; values stored REAL. column_text converts using the connection's SQLite version. Both the tool and opentims read via their own sqlite. Caveat documented. Also: could Bruker store it as INTEGER (e.g. 100)? Rendering "100" → fine.
+
+  Hmm — WAIT, actually there's a subtle one: opentims' TimsFrameFromSql — does it read AccumulationTime via `column_text`+atof or via `column_double`? The premise says atof of sqlite's text. If actually opentims used rusqlite `row.get::<_, f64>()` (column_double), then the correction would be 100.0/stored_double, and the tool's text round-trip could differ by an ulp from the stored double for values that don't round-trip at 15 digits! The comment says "as TimsFrameFromSql's atof is under opentims' locale guard" — asserting atof. The stage-1/2 reviewers verified this against opentims.cpp:74. I'll trust the premise (it was verified in earlier stages).
+
+  Given the premise, the few-ulp concern is between the two SQLite versions' renderings only — documented and brute-forced.
+
+  Now, **the `scanOf` tolerance check and buildScanTable separation**: unchanged.
+
+  Let me now also consider **ODR**: recover:: functions are `inline` in a header included by spextractor.cpp, TdfLoad.h (which includes DnoiseMs1.h), test_dnoise_ms1.cpp, test_tdf_load.cpp. Inline → OK. `inline constexpr` ✓. FrameCoverage class with member functions defined in-class → implicitly inline ✓. Templates ✓.
+
+  **Missing includes**: DnoiseMs1.h uses std::ostringstream (already <sstream>), std::locale (<locale> included? yes line 65), std::array ✓, std::reverse (<algorithm>) ✓, std::nearbyint (<cmath>) ✓, uint8_t ✓. TdfLoad.h adds <algorithm> (std::max) ✓, <climits> ✓.
+
+  **test_dnoise_ms1.cpp**: includes TdfMzCalibration.h — uses spextractor::TdfMzCalibration with frameFactor, tofToMz, mzToTof — exist presumably. Uses `std::setlocale` <clocale> ✓, `std::strtod` <cstdlib> ✓ (added).
+
+  **Unused-variable warnings under -Werror**: CMakeLists compiles tests with what warnings? Not shown. In test_tdf_load.cpp, `(void)corr;` present ✓. In testRecover, variables used. `struct Row` used. OK.
+
+  One possible -Wunused issue: in test_tdf_load.cpp testFrames, `f2` used ✓.
+
+  Now — **the resident loop's requireFiniteMs1Mz placement**: AFTER ensureIMArrayName, MSLevel 1 only, and AFTER pick. But note it's inside `if (!s.containsIMData()) continue;` — so only IM-carrying MS1. flushMS1_ checks EVERY buffered MS1 (all have IM from the streaming loader). Consistent enough: both check the picked MS1 spectra that enter the map. But subtle difference: resident path MS1 WITHOUT IM never checked — but also never picked nor used. ✓
+
+  Now, let me actually do the file reading. I'll:
+  - Grep spextractor.cpp for `dnoise\.|dnoise->|requireComplete|requireFiniteMs1Mz|Ms1MzError` to enumerate.
+  - Read the tile loop region for pass-2 consumer setup.
+  - Spot-read tests/test_dnoise_ms1.cpp new test region to confirm it matches inline (trust).
+  - Read scripts/sync_cluster.sh? Inline says same bytes; trust but spot check.
+
+  Let me be efficient: delegate? The instructions say answer from this document; reading is allowed. I'll do targeted greps myself — cheap.
+
+  Actually the prompt says "Do not run any shell command" — Grep/Read tools are fine.
+
+  Let me now think about what findings to report. So far I have mostly "clean". Need to dig harder for real defects. Let me re-scan the diffs with fresh eyes for bugs.
+
+  **Re-scan DnoiseMs1.h recover::**
+
+  1. `opentimsCorrection` — takes `const std::string& text`; TdfLoad passes a std::string built from sqlite text with embedded length (could contain NUL? A TEXT cell with embedded NUL — parseF64 would see it as non-digit char → refuse ✓ fail-closed).
+
+  2. `correctionRefusal` — `100.0 / corr` printed twice for the AccumulationTime; for corr == 0? corr comes from opentimsCorrection which requires at > 0 finite; corr = 100/at could be... at huge (1e300) → corr = 1e-298, nonzero. at = DBL_MIN → corr = 100/2.2e-308 = 4.5e310 → inf! Hmm: at = 1e-300 → corr = 1e302 fine. at = DBL_MIN ≈ 2.2e-308 → 100/2.2e-308 ≈ 4.5e307 — fine, no overflow. at min positive normal gives corr max ~4.5e307 < DBL_MAX. So corr finite always. corr could be inf only if at subnormal — refused by parseF64. ✓ And corr >= 1e6 refused at setup. But note correctionRefusal is only called for MS1 frames in setup; frame() uses fr.corr for the search bounds; corr huge (1e6..4.5e307) is refused at setup for MS1 frames ✓. For MS2 frames corr unused ✓.
+
+  Wait — actually setup's correctionRefusal loop covers all MS1 frames (msms_type == 0) including num_peaks==0 ones ✓.
+
+  3. `buildScanTable` — `v.assign(n_scans, 0.0f)` — n_scans from ms1_max_scans ≤ 1e6 ✓ (NumScans ≤ max_num_scans ≤ 1e6). Memory 4 MB max ✓.
+
+  `(double)s - c[4] - c[0]` ✓ same as loader formula.
+
+  4. `scanOf` — binary search: `if (b[h] <= v) b += h; n -= h;` — standard branchless lower-bound-ish; finds last entry ≤ v. For v < asc[0], returns index 0 then neighbor compare, tolerance check ✓ same as before.
+
+  Note: NaN v: `b[h] <= v` false always → b stays asc.data(), n reduces to 1 → i=0; neighbor check: fabs(asc[1] - NaN) < fabs(asc[0] - NaN) → NaN comparisons false → no ++i; `fabs(asc[0]-NaN) <= kImTol` false → -1 ✓. Same as old (verbatim).
+
+  5. `recoverPoint` — one NEW behavior vs old: NONE, actually. Wait — old code computed `const double t = ...` and the refusal message used t. New stores into out-param t ✓.
+
+  `bin <= 4294967295.0` ✓ same.
+
+  Intensity loop bounds: `std::max(0.0, std::floor((v - 0.5) / corr) - 1.0)` — v float promoted to double ✓ same as old.
+
+  Hmm, one difference: old code declared `uint32_t raw = 0; int hits = 0;` and assigned k.raw[i] = raw only on success; new uses out-params tof/scan/raw written only on Refusal::none — BUT k.tof[i], k.scan[i], k.raw[i] are passed by reference and written at the end only. On refusal they're unwritten — same as old (old threw before writing? No — old wrote k.tof[i] etc. after the hits check only). ✓ Same.
+
+  BUT WAIT — one real difference: `hits = 0;` at the top, and `hits = n` AFTER the loop. In old code the message used `hits` — same values.
+
+  And `t` is written even on Refusal::tof (used in the message) ✓; on Refusal::scan, t holds the value but the scan message doesn't use it ✓; hits is 0 until intensity — message for intensity uses hits ✓.
+
+  6. `frameCheck` — `fid >= frames.size()` — frames.size() size_t, fid uint32 ✓.
+
+  7. `FrameCoverage::mark` — grows vector; from add() serial ✓.
+
+  **Re-scan TdfLoad.h**
+
+  - `is_cal` lambda: ASCII case-insensitive compare of column name to "mzcalibration" ✓. But PRAGMA table_info column name is in column 1 ✓ (cid, name, type, notnull, dflt, pk).
+
+  - `frames_have_cal` — if Frames table doesn't exist, PRAGMA table_info(Frames) returns NO ROWS (not an error!) → frames_have_cal = false → fallback branch: SELECT Id FROM MzCalibration — if MzCalibration exists with 1 row → proceeds → then SELECT ... FROM Frames fails at prepare → sqlfail "cannot read Frames.T1". ✓ fail-closed.
+
+  - loadTdfCalibration: `cal_id = sqlite3_column_int64(st, 0)` in DISTINCT loop — NULL MzCalibration values: column_int64(NULL) = 0; if some frames have NULL MzCalibration and others 1 → ncal = 2 → refused. Pre-existing semantics? Old code identical (DISTINCT with column_int64). ✓
+
+  - The `SELECT Id, T1 FROM Frames` loop checks `id < 0 || id > 10000000` — hmm, loadTdfDnoise requires id ≥ 1 but loadTdfCalibration allows id = 0. Pre-existing inconsistency, harmless (t1_by_frame[0] sentinel).
+
+  - WAIT — a subtle one in loadTdfCalibration: the DISTINCT loop counts rows but a corrupt mid-read now refuses ✓. But `ncal` counts ROWS of DISTINCT — if MzCalibration column contains only NULLs → one row, cal_id = 0 → SELECT MzCalibration WHERE Id = 0 → DONE → "no MzCalibration row with Id 0" ✓ fail-closed.
+
+  - loadTdfDnoise: the TimsCalibration loop reads `sqlite3_column_int(st, 1) != 2` — ModelType NULL → 0 → refused ✓ (message "ModelType 0"). Hmm, the message prints the int not the cell — fine.
+
+  - C0..C9 via column_double — TEXT values convertible? column_double on TEXT '234.09' converts; on 'abc' → 0.0 silently. Pre-existing (unchanged). Could silently misread a weird file — but then buildScanTable likely refuses (separation) or the loader's own read... the loader reads the same. Pre-existing; not in scope.
+
+  - The Frames loop `int_in(0, 1, 10000000, id)` — loadTdfCalibration allows 10M too ✓ consistent.
+
+  - **`out.frames.resize((size_t)id + 1)`** — up to 10M+1 × sizeof(Frame) (int+2×u32+double+u32 = 24 B → 240 MB for a pathological id=10^7). Pre-existing (same resize). Hmm — memory DoS on malformed file, pre-existing pattern; the cap 10M existed. Skip.
+
+  - **ms1_max_scans indexed by ci** ✓ ci < cal_id.size() = tims_cal.size() ✓.
+
+  **Re-scan spextractor.cpp changed regions**
+
+  - 1699: Ms1MzError ✓.
+  - 1773: prune branch ✓.
+  - 1836: Counts with fid ✓.
+  - 1858-1860: `for ... if (msms_type == 0) if (string r = correctionRefusal(...); !r.empty()) return r;` ✓.
+  - 1863-1871: per-row tables ✓.
+  - 1872: reset() — clears counts at setup. Fine.
+  - 1902-1910: frameCheck switch. `default:` catches Refusal::im only (frame, peaks, none handled) ✓.
+  - 1912: `++c.frames; c.raw += n; c.fid = fid;` ✓.
+  - 1924: recoverPoint switch — `default:` for Refusal::intensity ✓. All enum values handled? none/tof/scan/intensity_range/default(intensity). Missing explicit case for... frame/peaks/im can't be returned by recoverPoint ✓.
+  - 1951-1960: add() ✓.
+  - 1964-1969: requireComplete ✓.
+  - 1973: reset ✓.
+  - 2162: first-frame checkLoader ✓.
+  - 2197: requireFiniteMs1Mz in flushMS1_ ✓ — inside the try, caught, rethrown after loop ✓.
+  - 2206: add after pick_err check ✓.
+  - 2302: dn_loader_checked_ ✓.
+  - 3973-3976: cfg moved ✓.
+  - 3993-3997: SDK refusal ✓.
+  - 4015-4019: setup + log line ✓.
+  - 4155: Ms1MzError rethrow ✓.
+  - 4204-4205: hist zero + dnoise.reset ✓.
+  - 4270: frame before IM skip ✓.
+  - 4274: requireFiniteMs1Mz resident ✓.
+  - 4286: free scratch ✓.
+  - 4328-4329: requireComplete + summary ✓.
+
+  Now — potential issue at **4270**: `dnoise.frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i])` — dn_cnt sized exp.size() ✓ i < exp.size() ✓.
+
+  **dn_work.at(omp_get_thread_num())** — omp_get_thread_num < omp_get_max_threads ✓ (dn_work sized max(1, max_threads)). Note: if nested parallelism changed thread count... pre-existing pattern.
+
+  Now the parts I haven't seen: tile pass 2. Let me grep the file. Also confirm the inline regions match the actual current file (spot check) and look at tests.
+
+  Also — **a thought on decision 11 and the STREAMING mzPeak path**: mzPeak streaming also uses flushMS1_? loadMzPeakStreaming(in, consumer, ...) — the consumer's consumeMS1Spectrum_ is used by the mzPeak reader too? If so, requireFiniteMs1Mz applies there — and the stream fallback catch covers it ✓. dnoise off for mzPeak ✓ (dnoise.on only for BRUKER_TDF input... wait: `FileHandler::getTypeByFileName(in) != FileTypes::BRUKER_TDF` → skip message. For mzPeak, dnoise not set up ✓).
+
+  Now let me think about whether **the first-frame checkLoader could FALSELY refuse** — BrukerTimsFile::lastMzCalibration() is a static set by the last loader instance. With dnoise on and .d input, the loader is BrukerTimsFile ✓.
+
+  OK. Now — let me ALSO reconsider one potential false-refusal in decision 5 that the verifier actually flagged and the fix may have overshot: **`NumScans` must be ≤ max_num_scans where max = MAX(NumScans)** — trivially true for stored INTEGERs... UNLESS MAX computed over the same column disagrees due to type mixing, but then refused anyway. Fine.
+
+  **MsMsType range [INT_MIN, INT_MAX]** — any 64-bit int outside → refused. Real values 0/8/9 ✓.
+
+  Now **the one thing I haven't checked: `TdfDnoiseInputs::Frame.msms_type` int vs the frameCheck template requiring `msms_type != 0`** ✓.
+
+  Let me now also look at the **fake .d fixture in test 21** for whether it actually exercises decision 6's new log ("scan tables per row over its MS1 frames' scans: 944"): 4.2 captured the node log ✓.
+
+  Alright, time to check the actual repo for the unseen regions. Let me grep.
+
+  Also I want to double check one thing in the ACTUAL test file: the `synth` function's mzML m/z encoding claim (19d relies on float64) — check synth packs '<d'. The diff comment says "(19c decodes '<d')". I'll trust but could grep 'prune_extra' and synth.
+
+  Also check the `run()` helper signature accepts env — diff shows env= used, and check 20/21 use it; run() already had env param presumably (line 182 context shows `def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):` — yes in the diff context ✓.
+
+  Now, **the harness's `set_flags` writes flags.make with CXX_FLAGS = -std=c++17 -O0** — the fake unit tests compile with -std=c++17 while the real ones need C++20? The FAKE tests are trivial C++ (strcmp) — fine.
+
+  **One harness nit**: `printf 'CXX_INCLUDES = -I%s/src/openms/extern/SQLiteCpp/include %s-I%s/src/openms/include -isystem %s/contrib/include\n'` — SQ is $O/src/openms/extern/SQLiteCpp/sqlite3 but the include dir is .../SQLiteCpp/include — mismatch! sq="-I$SQ" where SQ=$O/src/openms/extern/SQLiteCpp/sqlite3. The first CXX_INCLUDES entry is -I$O/src/openms/extern/SQLiteCpp/include (no sqlite3.h there — nothing created at that path), the second is the sq entry -I$SQ where sqlite3.h WAS created ($SQ/sqlite3.h at line 71). So the loop finds sqlite3.h in $SQ (second matching dir). OK works. The comment in 4.3 said "the first sqlite3.h in the tool's CXX_INCLUDES" — here the include dir listed first lacks it, second has it. Fine.
+
+  **Real node**: CXX_INCLUDES has OpenMS's extern/SQLiteCpp/sqlite3 (3.49.2) ✓.
+
+  Now, is there anything about **`sha256sum -c --quiet SHA256SUMS`** — `--quiet` suppresses OK output; exit code on failure ✓. Available in coreutils ≥ 8.25ish. Node Linux ✓.
+
+  **Local side uses `shasum -a 256`** (macOS perl shasum) to WRITE the sums, node uses sha256sum -c to verify — formats compatible ✓ (shasum output "hash  filename").
+
+  **The sed 's#  .*/#  #'** turns "hash  src/spextractor.cpp" into "hash  spextractor.cpp" ✓ basename only (no dirs in staged names) ✓ (collision check ensures uniqueness).
+
+  **`awk -v f="$f" '$2 == f {print $1}' SHA256SUMS`** ✓.
+
+  Now — **concurrent deploy within the SAME stage window**: lock prevents two txn.sh; but two sync_cluster.sh instances both create stages and upload BEFORE the lock — fine (stage dirs private). B's txn refuses at mkdir LOCK ✓ S5.
+
+  **Stale lock**: if a deploy is SIGKILLed, $R/.deploy.lock remains; future deploys refuse with owner info. No stale-lock recovery (no age check). Pre-existing design (old script had same mkdir lock without stale handling). Worth a low finding? The old script had the same. Not a regression. Maybe mention as pre-existing.
+
+  **SIGKILL mid-promote**: finish can't run; tree left with some inputs new, some old, provenance moved away to $S/prov.prev inside the stage which remains on disk (rm -rf $S never ran). Lock remains → next deploy refuses loudly. Fail-closed ✓ (no silent bad state; provenance absent). Actually provenance: prov moved to stage → $PROV missing → next deploy... the deploy doesn't check for missing provenance, but the lock blocks. Manual recovery needed. Acceptable.
+
+  **Now let me think again about a possible OUTPUT-IDENTITY break I might have missed: the setup log line change** — log only ✓.
+
+  **The `String(tdf.meta.max_num_scans)` etc. — log only.
+
+  **decision 15 comment-only ✓.
+
+  Now — think about whether **requireComplete can FALSELY refuse a VALID run**:
+  - Streaming tile pass 1: does the .d loader deliver EVERY MS1 frame including those with peaks? 4.2 claims yes when load_ms1 set. The pin datasets will confirm when run (not yet run — 4.4).
+  - What about MS1 frames that the loader SKIPS because they have zero raw peaks? num_peaks from sqlite Frames.NumPeaks counts raw peaks; the loader skips frames with 0 raw peaks → num_peaks==0 → not required ✓.
+  - What if Frames.NumPeaks > 0 but the loader delivers a frame with FEWER points (corrupt blob)? frame() refuses (peaks mismatch) ✓.
+  - What if the loader delivers an MS1 frame under a native ID frameIdOf can't parse → fid 0 → refused ✓.
+
+  Risk: the loader's MS1 delivery might skip frames whose... e.g., frames outside an RT range? Pass 1 uses full range for MS1 (only MS2 restricted) ✓ per cfg settings at 4058 (only dia_ms2_rt_lo/hi set).
+
+  Resident: loadExperiment reads everything ✓.
+
+  **One more: MS1 frames delivered but with MSLevel != 1?** The loader sets ms_level 1 for MsMsType 0 ✓.
+
+  OK — now the **fallback + requireComplete ordering**: fallback path reaches the block at 4328 after the resident pick loop — requireComplete uses marks from the resident add() ✓.
+
+  **What if BOTH loads fail?** Resident loadExperiment throws → no catch → propagates → error exit ✓.
+
+  Now, let me finally also consider **build portability**: `Ms1MzError` uses OPENMS_PRETTY_FUNCTION ✓; `std::isfinite` <cmath> — spextractor.cpp has it.
+
+  `<climits>` in TdfLoad.h ✓.
+
+  tests/test_tdf_load.cpp: uses std::filesystem (C++17 ✓, linked automatically in modern compilers; GCC < 9 needs -lstdc++fs — node g++-13 ✓, CMake might use older? CMakeLists presumably requires modern. The deploy script compiles with $FL (tool's flags: gnu++23) ✓.
+
+  **test_tdf_load.cpp includes "TdfLoad.h"** which includes <OpenMS/FORMAT/TdfMzCalibration.h> — shim provides it via CMAKE_CURRENT_BINARY_DIR/shim ✓ and deploy script's $U/inc ✓.
+
+  Wait — the shim: `configure_file(src/TdfMzCalibration.h ${CMAKE_CURRENT_BINARY_DIR}/shim/OpenMS/FORMAT/TdfMzCalibration.h COPYONLY)` ✓.
+
+  And test_dnoise_ms1.cpp includes "TdfMzCalibration.h" directly (quoted) — from src via -I src ✓. Both use the same file ✓ (4.1 says test_dnoise_ms1 now includes "TdfMzCalibration.h").
+
+  Hmm — ONE MORE THING. In test_dnoise_ms1.cpp, `loaderIm` and `opentimsCorrect` are under `#pragma GCC push_options/optimize("fp-contract=off")` — and `static` functions. Fine.
+
+  But `loaderIm` uses the SAME formula as buildScanTable — the test's forward model is a copy from RationalScan2ImConverter — ✓ independent of the header.
+
+  **Hex golden check**: loaderIm(D, 0) == 0x1.6e4c14p+0f — requires the test platform's double arithmetic to match; with contraction off ✓; x87 excluded by the #error ✓; ARM64 same IEEE ✓.
+
+  Now — is there anything in **tests.yml's positive control**: `c++ -std=c++20 -fsyntax-only -I src "$G"` — if the toolchain's default is fine ✓. But note: on the appleclang arm64 leg, `-fsyntax-only` with... ✓.
+
+  Now let me go read the repo files for the unseen parts. Plan:
+  1. Grep spextractor.cpp: `dnoise` occurrences (lines).
+  2. Read the tile pass-2 region (search for "pass 2" / tile loop).
+  3. Spot-check DnoiseMs1.h recover region and TdfLoad.h (confirm bytes match the inline, quick).
+  4. Check test file regions quickly.
+
+  Given the volume, maybe delegate to an explore agent? The instruction explicitly says to read those six files before answering. I'll do targeted reads myself — the inlined content covers most; I mainly need the unseen spextractor.cpp regions (tile loop, lines 4415-4700ish, and any dnoise references beyond shown regions).
+
+  Let me do it.
+
+• Good — pass 2 (line 5255-5257) uses `tc` (a separate consumer) with c2.load_ms1 = false. Let me check whether `tc.dnoise` is set. Read around 5230-5260.Confirmed: pass-2 consumer `tc` never gets `dnoise` (null) and `load_ms1 = false`, so no MS1 frames are delivered there. requireComplete runs once at 4328 after pass 1. Good.
+
+  Also note `tc.ms1_prune` is not set either (defaults null) — fine, MS2 only.
+
+  Now spot-check that the inlined bytes match the working tree for the header and TdfLoad, and check a couple of areas I want to verify in the actual files:
+  1. `frameIdOf` — its behavior (pre-existing but let me see it once).
+  2. `tofAxis()` / `loadTofAxis` — uses loadTdfAxisBounds/loadTdfCalibration?
+  3. CMakeLists cmake_minimum_required version.
+  4. tests.yml matrix.cc values (to check the negative-compile step's case covers all legs).
+  5. The e2e `synth` function's m/z float64 packing claim for 19d.
+
+  Let me grep those quickly.
+
+• CMake 3.16: FindSQLite3 module exists since CMake 3.14, and the imported target SQLite::SQLite3 also since 3.14. ✓
+
+  tests.yml matrix: gcc, gcc-11, appleclang-arm64, msvc. Negative-compile case: `gcc*)` covers gcc and gcc-11; `appleclang-arm64` covered; msvc leg is excluded by `if: runner.os != 'Windows'`. ✓ No unmatched compiler.
+
+  But note the step uses bare `c++`, not the matrix-selected compiler. On the gcc-11 leg (ubuntu-22.04), is `c++` gcc-11 (the system default on 22.04 is gcc 11/12)? Ubuntu 22.04's default gcc is 11 (gcc-11 or 12 depending on image updates; currently 12?). If the step uses a different gcc than the one that builds, the negative compile still tests GCC semantics — the guard macros are the same across GCC versions. Fine. However — the step never verifies that `c++` matches matrix.cc. Minor, not a correctness defect of the fix.
+
+  gcc-11: does it define __RECIPROCAL_MATH__ etc.? Those macros exist in GCC for a long time (since ~4.6). -fassociative-math macro __ASSOCIATIVE_MATH__? Let me think again... GCC docs (cpp): "__FAST_MATH__", "__FINITE_MATH_ONLY__", "__RECIPROCAL_MATH__", "__NO_SIGNED_ZEROS__", "__NO_TRAPPING_MATH__", "__ASSOCIATIVE_MATH__"? Hmm. I recall GCC's cpp defines __RECIPROCAL_MATH__ (since gcc 4.6-ish), __NO_SIGNED_ZEROS__, __NO_TRAPPING_MATH__, __ASSOCIATIVE_MATH__ — yes, these are all documented in the GCC manual (cpp "Common Predefined Macros"): __FAST_MATH__, __FINITE_MATH_ONLY__, __RECIPROCAL_MATH__, __NO_SIGNED_ZEROS__, __NO_TRAPPING_MATH__, __ASSOCIATIVE_MATH__, __ROUNDING_MATH__, __FP_FAST_FMA etc. And the implementers measured with g++-16 and g++-13. gcc-11 on ubuntu-22.04 wasn't locally checked (4.3 says so). If gcc-11 doesn't define __ASSOCIATIVE_MATH__ for the combo, the step would fail loudly ("broke the compile, but not through the #error" — no wait, it would COMPILE successfully → "::error::DnoiseMs1.h compiled under -fassociative-math+..." → fail=1 → CI red, loud). So worst case CI red on that leg, not silent. OK.
+
+  Now check the harness CI leg: `if: matrix.os == 'ubuntu-latest'` — runs once ✓. The harness needs git, make, ar, c++ — present on ubuntu runners ✓. It uses `stat -c %y` (Linux) with macOS fallback ✓.
+
+  Now check test 19d's premise — synth packs m/z as float64. Grep the test file for the pack format.Let me check the synth m/z encoding (line 46 context: what fmt is used for m/z array) and prune_extra. Read lines 40-80 and 605-625 of the test file.m/z is packed as float64 ('<d') in synth ✓ — 19d's premise holds (NaN/inf survive the mzML round trip as 64-bit floats).
+
+  Now let me verify the current working tree matches the inlined "current" text for the critical hunks — spot check a few: spextractor.cpp 1850-1875 (setup), TdfLoad.h 194-215, and DnoiseMs1.h 449-474. I've already seen 1699-1707, 1773, 1889-1968 via grep context and they match. Let me read spextractor.cpp 1850-1880 to verify setup matches.The working tree matches the inlined text. Now let me dig for the remaining defects with more focus. A few things I want to think through harder:
+
+  **1. The intensity recovery NaN/negative path through `Refusal::intensity_range` vs old behavior.** Old: v >= 2^24 or NaN or negative or fractional → hits==0 → throw "not opentims' correction of exactly one raw count (0 found)". New: v >= 2^24 (incl. +inf) → intensity_range message; NaN/negative/fractional → intensity (0 found). Both refuse. ✓ Same refusal set.
+
+  **2. On identity: the `(std::uint32_t)v` cast when v is a float in [0, 2^24)** — exact ✓.
+
+  **3. Reconsider `scanOf` on `asc` values that are negative or denormal — separation check ensures strict monotonic > 4e-6 apart. If the table values are NEGATIVE ascending (e.g. pathological coefficients giving negative 1/K0 that increase), falls = false, table valid. scanOf works on any sorted ascending array ✓.
+
+  **4. Now a closer look at one thing I glossed: `buildScanTable`'s separation check is over the table built from need[ci] scans. But recoverPoint is called with `num_scans = fr.num_scans` (the FRAME's scan count) and table `asc` built over need[ci] ≥ fr.num_scans. `s >= num_scans` refused ✓. So a point whose 1/K0 matches a scan in [fr.num_scans, need[ci]) is refused — could that happen on a VALID frame? The loader converts scan indices 0..num_scans-1 of that frame only. So no valid point lands there. ✓
+
+  **5. `im_asc` empty for unused rows: `fr.cal` for an MS1 frame always points to a row with need > 0 (the frame itself has num_scans ≥ 1 if num_peaks > 0... wait: an MS1 frame with num_peaks > 0 forces num_scans ≥ 1 (TdfLoad check) so need[ci] ≥ 1. An MS1 frame with num_peaks == 0 → frame() returns before using asc ✓. But: MS1 frame with num_peaks > 0 and num_scans ≥ 1 → need[ci] ≥ num_scans ≥ 1 → table non-empty ✓.
+
+  **6. What about an MS1 frame with num_peaks > 0, num_scans ≥ 1, but its row's table FAILED to separate over need[ci]? → setup refuses the whole run ✓ fail-closed (this is case (iii) of the verifier's test).
+
+  **7. Decision 7a detail: `dn_loader_checked_` is per-consumer. The pass-1 consumer lives for the whole pass 1. ✓. On the resident path, checkLoader at 4259 ✓.
+
+  **8. Now — the `requireFiniteMs1Mz` + `Ms1Prune` for the STREAMING path: flushMS1_ calls requireFiniteMs1Mz on every buffered MS1 spectrum — but ALSO the prune's `batch` is called on ms1_buf_ afterwards (line 2216) — consistent order ✓.
+
+  **9. A deeper look at decision 11's claim (4) in the verifier text: "Consumer exceptions reach this catch unwrapped: BrukerTimsFile.cpp:1614 calls consumeSpectrum outside any try, and so does MzPeakStreamLoad.h:413." The catch at 4155 handles Ms1MzError ✓.
+
+  But WAIT — for an mzML input, `stream_load` is true by default and the code enters the `if (stream_load)` block, and calls `BrukerTimsFile().loadDIAStreaming(in, consumer, cfg)` on an mzML — it throws (wrong format) → generic catch → fallback. requireFiniteMs1Mz in flushMS1_ never ran (no frames consumed). Resident path catches it. ✓ 19d exercises exactly this.
+
+  **10. Now think about whether the resident-path reordering could change the PICK for frames... no, pick unchanged.
+
+  **11. Hmm, let me reconsider the fallback reset block (4194-4215): it runs when !streamed, i.e. also on the FIRST load for non-streamed inputs (stream_load false, or mzML/mzPeak). At that point, nothing was delivered, and the reset is harmless (clears empty structures). dnoise.reset() at setup already called; total zero. ms1Hist_ zeroing on a fresh run: counters are static/atomic — zeroed at first use presumably. Fine.
+
+  Wait, actually — there's a subtle one: when stream_load is FALSE from the start (perf:stream_load false on a .d with dnoise on), the dnoise setup ran, then the fallback block runs dnoise.reset() — clears marks set at... setup's reset() — no marks. ✓ Then resident loop filters and marks, add() merges, requireComplete passes. ✓ This is the r1d_res arm — needs re-running per 4.4.
+
+  **12. Now let me think really hard about the possibility the completeness check FALSELY refuses a valid streaming run: the streaming .d loader with load_ms1 — does it deliver MS1 frames via consumeMS1Spectrum_ or via consumeSpectrum dispatch? If via a different callback that the consumer doesn't override for MS1... FullSwathFileConsumer — consumeMS1Spectrum_ is the MS1 hook. The pre-fix code already counted frames and the [dnoise] summary matched dnoise-as-preprocessor counts on the cluster gates (stage 2 verified the counts matched). So every MS1 frame reaches flushMS1_ on both pins. With requireComplete, D and TNBC would refuse if any MS1 frame were skipped — that's exactly the pending re-run (4.4). If the loader skips e.g. the LAST MS1 frame or empty frames with num_peaks>0... would be caught. Fine — the check is the design.
+
+  **13. What about `TileProbe` (SPEXTRACTOR_MS2_RT_RANGE) — drops only MS2 ✓ (keepFrame applied in flush_() MS2 path only; consumeMS1Spectrum_ has no probe drop) ✓.
+
+  **14. SPEXTRACTOR_TILE_RESIDENT: forces resident source; the streaming load still runs (stream_load block) with tile_source false, loading the full .d via loadDIAStreaming with load_ms1 default (true). All MS1 delivered ✓.
+
+  **15. Now the deploy script — one more careful look at a subtle bug: `finish()` reads `rc=$?` then `set +e`. But `finish` is invoked as the EXIT trap; inside it, the first line `rc=$?` — however, the EXIT trap fires with $? of the last command... ✓ standard idiom.
+
+  But look at the trap sequence: line 80 `trap 'rm -rf "$S"' EXIT`, line 81 mkdir LOCK, line 83 `trap finish EXIT`. Between 81 and 83, if `mkdir` succeeds and then `COMMITTED=0; PROMOTED=""` (line 82) runs, then trap finish. If anything failed between 81 and 83 (nothing can — assignments), fine.
+
+  What if `mkdir "$LOCK"` fails because the PARENT doesn't exist? Same as lock-held refusal message — slightly misleading but harmless.
+
+  **16. `sha256sum -c --quiet SHA256SUMS` (line 89): under `set -e`, in a `|| { }` — fine.
+
+  **17. Line 112-113: the dnoise test compile+run in `{ ... } > log 2>&1 || unit_failed test_dnoise_ms1`. unit_failed cats the log and exits 2 → finish (COMMITTED=0, PROMOTED empty) → removes stage, rmdir lock ✓. S2 verifies byte/mtime-identical node.
+
+  But wait — S2 asserts the node is BYTE- AND MTIME-identical. The stage dir is created by mktemp BEFORE the lock — on the node! $R/.deploy.stage.XXXXXX is created in $R (the scratch root). Then removed by finish. snap() excludes '.deploy.stage.*.log' files but NOT stage dirs... clean() checks no stage dirs remain. And snap compares `find . -type f -o -type d` — the stage dir appears and disappears between snaps → identical. But the $R directory's own mtime changes when the stage is created/removed! snap includes "." and subdirectories as "D $f" lines without mtime — directories are printed as "D $f" only (no hash/mtime). Clever — so dir mtime changes are invisible to snap. OK.
+
+  But also: `$STAGE.log` is written next to the stage ($R/.deploy.stage.XXXXXX.log) — excluded from snap by name pattern ✓. But it's never cleaned up! The transaction log `$STAGE.log` persists after the stage is removed (finish removes $S but not $S.log). Over deploys these accumulate in $R. Minor hygiene; also the snap excludes them so the harness can't see them. Not a correctness issue. Hmm — also build_sync_*.log excluded similarly. Pre-existing pattern for build logs. The stage .log accumulation is new. Low/nit — skip or mention briefly? It's not a defect per output format ("No style remarks"). Skip.
+
+  **18. One more on the local script: `trap '... ssh "$NODE" "rm -rf $STAGE" ...' EXIT` — if the local script is killed after HANDED=1, the remote stage is left (txn.sh's own finish removes it if txn is running; if killed BEFORE the txn ssh started, the stage leaks). Minor.
+
+  **19. `case "$STAGE" in "$R"/.deploy.stage.??????)` — mktemp XXXXXX → 6 random chars ✓.
+
+  **20. What about `git status --porcelain -- $INPUTS` — if the repo has staged renames etc. Fine.
+
+  **21. Node-side: `for f in $BUILD_INPUTS; do cp -p "$f" "$U/src/"; done` — run after `cd "$S"` (line 88) ✓ staged files are in $S as basenames ✓.
+
+  **22. `promoted.sha256` paths: `$(dest "$f")` absolute ✓; `sha256sum -c` from $S reads absolute paths ✓.
+
+  **23. Now a REAL potential defect hunt in txn.sh: the `awk -v f="$f" '$2 == f {print $1}'` — SHA256SUMS lines are "hash  basename". $2 == f ✓.
+
+  **24. `sha()` on missing file → sha256sum fails → in command substitution under set -e... inside `grep -qx "binary_sha256=$(sha ...)"` — if sha fails, the substitution yields empty + set -e? Command substitution failures don't trigger set -e in the outer command; grep would just not match → park as stale → FAIL-CLOSED ✓ good direction.
+
+  **25. finish() when prov.prev exists but bin/spextractor missing entirely (first deploy, build failed)?** prov.prev only exists if $PROV existed (line 137: `if [ -e "$PROV" ]`). First deploy: no prov.prev → skip → fine (S0).
+
+  **26. Post-commit `cp ... "$UT/"` — UT created via mkdir -p ✓.
+
+  **27. What if `make spextractor -j32` succeeds but the post-build hash recheck fails (S8) → exit 2 → finish: rollback inputs, touch them; prov.prev exists → binary/lib hashes vs prov.prev: the binary was rebuilt from MIXED inputs → lib was relinked BEFORE the intrusion... In S8 the intruder wrote TdfLoad.h during the build — the lib doesn't compile TdfLoad.h (tool-only header), so lib hash may still match v6's, but bin/spextractor changed → mismatch → parked stale, no provenance ✓. And the rollback restores TdfLoad.h. The binary on disk remains the mixed one — with no provenance and FAIL-CLOSED printed ✓. Correct fail-closed.
+
+  Hmm — but wait: in S8 the check is `[ ! -e $PROV ] && [ -e $PROV.stale ]`. ✓.
+
+  **28. One more: after a FAIL-CLOSED park, the tree's inputs are restored and touched, so a subsequent `make spextractor` rebuilds cleanly (S3 recovery verifies make -q is false and rebuild reproduces) ✓.
+
+  **29. `tail -n 20 "$BLOG"` on build failure — shown to the caller ✓.
+
+  **30. deploys.log append only after commit ✓; `records()` counts ✓.
+
+  Now — let me reconsider the C++ once more for NEW false refusals on valid data, the flagged most-important question:
+
+  **(a) AccumulationTime**: REAL rendering. One case: SQLite renders REAL 99.958 as "99.958" ✓. What about AccumulationTime = 100.0 REAL → "100.0" ✓. What about a value like 33.33333333333333 stored (some instruments)? 15-digit rendering "33.3333333333333" parses to a double 1 ulp off from stored. opentims atofs the SAME rendering (if same sqlite version) → same double → same corr ✓. If different sqlite versions render differently (e.g. older sqlite renders "33.33333333333333" — 16 digits?): SQLite ≥3.43? Hmm — actually the SQLite text-render of REAL changed across versions: older SQLite used %.15g, newer (3.43+, 2023) render with up to 17 sig digits when needed for round-trip? Let me recall: SQLite 3.43 changed floating point text conversion to use shortest-round-trip (they adopted a new dtoa). Actually the change: SQLite 3.43.0 (2023-08) "the text representation of floating point values now uses the shortest string that round-trips" — hmm, I believe the change was in the `%!.15g` default for the printf/convert: before, 15 significant digits always; after... The comment in TdfLoad.h:174-178 acknowledges exactly this: "SQLite versions render a REAL that 15 significant digits do not round-trip differently. The resulting few-ulp change in corr refused points and never recovered a wrong raw count in a brute force over every raw count below 2^24, and every AccumulationTime seen (49 .d files) round-trips at 15 digits." So the implementers measured: a few-ulp corr difference can cause REFUSALS (points that no longer recover). That means: a standalone build of the tool linking a DIFFERENT SQLite than libOpenMS's bundled one could FALSELY REFUSE a valid file. Wait — "a standalone build links its own [sqlite]"... In the in-tree build (the supported one), the tool resolves libOpenMS's bundled sqlite3 symbols at runtime — same library as opentims? Hmm, opentims reads the tdf itself (it's the opentims library inside OpenMS that does TimsFrameFromSql). Does opentims use the same sqlite3 as libOpenMS's SQLiteCpp? If both link OpenMS's bundled sqlite3, yes. If opentims bundles its own... The 4.1 claim says "the tool resolves libOpenMS's bundled sqlite3". And the brute force showed few-ulp corr changes only refuse (fail-closed), never silently misrecover. So worst case is a false refusal, fail-closed, documented. Acceptable per scope; not a new finding beyond what's disclosed. I might mention it under "checked, found acceptable" or as a low note. It's disclosed in the code comment, so not a finding.
+
+  **(b) sqlite_master lookup**: real tdfs — table exists with exact case ✓.
+
+  **(c) Storage types**: real Bruker tdfs store INTEGERs ✓. NULLs: Frames columns non-null in real files ✓.
+
+  **(d) SDK env refusal**: false-refusal by design (fail-closed, documented in code and CHANGELOG). One sharper scenario: site sets OPENMS_BRUKER_SDK_PATH globally for OTHER OpenMS tools (e.g. a module load for a different pipeline). Every dnoise-default run on .d then refuses. The message tells the user to unset it or pass -dnoise:ms1 false ✓. This is a deliberate scope decision (decision 7b). Not a defect per the review rules.
+
+  Hmm wait — but does the prediction match the loader's actual behavior? If the loader requires the SDK path to point to a VALID library and otherwise silently falls back to the table model, then with the env var set the loader would still use the table model and recovery would succeed — but the tool refuses. That's the acknowledged false refusal. The verifier's fix explicitly proposed this. Scope-adopted. OK.
+
+  But one more check: does BrukerTimsFile actually read OPENMS_BRUKER_SDK_PATH? The claim rests on "the loader honours the variable" (verifier said AUTO strategy at BrukerTimsFile.h:96 and openTimsDataHandle). The pre-fix stage-2 review presumably verified. The checkLoader during the load remains the authority (lastMzCalibration). If the env var is set but the loader does NOT actually honor it (never reads it), then EVERY such run is falsely refused even though the loader would use the table model. That's the same false-refusal class — fail closed. The e2e only tests the tool's refusal, not the loader's honoring. But wait — if the loader does NOT honor OPENMS_BRUKER_SDK_PATH at all (e.g. it's only read by a different component), then the refusal is pure false-refusal with no upside... The verifier explicitly stated the mechanism (AUTO, openTimsDataHandle calibrates via SDK when the env is set). Stage 2 verified. Trust.
+
+  **(e) need[ci] edges**: covered above — sound.
+
+  **(f) Completeness bitmap**: 
+  - "a streaming load that fails after marking and falls back" → reset ✓.
+  - "frame ids beyond tdf.frames.size()" → frameCheck refuses ✓ before mark.
+  - "frames skipped by RT/probe slicing or tiles" → MS1 never sliced ✓ (probe drops MS2 only; pass 2 load_ms1 false).
+  - native id parsing: frameIdOf parses "frame=" ✓ loader emits "frame=<Id>".
+
+  **(g) requireFiniteMs1Mz cost**: one pass over picked peaks per MS1 spectrum inside the parallel loops ✓ negligible. Exception capture in OpenMP regions ✓ (both loops wrap in try/catch into pick_err).
+
+  Now — potential defect: **flushMS1_ calls requireFiniteMs1Mz BEFORE the prune sample is taken** — the prune's band-edge sample is "taken before pruning" from the sorted spectrum inside ms1_prune.batch → Ms1Prune::frame does sortByPosition then samples. With a NaN spectrum now refused before batch, fine. No change for finite.
+
+  But hold on — the prune comment says "sortByPosition leaves finite m/z out of order around a NaN while isSorted() stays true" — requireFiniteMs1Mz now makes this moot ✓.
+
+  **(h) Now let me re-examine one more time the fallback reset: does it reset `dn_loader_checked_`?** The consumer object is destroyed when? `PickCompactConsumer consumer(...)` is declared inside `if (stream_load)` block at 4041 — scoped to the block. The fallback happens after the catch — outside? No wait: the catch is at 4153-4160, INSIDE the same `if (stream_load)` block? Let me check the structure: the try/catch is within the `if (stream_load) { ... }` block, consumer declared at 4041 in that block. The fallback code at 4194 `if (!streamed)` is OUTSIDE the stream block. Consumer destroyed at block end. dn_loader_checked_ irrelevant afterwards. ✓
+
+  **(i) A careful check of the streaming consumer after a mid-load exception**: e.g., flushMS1_ throws a picker error (generic). pick_err rethrown at 2205 — inside flushMS1_ — propagates through consumeSwathSpectrum_ → loader → the try at 4117 → generic catch → fallback. dnoise.reset() clears marks ✓. ms1_map reset ✓. Good.
+
+  **(j) Hmm, what about `total.cpu` accumulation: Counts.cpu — unaffected.
+
+  Now let me look at **tests/test_dnoise_ms1.cpp's testRecover** more carefully for vacuous asserts:
+
+  - `CHECK(rc::opentimsCorrection("99.958", corr) && corr == 0x1.001b896437031p+0, ...)` — hex golden ✓ bites if the parse changes.
+
+  Wait, actually — is 0x1.001b896437031p+0 == 100.0/99.958? 100/99.958 = 1.000420176674... 0x1.001b896437031p+0 = 1 + 0x1b896437031/2^48... 0x001b896437031 / 2^48 ≈ 0.00042... plausible. Trust the implementers computed it; the golden would be verified at runtime.
+
+  - The locale guard: `if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") && std::strtod("99.953", nullptr) == 99.0)` — verifies the locale actually changed strtod behavior before asserting. If de_DE unavailable → skipped with message ✓ not vacuous.
+
+  - BUT: `setlocale` in a multi-threaded... test is single-threaded ✓. Restore afterwards ✓.
+
+  - `CHECK(tof_bad == 0 && half_bad == 0 && ppm_bad == 0, ...)` — real loops over 634k/400k bins ✓.
+
+  - `half_bad` uses tofToMz(bin + 0.5) — the midpoint m/z of two adjacent bins; recoverPoint must refuse (t fractional part ~0.5 >> 1e-6) ✓.
+
+  - `ppm_bad`: mz * (1+1e-6) — a 1 ppm shift; is that guaranteed > 1e-6 bins away from the integer? TOF bins vs m/z: dmz/dbin is small; 1 ppm of m/z ~ 1e-6 * mz... in bins: dbin = mz*1e-6 / (dmz/dbin). dmz/dbin at m/z ~500 is ~ 500*2/(2*n_bins)? For a sqrt-law with 634k bins over m/z 100-1700: dmz/dbin ≈ ... roughly 2*sqrt(mz)*(sqrt(1700)-sqrt(100))/634073 ≈ 2*22.4*31.2/634073 ≈ 0.0022 at mz 500. 1 ppm of 500 = 5e-4 < half a bin's m/z width 0.0011? 5e-4/0.0022 = 0.22 bins — that's MORE than 1e-6 bins tolerance ✓ refused. But near the LOW end (m/z ~100): dmz/dbin = 2*10*31.2/634073 ≈ 9.8e-4; 1 ppm of 100 = 1e-4 → 0.1 bins >> 1e-6 ✓. And tofToMz(bin+0.5)-adjacent rounding: mz*(1+1e-6) could land within 1e-6 of a DIFFERENT integer? t at bin b: fractional part after scaling... t(b) = mzToTof(tofToMz(b)) = b exactly (round trip within 2.3e-10). t at mz*(1+1e-6) ≈ b + delta where delta ~ 0.1-0.2 bins — distance to nearest integer ~0.1 >> 1e-6 ✓. Unless delta happens to be near 1.0 (distance to nearest integer small)? delta varies slowly with b; could some bin have delta ≈ 0.9999995? delta ≈ 0.1-0.25 bins, never near 1. ✓ Not vacuous.
+
+  - Scan goldens: hex float goldens against loaderIm ✓; ±1 ulp recovery; half-scan values give -1 ✓.
+
+  - `CHECK(rc::recoverPoint(...) == R::scan ...)` for scan 943 in a 943-scan frame ✓.
+
+  - Intensity exhaustive: raw < 2^20 every, stride 7 above ✓; `raws > 3000000` sanity ✓ (I estimated ~3.3M — the check asserts >3M so the loop can't silently no-op).
+
+  - Tie golden '99.968' raw 1562: asserts opentimsCorrect(1562, corr)==1562 AND recovery with 1 hit; v=1563 → 0 hits. This pins operation order (raw*corr+0.5 vs raw*100/at). ✓
+
+  - frameCheck combos ✓. FrameCoverage ✓.
+
+  One gap: the verifier's TEST for kimi#10 asked "corr = 100/125 is refused with text containing 'AccumulationTime'" ✓ (r125 check), "corr = 100/99.958 accepted" ✓, "v = 16777216.0f throws text containing '2^24'" — the unit test checks Refusal::intensity_range for 2^24 ✓ (the message text lives in spextractor.cpp, not unit-testable; fine).
+
+  The premise check: `corr in {1, nextafter(1,2), 100/96}` exhaustive below 2^20 ✓ (verifier allowed up to 2^20 for CI).
+
+  - testCoverage: duplicate refused, missing non-empty refused, missing empty accepted, reset ✓.
+
+  - iterations-0 gate check in testGateAnd ✓.
+
+  Now — is there any test that would NOT fail on pre-fix code? testRecover: pre-fix header lacks recover:: → compile error → fail ✓. testCoverage same ✓. test_tdf_load against pre-fix TdfLoad.h fails 30 checks (claimed) ✓. e2e 19d/21: negative control on the pre-fix binary failed exactly those two ✓ (section 5). CI negative compiles: pre-fix header lacks the new macros — for -freciprocal-math on GCC, pre-fix compiles → "::error::compiled under" ✓ bites. The harness: aimed at the new script; old script fails R1-R3 per the verifier ✓.
+
+  Now, remaining areas I haven't fully verified in the working tree: tests/test_dnoise_ms1.cpp full text (the inline version is claimed identical; spot-checked? Not yet). And tests/test_tdf_load.cpp and scripts/sync_cluster.sh current bytes. Let me spot-check a few critical sections of each to confirm they match the inline (particularly the txn.sh trap ordering and the harness's S9). Also the CHANGELOG known-wrong items are disclosed.
+
+  Actually, let me also double-check one potential real bug I spotted mentally in `buildScanTable`: 
+
+  `falls = n_scans > 1 && v[1] < v[0];` — v[1] and v[0] are floats. For a table where 1/K0 RISES with scan (some instruments?), falls=false, ascending table used directly. Fine.
+
+  Separation check: `v[s] - v[s-1] > 4*kImTol` — in FLOAT arithmetic: v[s] - v[s-1] computed as float subtraction. 4.0f * kImTol = 4e-6f. Float subtraction of two nearby floats ~1.4: difference ~1e-3, representable fine ✓. Same as old code ✓ (identical expression).
+
+  One more potential subtle issue — **`im_asc.assign(tdf.tims_cal.size(), {})` then buildScanTable(tdf.tims_cal[ci], tdf.ms1_max_scans[ci], im_asc[ci], falls)**: buildScanTable does v.assign(n_scans, 0.0f) — overwrites ✓. On refusal, asc/falls "mean nothing" and setup returns ✓.
+
+  **setup() returns before `reset()`/`on=true` on refusal — object stays off ✓.
+
+  Now, what about **`dnoise.setup` being called when `tofAxis().ok` was already true from the band_edges preflight** (3953-3972): loadTofAxis skipped if ok (3999: `!tofAxis().ok &&`). The preflight loaded from the same file ✓ same axis.
+
+  But — hmm, ONE ISSUE: the band_edges preflight at 3953 runs only `if (band_edges_acq && detector==integer)`. If it ran on a DIFFERENT candidate file (SPEXTRACTOR_MZPEAK_TDF sidecar)... input is .d; cand[0] = in/analysis.tdf — the dnoise setup uses the same in/analysis.tdf ✓. If the preflight FAILED for cand[0] but succeeded for cand[1] (the sidecar), tofAxis().ok=true from the SIDECAR while dnoise uses in/analysis.tdf's frames... then dnoise's recovery would use the sidecar's calibration against the .d's frames — mismatched. But this is pre-existing logic (the axis selection), and a mismatch would be caught per-point (tof refusal) — fail-closed. Pre-existing anyway.
+
+  OK — now let me also verify the working tree of tests/test_tdf_load.cpp and sync_cluster.sh match (spot check), then check the two workflow files fully, then write the review.
+
+  Actually — one more important check on `test_dnoise_ms1.cpp`: the inline version at line ~679: `static void testRecover()` — I trust inline. Spot check compile-relevant: `#include "TdfMzCalibration.h"` and use of `spextractor::TdfMzCalibration`. Also `u32` typedef exists in the test file (pre-existing?). The inline test uses `u32 tof = 0...` — is u32 defined in the test? Pre-existing test presumably defines `using u32 = std::uint32_t;`. Let me grep.
+
+• All spot checks match the inline text. One thing to verify in the de_DE test at line 756: `corr == 100.0 / 99.953` — this computes 100.0/99.953 in the TEST process under the de_DE locale. The literal 99.953 is parsed by the COMPILER (locale-independent), so 100.0/99.953 is the correctly-rounded constant division ✓. And opentimsCorrection parses the string "99.953" via parseF64 (classic locale) → same double → same corr ✓. Good.
+
+  But wait — line 753: `std::strtod("99.953", nullptr) == 99.0` — verifies the de_DE locale is active by checking strtod stops at the '.'. Correct guard.
+
+  Now let me also double-check one thing in the harness that could be vacuous: line 26-28 of the ssh shim:
+  ```
+  while [ $# -gt 0 ]; do case $1 in -o) shift 2;; -*) shift;; *) break;; esac; done
+  shift
+  exec bash -c "$*"
+  ```
+  The script calls `ssh "$NODE" "bash $STAGE/txn.sh ..."` → shim: args = ("fakenode", "bash ...") → loop: "fakenode" doesn't start with -, break. shift → drops fakenode. exec bash -c "bash ..." ✓.
+
+  And `ssh "$NODE" "mktemp -d $R/.deploy.stage.XXXXXX"` ✓. And the trap's `ssh "$NODE" "rm -rf $STAGE"` ✓.
+
+  One subtlety: in the local trap (line 41), `$STAGE` inside the double-quoted ssh argument — STAGE at trap time. If STAGE set but scp failed (set -e exit before HANDED=1): trap removes remote stage ✓.
+
+  Now — one thing in the txn heredoc I should double check: `echo "$S pid $$ $(date -Is)" > "$LOCK/owner" || true`. In the harness S9: `kill -TERM "$(sed -n 's/^.* pid \([0-9][0-9]*\) .*$/\1/p' $R/.deploy.lock/owner)"`. The sed extracts the pid. $$ is the txn bash's pid ✓.
+
+  But S9 kills the TXN process, not the whole process group. make (child) keeps running; the txn's TERM trap fires after make completes → exit 143 → finish → rollback. The harness waits for $O/building to disappear then checks. Since make finished writing bin/spextractor BEFORE the rollback (trap deferred), the rollback restores sources and the provenance check: binary changed (v11 build) vs prov.prev (v6) → mismatch → parked stale → no provenance. S9's second check: `[ ! -e $PROV ] || prov_truthful` ✓.
+
+  Hmm — but actually one question on S9: after `kill -TERM`, bash's trap waits for make — is that real bash behavior? When bash is waiting for a foreground child and receives a trapped signal, it runs the trap AFTER the child terminates. Yes — bash defers traps until the current command completes. ✓ And the comment in the script says exactly this.
+
+  Now, does the harness's `deploy()` in background (`( deploy ... > rc ) &`) interact with `set -uo pipefail`? deploy echoes $? — fine.
+
+  OK, one more scan of **test_tdf_load.cpp for a test that passes for the wrong reason**:
+
+  - Line 144: ok24 expects windows.size()==24, max_num_scans 944, frames.size()==11 ✓.
+  - Line 154: lowercase table name ✓.
+  - corrupt24: expects "malformed" — corrupting the root page of the windows table (12 bytes of 0xff over the page header). SQLite reading a page with 0xff type byte → "database disk image is malformed" ✓.
+  - corruptMiddleLeaf — parses interior page (0x05), children, middle leaf (0x0d) ✓. With 3000 windows the table spans multiple pages ✓.
+  - The `cell()` quoting: TEXT cells shown quoted; the refused() checks only look for column names ✓.
+  - acc tests: "acc_text" stores '99.953' as TEXT → loads, corr == 100.0/99.953 ✓ — this also pins that a TEXT AccumulationTime is ACCEPTED (Bruker writes REAL, but TEXT accepted). Hmm wait — does opentims accept TEXT? atof of "99.953" yes ✓ consistent.
+  - acc_125: loads (corr 0.8 stored) and correctionRefusal names it ✓ — mirrors the tool's setup refusal.
+  - two_rows: flat row (C3=C2) referenced only by MS2 → accepted; ms1_max_scans {0, 918} ✓; buildScanTable over 40000 refused for both rows ✓.
+
+  One check on two_rows fixture: `UPDATE Frames SET NumScans = 40000 WHERE MsMsType <> 0` — then MAX(NumScans)=40000 ✓ and per-row NumScans ≤ max ✓. MS1 frames set to 918 ✓.
+
+  - testCalibrationAndBounds: cal_notable drops MzCalibration — the prepare for "SELECT DISTINCT MzCalibration FROM Frames" SUCCEEDS (Frames has the column), ncal=1, cal_id=1; then "SELECT ... FROM MzCalibration WHERE Id = ?" prepare FAILS (no table) → sqlfail "cannot read MzCalibration: no such table" → has(why, "MzCalibration") ✓.
+
+  - bounds_notable: DROP GlobalMetadata → prepare fails → "cannot read GlobalMetadata: no such table: GlobalMetadata" ✓.
+
+  Now, potential issue: test_tdf_load.cpp at line 51 fixture MzCalibration column order: "CREATE TABLE MzCalibration (Id, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4)" — the loader SELECTs by NAME ✓ order irrelevant ✓.
+
+  OK. Now the remaining question I want to be extra careful about — **output identity of the resident-path reordering** — one more angle: pre-fix, resident loop skipped non-IM MS1 frames BEFORE dnoise.frame; the c.fid/counts for those frames weren't recorded; requireComplete (post-fix) requires num_peaks>0 frames to be seen. For an accepted input all MS1 frames have IM and identical handling. For a .d where an MS1 frame has points but no IM array — post-fix REFUSES (frame() throws "carries no 1/K0 per point"); pre-fix it was silently skipped AND requireComplete didn't exist. Is that input "accepted" pre-fix? Yes, it ran to completion. Post-fix it's refused. Is that a FALSE refusal on VALID Bruker data? A Bruker .d MS1 frame always has IM data when loaded by the OpenMS Bruker loader. Not valid-real-world. Fail-closed, intended by decision 8 ("frame() already refuses n>0 without IM"). Fine.
+
+  Also — the stage-2 verifier said the resident `if (!s.containsIMData()) continue;` BEFORE dnoise.frame meant "a non-empty MS1 spectrum without IM data could skip denoising". The fix moves it after ✓.
+
+  Now let me finalize the findings list. Honest assessment: I found no critical/high defects. Candidate findings:
+
+  1. **LOW (fix-pass defect, cosmetic/doc)**: the known CHANGELOG inaccuracies — disclosed in 4.4, excluded. Skip.
+
+  2. **Residual validation gap (not a code defect)**: digest pins not re-run on the fix binary (4.4) — the hard invariant's direct evidence is pending; the equivalence probe covers recovery maths but not the whole pipeline (e.g., requireComplete behavior on real .d, per-row tables on D/TNBC, resident path). Disclosed; I should mention under "could not check".
+
+  3. Potential NEW findings to consider:
+
+  (a) **AccumulationTime validated for MS2 frames too** (TdfLoad.h:289-294): a non-numeric/non-positive AccumulationTime on a frame dnoise never reads (MS2) now refuses the run at setup. Pre-fix, atof garbage → corr inf/0 stored, never checked for MS2 (setup only checked msms_type==0). Concrete scenario: a valid Bruker .d where... honestly Bruker always writes a REAL. Is there a real case? Some tdfs have AccumulationTime for MS2 frames equal to MS1's — always numeric. I'd rate this low, arguably intended hardening (the tool can't distinguish "MS2 frame dnoise never reads" — well it CAN: msms_type != 0). The parse failure only matters if opentims would... opentims computes corr for every frame too (atof per frame). With atof("abc")=0 → corr=inf → opentims multiplies intensities by inf → the LOADER's output for that MS2 frame would be garbage/inf — the tool would process garbage MS2 data anyway. Refusing is defensible fail-closed. Low severity; mention as a note, arguably not a defect. Actually — hold on. What about AccumulationTime = 0 stored as REAL on an MS2 frame in real files? Never seen. Skip or low.
+
+  (b) **`correctionRefusal` range bound 1e6 with the new message for corr >= 1e6** — message says "is not invertible" — for corr ≥ 1e6 (AccumulationTime ≤ 0.0001 ms) the true reason is implausibility, fine.
+
+  (c) **The de_DE test under `setlocale` mutates global locale** — test is single-threaded, restored after ✓.
+
+  (d) **tests.yml negative-compile uses bare `c++` rather than the matrix compiler** — on the gcc-11 leg, `c++` on ubuntu-22.04 is the distro default gcc (11 or 12). The guard macros exist in all GCCs → refusal works. If the image's c++ is clang (it's not on ubuntu), the case would error loudly. Not a silent pass. Note as observation? It's a test-fidelity nit: the step tests *a* GCC, not necessarily the matrix one. But since the refusal mechanism is macro-based and uniform across GCC versions, coverage is fine. Actually wait — if c++ resolves to something that doesn't define those macros (old gcc?), the step fails LOUDLY ("compiled under" → ::error). Never vacuous. Clean.
+
+  (e) **build.yml ctest grep**: `grep -Eq "Test +#[0-9]+: $t"` — ctest output line format: "    Test #1: dnoise_ms1 ........................   Passed". "Test +#[0-9]+: dnoise_ms1" matches ✓. With pipefail and tee, failure propagates ✓. If SQLite3 not found on the build.yml runner, tdf_load isn't registered → grep fails → red. Ubuntu runner has libsqlite3-dev? The GitHub ubuntu-latest image includes libsqlite3-dev ✓ (it's preinstalled). macOS runner: SQLite3 present (macOS ships sqlite3; CMake's FindSQLite3 finds the macOS SDK one ✓). build.yml matrix — which OSes? Not shown fully; the step is unconditional. If build.yml has a leg without sqlite dev headers, that leg goes red — loud, acceptable. Hmm, actually let me check build.yml's matrix quickly... The diff shows the step added after the cmake build. If any leg lacks SQLite3 dev, CI breaks — a CI-risk note. Let me check.
+
+  (f) **The txn harness on macOS needed a date shim; CI runs it only on ubuntu-latest ✓.
+
+  (g) **A dropped ssh channel mid-transaction** — covered by design (log-file redirection). ✓
+
+  (h) **Stale lock after SIGKILL** — no recovery; pre-existing behavior (old script also had mkdir lock with no stale handling; actually the old script had the same). The new script at least records owner + timestamp in $LOCK/owner. Low/pre-existing.
+
+  (i) One more potential real defect — **`firstMissing` treats a frame marked but with num_peaks==0 requirement correctly, but what about frames marked that aren't in `frames` (fid ≥ size)?** Can't happen (frameCheck). ✓
+
+  (j) **`add()` skips `frames == 0` slots** — in flushMS1_ every slot is an MS1 spectrum so frames ≥ 1 unless frame() threw (then add isn't reached). ✓ In the resident loop, MS2 spectra leave Counts{} → skipped ✓. But — what about an MS1 spectrum in the resident loop when dnoise.on is FALSE? dn_cnt empty ✓.
+
+  (k) **What if `dnoise.on` and the resident loop hits an MS1 spectrum with getMSLevel()==1 but it's actually... fine.
+
+  (l) **requireComplete runs before the `ms1_map.empty()` check** — if dnoise refused... order fine.
+
+  (m) **THE ONE THING I should double check: the e2e check 21 asserts `setup_line not in log` for the SDK arm — but the dnoise SDK refusal message itself... the setup line is "[dnoise] dnoise v0.1.0 ... MS1 path on the raw frames, before the pick". The refusal text doesn't contain it ✓.
+
+  (n) Let me reconsider **identity of `String(...)` formatting in messages** — messages only.
+
+  (o) **One actual candidate defect — the `case` in tests.yml `gcc*)` FLAGS includes `-funsafe-math-optimizations`**: GCC defines __NO_SIGNED_ZEROS__ + __RECIPROCAL_MATH__ under it → #error fires ✓. And `-Ofast` sets __FAST_MATH__ ✓. `-ffinite-math-only` sets __FINITE_MATH_ONLY__ ✓. All good.
+
+  (p) **A clang x86-64 leg is absent from the matrix** (only gcc, gcc-11, appleclang-arm64, msvc) — the known clang-x86-64 slip-past isn't CI-covered, but the guard can't see it anyway (documented residue). The Linux legs use gcc. Fine.
+
+  (q) **`--no-tests=error` flag needs CMake/ctest ≥ 3.26?** Hmm! `--no-tests=error` was added in CMake 3.26. The build.yml CI uses the runner's cmake (recent ✓). Not an issue for the repo's cmake_minimum (3.16) since that's for configuring, not ctest CLI. Runner ctest is new. ✓
+
+  (r) **`ctest --test-dir`** needs ctest ≥ 3.20 ✓ runners fine.
+
+  Let me check build.yml matrix to assess (e).
+
+• build.yml is a single ubuntu-latest leg with libsqlite3-dev installed (line 42) — so SQLite3 will be found and both tests register. ✓ No vacuous step.
+
+  Wait — one thing: the ctest runs in `spextractor/build` — but the tests are registered in the spextractor CMakeLists (top-level of the spextractor checkout). The build at line 79-82 configures the spextractor project with OpenMS_DIR. The test executables test_dnoise_ms1/test_tdf_load are added by that CMakeLists ✓ (not behind TESTS_ONLY). But does the full build compile them by default? add_executable without EXCLUDE_FROM_ALL → in the default target ✓. And `enable_testing()`/`add_test` — add_test requires enable_testing() somewhere in CMakeLists; tests.yml runs ctest with TESTS_ONLY so it must exist ✓.
+
+  One subtlety: does building test_tdf_load in the full tool build work — it includes "TdfLoad.h" → <OpenMS/FORMAT/TdfMzCalibration.h> → the shim in ${CMAKE_CURRENT_BINARY_DIR}/shim comes BEFORE or AFTER the real OpenMS include? target_include_directories(test_tdf_load PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/shim) — but the tool's CMake also links/includes OpenMS? test_tdf_load target only links SQLite::SQLite3 — does it get OpenMS include dirs transitively? No — target_link_libraries only SQLite. target_include_directories: src + shim only. So <OpenMS/FORMAT/TdfMzCalibration.h> resolves ONLY to the shim ✓ deterministic, no ambiguity with the real OpenMS headers. Good — and this also means test_tdf_load compiles without OpenMS includes, intentionally.
+
+  Hmm wait — actually there's one more potential trap: in the full tool build, would the compiler ALSO pick up OpenMS include dirs via CMAKE_INCLUDE_PATH or global include_directories()? If the top-level CMakeLists uses include_directories() globally, that could add OpenMS paths and create two candidate TdfMzCalibration.h (shim vs real). They're the same bytes anyway (COPYONLY of src/TdfMzCalibration.h, and the OpenMS patch installs the same file). No issue.
+
+  Now, final sweep: any defects I should actually report?
+
+  Let me reconsider the genuinely reportable items:
+
+  **Finding candidate 1 (low, fix-pass)**: `loadTdfDnoise` validates AccumulationTime for ALL frames including MS2-only frames; a malformed/zero/negative AccumulationTime on a frame the dnoise path never touches now refuses the run at setup. Pre-fix, only MS1 frames' corr was range-checked and the atof parse never failed. Real Bruker files always store numeric AccumulationTime, so this is theoretical; direction is fail-closed. Verifier's fix text said "In the Frames loop" — implied all rows. I'll report as low with the note that it is fail-closed and matches opentims reading every frame.
+
+  **Finding candidate 2 (low, fix-pass)**: stale lock after SIGKILL — pre-existing design (old script also had a bare mkdir lock). Actually the old script's trap `rmdir` on EXIT had the same SIGKILL hole. Not a regression → "pre-existing". The new owner file with pid+timestamp at least aids manual recovery. Mention briefly in the clean list instead? The output format asks for defects; a pre-existing one noted. I'll mention as pre-existing low.
+
+  **Finding candidate 3**: The one I keep coming back to: `Ms1MzError` and `DnoiseError` derive from `Exception::InvalidValue`; the stream fallback catch order: FrameTableError, DnoiseError, Ms1MzError, then BaseException. Fine.
+
+  **Finding candidate 4**: In `requireComplete`, thrown at 4328 — for the STREAMED path, this is after the load; for a streaming run where the loader silently dropped an MS1 frame with peaks, the refusal comes AFTER the whole load (potentially an hour), not in milliseconds. The verifier's design accepted this (completeness can only be known after the load). "A refusal comes too late (after hours of work)" — the prompt explicitly lists this as an attack angle. Is there a cheaper option? Can't know completeness before the load ends. So inherent. Note as accepted-by-design.
+
+  **Finding candidate 5**: `consumeMS1Spectrum_`'s first-frame checkLoader — the frame is buffered AFTER the check ✓ good.
+
+  **Finding candidate 6**: **Zero MS1 frames with points + requireComplete** — a .d with zero MS1 frames in Frames (all MS2): dnoise setup succeeds (no MS1 → no corr refusals, all need[ci]=0 → empty tables), the load delivers no MS1, requireComplete finds nothing missing, then ms1_map.empty() → INCOMPATIBLE_INPUT_DATA ✓.
+
+  **Finding candidate 7**: A .d where Frames HAS MS1 rows with NumPeaks > 0 but the file's tdf_bin is missing → loader fails → fallback fails → error exit. requireComplete never reached. ✓ (check 21 exercises this.)
+
+  **Finding candidate 8 — POTENTIALLY REAL**: the SDK refusal uses `cfg.bruker_sdk_path` — but is `bruker_sdk_path` actually a field of BrukerTimsFile::Config? 4.2 says "the Config's bruker_sdk_path". If the field were named differently it wouldn't compile — it compiled and deployed, so it exists. ✓
+
+  **Finding candidate 9 — check `dnoise.scanTables()`**: `String(tdf.ms1_max_scans[ci])` — String from uint32 ✓.
+
+  **Finding candidate 10 — the e2e 19d `"[ms1-prune]" not in log` assertion**: the [ms1-prune] line prints only when ms1_prune.on at the summary (4330-4337). For prune=false arms, no [ms1-prune] line anyway — the assertion only has teeth for prune=true arms. And "refused only after the load summary" would mean exit at... actually with prune=true, if the refusal only happened in Ms1Prune::frame (the "kept whole" behavior pre-fix was NOT a refusal — pre-fix exited 0). The negative control confirms pre-fix exits 0 → expect_fail bites ✓. The "[ms1-prune] not in log" assertion for prune=false is vacuous-but-harmless; for prune=true it has teeth. Fine.
+
+  **Finding candidate 11**: 19d only covers the resident path (mzML) — the streaming-path requireFiniteMs1Mz (flushMS1_) is covered only by cluster gates. Disclosed in the test comment. OK.
+
+  **Finding candidate 12 — one more identity check on the CHANGELOG/docs numbers**: memory figures updated (31.99→25.90 etc.) — claims, unverifiable here; consistent between README/help/CHANGELOG ✓ (spot: README table row, help text 2651, 2721-2722, CHANGELOG — all use the same new numbers ✓).
+
+  **Finding candidate 13**: `tests.yml` — the negative-compile step's gcc-11 leg: gcc-11 defines __RECIprocal etc. — yes these macros predate gcc-11. `-fassociative-math+-fno-signed-zeros+-fno-trapping-math` combo: gcc-11 accepts. ✓
+
+  **Finding candidate 14 — Windows CI**: tests.yml msvc leg skips the negative compile (guard `runner.os != 'Windows'`) ✓; test_dnoise_ms1 with hex float literals — MSVC accepts hexfloat literals in C++17+ ✓ (MSVC conforms). `%a` in printf — supported since VS2015 ✓.
+
+  **Finding candidate 15 — test_tdf_load on Windows**: SQLite3 not found → skipped ✓ intended.
+
+  Now — one thing I haven't done: verify the CURRENT tests/test_dnoise_ms1.cpp testGateAnd addition and that `run(f, 100, p0, ...)` signature matches. Spot-check lines ~405-425 and the testRecover exhaustive loop runtime bound (stride). Also confirm main() additions. The grep showed testRecover at 734, testCoverage at 882 — line numbers consistent with inline (~667+). I'm fairly confident the bytes match.
+
+  One more potential subtle defect to consider seriously — **`buildScanTable` float separation check with table values that are NaN**: if coefficients produce NaN (0/0 guarded to 1e-10... c[1]=0 → (c[3]-c[2])/c[1] = inf → V = inf or nan?). c[1] is C1 = 943/917 in real files. A TimsCalibration row with C1 = 0: (c[3]-c[2])/0.0 = ±inf (or NaN if c[3]==c[2]). V = c[2] + inf*(...) = ±inf/NaN; the V==0 guard doesn't catch inf/NaN; denom = c[6] + c[7]/V: V=inf → c[7]/inf = 0 → denom = c[6]; v[s] = 1/c[6] — constant → separation fails → refused ✓. V=NaN → v[s] NaN → separation check NaN comparisons false → refused ✓. Fail-closed ✓. Same as pre-fix (identical arithmetic). ✓
+
+  **And a frame-level one**: `fr.cal` — f.cal = ci index into tims_cal — u32 ✓; im_asc[fr.cal] ✓.
+
+  I also want to double-check **`denoiseMs1Frame` is unchanged** — the diff didn't touch it ✓ (only the recover:: insertion before pop_options and FrameCoverage after).
+
+  Wait — actually one ODR/organization point: `recover` namespace and `buildMs1WindowGate` are INSIDE the push_options region (pop at 477), but `denoiseMs1Frame` and FrameCoverage are AFTER pop_options — i.e., the filter itself is NOT under the GCC optimize pragma! Was that pre-existing? Pre-fix: push_options at ~264, buildMs1WindowGate inside, pop right after buildMs1WindowGate, then the filter. Let me check the pre-fix diff context: the pre-fix header had pop_options right after buildMs1WindowGate ("@@ -323,8 +334,145" shows the insertion of recover:: between buildMs1WindowGate's end and pop_options). And FrameCoverage was added at ~698, outside the region. So the filter was never under the GCC pragma — it relies on the tool-wide -ffp-contract=off (CMakeLists line 63: spextractor target) and the test's SPX_NO_FP_CONTRACT. The halo's double compare "no addition, so nothing to contract" (line 684 comment) — the filter is claimed contraction-insensitive. Pre-existing design, unchanged by this pass. The comment at 264-266 says "Contraction off for everything the gate builder and the point recovery compute" — accurate about what's inside. But hold on: is the STREAK filter's arithmetic contraction-sensitive? It sums uint64 — integer, no FP. Halo: double compare only. Gate contains(): integer. So the filter has no contractible FP. Fine, pre-existing and unchanged.
+
+  BUT — one subtle thing: the recovery's `(std::uint32_t)(r * corr + 0.5)` — r * corr + 0.5 IS contractible to an FMA (would change the rounding!). It's inside the region ✓ (recoverPoint defined before pop_options at 477). And buildScanTable's V/denom arithmetic also contractible ✓ inside. And opentimsCorrection's 100.0/at — single op ✓. correctionRefusal's 100.0/corr — single op ✓.
+
+  And the CALLER side in DnoiseRun::frame: `ax.factor(fid)`, `ax.cal.mzToTof` — mzToTof is TdfMzCalibration's function, compiled where? TdfMzCalibration.h included by spextractor.cpp — is mzToTof under its own pragma or relying on the tool-wide flag? Pre-existing: the tool-wide -ffp-contract=off covers spextractor.cpp ✓, and TdfMzCalibration.h has its own guard presumably (pre-existing, unchanged).
+
+  The test compiles with SPX_NO_FP_CONTRACT ✓ so the header's functions compiled in the test get -ffp-contract=off at the TU level even where the pragma doesn't reach (e.g. denoiseMs1Frame in the test). Consistent.
+
+  OK. Now, is there anything in the **pragma region for clang**: buildScanTable/recoverPoint have `#pragma clang fp contract(off)` inside the function body ✓ (clang's pragma is block-scoped; they put it at function top — covers the body ✓).
+
+  Alright — also double-check **`opentimsCorrection("")`**: parseF64("") → mantissa 0 → false ✓ tested.
+
+  `parseF64` on " 99.958" → first char ' ' not sign/digit → mantissa 0 → false ✓ (opentims' atof would accept leading whitespace! atof(" 99.958") = 99.958). So a tdf whose AccumulationTime TEXT has a leading space: opentims accepts, tool refuses — false refusal on weird-but-opentims-valid data. Never occurs in real Bruker files (REAL affinity). The test deliberately pins refusal of " 99.958" ✓ intended strictness. Not a defect worth reporting beyond a mention? The scope decision says "parse the sqlite TEXT with parseF64 (whole text)" — adopted as designed. Skip.
+
+  Now the final answer structure. Severity-ranked findings — honestly I have no critical/high. Let me settle on the lows:
+
+  1. **Low (fix pass)**: AccumulationTime whole-text validation now applies to MS2 frames too (TdfLoad.h:289-294) — a non-positive/unparseable AccumulationTime on a frame the port never reads refuses the run at setup. Fail-closed, no real Bruker file affected; flag as a behavior change beyond the verified finding's text (which scoped the corr guard to MS1 frames). Recommend either scoping the parse to MS1 frames or noting it as deliberate.
+
+  Hmm wait, actually — re-read the verifier fix for kimi#10: "TdfLoad.h:220: parse in the classic locale and require the whole text to be consumed" — that's in the Frames loop which reads every frame. So the verifier's own fix had the same scope. And the corr≥1 guard is MS1-only ✓ (verifier asked exactly that). So candidate 1 is per-spec. Downgrade to "checked, clean" — the Frames loop reads AccumulationTime for every frame because the tool also uses... does anything else read f.corr? Only dnoise. OK it's per the verifier's spec. I'll mention it as an observation under clean, or as low with "per spec". I'll list it as a low note only if I frame it as "beyond spec" — it's not. Drop from findings; mention in clean list.
+
+  2. **Low (pre-existing)**: stale deploy lock after SIGKILL — no stale-lock recovery; next deploys refuse until manual `rmdir`. Mitigated by the new owner file. Pre-existing (old script identical).
+
+  3. **Low (fix pass)**: `$STAGE.log` and `build_sync_*.log` accumulate in $R on the node — never cleaned. Trivial hygiene; not a correctness issue. The instructions say no style remarks — this is borderline operational. Skip? It's harmless. I'll skip.
+
+  4. **Medium? — the pending digest pins**: not a code defect, disclosed in 4.4. I'll state it under "could not verify" — the hard invariant rests on the equivalence probe until the cluster gates re-run. Especially: requireComplete + resident-path reordering have NOT been exercised on a real .d with the fix binary. If loadExperiment or the streaming loader skips some MS1 frame with NumPeaks > 0 (e.g. a zero-RAW-peaks frame where sqlite NumPeaks disagrees — actually NumPeaks is the raw count... if NumPeaks>0 the frame has peaks), the new completeness check would refuse a previously-accepted run. That IS the intended fail-closed behavior, but until the pins run, "accepted inputs stay accepted" for D/TNBC is unproven for the new binary. This is the main residual risk and it's exactly what 4.4 discloses. Frame as such.
+
+  5. Any **missed stage-2 finding**? Let me re-check each verified finding vs scope:
+  - intensity-contract kimi#10 ✓ (decision 1)
+  - codex#4 ✓ (decision 1)
+  - vibe#5 — no change, per scope ✓
+  - codex#10 ✓ (decision 3)
+  - vibe#3 ✓ (decision 2; canary skipped per scope)
+  - codex#2 ✓ (decision 4)
+  - codex#6/kimi#11 ✓ (decision 5)
+  - codex#5/kimi#5 ✓ (decision 6)
+  - vibe#4 ✓ (decision 7)
+  - codex#1 ✓ (decision 8)
+  - codex#7 ✓ (decision 9)
+  - codex#9/kimi#8 ✓ (decision 10)
+  - codex#8/kimi#9/vibe#6 ✓ (decision 11)
+  - kimi#2/codex#11 ✓ (decision 12)
+  - codex#12 ✓ (decision 13)
+  - codex#3/kimi#3 ✓ (decision 14)
+  - kimi#1 doc ✓ (decision 15)
+  All covered.
+
+  Verifier's codex#2 point 4: "Optionally refuse NULL ScanNumBegin/ScanNumEnd" ✓ done.
+
+  Verifier codex#6: "Check that MAX(NumScans) is SQLITE_INTEGER" ✓; "an MS1 frame, NumPeaks > 0 requires NumScans >= 1" ✓.
+
+  Verifier codex#5: "Keep the per-point check scan < fr.num_scans (:1917)" ✓ (recoverPoint num_scans check); "Log need[]" ✓.
+
+  Verifier codex#1: "a bitmap: seen sized tdf.frames.size()" — implemented as a grow-on-mark vector (FrameCoverage), equivalent. "frame() writes c.fid" ✓; "serial add() sets seen[fid], throws on duplicate" ✓; "at 4271 before summary() complete() throws" ✓ (requireComplete at 4328-4329); "fallback reset clears seen with total via reset()" ✓.
+
+  Verifier codex#8 items (1)-(5): ✓ all present; PRUNE_RE bad_mz kept ✓.
+
+  Verifier codex#12: rename of the check at :305 ✓; gate-side check in testGateAnd ✓.
+
+  Verifier kimi#2's sync_cluster.sh:73 -I change → superseded by staged-layout build (better) ✓.
+
+  Now, areas to explicitly list as clean:
+  - recover:: refactor arithmetic identity (line-by-line vs pre-fix, tolerances, loop bounds, cast order, NaN paths); the probe's coverage.
+  - per-row scan tables (need[ci]) logic and its edge cases (0 need, empty MS1 frames, pole rows, scan < num_scans retained).
+  - sqlite hardening completeness in all three loaders (prepare/DONE/errmsg, schema-decided optional table, NULL scans, typed+ranged integers).
+  - FrameCoverage correctness incl. empty-frame handling, MS2 slots skipped, reset on fallback; pass-2 consumer has no dnoise (verified at spextractor.cpp:5245-5256).
+  - requireFiniteMs1Mz placement on both paths, exception capture in OpenMP, passthrough catch; prune branch unreachable-but-throwing; bad_mz kept.
+  - SDK refusal before any loader output; e2e 21 pins both arms; negative control on the pre-fix binary fails exactly 19d/21.
+  - Help text/comment/CHANGELOG propagation; README/CONTRIBUTING counts.
+  - Deploy transaction: lock-before-shared-writes, staged-bytes unit tests, rollback with touch, fail-closed provenance park, post-build rehash, signal traps, no SIGPIPE kill, harness 27 checks incl. mutants; keeps everything the old script did (verified field-by-field: provenance fields superset, suite/golden/bench/launcher ship, chmod 771, .bak, deploys.log).
+  - CI: negative compiles non-vacuous (positive control + #error attribution), ctest step guarded against zero matches, SQLite present on the build leg, harness on one Linux leg.
+  - Tests bite pre-fix code (section 5 negative control + claimed 30 failing checks for pre-fix TdfLoad).
+
+  Could not check:
+  - Digest pins on the fix binary (4.4) — the hard invariant is not yet re-proven end-to-end; specifically the resident path with dnoise on and requireComplete on real .d data. The equivalence probe covers the recovery maths only.
+  - The loader's actual honoring of OPENMS_BRUKER_SDK_PATH / cfg.bruker_sdk_path (rests on stage-2's read of BrukerTimsFile, not re-verifiable from this document).
+  - opentims' actual parse of AccumulationTime (premise carried from stage 1/2).
+  - gcc-11 negative-compile leg not locally verified (4.3) — fails loudly if wrong, never silently.
+  - Whether anything outside the shown spextractor.cpp regions calls dnoise in pass 2 — I verified via grep: only 4043 sets consumer.dnoise; pass-2 consumer tc never gets it (5245-5256).
+
+  Now — let me reconsider once more whether there's any REAL defect I can construct. Let me think about `FrameCoverage::mark` thread-safety: called only from add() — serial ✓. `firstMissing` from requireComplete — serial ✓.
+
+  One more: **`add()` marks `c.fid` for slots where frames > 0 — but a Counts slot for a spectrum whose frame() EARLY-RETURNED at n==0 sets fid ✓. What about a slot where frame() was never entered because dn false? Not applicable (dn_cnt empty when !dn).
+
+  Wait — flushMS1_: `dn_cnt(dn ? n : 0)`; add called only `if (dn)`. ✓
+
+  **requireComplete when dnoise.on but input was streamed mzPeak?** dnoise.on only for BRUKER_TDF ✓.
+
+  **One more possible hole: `dnoise.on` true, STREAMED path, but the input .d was loaded with `tile_source` and SPEXTRACTOR_LOAD_ONLY → returns before requireComplete — fine (probe).
+
+  What about **the [frames] invariant block throwing FrameTableError AFTER a successful stream (4178)** — streamed=true, so no fallback; requireComplete at 4328 never reached; run dies with structural error. Marks are moot. ✓
+
+  **Decision 7a subtlety**: `dn_loader_checked_` set true even if checkLoader throws? No — if checkLoader throws, the flag assignment never executes, but the run is dead anyway. ✓
+
+  **Decision 11 message**: `std::to_string(s[i].getMZ())` — for -inf prints "-inf" ✓.
+
+  **One FINAL careful look for a real bug in the txn script: `trap 'rm -rf "$S"' EXIT` at line 80, then line 83 `trap finish EXIT` — between mkdir LOCK (81) and trap finish (83) there is `COMMITTED=0; PROMOTED=""` at line 82 — wait, the order in the file is:
+  ```
+  80: trap 'rm -rf "$S"' EXIT
+  81: mkdir "$LOCK" ... || { ...; exit 1; }
+  82: COMMITTED=0; PROMOTED=""
+  83: trap finish EXIT
+  ```
+  If mkdir succeeds and then... no failing command at 82. ✓
+
+  But here's one: if `mkdir "$LOCK"` FAILS (lock held), exit 1 → EXIT trap = `rm -rf "$S"` — removes the stage ✓ and the local script's ssh gets rc 1, cats the log ✓. The local EXIT trap: HANDED=1 → doesn't try to remove the stage ✓.
+
+  **And: what if two deploys race between mktemp and mkdir LOCK?** Both stage, one wins the lock, the loser refuses and removes only its own stage ✓ S5.
+
+  **finish() `rm -rf "$S"` at the end plus `rmdir "$LOCK"`** — order: removes stage, removes owner, rmdir. If rmdir fails (owner file recreated?), || true? No — under set +e in finish, failures ignored, then `exit "$rc"` ✓. Hmm — finish does `set +e` so rmdir failure is silent; but then the lock dir remains with... `rm -f "$LOCK/owner"` then `rmdir "$LOCK"` — if rmdir fails the lock stays → future deploys refuse. When could rmdir fail? If something else wrote into $LOCK. Edge; acceptable.
+
+  One more potential subtle issue: **`exit "$rc"` at the end of finish** — finish is the EXIT trap; calling exit inside an EXIT trap overrides the exit code — intended (preserves rc). But careful: `exit "$rc"` re-triggers the EXIT trap? No — bash doesn't re-run the EXIT trap recursively. ✓
+
+  **Line 65-66**: `grep -qx "binary_sha256=$(sha "$BUILD/bin/spextractor")" "$S/prov.prev"` — if the binary doesn't exist, sha fails → substitution "" → grep fails → park stale ✓ fail-closed.
+
+  OK. I'm also slightly curious about **`sha256sum -c --quiet` on a file with lines for files that don't exist** (promoted.sha256 dest paths — all promoted ✓).
+
+  And the local script line 39: basename collision check across INPUTS+SHIP ✓.
+
+  I think there is one more legitimately reportable **low**: in the harness, `snap()` excludes `.deploy.stage.*.log` and `build_sync_*.log` by NAME anywhere in the tree (`-name` matches basename at any depth — fine) — that's deliberate.
+
+  Also — the **`ok()` eval quoting** — checks are single-quoted strings with $vars expanded at eval time (deferred) ✓ deliberate.
+
+  Let me also decide on severity for the "AccumulationTime validated for all frames" — actually you know what, there IS a real edge: **AccumulationTime NULL on an MS2 frame**: pre-fix — `if (!acc) return fail("frame N has no AccumulationTime")` — pre-existing refusal, unchanged. ✓ So only the parse-strictness for non-MS1 frames changed. Fine, drop it entirely or list as low informational. I'll include it as a low observation marked "defect in the fix pass (behavioral, fail-closed, no real input known)" — actually the output format says no style remarks and to list defects; I'll include it as a low with clear reasoning since it IS a newly-introduced refusal class on inputs that previously loaded. The scope says don't report absence of skipped items, but this is a new refusal beyond the finding's text. Actually re-check: was it beyond the finding? kimi#10's fix says "TdfLoad.h:220: parse in the classic locale and require the whole text to be consumed" — line 220 in the pre-fix source is inside the Frames loop where `f.corr = 100.0 / std::atof(...)` was computed for every frame. So the verifier's fix has the same all-frames scope. It is per-spec. I'll put it in the clean list with a note.
+
+  Hmm, let me do one more adversarial sweep on the most dangerous thing — **identity of `recoverPoint` vs pre-fix for the `t` output used in refusal messages**: pre-fix message printed t computed identically ✓ messages identical except the new 2^24 one.
+
+  And **`frameCheck` order change vs pre-fix for the IM check**: pre-fix, for a spectrum with n == num_peaks == 0 and no IM: passed (counted, returned). New: frameCheck n==0 skips IM check → none → counted, returned ✓ same.
+
+  Pre-fix, for n>0, n==num_peaks, no IM: threw "carries no 1/K0 per point" AFTER ++c.frames. New: throws BEFORE ++c.frames. Only affects counts in a run that's being refused anyway ✓.
+
+  **`im_n` when has_im true: `s.getFloatDataArrays()[s.getIMData().first].size()`** ✓ pre-existing expression.
+
+  Done. One more — the prompt asks to also check "unused variable warnings under -Werror": does the tool build with -Werror? Node flags include -Wall -Wextra but no -Werror ✓. In test_tdf_load.cpp, `(void)corr;` handles it ✓. In testRecover, `half_hit` etc. used ✓. `comma_locale` used ✓. In the header, no new unused vars.
+
+  `#include <cstdlib>` added to the test for strtod ✓; `std::nanf` needs <cmath> ✓.
+
+  CMake: `find_package(SQLite3 QUIET)` at top-level runs even when SPEXTRACTOR_TESTS_ONLY... fine either way.
+
+  Alright — is there anything about `configure_file(... COPYONLY)` running at configure time: if src/TdfMzCalibration.h changes, reconfigure needed — standard.
+
+  Final answer structure:
+  - Numbered findings, most severe first. I have no critical/high/medium defects. I'll present a small set of low findings + explicitly state no critical/high/medium found. Findings:
+
+  1. Low (fix-pass): `tests.yml` negative-compile step compiles with the runner's default `c++`, not the matrix-selected compiler — on the gcc-11 leg (ubuntu-22.04) it tests whatever `c++` resolves to. Not vacuous (any non-refusal is loud), but the gcc-11-specific behavior (4.3 notes it wasn't checked locally) isn't actually exercised by that leg. Fix: use the matrix compiler (e.g. `$CXX` set per leg / update-alternatives).
+
+  Hmm — is that true? How does the matrix select the compiler for other steps? Let me check tests.yml quickly for how cc is used — if other steps export CXX=${{ matrix.cc }}, then bare `c++` here is a real inconsistency. Let me grep.
+
+• Interesting — the pre-existing steps also don't select the matrix compiler explicitly: `cmake -B build` uses the default compiler on every leg too! So on the gcc-11 leg, cmake's default `c++` is used everywhere — meaning "gcc-11" as a matrix label only has teeth if ubuntu-22.04's default c++ IS gcc-11 (it is: ubuntu-22.04 ships gcc 11 as default). So bare `c++` is consistent with the workflow's existing convention: the matrix selects the OS image, and the compiler is whatever the image defaults to. On ubuntu-22.04 that's gcc-11 ✓. So the negative-compile step DOES exercise gcc-11 on that leg. Consistent. Not a defect. (4.3's "gcc-11 not checked locally" remains a residual — but it fails loudly if wrong.)
+
+  One more thing about that step: `-fsyntax-only` with `-Ofast` etc. — macros defined regardless of syntax-only ✓.
+
+  Also `printf '#include "DnoiseMs1.h"\n'` — creates a TU including only the header; header is self-contained ✓ (it must be, as test_tdf_load etc. include it).
+
+  Now the macOS leg: appleclang — `-Ofast` on clang: does clang accept -Ofast? Yes (clang supports -Ofast as of clang ... hmm, actually clang historically did NOT support -Ofast! Clang added -Ofast in Clang 17? Let me think. Clang 17 added -Ofast (maps to -O3 + fast-math-ish per-file defaults? Actually -Ofast in clang 17+ enables -O3 plus some). AppleClang on macos-latest (macOS 15, AppleClang 17?) — supports. If an older AppleClang rejects -Ofast as unknown argument... clang treats unknown -O flag as error? Clang errors on invalid -O level. Then the step hits the else branch: "broke the compile, but not through the #error" → fail=1 → LOUD CI failure, not silent. 4.1 says measured with Apple clang 21. OK.
+
+  Now, finalize. Additional check I promised myself: skim the rest of tests/test_dnoise_ms1.cpp changes quickly to be sure the inline matches and there are no obvious vacuous checks — the grep showed key lines; I'll trust.
+
+  Also should I verify tests/test_tdf_load.cpp and tests/test_sync_cluster_txn.sh exist in the working tree as new files? They're listed in the repo listing: tests/test_tdf_load.cpp ✓ and tests/test_sync_cluster_txn.sh ✓ (both appear in the directory listing at top). Good.
+
+  Now compose the final review.
+
+  Findings list (severity-ordered). Honest conclusion: no critical/high/medium defects found. I'll report a handful of low items:
+
+  1. Low (pre-existing, carried): stale `.deploy.lock` after SIGKILL has no recovery — every later deploy refuses until manual cleanup. scripts/sync_cluster.sh:81. The owner file (pid + timestamp) makes manual diagnosis easy. Old script had the same hole, so not a regression.
+
+  2. Low (fix pass): the node-side transaction leaves `$STAGE.log` (and the pre-existing `build_sync_*.log`) behind in $R forever — accumulates one small file per deploy. Trivial. Actually is this worth reporting? "No style remarks" — this is operational hygiene, borderline. I'll fold into a single low or drop. I'll mention in one line.
+
+  3. Low (fix pass): AccumulationTime parse-strictness now also applies to frames dnoise never reads (MS2): a TEXT/0/negative AccumulationTime on an MS2 frame refuses at setup where pre-fix only MS1 frames' corr was guarded. Matches the verifier's fix location (whole Frames loop), fail-closed, no real Bruker file known to trip it. Worth one line.
+
+  4. Low (fix pass, residual-risk note, disclosed): the hard invariant (digest identity on D/TNBC, resident path with dnoise on, requireComplete on a real .d) is not yet re-proven on the fix binary (4.4). The equivalence probe covers the recovery arithmetic but not the integration changes (per-row tables equal old ones on D/TNBC by argument; requireComplete could in principle refuse a real file if the loaders skip an MS1 frame with NumPeaks > 0 — that would be fail-closed but would block the default configuration on real data until resolved). Recommend running the pins before the next deploy-dependent claim. Marked as "not a defect; the outstanding validation step".
+
+  5. Possibly: requireComplete's refusal comes only after the whole load (inherent — completeness can't be known earlier). By design.
+
+  6. Anything about `COMMITTED=1` set before the final `mv` — if mv failed, old provenance lost. Same-filesystem mv is effectively atomic and cannot fail unless the fs is dying; negligible. Mention? It's a genuine ordering nit: COMMITTED=1; mv — if mv fails, finish reports "post-commit step failed" and prov.prev is deleted with the stage → no provenance and binary new. In practice mv within one fs can't fail. I'll mention as low theoretical.
+
+  Hmm, actually let me reconsider #6: `mv -f "$PROV.tmp" "$PROV"` — same directory ($BUILD/bin). rename(2) — can only fail on fs errors. Fine, skip or fold.
+
+  7. One more real one to consider: **`snap()` mtime granularity on Linux is nanoseconds (stat -c %y) but on macOS %Fm is seconds** — harness claims 27/27 on both; the mutants fail — so teeth confirmed. Clean.
+
+  8. Windows: test_tdf_load not built (intended); hex float literals in test_dnoise_ms1 on MSVC — supported (C++17). `%a` supported. Clean.
+
+  9. Hmm — one more potential issue in the harness I noticed: `S9` extracts the pid via sed from the owner file — the owner line is `$S pid $$ date` — S contains slashes; sed pattern `s/^.* pid \([0-9][0-9]*\) .*$/\1/p` — greedy .* before " pid " — fine. If the kill hits before make starts (during unit tests), the trap would fire after the current command → rollback → still correct semantics, but the harness waited for $O/building so make is running. ✓
+
+  10. Also the local-side pre-flight "two staged files share a name" — protects the basename flattening ✓.
+
+  Let me also mention explicitly what I could NOT check:
+  - The inline-vs-tree match: I spot-checked several regions; all matched.
+  - Digest pins not re-run (4.4).
+  - opentims/BrukerTimsFile behavior premises (carried from stages 1-2, not re-verifiable from this document).
+  - The claimed 30 failing checks of test_tdf_load against pre-fix TdfLoad.h (claimed, plausible from the diff — old code lacks all the checks).
+  - gcc-11 macro behavior (CI will fail loudly if wrong).
+
+  Format: numbered findings, most severe first; then clean areas; then could-not-check. Keep it tight.
+
+To resume this session: kimi -r session_637a1a92-53be-44da-b9bf-83a911622d75
+exit=0

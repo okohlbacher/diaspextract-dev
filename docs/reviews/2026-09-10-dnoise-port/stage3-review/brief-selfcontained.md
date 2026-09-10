@@ -1,0 +1,5864 @@
+# Adversarial review, stage 3: SpeXtractor dnoise MS1 port -- the fix pass G diff (fixes for the verified stage-2 findings)
+
+Everything you need is inline. Do not run any shell command.
+
+(You may be given a list of repository files to read at the very end; the inlined text below is the same bytes. Answer
+from this document; do not try to build, run or test anything.)
+
+## 1. What the code is
+
+SpeXtractor is an OpenMS TOPP tool (C++20, OpenMP; src/spextractor.cpp, ~6000 lines) that builds pseudo-MS/MS spectra
+from Bruker timsTOF diaPASEF data (.d directories: analysis.tdf sqlite metadata + analysis.tdf_bin frames). It also
+reads mzML and mzPeak.
+
+dnoise v0.1.0's MS1 path is ported bit-identically in src/DnoiseMs1.h (header-only, namespace spx::dnoise: a streak
+filter, a halo filter and a DIA window gate over raw (scan index, TOF index, raw u32 intensity) points). It is ON by
+default (`-dnoise:ms1 true`; `-dnoise:ms1 false` is the escape hatch) and runs on every MS1 frame of a Bruker .d,
+before the MS1 peak pick.
+
+The in-tool path (struct DnoiseRun in spextractor.cpp):
+- Setup before pass 1: src/TdfLoad.h `loadTdfDnoise` reads analysis.tdf read-only via sqlite: GlobalMetadata (TEXT),
+  MAX(Frames.NumScans), the optional DiaFrameMsMsWindows table, per-frame Frames(Id, MsMsType, NumScans, NumPeaks,
+  AccumulationTime, TimsCalibration) and TimsCalibration rows (C0..C9). It builds the window gate, per-TimsCalibration
+  scan tables and loads the TOF axis (MzCalibration table model, per-frame factor from T1/T2).
+- The OpenMS Bruker loader hands MS1 frames over as MSSpectrum with double m/z (exact per-frame table calibration),
+  float32 intensity (opentims-corrected: (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5)) and a float32
+  "Ion Mobility" array. DnoiseRun recovers, per point and before the picker:
+  TOF bin  = MzCalibration table model inverse of the exact m/z at the frame's factor, within 1e-6 bins of an integer;
+  scan     = the float32 1/K0 matched in a per-TimsCalibration-row table of the loader's own float32 1/K0 per scan
+             (within 1e-6; setup requires the table monotonic with adjacent gaps > 4e-6);
+  raw      = the unique inverse of opentims' intensity correction corr = 100/AccumulationTime.
+  It also requires that the frame id is an MS1 frame of the tdf, that the point count equals Frames.NumPeaks, that
+  BrukerTimsFile::lastMzCalibration() == "tdf_table_modeltype1", and (new in this pass) that every MS1 frame with
+  points reaches the filter exactly once. Any mismatch throws DnoiseError (fail closed), rethrown past the stream-load
+  fallback. Kept points are applied with MSSpectrum::select + shrinking every data array; an emptied frame stays with
+  an empty IM array.
+- Two load paths: the streaming load (a consumer, PickCompactConsumer, flushMS1_ picks MS1 batches) and a resident
+  load (whole run in memory, then a parallel pick loop). A failed streaming load falls back to the resident load after
+  resetting its state (the "stream fallback").
+- The MS1 prune (Ms1Prune, `-perf:ms1_prune`) removes sub-noise picked MS1 centroids and is output-identical.
+
+HARD INVARIANT: output must stay digest-identical on accepted inputs. Pins (bench/semantic_digest.py, first 8 hex):
+dataset D (31-min diaPASEF) dnoise off 8c1b047f, dnoise on e43672a0; TNBC 009 (2-hour) dnoise off bff54a1f, on
+3aafd0b5. Recovery arithmetic must keep its expressions and operation order verbatim, inside the header's
+floating-point-contraction-off region (#pragma STDC FP_CONTRACT OFF / clang fp contract(off) / GCC optimize guard).
+Anything unrecoverable must be refused (fail closed), never silently filtered or silently skipped.
+
+Stage 1 reviewed the port; stage 2 reviewed its integration into the tool (default on). Stage 2's findings were verified
+(section 2) and a scoped fix pass ("fix pass G", section 3) was implemented by several agents. THIS review is of the
+fix pass G diff (sections 7-10).
+
+## 2. What stage 2 found and the verifier confirmed (the verified findings with the fix and test the verifier
+proposed for each; verbatim). Line numbers here refer to the PRE-fix-pass sources, i.e. the left-hand
+side of the diffs in section 7; SP/... paths are the verifier's scratch and are not inlined.
+
+```markdown
+## [intensity-contract] PARTLY low
+kimi #10 / vibe #2: std::atof on AccumulationTime is locale-sensitive; is mirroring opentims' atof correct, and does OpenMS/TOPP ever set a non-C LC_NUMERIC?
+
+FIX: TdfLoad.h:220: parse in the classic locale and require the whole text to be consumed:
+`double at; if (!spx::dnoise::detail::parseF64(std::string(reinterpret_cast<const char*>(acc), (size_t)sqlite3_column_bytes(st, 4)), at) || !(at > 0.0)) return fail("frame " + std::to_string(id) + ": AccumulationTime is not a positive decimal number"); f.corr = 100.0 / at;`
+
+parseF64 converts via strtod in the C locale, correctly rounded, which is bit-identical to opentims' guarded atof for every text it accepts. Anything else fails closed. (The column_double + 15-digit round-trip variant from kimi #1 also works.) Land this together with the corr >= 1 setup guard (codex #4). With both, "100.042" is refused up front instead of passing as corr = 1.
+
+TEST: Unit test on the parse:
+- Under setlocale(LC_NUMERIC, "de_DE.UTF-8") (skip if that locale is unavailable), "99.953" gives corr bit-equal to 100.0/99.953 as parsed in the C locale.
+- "100.042" gives corr < 1.
+- "99,953" and "abc" are refused.
+- If TdfLoad.h is testable with SQLite (standalone CMake), run it through a temporary analysis.tdf with one Frames row.
+
+## [intensity-contract] CONFIRMED low
+codex #4: AccumulationTime > 100 ms (corr < 1) makes raw counts collide and refuses mid-run; corrected intensity >= 2^24 is refused; should setup refuse corr < 1 up front with a clear message, and should the error text name the 2^24 bound?
+
+FIX: Setup (:1843-1845): change the test to `!(corr >= 1.0 && corr < 1e6)`. Message: "MS1 frame N: AccumulationTime T ms exceeds 100 ms, so opentims' intensity correction 100/T = c < 1 maps several raw counts to one intensity and the raw counts dnoise filters cannot be recovered". Update the comment to match.
+
+frame() (:1921-1925): refuse `v >= 16777216.0f` separately, with "intensity >= 2^24 = 16777216: the loader's float32 intensity no longer identifies one raw count". Keep the conservative cut; relaxing it would need the float cast inside the forward check, which is not worth it at a 145k maximum.
+
+Apply after the classic-locale parse fix (kimi #10), or a comma locale turns 100.042 into corr = 1.
+
+TEST: Unit test on the factored recovery and setup check:
+- corr = 100/125 is refused with text containing "AccumulationTime".
+- corr = 100/99.958 is accepted.
+- v = 16777216.0f throws text containing "2^24".
+- The threshold premise holds: corr in {1, nextafter(1,2), 100/99.958, 100/96} has no two raws below 2^24/corr mapping to the same value (exhaustive, or up to 2^20 for CI time).
+
+## [intensity-contract] PARTLY none
+vibe #5: intensity recovery search bounds (+-1 around (v+-0.5)/corr) are arbitrary and wasteful; for extreme corr (0.1) the loop iterates 20x more
+
+FIX: None needed. If the loop is touched anyway, drop the -1.0/+1.0 and keep floor/ceil. That rounding already contains every preimage, as the exhaustive test shows.
+
+TEST: The exhaustive recovery unit test from kimi #1 (every raw inverts to itself uniquely) covers any bound change. Optionally assert that the shipped and floor/ceil bounds give identical (hits, raw) for raw < 2^20 at corr 100/99.958 and 100/96.
+
+## [fp-and-build] PARTLY low
+codex #10: CMakeLists applies -ffp-contract=off to the whole spextractor target, which changes contraction everywhere in the tool (including with dnoise off) and broadens the identity claim beyond the validation; it should be scoped or a new baseline defined
+
+FIX: Keep the flag tool-wide; do not scope it. Add a CHANGELOG line: builds of the tool for FMA-capable targets (arm64, -march=haswell and later) are now contraction-free like the cluster reference; default x86-64 builds and all pins are unchanged.
+
+TEST: Add `ctest --test-dir spextractor/build -R dnoise_ms1 --output-on-failure` to build.yml. Today only tests.yml:34 runs ctest (TESTS_ONLY), so the full tool build never runs the pinned-box test under its own flags. Optionally, the sync_cluster.sh FL assertion described under kimi #4.
+
+## [fp-and-build] CONFIRMED low
+vibe #3: -funsafe-math-optimizations, -freciprocal-math and clang -ffp-model=fast are not caught by DnoiseMs1.h's #error and move D's gate boxes; is a cheap runtime self-test (recompute razor-edge boxes at setup, refuse on mismatch) sound and worth it?
+
+FIX: Minimal fail-closed fix at compile time: extend the guard at DnoiseMs1.h:66-67 with `|| defined(__RECIPROCAL_MATH__) || defined(__ASSOCIATIVE_MATH__) || defined(__NO_SIGNED_ZEROS__) || defined(__ARM_FP_FAST)`. Leave __NO_TRAPPING_MATH__ out. Update the error text and the point-6 comment to say that only clang on x86-64 (and clang -freciprocal-math on arm64) still slips past.
+To close that residue as well: a noinline canary in DnoiseRun::setup() that runs buildMs1WindowGate on the unit test's D fixture (metaD strings, kRowsD, Params{}) and refuses the run if any of the 24 boxes differ from kBoxesD. It costs microseconds and about 40 lines of constants; worth adopting only if default-on bit identity must survive arbitrary third-party CXXFLAGS.
+
+TEST: In tests.yml, on every GCC and arm64 matrix entry, add a negative compile step asserting refusal, e.g. `! $CXX -std=c++20 -O2 -freciprocal-math -fsyntax-only -I src tests/test_dnoise_ms1.cpp` and the same with -funsafe-math-optimizations. Keep the existing pinned D boxes 9/11/13/15/16/18 as the canary's golden. Add ctest to build.yml so the full tool build exercises the header under its own flags.
+
+## [sqlite-metadata] PARTLY medium
+codex #2: sqlite errors in loadTdfDnoise (a failed prepare counts as no rows, and any non-ROW code ends a row loop as if complete) can silently build a partial or absent window gate
+
+FIX: In loadTdfDnoise (apply the same to loadTdfCalibration and loadTdfAxisBounds):
+  auto sqlfail = [&](const std::string& what) { return fail(what + ": " + sqlite3_errmsg(db)); };  // errmsg is read before fail() finalizes
+1. Check every prepare: if (sqlite3_prepare_v2(...) != SQLITE_OK) return sqlfail("GlobalMetadata query"); likewise for MAX, TimsCalibration and Frames.
+2. Require DONE after every loop: int rc; while ((rc = sqlite3_step(st)) == SQLITE_ROW) {...} if (rc != SQLITE_DONE) return sqlfail("reading <table>");
+3. Decide whether the optional table exists from the schema, never from a prepare error:
+  SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = 'DiaFrameMsMsWindows' COLLATE NOCASE
+  (COLLATE NOCASE because table-name resolution is case-insensitive; that statement also needs its prepare and step checked). If no row: windows stay empty (dnoise: no gate). If present: the windows prepare must succeed (a missing column refuses) and the loop must end in SQLITE_DONE.
+4. Optionally refuse NULL ScanNumBegin/ScanNumEnd; the WHERE clause only filters the m/z columns, and column_int64 reads NULL as 0.
+
+TEST: Add a sqlite-gated unit test, tests/test_tdf_load.cpp. test_dnoise_ms1 must stay sqlite-free for Windows CI, so use find_package(SQLite3 QUIET) plus if(SQLite3_FOUND), and a shim ${CMAKE_BINARY_DIR}/shim/OpenMS/FORMAT/TdfMzCalibration.h. Also compile it in the sync_cluster.sh unit-test step.
+The test builds tdfs through the sqlite3 C API in a temp dir, using the shapes in verify2/mktdf.py. It corrupts pages at (rootpage-1)*page_size, parsing the 0x05 interior page to find a middle leaf. Assert:
+- ok: true, 24 windows
+- absent: true, 0 windows, no gate
+- nocol: false, why mentions IsolationWidth
+- corrupt single windows page: false, 'malformed'
+- corrupt mid-table leaf: false (today: true with 1554 of 3000 windows)
+- corrupt Frames leaf: false at setup, not during the load
+
+## [sqlite-metadata] PARTLY low
+codex #6 / kimi #11: NumScans and NumPeaks are narrowed to u32 without range checks
+
+FIX: In the Frames loop, validate the stored integer before casting:
+  auto int_in = [&](int col, long long lo, long long hi, long long& v) { if (sqlite3_column_type(st, col) != SQLITE_INTEGER) return false; v = sqlite3_column_int64(st, col); return v >= lo && v <= hi; };
+- NumScans in [0, meta.max_num_scans]. That limit is at most 1e6 and comes from the same table; the per-row type check also closes the case where MAX returns a TEXT cell, which sorts above INTEGER.
+- NumPeaks in [0, UINT32_MAX].
+- MsMsType in [INT_MIN, INT_MAX].
+- TimsCalibration (here and in the TimsCalibration.Id read at :198) in [0, UINT32_MAX].
+- For an MS1 frame, NumPeaks > 0 requires NumScans >= 1.
+- Check that MAX(NumScans) is SQLITE_INTEGER (NULL on an empty table is already handled as 0).
+Refuse with the frame id and column name. With these checks the u32 guard in denoiseMs1Frame is unreachable from the tool; keep it in the header.
+
+TEST: In the sqlite unit test above, add Frames rows with NumScans = -1, NumScans = 4294967297, NumPeaks = 4294967301, and NumScans stored as TEXT '944'. Each must make loadTdfDnoise return false and name the column; today they return true with num_scans 4294967295 / 1 and num_peaks 5. A control row shaped like D must still return true.
+
+## [sqlite-metadata] CONFIRMED low
+codex #5 / kimi #5: the scan-table monotonicity and separation check runs every TimsCalibration row over the global MAX(NumScans), including rows no MS1 frame references
+
+FIX: In DnoiseRun::setup, after the per-row NumScans validation from finding 2, compute need[ci] = max(fr.num_scans over frames with msms_type == 0 && fr.cal == ci).
+- Build and check each row's table over need[ci] scans only.
+- need[ci] == 0: leave im_asc[ci] empty and skip the check. scanOf returns -1 on an empty table, so any use still refuses.
+- Keep tdf.meta.max_num_scans unchanged for buildMs1WindowGate, since dnoise's MAX runs over all frames.
+- Keep the per-point check scan < fr.num_scans (:1917).
+- Log need[] next to the global max.
+
+TEST: Factor the table build out of spextractor.cpp into an inline function the sqlite-free unit test can include (for example next to DnoiseMs1.h), then pin three cases:
+(i) a row with TNBC's coefficients referenced by MS1 frames of 918 scans, in a run whose global MAX is 40,000 because of another row. Refused today, accepted after.
+(ii) an unreferenced row with its pole inside [0, 918). Accepted after.
+(iii) a referenced row with its pole inside its own frames' range. Still refused.
+
+## [sqlite-metadata] PARTLY low
+vibe #4: the TOF axis model is not checked until the first batch
+
+FIX: (1) Call dnoise->checkLoader() once, on the first consumeMS1Spectrum_ call, before buffering. The refusal then comes after one frame instead of 256. Keep the per-batch call as the authority.
+(2) For the resident path, predict the loader's choice in the dnoise setup block. The tool never sets tims_calibration_strategy (default AUTO, BrukerTimsFile.h:96), so refuse when cfg.bruker_sdk_path or getenv("OPENMS_BRUKER_SDK_PATH") is non-empty, with the message 'the loader will calibrate m/z through the Bruker SDK'. If the SDK then fails to load, the loader would fall back to the table model, so this can be a false refusal; that is fail-closed, and -dnoise:ms1 false is the escape. Unset or empty means the table model, since loadTofAxis already applied the same isSupported checks.
+
+TEST: Add an e2e check in test/test_spextractor.py. Create a fake .d containing only a synthetic analysis.tdf (a supported MzCalibration row, Frames with T1, D-shaped TimsCalibration and windows) and no tdf_bin. Run it with OPENMS_BRUKER_SDK_PATH=/nonexistent and expect a nonzero exit whose log names dnoise:ms1 and the SDK, before any loader output. Without the variable, the same input must get past setup (it then fails in the loader because tdf_bin is missing, which proves the ordering).
+
+## [resident-fallback] PARTLY low
+codex #1: on the resident path, 'if (!s.containsIMData()) continue;' runs before dnoise.frame, so a non-empty MS1 spectrum without IM data could skip denoising. Should the run also check that every MS1 frame was filtered exactly once?
+
+FIX: Two changes, both fail-closed.
+
+(1) In the resident loop, call `if (dnoise.on && s.getMSLevel() == 1) dnoise.frame(...)` BEFORE `if (!s.containsIMData()) continue;`. frame() already refuses n>0 without IM and counts n==0, so streaming and resident counts then agree.
+
+(2) Cheapest exact completeness check, a bitmap:
+- Add `std::vector<uint8_t> seen` to DnoiseRun, sized tdf.frames.size() (17 KB for D, 72 KB for TNBC).
+- frame() writes the frame id into its per-frame Counts slot (`c.fid = fid`).
+- The serial add() sets seen[fid] and throws DnoiseError if it was already set.
+- At 4271, before summary(), a new complete() throws DnoiseError for any id with msms_type==0 && num_peaks>0 && !seen.
+- The fallback reset clears seen together with total, via a reset() method.
+
+A frames-count plus total-raw check is not exact: a duplicated frame and a missing frame with equal NumPeaks cancel out.
+
+TEST: - Move the bookkeeping (mark/complete/reset) into a small header struct and unit-test it in tests/test_dnoise_ms1.cpp: a duplicate is refused, a missing non-empty frame is refused, a missing empty frame is accepted, reset clears the marks.
+- Cluster gate: the D/TNBC streaming arms and c3 r1d_res/r2d_fb pass the check with unchanged digests.
+- Close the gap in point 6: one full-D -perf:stream_load false run with dnoise on (2 emptied frames) must match the streaming MS1 trace count.
+
+## [resident-fallback] PARTLY low
+codex #7: the resident dn_work vectors outlive the pick, stay alive into tracing and assembly (~3.1 GB), and the ledger does not charge them
+
+FIX: Free the scratch right after `dnoise.add(dn_cnt);` (4229): `std::vector<DnoiseRun::Work>().swap(dn_work); std::vector<DnoiseRun::Counts>().swap(dn_cnt);`. Alternatively, brace the declaration, the parallel loop and add() into their own scope. Optionally charge LC_SCRATCH through a LedCharge sized from the Work capacities while the loop runs.
+
+TEST: No suite check can build a .d. Pin it with the c3 r1d_res arm (resident, dnoise on): MS1 traces digest 18155112766412898203 unchanged. Also record one full-D -perf:stream_load false run with SPEXTRACTOR_LEDGER and check RSS/arena at the 'Split into MS1' line.
+
+## [resident-fallback] PARTLY low
+codex #9 / kimi #8: after a stream fallback, the [ms1-hist] counters, phase stats and ledger rows other than LC_MS1MAP/LC_SLAB keep the failed attempt's values
+
+FIX: Nothing is needed for output. Optional ledger hygiene: make scratch_charged a PickCompactConsumer member and subtract it in ~PickCompactConsumer (`ledAdd_(LC_SCRATCH, -scratch_charged_)`). Optionally zero ms1Hist_() in the reset block, which matters only if a resident [ms1-hist] print is ever added. Phase rows need no change.
+
+TEST: Existing proof of the reset: c3 r2d_fb vs r1d_res (identical [dnoise] line and digests); keep it in the gate. For the ledger fix, run a SPEXTRACTOR_TILE_RESIDENT=1 fallback on g1.d with SPEXTRACTOR_LEDGER and assert scratch_mib returns to 0 after the load phase.
+
+## [nan-mz] PARTLY low
+codex #8 / kimi #9 / vibe #6: Ms1Prune::frame sorts (sortByPosition) before it notices a non-finite m/z and takes its stride-97 sample from that order, so a spectrum it keeps whole has already been reordered and sampled; the reviewers say prune on can then differ from prune off.
+
+FIX: Fail closed on both paths. Check every MS1 spectrum right after its pick, which is before the prune and independent of it. Both arms then refuse exactly the same inputs, and nothing after the pick ever sees a non-finite m/z.
+
+(1) After shrinkDataArrays (frozen line 1694):
+
+  /// [ms1-finite] Refuses an input with a non-finite MS1 m/z. Nothing after the pick is defined on one, prune on or off:
+  /// sortByPosition leaves finite m/z out of order around a NaN while isSorted() stays true, a NaN band edge leaves two
+  /// band cores owning nothing, and MassTraceDetection's m/z search matches anything. Rethrown past the stream fallback.
+  struct Ms1MzError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
+  inline void requireFiniteMs1Mz(const MSSpectrum& s)
+  {
+    for (Size i = 0; i < s.size(); ++i)
+      if (!std::isfinite(s[i].getMZ()))
+        throw Ms1MzError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                         "[ms1] MS1 spectrum has a non-finite m/z (" + std::to_string(s[i].getMZ()) + ") at peak " + std::to_string(i)
+                         + " of " + std::to_string(s.size()) + " after peak picking; the input is malformed and the run is refused", s.getNativeID());
+  }
+
+(2) flushMS1_, inside the try, after the ensureIMArrayName(s) that follows the pick (2161):
+          requireFiniteMs1Mz(s);   // [ms1-finite] before the prune, prune on or off
+
+(3) Resident pick loop, after ensureIMArrayName(s) (4220):
+        if (s.getMSLevel() == 1) requireFiniteMs1Mz(s);   // [ms1-finite] exactly the spectra the prune and the MS1 map take
+
+(4) Stream fallback, next to the DnoiseError line (4105):
+      catch (const Ms1MzError&) { throw; }        // [ms1-finite] a refusal of the input, not a reader failure
+Without this the stream load reads the whole run a second time only to refuse it. Consumer exceptions reach this catch unwrapped: BrukerTimsFile.cpp:1614 calls consumeSpectrum outside any try, and so does MzPeakStreamLoad.h:413.
+
+(5) Ms1Prune::frame: replace line 1759 with
+      if (!finite) requireFiniteMs1Mz(s);   // [ms1-finite] unreachable, both load paths refuse first; throws if a future entry point skips them
+and change the comment at 1757-1758 to match. At 4278, drop the " (bad_mz: spectra with a non-finite m/z, kept whole)" suffix. Keep the numeric bad_mz field, now always 0, so PRUNE_RE and check 19's bad_mz == 0 stay valid.
+
+Cost: one extra read of the picked MS1 m/z per spectrum, inside the existing parallel pick loops. That is negligible next to the pick.
+
+TEST: Add check 19d to test/test_spextractor.py after 19c, and add 1 to `total`:
+
+    # 19d: a non-finite MS1 m/z is refused after the pick and BEFORE the prune, prune off and on alike.
+    def c19d():
+        for tag, bad in (("nan", float("nan")), ("inf", float("inf"))):
+            inp_n = os.path.join(work, f"prune_{tag}.mzML")
+            synth(inp_n, n_cycles=21, ms1_extra=lambda c: prune_extra(c) + ([(bad, 5000.0, 0.95)] if c == 10 else []))
+            for bands in (1, 48):
+                for prune in ("false", "true"):
+                    r = run(binary, inp_n, os.path.join(work, f"{tag}_b{bands}_{prune}.mzML"),
+                            extra=("-perf:ms1_trace_bands", str(bands), "-perf:ms1_prune", prune), expect_fail=True)
+                    log = r.stdout + r.stderr
+                    assert "non-finite m/z" in log, f"{tag} bands {bands} prune {prune}: not refused for its m/z:\n" + log[-800:]
+                    assert "[ms1-prune]" not in log, f"{tag} bands {bands} prune {prune}: refused only after the load summary, not at the pick"
+    check("a non-finite MS1 m/z is refused before the prune, prune off and on", c19d)
+
+Why it pins the fix: synth packs m/z as float64 (19c decodes '<d'), so NaN and inf survive the mzML round trip. Today all 8 arms exit 0, so the check fails. With the fix all 8 refuse. The [ms1-prune] line is logged at 4272, after the resident prune, so its absence shows the refusal happens in the pick loop. The stream-fallback passthrough (4) runs only on streamed .d/mzPeak input and stays covered by the cluster gates, as flushMS1_ already is.
+
+## [tests-and-claims] CONFIRMED medium
+kimi #2 / codex #11: no automated test covers DnoiseRun point recovery (TOF from m/z, scan from float32 1/K0, raw from corrected intensity, frame/NumPeaks checks)
+
+FIX: Move the maths out of spextractor.cpp: 57 lines from the ranges above, plus TdfLoad.h:220. It becomes a dependency-free section of src/DnoiseMs1.h, namespace spx::dnoise::recover, about 75 lines with comments, placed inside the existing push_options / fp contract(off) region so the guard travels with it:
+- `inline double opentimsCorrection(const char* acc_text)`: 100.0/atof, as opentims.cpp:74. TdfLoad.h calls it.
+- `inline bool corrInvertible(double corr)`
+- `inline std::string buildScanTable(const std::array<double,10>& C, std::size_t n_scans, std::vector<float>& asc, bool& falls)`: empty string or the reason.
+- `inline long scanOf(const std::vector<float>& asc, bool falls, float v)`: verbatim.
+- `enum class Refusal { none, frame, peaks, im, tof, scan, intensity };`
+- `inline Refusal frameCheck(std::uint32_t fid, std::size_t n_frames, int msms_type, std::uint32_t num_peaks, std::size_t n, std::size_t im_n)`
+- `template <class Cal> inline Refusal recoverPoint(const Cal& cal, double b, double mz, float im, float inten, double corr, const std::vector<float>& asc, bool falls, std::uint32_t num_scans, std::uint32_t& tof, std::uint32_t& scan, std::uint32_t& raw, int& hits)`
+
+The template keeps DnoiseMs1.h free of the calibration header. The tool instantiates it with <OpenMS/FORMAT/TdfMzCalibration.h>, the test with src/TdfMzCalibration.h; sync_cluster.sh:30 ships the same file to both.
+
+DnoiseRun::setup and frame become adaptors that map a Refusal to today's messages, about 40 lines shorter overall.
+
+No CMake change: test_dnoise_ms1 already builds with src and -ffp-contract=off in both modes. One change in sync_cluster.sh:73: add -I/scratch/kohlbach/OpenMS/src/openms/include/OpenMS/FORMAT so the node test finds the deployed TdfMzCalibration.h.
+
+TEST: Add testRecover() to tests/test_dnoise_ms1.cpp, about 120 lines. The exhaustive loops take about 1 s at -O2; use stride 7 above 2^20 if CI runs -O0.
+
+Inputs are metadata constants only:
+- D MzCalibration: timebase 0.125, delay 25655.375, C0 279.3262846272992, C1 155279.13067653627, C2 0.001260061434461731, T1_ref 25.693668980735552, dC1 20; frame-1 T1 25.727120813485598.
+- TNBC MzCalibration row 1: 0.2, 25030.2, 314.59993079240667, 155508.97802581752, 0, 25.41837029204028, 20; frame-1 T1 25.393315017452863.
+- TimsCalibration C0..C9, D: {1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644, 167.9496150068565, 16.646316600032645, 2241.865411900982}, 944 scans.
+- TimsCalibration C0..C9, TNBC: {1, 917, 217.9811466010841, 74.83820441307512, 33.0, 1, 0.02256006096271849, 131.32054866963384, 12.961442137235451, 2637.0446006790567}, 918 scans.
+
+The forward model lives in the test, separate from the inverse: tofToMz; loaderIm = float(applyFormula) copied from RationalScan2ImConverter.cpp:47-55; opentims = uint32(double(raw)*corr + 0.5), then float.
+
+1. TOF
+- Every bin of both files goes tofToMz, then recoverPoint, and returns the bin.
+- tofToMz(tof+0.5) and mz*(1+1e-6) give Refusal::tof.
+
+2. Scan
+- falls == true for both files.
+- Hex goldens, D scans 0/1/472/943: 0x1.6e4c14p+0, 0x1.6e124p+0, 0x1.03cfc8p+0, 0x1.33a7e6p-1.
+- Hex goldens, TNBC scans 0/1/459/917: 0x1.a33458p+0, 0x1.a2ec16p+0, 0x1.201aa4p+0, 0x1.343b72p-1.
+- Every scan recovers, also at +-1 ulp; applyFormula(s+0.5) gives -1 for every s.
+- Scan 943 in a frame with num_scans 943 gives Refusal::scan.
+- A row with C3 == C2 is refused by buildScanTable.
+
+3. Intensity
+- opentimsCorrection('99.958') == 0x1.001b896437031p+0 and ('99.953') == 0x1.001ed0ffd561bp+0.
+- Every raw count below 2^24 after correction recovers uniquely on both files.
+- v 1190 (D) and v 1064 (TNBC) give 0 hits.
+- Tie golden, text '99.968': raw 1562 gives v 1562, which recovers to 1562 with 1 hit; v 1563 gives 0 hits.
+- v 0 gives raw 0; v 12.5, -1 and 16777216 are refused.
+- '125' (corr 0.8): v 2 gives 2 hits. '50': raw 2^23 gives v 16777216, refused.
+- corrInvertible(0.5) is false.
+
+4. frameCheck
+- fid 0, fid past the table, msms_type 9, n != NumPeaks and IM size != n are each refused; n == 0 passes.
+
+Confirm the scan hex goldens once against the linked OpenMS::RationalScan2ImConverter::applyFormula after the benchmark. The probe used a verbatim copy; OpenMS.dir and spextractor.dir both build -O3 -ffp-contract=off with no -march.
+
+## [tests-and-claims] CONFIRMED low
+codex #12: dnoise:iterations help says '0 keeps every point', but the halo and the window gate still run
+
+FIX: Help text for dnoise:iterations: "Streak filter passes, each over the previous pass's survivors; 0 skips the streak filter, and the halo filter and the window gate still run unless dnoise:halo / dnoise:dia_ms1_window are false (dnoise --iterations)."
+
+DnoiseMs1.h:86 comment: `///< streak passes, each over the previous survivors; 0 = no streak pass (halo and gate still apply)`.
+
+Rename the check at test_dnoise_ms1.cpp:305 to "iterations 0: the streak filter keeps every point".
+
+TEST: The halo side is already pinned by testHalo:364. Add the gate side to testGateAnd, which uses the fixture at lines 406-409 (10 points; the halo keeps all 10, the gate keeps 3):
+`dn::Params p0; p0.iterations = 0; const Run r0 = run(f, 100, p0, gate ? &*gate : nullptr); CHECK(r0.counts.after_halo == 10 && r0.counts.kept == 3, "iterations 0 still runs the halo and the gate");`
+
+## [deploy-script] CONFIRMED medium
+codex #3 / kimi #3: scripts/sync_cluster.sh uploads the source, headers and unit test before taking the remote lock, and a unit-test or build failure restores only the .cpp, so new headers stay in the tree.
+
+FIX: Replace the script with /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/a01a4fa9-478a-46f9-841b-a62735f601ab/scratchpad/verify2/sync_cluster.proposed.sh. The exact change as a unified diff is verify2/sync_cluster.patch. Real cluster paths now appear only in three root assignments (R, TOOLS, TESTS); shellcheck is clean.
+
+(1) Local side: keep the same dirty check. Create `STAGE=$(ssh node mktemp -d $R/.deploy.stage.XXXXXX)`. Write SHA256SUMS for every input and shipped file. Upload everything plus a node-side txn.sh into $STAGE with one scp. Nothing shared is written.
+
+(2) Run `ssh node "bash $STAGE/txn.sh $STAGE $GITREV $R $TOOLS $TESTS > $STAGE.log 2>&1; rc=\$?; cat $STAGE.log; exit \$rc"`. The transaction writes only to its log, so a dropped channel cannot kill it with SIGPIPE.
+
+(3) txn.sh does, in order:
+- `mkdir $LOCK`, or REFUSE (removing only the stage).
+- `trap finish EXIT`, then write an owner file.
+- `sha256sum -c` on the staged files, then the calibration patch check.
+- Compile and run the unit test from the stage, before anything is promoted. It includes the staged DnoiseMs1.h, which is the same file later renamed into src/topp.
+- `cp -p` backups of all 5 build inputs; move the provenance aside to $S/prov.prev.
+- Promote each input with `mv` plus `touch`. Every tree dir is on the /scratch nvme device, so the rename is atomic.
+- `make spextractor -j32`.
+- Re-check the promoted hashes. This catches writers outside the lock; apply_openms_patches.sh:21 installs the header without taking it.
+- Compute the provenance on the node from the promoted files, then `COMMITTED=1; mv provenance.tmp provenance`.
+- Only after that: append deploys.log, keep the old .cpp as .bak, copy the suite, golden file, bench tools, launcher and unit-test source and log, `chmod 771` the launcher.
+
+(4) finish(), if not committed:
+`for f in $PROMOTED; do d=$(dest $f); if [ -e $S/bak/$f ]; then mv -f $S/bak/$f $d && touch $d; else rm -f $d; fi; done`
+Put prov.prev back only if `binary_sha256` AND `libopenms_sha256` match the current bin/spextractor and lib/libOpenMS.so. Otherwise move it to `$PROV.stale` and print FAIL-CLOSED, leaving no provenance. In every case: `rm -rf $S; rm -f $LOCK/owner; rmdir $LOCK`.
+
+TEST: Harness: /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/a01a4fa9-478a-46f9-841b-a62735f601ab/scratchpad/verify2/txn_harness.sh. It uses a fake node where libOpenMS relinks before the tool compiles (real make and mtime rules) and ssh/scp shims. It aborts unless the shims are first on PATH and no real path survives substitution.
+
+The proposed script passes 18/18 checks across scenarios S0-S8:
+- S0-S1: first deploy and a normal deploy commit.
+- S2, unit-test failure: node byte- and mtime-identical.
+- S3, build failure with a calibration change: all inputs restored; provenance absent (parked as .stale); `! make -q lib/libOpenMS.so`; make on the restored tree reproduces the parked hashes.
+- S3b, build failure without a calibration change: provenance restored and matches the files.
+- S4, lock held: node identical.
+- S5, concurrent deploy: B refused; tree, tools and provenance are exactly A's, with no byte of B anywhere.
+- S6, missing patch: refused, node identical.
+- S7, torn upload: refused, node identical.
+- S8, a write outside the lock during the build: refused, no provenance.
+
+The original script fails R1-R3 (5 violations). Four mutants (no touch, unconditional provenance restore, .cpp-only restore, no post-build recheck) each fail 3-6 assertions. To pin this, commit the harness as tests/test_sync_cluster_txn.sh aimed at scripts/sync_cluster.sh and run it in CI on Linux (on macOS it needs the date shim).
+
+```
+
+## 3. Scope decisions: what fix pass G adopted and what it skipped
+
+```text
+SCOPE DECISIONS for fix pass G (adopted exactly as listed; the numbers are referenced below and in the code's comments/CHANGELOG):
+ 1. [kimi#10/vibe#2 + codex#4] AccumulationTime: parse the sqlite TEXT with the existing classic-locale detail::parseF64 (whole text, finite), require at > 0, corr = 100.0/at. Setup refuses corr < 1 (AccumulationTime > 100 ms) with the verifier's message; frame() refuses v >= 2^24 (16777216) with its own message naming 2^24. Recovery loop bounds stay as they are (vibe#5: no change).
+ 2. [vibe#3] Extend DnoiseMs1.h's #error guard with __RECIPROCAL_MATH__, __ASSOCIATIVE_MATH__, __NO_SIGNED_ZEROS__, __ARM_FP_FAST (not __NO_TRAPPING_MATH__); update the error text/comment. NO runtime canary (skipped: add when arbitrary third-party CXXFLAGS matter). CI negative-compile steps where the compiler defines those macros.
+ 3. [codex#10] Keep -ffp-contract=off tool-wide; add a CHANGELOG line; run the dnoise unit tests via ctest in the full-tool CI build (build.yml).
+ 4. [codex#2] sqlite in TdfLoad.h: check every prepare, require SQLITE_DONE after every row loop, decide the optional DiaFrameMsMsWindows table from sqlite_master (COLLATE NOCASE) never from a prepare error, include sqlite3_errmsg in messages; apply to loadTdfCalibration / loadTdfAxisBounds too if present. Refuse NULL ScanNumBegin/ScanNumEnd.
+ 5. [codex#6/kimi#11] Per-row SQLITE_INTEGER type + range validation before narrowing: NumScans in [0, max_num_scans], NumPeaks in [0, UINT32_MAX], MsMsType in int range, TimsCalibration in [0, UINT32_MAX] (also the TimsCalibration.Id read); MAX(NumScans) must be INTEGER (NULL on empty table = 0); an MS1 frame with NumPeaks > 0 needs NumScans >= 1. Refuse naming frame id + column.
+ 6. [codex#5/kimi#5] Scan tables: build/check each TimsCalibration row over need[ci] = max NumScans of MS1 frames (MsMsType 0) referencing it; need 0 -> empty table, no check; global max_num_scans unchanged for the window gate; keep the per-point scan < num_scans check; log need[] next to the global max.
+ 7. [vibe#4] (a) call the dnoise checkLoader on the first MS1 spectrum consumed (before buffering), keep the per-batch call; (b) at dnoise setup refuse when the Bruker SDK would calibrate m/z (cfg.bruker_sdk_path or getenv OPENMS_BRUKER_SDK_PATH non-empty) with a message naming dnoise:ms1 and the SDK; (c) e2e check with a python-sqlite3 fake .d (analysis.tdf only, no tdf_bin): with OPENMS_BRUKER_SDK_PATH=/nonexistent -> nonzero exit naming dnoise:ms1 and the SDK before loader output; without it -> gets past setup and fails later in the loader.
+ 8. [codex#1] Resident load loop: call dnoise.frame(...) for MS1 BEFORE the containsIMData skip. Exact completeness: a seen-bitmap bookkeeping struct in DnoiseMs1.h (mark(fid) refuses a duplicate; after the load, any frame with MsMsType 0 and NumPeaks > 0 not seen is refused; reset() clears; used by the stream-fallback reset). Unit-test the struct.
+ 9. [codex#7] Free the resident dn_work / dn_cnt scratch right after dnoise.add(...) (swap with empty). No ledger charge.
+10. [codex#9] Zero ms1Hist_() in the stream-fallback reset block. Nothing else (ledger member refactor skipped).
+11. [codex#8/kimi#9/vibe#6] requireFiniteMs1Mz(s) right after the MS1 pick on BOTH load paths (flushMS1_ and the resident pick loop), a distinct exception type rethrown past the stream fallback like DnoiseError; Ms1Prune::frame's non-finite branch becomes a call that throws (unreachable); drop the "(bad_mz: ... kept whole)" log suffix but keep the numeric bad_mz field (always 0) so PRUNE_RE and check 19 stay valid; e2e check 19d as the verifier wrote it.
+12. [kimi#2/codex#11] Factor the recovery maths out of DnoiseRun into DnoiseMs1.h namespace spx::dnoise::recover inside the FP-contract-off region (verifier sketch: correction parse/check, buildScanTable over n scans, scanOf verbatim, Refusal enum, frameCheck, a recoverPoint template over the calibration type so the header stays free of the calibration header). DnoiseRun becomes an adaptor mapping Refusal to today's messages. testRecover() in tests/test_dnoise_ms1.cpp with the verifier's metadata constants and goldens (in stage2_fixes.md); keep CI time bounded (stride above 2^20).
+13. [codex#12] dnoise:iterations help text + header comment: 0 skips the streak filter; the halo and window gate still run. Gate-side unit check in testGateAnd.
+14. [codex#3/kimi#3] Adopt the verifier's proposed transactional sync_cluster.sh (it must keep everything the old script did), commit the harness as tests/test_sync_cluster_txn.sh aimed at scripts/sync_cluster.sh, run it in CI on the Linux leg.
+15. [kimi#1, refuted, doc-only] Fix the operation-order comments (spextractor.cpp near the old :1814, DnoiseMs1.h:25) to read (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5) as opentims computes it, and drop/qualify the "same library in the same process" claim at TdfLoad.h:143.
+
+SKIPPED ON PURPOSE (not implemented; do not report their absence as a defect unless you show a concrete failure on an accepted input that the scope above does not already refuse):
+- the runtime gate canary (decision 2);
+- ledger scratch accounting for the resident dnoise scratch (decision 9) and the ledger member refactor (decision 10);
+- relaxing the 2^24 intensity bound (decision 1);
+- tightening the intensity recovery loop bounds (vibe#5).
+```
+
+## 4. What the implementers report (validation done, deviations, known open items)
+
+These are the implementing agents' own claims. Treat them as claims to attack, not as facts.
+
+### 4.1 Header layer (src/DnoiseMs1.h, src/TdfLoad.h, tests/test_dnoise_ms1.cpp, tests/test_tdf_load.cpp, CMakeLists.txt)
+- recover:: in DnoiseMs1.h holds kTofTol/kImTol, opentimsCorrection, correctionRefusal, buildScanTable, scanOf, the
+  Refusal enum, frameCheck<FrameRow> and recoverPoint<Cal>, inside the contraction-off region. An equivalence probe
+  compared it with verbatim copies of the pre-fix DnoiseRun code (-O3 -ffp-contract=off): 0 differences over
+  13,034,040 points (every TOF bin of D and TNBC plus 12M random m/z; 1/K0 within and past the tolerance, NaN,
+  fractions, negatives, 2^24, inf, corr 0.8..2), 4,800 scan tables (real, perturbed, flat, n 0..50,000) and 256
+  frame-check combinations; outcome, tof/scan/raw, t (bitwise) and hits all equal. Run with Apple clang 21, g++-16, and
+  on the cluster node with g++-13 and the tool's exact flags.
+- GCC does not inline recoverPoint into DnoiseRun::frame ("optimization level attribute mismatch": functions under
+  `#pragma GCC optimize` are not inlined into callers without it): +0.5 ns/point (10.40 -> 10.92 ns), ~0.5 CPU-s per D run.
+  Kept inside the region as scoped.
+- AccumulationTime is parsed with detail::parseF64 (classic locale, whole text, finite, > 0). correctionRefusal gives
+  the corr < 1 message; recoverPoint returns Refusal::intensity_range for v >= 2^24.
+- FrameCoverage: mark (false on a duplicate), firstMissing (first MS1 frame with NumPeaks > 0 not marked, 0 if none), reset.
+- #error guard also fires on __RECIPROCAL_MATH__, __ASSOCIATIVE_MATH__, __NO_SIGNED_ZEROS__, __ARM_FP_FAST. Measured:
+  clang refused for -ffast-math, -Ofast, -ffinite-math-only, -funsafe-math-optimizations, -ffp-model=fast (arm64);
+  g++-16 refused for those plus -freciprocal-math, -fassociative-math, -fno-signed-zeros. Still compiles (documented
+  residue): -fno-trapping-math, -ffp-contract=fast, and clang's -freciprocal-math, -fassociative-math,
+  -fno-signed-zeros on every target, and clang -funsafe-math-optimizations / -ffp-model=fast on x86-64.
+- TdfLoad.h: all three loaders check every prepare, need SQLITE_DONE after every row loop, append sqlite3_errmsg.
+  DiaFrameMsMsWindows is looked up in sqlite_master (ASCII case-insensitive compare, sqlite3_stricmp avoided in case
+  libOpenMS.so does not export it); the MzCalibration column fallback reads PRAGMA table_info. NULL
+  ScanNumBegin/ScanNumEnd refused. Integers type- and range-checked before narrowing. An MS1 frame with points but
+  NumScans 0 refused. New field TdfDnoiseInputs::ms1_max_scans (decision 6's need[ci]).
+- tests/test_tdf_load.cpp is built only where CMake finds SQLite3, with a shim for the calibration header. Compiled
+  against the pre-fix TdfLoad.h it fails 30 checks. test_dnoise_ms1 now includes "TdfMzCalibration.h".
+- Inputs that were ACCEPTED before and are now REFUSED (the agent says none of D, TNBC or real Bruker tdfs are affected):
+  a tdf with no GlobalMetadata table (even without window rows); REAL or TEXT cells in the Frames integer columns,
+  including MAX(NumScans); an MS1 frame with points and NumScans 0; an AccumulationTime atof would read but parseF64
+  rejects (e.g. "99.958ms"); NULL ScanNumBegin or ScanNumEnd; any sqlite error mid-read.
+
+### 4.2 Tool side (src/spextractor.cpp, test/test_spextractor.py, README/CONTRIBUTING/CHANGELOG)
+- 7a: the streaming consumer checks the loader's m/z model on the first MS1 frame, before buffering; per-batch check kept.
+- 7b: the loader Config is now set before the dnoise setup block; setup refuses when a Bruker SDK path is set (the
+  Config's bruker_sdk_path, else a non-empty OPENMS_BRUKER_SDK_PATH), before loadTofAxis and setup.
+- 8: resident loop calls dnoise.frame before the ion-mobility skip. Counts records the frame id; add() marks each frame
+  and refuses a duplicate, skipping slots with frames == 0 (resident MS2 spectra); requireComplete() runs before
+  summary() in the block both load paths reach; reset() clears counts and marks and is called by setup() and the
+  stream-fallback reset. Load-mode analysis (from reading the loader source): the streaming and resident DIA paths
+  deliver every MS1 frame when load_ms1 is set; tile pass 2 has load_ms1 false and no dnoise pointer; the MS2 RT-range
+  probe drops only MS2 frames; mzML/mzPeak input never turns dnoise on. So no dnoise-on mode delivers only some MS1 frames.
+- 9: resident dn_work/dn_cnt freed right after dnoise.add. 10: stream fallback zeroes [ms1-hist] counters.
+- 11: Ms1MzError + requireFiniteMs1Mz after the pick in flushMS1_ and in the resident loop; rethrown past the stream
+  fallback; Ms1Prune::frame's non-finite branch now calls it (unreachable); "(bad_mz: ...)" suffix dropped, numeric
+  bad_mz field kept (always 0).
+- 13: dnoise:iterations help. 15: operation-order comment.
+- 12: DnoiseRun is an adaptor over recover:: (kTofTol, kImTol, scanOf members deleted). New messages: the 2^24 message,
+  "reached the filter twice", "never reached the filter". Setup's corr >= 1e6 refusal now prints 6 significant digits.
+- e2e suite 22 -> 24 checks: 19d (non-finite MS1 m/z refused before the prune, prune off and on) and 21 (a python-sqlite3
+  fake .d with only analysis.tdf: with OPENMS_BRUKER_SDK_PATH set -> refusal naming dnoise:ms1 and the Bruker SDK, no
+  setup line, no [stream] output; without it -> the setup line, then "[stream] streaming load failed").
+- Captured on the node from the new binary on the suite's fake .d: without an SDK path the setup log line ends
+  "...gate_boxes=24; 1 TimsCalibration row(s) over 944 scans (MAX(Frames.NumScans), the gate's); scan tables per row
+  over its MS1 frames' scans: 944", then "[stream] streaming load failed". With OPENMS_BRUKER_SDK_PATH=/nonexistent it
+  exits 6: "Invalid parameter: dnoise:ms1 recovers each point's TOF bin through the tdf's MzCalibration table model,
+  but with a Bruker SDK path set (/nonexistent) the loader calibrates m/z through the Bruker SDK: unset
+  OPENMS_BRUKER_SDK_PATH to denoise. -dnoise:ms1 false runs without MS1 denoising."
+- Both real files (D, TNBC) have one TimsCalibration row and uniform NumScans (944 / 918), so per-row tables equal the
+  old ones; corrections 100/99.958 and 100/99.953 are >= 1.
+
+### 4.3 Deploy script and CI (scripts/sync_cluster.sh, tests/test_sync_cluster_txn.sh, .github/workflows/*)
+- scripts/sync_cluster.sh is the verifier's transaction script, extended; usage unchanged ([node] [--allow-dirty]).
+  Differences from the proposal: compiled test binaries are no longer left in spextractor_unit (sources and logs
+  only); test_tdf_load is compiled and run from the stage before anything is promoted; both tests build in a copy of
+  the repo layout made from the hash-checked staged files ($U/src, $U/tests, $U/inc/OpenMS/FORMAT) so every include
+  form resolves to staged bytes; SQLite comes from the tool's own build (the first sqlite3.h in the tool's CXX_INCLUDES
+  plus $BUILD/lib/libsqlite3.a), and the tdf_load test is skipped explicitly if either is missing; HUP/INT/TERM traps
+  (bash would otherwise run the EXIT trap immediately while make keeps writing the binary); local pre-flight refuses a
+  missing input by name and lists dirty files; `< /dev/null` on the node-side bash.
+- Harness tests/test_sync_cluster_txn.sh: 27 checks (the verifier's S0-S8 plus S2b tdf_load test fails, S9 SIGTERM
+  mid-build, S10/S10b no sqlite3.h / no libsqlite3.a -> skipped test and a commit, S11 missing input, S12/S12b dirty
+  refusal then --allow-dirty). 27/27 on macOS (bash 5.3 and /bin/bash 3.2, make 3.81) and on the Linux node (bash 5.2,
+  GNU make 4.3). 7 mutants of the script all fail (no_touch 4, park_off 4, cpp_only 9, no_recheck 3, tree_include 18,
+  tdf_ungated 3, no_sigtrap 1).
+- CI: build.yml runs `ctest --output-on-failure --no-tests=error -R 'dnoise|tdf_load'` after the tool build and asserts
+  both dnoise_ms1 and tdf_load ran. tests.yml, non-Windows legs: negative-compile steps for the #error (GCC flag sets;
+  AppleClang arm64 set), with a no-flag positive control, counting a refusal only if the error is DnoiseMs1.h's #error.
+  tests.yml ubuntu-latest only: runs the harness. gcc-11 on ubuntu-22.04 not checked locally.
+- Node facts: g++-13 13.3.0; flags -O3 -DNDEBUG -std=gnu++23 -fvisibility=hidden -fPIC -mssse3 -Wall -Wextra
+  -Wno-unknown-pragmas -ffp-contract=off -Wno-unused-function -Wno-psabi -fopenmp. No system sqlite3.h; the tool's
+  CXX_INCLUDES has OpenMS's extern/SQLiteCpp/sqlite3 (3.49.2); build/lib/libsqlite3.a exists; libOpenMS.so exports 278
+  sqlite3_* symbols.
+- The new script deployed the fix pass build to the node and committed on the first try; provenance:
+  src_sha256=9227df96..., git=cc39a66+dirty, binary_sha256=bcda6bfa..., dnoise_unit_test=passed, tdf_load_unit_test=passed.
+
+### 4.4 Known open items (already reported, NOT yet fixed; re-report only if you find something beyond them)
+- CHANGELOG claims known to be wrong: (1) "Only clang on x86-64, and clang -freciprocal-math on arm64, still slip past"
+  (the measured residue is in 4.1); (2) "every raw count below 2^24" (the test covers every raw below 2^20 and every 7th
+  up to 2^24); (3) "runs the unit test from the stage" (both unit tests); (4) "build.yml runs the dnoise unit tests
+  through ctest" (the dnoise_ms1 and tdf_load ctests).
+- docs/BASELINE.md still carries an old dnoise memory table (not part of this diff).
+- The D and TNBC digest pins have NOT yet been run with the fix-pass binary (sha bcda6bfa...); nor has the resident
+  path (full-D -perf:stream_load false with dnoise on) nor the completeness check on a real .d. The equivalence probe
+  above is the only evidence of output identity so far.
+
+## 5. Invariants and end-to-end results
+
+- Output digest-identical on accepted inputs. Pins (bench/semantic_digest.py, first 8 hex): D dnoise off 8c1b047f,
+  dnoise on e43672a0; TNBC 009 dnoise off bff54a1f, on 3aafd0b5. (Not yet re-run on the fix-pass binary; see 4.4.)
+- Fail closed on anything unrecoverable; `-dnoise:ms1 false` is the escape hatch and every refusal must say so.
+- e2e suite on the deployed fix-pass build, verbatim:
+
+```text
+24/24 checks passed (exit 0). Run: /scratch/kohlbach/OpenMS/build/bin/spextractor (sha bcda6bfa...) with the build-tree libOpenMS.so and the suite sync shipped ($SPX/tools/test_spextractor.py, sha d8af25db..., same as the local file). Log: ibminode05:/scratch/kohlbach/fixg_e2e/e2e.log. Checks 19d and 21 pass.
+```
+
+- Negative control: the same suite on the pre-fix build (s2b arm), verbatim:
+
+```text
+22/24 checks passed, exit 1. Only the two new checks failed:
+- **19d** ("a non-finite MS1 m/z is refused before the prune, prune off and on"): expected a non-zero exit, but the first arm (nan, 1 band, prune false) exited 0.
+- **21** ("dnoise:ms1 refuses a Bruker SDK calibration before the load..."): with OPENMS_BRUKER_SDK_PATH set, the pre-fix binary did not refuse. It printed the dnoise setup line, then "[stream] streaming load failed (FileNotReadable)".
+
+Run: binary /ceph/ibmi/abi/oliver/spextract/dnoise_s2b/bin/spextractor (sha 2d9aa6c4..., the pre-fix build), loading the arm's own libOpenMS.so and libOpenSwathAlgo.so. It used the same suite bytes (sha d8af25db) in a tools/tests mirror, only reading the arm. Log: ibminode05:/scratch/kohlbach/fixg_e2e_s2b/e2e.log.
+```
+
+## 6. What to attack -- be concrete, cite the inlined text (file:line from the line-numbered listings)
+
+1. Correctness and completeness of each fix (decisions 1-15): does each change do what the verified finding asked, on
+   every path it applies to (streaming, resident, stream fallback, tiles)? Any finding from section 2 that is only
+   partly fixed, fixed in one path but not the other, or silently dropped?
+2. Output identity: can any change alter output on an ACCEPTED input, dnoise on or off? In particular the recovery
+   refactor (operation order, types, float vs double, the GCC `optimize` region vs the tool-wide -ffp-contract=off,
+   non-inlined calls, the template over the calibration type), moving the resident dnoise.frame call before the
+   containsIMData skip, the reordering of the loader Config before the dnoise setup, per-row scan tables, freeing the
+   scratch, zeroing [ms1-hist], requireFiniteMs1Mz, the prune's non-finite branch, and the log-line change.
+3. NEW FALSE REFUSALS on VALID Bruker data -- the most important question after identity. Think about:
+   - AccumulationTime stored as INTEGER, REAL or TEXT in real analysis.tdf files and how sqlite3_column_text renders
+     each (e.g. REAL 100.0 -> "100.0", 99.958 -> "99.958", a REAL whose shortest round-trip text differs from what
+     opentims' atof reads; INTEGER 100 -> "100"; exponent forms); whether parseF64 on that text is bit-identical to
+     opentims' 100/atof on the same text; leading/trailing spaces; what opentims itself does;
+   - the sqlite_master lookup (name case, views, attached/temp schemas, a table named differently but resolvable);
+   - NumScans/NumPeaks/MsMsType/TimsCalibration storage types in real tdfs (INTEGER affinity vs REAL/TEXT cells;
+     NULLs; MsMsType values other than 0/9; frames with NumPeaks 0; PRAGMA table_info fallbacks);
+   - the SDK environment refusal (OPENMS_BRUKER_SDK_PATH set but the SDK unusable, set to an empty string, set by a
+     site module for other tools; cfg.bruker_sdk_path defaults; whether the loader actually honours the variable);
+   - need[ci] edge cases (a row used only by MS2 frames; MS1 frames with NumScans 0 and NumPeaks 0; a TimsCalibration
+     id out of range or non-contiguous; ms1_max_scans sized from what);
+   - the completeness bitmap (frames the filter empties, zero-peak MS1 frames, frames skipped by RT/probe slicing or
+     tiles, a streaming load that fails after marking and falls back, frame ids beyond tdf.frames.size(), MS1 frames
+     delivered under a native id frameIdOf parses differently);
+   - requireFiniteMs1Mz cost and placement (per spectrum, inside parallel loops; exception capture in OpenMP regions).
+4. Fail closed: any path where an error is now swallowed, a refusal comes too late (after hours of work), an exception
+   escapes an OpenMP region uncaptured, or a refusal message is wrong/misleading or loses the escape hatch.
+5. The deploy transaction (scripts/sync_cluster.sh): lock ordering (lock before anything shared is written), stale-lock
+   handling, rollback completeness (every promoted input, touch/mtime semantics with make), provenance restore/park
+   logic, the unit-test step compiling against staged bytes only, the SQLite detection, signal traps and the EXIT trap
+   interplay, a dropped ssh channel (the transaction must survive and not be killed by SIGPIPE), set -e/-u pitfalls,
+   quoting, what happens when a post-commit step fails, concurrent deploys, and whether it keeps everything the old
+   script did (see its diff).
+6. Tests pin the fixes: would each new/changed test fail on the pre-fix code (unit tests testRecover, FrameCoverage,
+   iterations-0 gate check, test_tdf_load cases, e2e 19d and 21, the txn harness scenarios, the CI negative compiles)?
+   Any vacuous assertion, any check that passes for the wrong reason, any CI step that cannot fail (e.g. a grep that
+   matches its own command line, a `!` inside `set -e`, a skipped test counted as passed)?
+7. Anything stage 2 found that this pass missed, and any new defect the pass introduced (build breaks on other
+   compilers/platforms, Windows CI, CMake 3.16, bash 3.2, missing includes, ODR/inline issues in the header, unused
+   variable warnings under -Werror).
+
+## Output format
+
+Return a numbered list of findings, most severe first. For each: severity (critical/high/medium/low), location
+(file:line), the concrete failure scenario (input or state -> wrong output, false refusal, silent pass, crash), and the
+fix. Mark each finding as a defect in the fix pass or as pre-existing. No style remarks. Then a short list of the areas
+you checked and found clean. Say explicitly when you could not check something.
+
+## 7. Diffs: pre-fix-pass snapshot -> current, every changed file (diff -u)
+
+Files changed by this pass: src/DnoiseMs1.h, src/TdfLoad.h, src/spextractor.cpp, tests/test_dnoise_ms1.cpp, CMakeLists.txt, scripts/sync_cluster.sh, .github/workflows/build.yml, .github/workflows/tests.yml, test/test_spextractor.py, README.md, CONTRIBUTING.md, CHANGELOG.md; new: tests/test_tdf_load.cpp, tests/test_sync_cluster_txn.sh.
+(Other working-tree modifications -- NOTICE, LICENSES/, docs/ -- predate this pass and are not under review.)
+
+### 7.1 src/DnoiseMs1.h
+
+```diff
+--- a/src/DnoiseMs1.h (pre-fix-pass snapshot)
++++ b/src/DnoiseMs1.h (current)
+@@ -22,9 +22,10 @@
+ //   1. Stage order: the streak filter on the raw points, `iterations` passes, each summing only the
+ //      previous pass's survivors (1 pass: 24,906); then the halo ONCE, with the streak survivors as
+ //      its reference set (raw points as reference: 122); then the window gate ANDed (gate first: 199).
+-//   2. Raw u32 intensities from the frame blob, not the floor(I * 100 / AccumulationTime + 0.5) that
+-//      opentims and the Bruker SDK return. At default settings they only enter the halo ratio, yet on
+-//      24 TNBC 009 frames the corrected values flip 9 of 3.1 million kept points.
++//   2. Raw u32 intensities from the frame blob, not the corrected ones the loaders return -- opentims computes
++//      (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5), and the Bruker SDK corrects them too. At default
++//      settings they only enter the halo ratio, yet on 24 TNBC 009 frames the corrected values flip 9 of 3.1
++//      million kept points.
+ //   3. Streak: min_feature_length counts OCCUPIED scans of a gap-bridged run, not its span; points are
+ //      kept by span, which only matters for zero-intensity points.
+ //   4. Halo: the reference skips EVERY point in the point's own TOF column (that is what spares a
+@@ -37,13 +38,20 @@
+ //      bounds are floor/ceil of values like 542.9999999999999; fusing `intercept + slope * scan` into
+ //      one FMA flips 3 of D's 24 boxes (13 points on 8724). The builder keeps that product apart
+ //      through a volatile and is compiled with contraction off; CMakeLists.txt passes -ffp-contract=off
+-//      as well. Flags that rewrite more than contraction and announce it in a macro (-ffast-math/-Ofast,
+-//      -ffinite-math-only, /fp:fast, x87 excess precision) are refused at compile time below; those the
+-//      preprocessor cannot see (-funsafe-math-optimizations, -freciprocal-math, clang -ffp-model=fast)
+-//      move boxes too and must not be used. tests/test_dnoise_ms1.cpp pins D's boxes, those three included.
++//      as well. Flags that rewrite more than contraction are refused at compile time below wherever the
++//      compiler announces them in a macro: -ffast-math/-Ofast, -ffinite-math-only, /fp:fast, x87 excess
++//      precision; GCC's -funsafe-math-optimizations, -freciprocal-math, -fassociative-math and
++//      -fno-signed-zeros; clang's -funsafe-math-optimizations and -ffp-model=fast on arm64 (__ARM_FP_FAST).
++//      Only clang slips past: -freciprocal-math, -fassociative-math and -fno-signed-zeros on every target,
++//      -funsafe-math-optimizations and -ffp-model=fast on x86-64. Do not use them: -freciprocal-math,
++//      -funsafe-math-optimizations and -ffp-model=fast each move D's boxes. tests/test_dnoise_ms1.cpp pins
++//      D's boxes, the three FMA-sensitive ones included.
+ // Not ported, because dnoise's defaults never reach it on diaPASEF MS1: the mz_ppm width override,
+ // frame_half_width neighbourhoods, the selection-polygon gate (skipped whenever DiaFrameMsMsInfo and
+ // DiaFrameMsMsWindows map frames to windows), crop, smooth/watershed/box-centroid, and the MS2 paths.
++// Also here, because the in-tool bit-identity rests on them: recover::, which inverts what the Bruker loader
++// delivers (m/z, float32 1/K0, corrected intensity) back to the integers dnoise filters, and FrameCoverage,
++// which holds the tool to denoising every MS1 frame exactly once.
+ 
+ #pragma once
+ #include <algorithm>
+@@ -62,10 +70,13 @@
+ #include <utility>
+ #include <vector>
+ 
+-// Point 6: strict IEEE binary64 or no build. Each of these moves D's gate boxes, and none can be switched off per function.
++// Point 6: strict IEEE binary64 or no build, for every value-changing flag the compiler announces in a macro (GCC one per
++// flag, clang on arm64 only __ARM_FP_FAST); none can be switched off per function. __NO_TRAPPING_MATH__ is left out: it is
++// clang's default behaviour, under which every golden was measured.
+ #if defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__) || defined(_M_FP_FAST) || \
+-    (defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD != 0)
+-#error "DnoiseMs1.h needs strict IEEE binary64 arithmetic to stay bit-identical with dnoise: build without -ffast-math/-Ofast, -ffinite-math-only, /fp:fast and x87 excess precision (-mfpmath=387)"
++    (defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD != 0) || defined(__RECIPROCAL_MATH__) || defined(__ASSOCIATIVE_MATH__) || \
++    defined(__NO_SIGNED_ZEROS__) || defined(__ARM_FP_FAST)
++#error "DnoiseMs1.h needs strict IEEE binary64 arithmetic to stay bit-identical with dnoise: build without -ffast-math/-Ofast, -ffinite-math-only, -funsafe-math-optimizations, -freciprocal-math, -fassociative-math, -fno-signed-zeros, -ffp-model=fast, /fp:fast and x87 excess precision (-mfpmath=387)"
+ #endif
+ 
+ namespace spx::dnoise
+@@ -83,7 +94,7 @@
+   std::size_t max_internal_gap = 2;         ///< empty scans a run may bridge (a larger step breaks it)
+   std::uint64_t min_window_intensity = 0;   ///< window sum a scan needs to count as occupied (and > 0)
+   std::uint64_t min_feature_intensity = 0;  ///< window sum over the run's whole span
+-  std::size_t iterations = 2;               ///< passes, each over the previous survivors; 0 keeps every point
++  std::size_t iterations = 2;               ///< streak passes, each over the previous survivors; 0 = no streak pass (halo and gate still apply)
+   // halo filter, halo.rs
+   bool halo = true;
+   double halo_peak_fraction = 0.15;         ///< keep iff I >= fraction * (max off-column I in the box)
+@@ -250,9 +261,9 @@
+   std::string error;                  ///< non-empty: the run is refused here -- a timsrust MetadataReader error, or a metadata value outside the port's finite-decimal domain
+ };
+ 
+-// Contraction off for everything the gate builder computes (point 6 at the top). Clang attaches its pragma to each
+-// operation, so it survives inlining, but an explicit -ffp-contract=fast overrides it -- hence also the volatile in
+-// the builder. GCC applies the optimize pragma to every function defined before pop_options.
++// Contraction off for everything the gate builder and the point recovery compute (point 6 at the top). Clang attaches its
++// pragma to each operation, so it survives inlining, but an explicit -ffp-contract=fast overrides it -- hence also the
++// volatile in the builder. GCC applies the optimize pragma to every function defined before pop_options.
+ #if defined(__GNUC__) && !defined(__clang__)
+ #pragma GCC push_options
+ #pragma GCC optimize("fp-contract=off")
+@@ -323,8 +334,145 @@
+   }
+   out.gate = Ms1WindowGate::fromBoxes(boxes, num_scans);
+   return out;
++}
++
++/// [dnoise] Point recovery. The Bruker loader delivers m/z, a float32 1/K0 and a corrected intensity, not the (scan, TOF
++/// bin, raw count) dnoise filters, so the tool (DnoiseRun in spextractor.cpp) inverts all three per point and refuses the
++/// run on anything that does not recover exactly. The arithmetic lives here -- dependency-free, contraction off, pinned by
++/// tests/test_dnoise_ms1.cpp against the loader's forward maths on both benchmark files' metadata -- and the caller turns a
++/// Refusal into its message.
++namespace recover
++{
++inline constexpr double kTofTol = 1e-6;   ///< bins: the round trip is exact to 2.3e-10 on both benchmark files
++inline constexpr float kImTol = 1e-6f;    ///< 1/K0: a float32 step is ~1.2e-7 there, adjacent scans >= 8.8e-4 apart
++
++/// opentims' intensity correction of a frame, 100.0 / AccumulationTime (opentims.cpp:74), from the column's whole sqlite
++/// text. opentims converts that text with atof inside its read_sql locale guard, so in the C locale; detail::parseF64 is
++/// the same correctly rounded conversion on every text it accepts, whatever LC_NUMERIC the process has. false unless the
++/// text is a finite decimal number > 0.
++inline bool opentimsCorrection(const std::string& text, double& corr)
++{
++  double at = 0.0;
++  if (!detail::parseF64(text, at) || !(at > 0.0)) return false;
++  corr = 100.0 / at;
++  return true;
+ }
+ 
++/// Why the raw counts of MS1 frame @p fid cannot be recovered through its correction @p corr, or empty when they can. At
++/// corr >= 1 (AccumulationTime <= 100 ms) raw counts below 2^24 do not collide (checked exhaustively at 19 values, 1 + 1 ulp
++/// among them); below 1 they do, from raw 3 at 125 ms and from raw 1191 at 100.042 ms. 1e6 is a plausibility bound.
++inline std::string correctionRefusal(std::size_t fid, double corr)
++{
++  if (corr >= 1.0 && corr < 1e6) return std::string();
++  std::ostringstream m;   // the classic locale, as for every number this header reads
++  m.imbue(std::locale::classic());
++  m << "MS1 frame " << fid << ": ";
++  if (corr < 1.0)
++    m << "AccumulationTime " << 100.0 / corr << " ms exceeds 100 ms, so opentims' intensity correction 100/" << 100.0 / corr << " = "
++      << corr << " < 1 maps several raw counts to one intensity and the raw counts dnoise filters cannot be recovered";
++  else
++    m << "opentims' intensity correction 100 / AccumulationTime = " << corr << " is not invertible";
++  return m.str();
++}
++
++/// The float32 1/K0 of each of @p n_scans scans under one TimsCalibration row @p c (C0..C9) as the loader converts them --
++/// RationalScan2ImConverter::applyFormula term for term, then frameToSpectrum's float cast -- into @p asc, ascending;
++/// @p falls: 1/K0 falls with the scan, so @p asc is reversed. Empty, or why scanOf cannot be exact over these scans: the
++/// values must rise strictly by more than 4 * kImTol, so no float32 lies within kImTol of two of them. 0 scans give an
++/// empty table, which matches nothing. After a refusal @p asc and @p falls mean nothing.
++inline std::string buildScanTable(const std::array<double, 10>& c, std::size_t n_scans, std::vector<float>& asc, bool& falls)
++{
++#if defined(__clang__)
++  #pragma clang fp contract(off)
++#endif
++  std::vector<float>& v = asc;
++  v.assign(n_scans, 0.0f);
++  for (std::size_t s = 0; s < n_scans; ++s)
++  {
++    double V = c[2] + ((c[3] - c[2]) / c[1]) * ((double)s - c[4] - c[0]);
++    if (V == 0.0) V = 1e-10;
++    double denom = c[6] + c[7] / V;
++    if (denom == 0.0) denom = 1e-10;
++    v[s] = static_cast<float>(1.0 / denom);
++  }
++  falls = n_scans > 1 && v[1] < v[0];
++  if (falls) std::reverse(v.begin(), v.end());
++  for (std::size_t s = 1; s < n_scans; ++s)
++    if (!(v[s] - v[s - 1] > 4.0f * kImTol))   // strictly monotonic, finite, no two scans within reach of one value
++      return "the TimsCalibration model does not separate every scan by more than " + std::to_string(4.0f * kImTol) + " 1/K0";
++  return std::string();
++}
++
++/// The scan whose float32 1/K0 in @p asc (reversed when @p falls) lies within kImTol of @p v; -1 for none.
++inline long scanOf(const std::vector<float>& asc, bool falls, float v)
++{
++  if (asc.empty()) return -1;
++  const float* b = asc.data();
++  for (std::size_t n = asc.size(); n > 1; ) { const std::size_t h = n / 2; if (b[h] <= v) b += h; n -= h; }   // the last entry <= v, else the first
++  std::size_t i = (std::size_t)(b - asc.data());
++  if (i + 1 < asc.size() && std::fabs(asc[i + 1] - v) < std::fabs(asc[i] - v)) ++i;
++  if (!(std::fabs(asc[i] - v) <= kImTol)) return -1;
++  return falls ? (long)(asc.size() - 1 - i) : (long)i;
++}
++
++/// Why a spectrum cannot be denoised as a raw frame, or one of its points not recovered.
++enum class Refusal
++{
++  none,
++  frame,           ///< its frame id is 0, past the Frames table, or not an MS1 frame (MsMsType 0)
++  peaks,           ///< it holds other than the frame's NumPeaks points: not the whole raw frame
++  im,              ///< it has points but no 1/K0 per point
++  tof,             ///< the m/z is not the MzCalibration table model's value of a TOF bin (within kTofTol)
++  scan,            ///< the 1/K0 is not the TimsCalibration model's value of one of the frame's scans (within kImTol)
++  intensity,       ///< the intensity is not opentims' correction of exactly one raw count
++  intensity_range  ///< the intensity is >= 2^24 = 16777216 (inf included): its float32 no longer identifies one raw count
++};
++
++/// The checks on a spectrum before any of its points, in this order. @p frames is the run's Frames table by Id (any row
++/// type with msms_type and num_peaks: TdfDnoiseInputs::Frame in the tool), @p n the spectrum's points, @p has_im whether it
++/// carries a 1/K0 array and @p im_n that array's size (ignored without one). A frame without points needs no 1/K0 array.
++template <class FrameRow>
++inline Refusal frameCheck(const std::vector<FrameRow>& frames, std::uint32_t fid, std::size_t n, bool has_im, std::size_t im_n)
++{
++  if (fid == 0 || fid >= frames.size() || frames[fid].msms_type != 0) return Refusal::frame;
++  if (n != frames[fid].num_peaks) return Refusal::peaks;
++  if (n != 0 && (!has_im || im_n != n)) return Refusal::im;
++  return Refusal::none;
++}
++
++/// One point of a frame with factor @p b (Cal::mzToTof inverts the m/z model the loader calibrated with:
++/// TdfMzCalibration in the tool), correction @p corr (correctionRefusal empty, so the search visits at most five raw
++/// counts), scan table @p asc / @p falls (buildScanTable) and @p num_scans scans: the TOF bin, scan and raw count the
++/// loader turned into @p mz, @p im and @p v. Checked in that order; on Refusal::none @p tof, @p scan and @p raw hold the
++/// point. For a message: @p t is the fractional TOF, @p hits the raw counts whose correction is @p v (0 until the
++/// intensity is checked).
++template <class Cal>
++inline Refusal recoverPoint(const Cal& cal, double b, double mz, float im, float v, double corr, const std::vector<float>& asc,
++                            bool falls, std::uint32_t num_scans, std::uint32_t& tof, std::uint32_t& scan, std::uint32_t& raw,
++                            double& t, int& hits)
++{
++#if defined(__clang__)
++  #pragma clang fp contract(off)
++#endif
++  hits = 0;
++  t = cal.mzToTof(mz, b);
++  const double bin = std::nearbyint(t);
++  if (!(std::fabs(t - bin) <= kTofTol && bin >= 0.0 && bin <= 4294967295.0)) return Refusal::tof;
++  const long s = scanOf(asc, falls, im);
++  if (s < 0 || (std::uint32_t)s >= num_scans) return Refusal::scan;
++  if (v >= 16777216.0f) return Refusal::intensity_range;   // a float32 holds every count below 2^24 exactly, and no more
++  std::uint32_t found = 0;
++  int n = 0;
++  if (v >= 0.0f && v < 16777216.0f && v == std::floor(v))
++    for (double r = std::max(0.0, std::floor((v - 0.5) / corr) - 1.0), r_end = std::ceil((v + 0.5) / corr) + 1.0; r <= r_end; r += 1.0)
++      if ((std::uint32_t)(r * corr + 0.5) == (std::uint32_t)v) { found = (std::uint32_t)r; ++n; }   // opentims.cpp:225: double(raw) * correction + 0.5, into a uint32
++  hits = n;
++  if (n != 1) return Refusal::intensity;
++  tof = (std::uint32_t)bin; scan = (std::uint32_t)s; raw = found;
++  return Refusal::none;
++}
++} // namespace recover
++
+ #if defined(__GNUC__) && !defined(__clang__)
+ #pragma GCC pop_options
+ #endif
+@@ -550,6 +698,35 @@
+   return c;
+ }
+ 
++/// [dnoise] That a run denoised every MS1 frame with points exactly once. Counts cannot tell: a frame denoised twice and a
++/// missing one with equal NumPeaks cancel out. So one mark per frame id -- set serially as each batch's counts are merged,
++/// checked once after the load, and reset with the counts when a failed stream load falls back to the resident one.
++class FrameCoverage
++{
++public:
++  /// Mark frame @p fid (an id frameCheck accepted) as denoised; false if it already was.
++  bool mark(std::uint32_t fid)
++  {
++    if (fid >= seen_.size()) seen_.resize(static_cast<std::size_t>(fid) + 1, 0);
++    if (seen_[fid]) return false;
++    seen_[fid] = 1;
++    return true;
++  }
++  /// The first MS1 frame with points in @p frames (by Id; any row type with msms_type and num_peaks) that was not marked,
++  /// or 0 when every one was.
++  template <class FrameRow>
++  std::size_t firstMissing(const std::vector<FrameRow>& frames) const
++  {
++    for (std::size_t id = 1; id < frames.size(); ++id)
++      if (frames[id].msms_type == 0 && frames[id].num_peaks > 0 && (id >= seen_.size() || !seen_[id])) return id;
++    return 0;
++  }
++  void reset() { seen_.clear(); }
++
++private:
++  std::vector<std::uint8_t> seen_;   ///< by frame id
++};
++
+ } // namespace spx::dnoise
+ 
+ #endif // SPEXTRACTOR_DNOISE_MS1_H
+```
+
+### 7.2 src/TdfLoad.h
+
+```diff
+--- a/src/TdfLoad.h (pre-fix-pass snapshot)
++++ b/src/TdfLoad.h (current)
+@@ -1,12 +1,15 @@
+ // Read the calibration a Bruker .d actually uses, straight from analysis.tdf via the sqlite3 C API.
+ // Kept OUT of TdfMzCalibration.h on purpose: that header is the pure arithmetic model, is installed
+ // into the OpenMS tree by the patch script, and is compiled by the dependency-free golden test on
+-// every CI platform -- including Windows, which has no sqlite3.h. Only the tool needs this file.
++// every CI platform -- including Windows, which has no sqlite3.h. Only the tool and its sqlite-gated
++// test (tests/test_tdf_load.cpp) need this file.
+ #pragma once
+ #include <OpenMS/FORMAT/TdfMzCalibration.h>   // the copy the OpenMS patch installs; same header as src/TdfMzCalibration.h
+ #include <sqlite3.h>
+-#include "DnoiseMs1.h"   // [dnoise] RunMeta, WindowRow: the MS1 port's gate inputs
++#include "DnoiseMs1.h"   // [dnoise] RunMeta, WindowRow: the MS1 port's gate inputs; recover::opentimsCorrection
++#include <algorithm>
+ #include <array>
++#include <climits>
+ #include <cmath>
+ #include <cstdint>
+ #include <optional>
+@@ -32,6 +35,11 @@
+ // acquisitions carry two rows with every frame on Id 1. Refuses when frames reference more than
+ // one row (per-frame recalibration, unsupported). t1_by_frame[id] = Frames.T1, T1_ref when NULL;
+ // index 0 is never a frame (Ids start at 1) and is left for the caller to treat as a sentinel.
++//
++// Every read here is whole or refused, with sqlite3_errmsg saying why: each prepare is checked, and
++// each row loop must end in SQLITE_DONE. An error merely ends a loop, so a partial T1 read would give
++// the later frames T1_ref, and a partial window table half a gate, silently. Whether an optional
++// table or column exists is read from the schema, never inferred from a failed query.
+ // ---------------------------------------------------------------------------------------------
+ /// The run-level bounds of the flight-time axis from GlobalMetadata: the digitizer's sample count
+ /// (every bin index is below it -- the absolute bound) and the acquisition's m/z range. Values are
+@@ -42,7 +50,7 @@
+ {
+   sqlite3* db = nullptr;
+   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+-  { why = std::string("cannot open ") + tdf; sqlite3_close(db); return false; }
++  { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
+   sqlite3_stmt* st = nullptr; out = TdfAxisBounds{}; int seen = 0; why.clear();
+   auto num = [&](const unsigned char* txt, int nbytes, const char* key, double& v) {
+     if (!txt) { why = std::string(key) + " is NULL"; return false; }
+@@ -52,9 +60,10 @@
+     { why = std::string(key) + " is not a finite number: '" + std::string(reinterpret_cast<const char*>(txt), (size_t)nbytes) + "'"; return false; }
+     v = x; return true; };
+   if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper','DigitizerNumSamples')", -1, &st, nullptr) != SQLITE_OK)
+-  { why = "no GlobalMetadata table"; sqlite3_finalize(st); sqlite3_close(db); return false; }
++  { why = std::string("cannot read GlobalMetadata: ") + sqlite3_errmsg(db); sqlite3_finalize(st); sqlite3_close(db); return false; }
+   bool ok = true; bool have_lo = false, have_hi = false, have_n = false;
+-  while (ok && sqlite3_step(st) == SQLITE_ROW)
++  int rc = SQLITE_DONE;
++  while (ok && (rc = sqlite3_step(st)) == SQLITE_ROW)
+   {
+     const unsigned char* kt = sqlite3_column_text(st, 0); if (!kt) continue;
+     const std::string k = reinterpret_cast<const char*>(kt); double v = 0.0;
+@@ -72,6 +81,7 @@
+     }
+     ++seen;
+   }
++  if (ok && rc != SQLITE_DONE) { why = std::string("reading GlobalMetadata: ") + sqlite3_errmsg(db); ok = false; }
+   sqlite3_finalize(st); sqlite3_close(db);
+   if (!ok) return false;
+   if (seen < 3) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(seen) + " of 3)"; return false; }
+@@ -89,27 +99,45 @@
+   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+   { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
+   sqlite3_stmt* st = nullptr;
++  auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
++  auto sqlfail = [&](const std::string& what) { return fail(what + ": " + sqlite3_errmsg(db)); };   // errmsg is read before fail() finalizes
++  int rc = SQLITE_OK;
++  bool frames_have_cal = false;   // PRAGMA table_info: one row per column, the name in column 1, matched ASCII case-insensitively as sqlite resolves it
++  auto is_cal = [](const unsigned char* c) {
++    const char* w = "mzcalibration";
++    for (; *c && *w; ++c, ++w) if ((*c >= 'A' && *c <= 'Z' ? *c + 32 : *c) != *w) return false;
++    return !*c && !*w; };
++  if (sqlite3_prepare_v2(db, "PRAGMA table_info(Frames)", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read the Frames schema");
++  while ((rc = sqlite3_step(st)) == SQLITE_ROW)
++  { const unsigned char* c = sqlite3_column_text(st, 1); frames_have_cal = frames_have_cal || (c && is_cal(c)); }
++  if (rc != SQLITE_DONE) return sqlfail("reading the Frames schema");
++  sqlite3_finalize(st); st = nullptr;
+   long long cal_id = -1; int ncal = 0;
+-  if (sqlite3_prepare_v2(db, "SELECT DISTINCT MzCalibration FROM Frames", -1, &st, nullptr) == SQLITE_OK)
++  if (frames_have_cal)
+   {
+-    while (sqlite3_step(st) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
++    if (sqlite3_prepare_v2(db, "SELECT DISTINCT MzCalibration FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.MzCalibration");
++    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
++    if (rc != SQLITE_DONE) return sqlfail("reading Frames.MzCalibration");
+     sqlite3_finalize(st); st = nullptr;
+-    if (ncal != 1) { why = "frames reference " + std::to_string(ncal) + " distinct MzCalibration rows"; sqlite3_close(db); return false; }
++    if (ncal != 1) return fail("frames reference " + std::to_string(ncal) + " distinct MzCalibration rows");
+   }
+   else
+   {
+     // Frames has no MzCalibration column (a minimal or very old tdf): fall back to the single-row
+     // rule rather than refusing -- the reference is then unambiguous only if there IS one row.
++    if (sqlite3_prepare_v2(db, "SELECT Id FROM MzCalibration", -1, &st, nullptr) != SQLITE_OK) return sqlfail("Frames has no MzCalibration column, and MzCalibration cannot be read");
++    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
++    if (rc != SQLITE_DONE) return sqlfail("reading MzCalibration");
+     sqlite3_finalize(st); st = nullptr;
+-    if (sqlite3_prepare_v2(db, "SELECT Id FROM MzCalibration", -1, &st, nullptr) == SQLITE_OK)
+-      while (sqlite3_step(st) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
+-    sqlite3_finalize(st); st = nullptr;
+-    if (ncal != 1) { why = "Frames has no MzCalibration column and MzCalibration has " + std::to_string(ncal) + " rows (need exactly 1)"; sqlite3_close(db); return false; }
++    if (ncal != 1) return fail("Frames has no MzCalibration column and MzCalibration has " + std::to_string(ncal) + " rows (need exactly 1)");
+   }
+   if (sqlite3_prepare_v2(db, "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 "
+-                             "FROM MzCalibration WHERE Id = ?", -1, &st, nullptr) != SQLITE_OK
+-      || sqlite3_bind_int64(st, 1, cal_id) != SQLITE_OK || sqlite3_step(st) != SQLITE_ROW)
+-  { why = "no MzCalibration row with Id " + std::to_string(cal_id); sqlite3_finalize(st); sqlite3_close(db); return false; }
++                             "FROM MzCalibration WHERE Id = ?", -1, &st, nullptr) != SQLITE_OK)
++    return sqlfail("cannot read MzCalibration");
++  rc = sqlite3_bind_int64(st, 1, cal_id);
++  if (rc == SQLITE_OK) rc = sqlite3_step(st);
++  if (rc == SQLITE_DONE) return fail("no MzCalibration row with Id " + std::to_string(cal_id));
++  if (rc != SQLITE_ROW) return sqlfail("reading MzCalibration row " + std::to_string(cal_id));
+   cal.model_type = sqlite3_column_int(st, 0);
+   cal.digitizer_timebase = sqlite3_column_double(st, 1); cal.digitizer_delay = sqlite3_column_double(st, 2);
+   cal.C0 = sqlite3_column_double(st, 3); cal.C1 = sqlite3_column_double(st, 4);
+@@ -118,17 +146,18 @@
+   cal.T1_ref = sqlite3_column_double(st, 6); cal.dC1 = sqlite3_column_double(st, 7); cal.dC2 = sqlite3_column_double(st, 8);
+   cal.C3 = sqlite3_column_double(st, 9); cal.C4 = sqlite3_column_double(st, 10);
+   sqlite3_finalize(st); st = nullptr;
+-  if (std::isnan(cal.C2)) { why = "MzCalibration C2 is NULL (missing, not zero)"; sqlite3_close(db); return false; }
+-  if (!cal.isSupported()) { why = cal.unsupportedReason(); sqlite3_close(db); return false; }
++  if (std::isnan(cal.C2)) return fail("MzCalibration C2 is NULL (missing, not zero)");
++  if (!cal.isSupported()) return fail(cal.unsupportedReason());
+   t1_by_frame.clear();
+-  if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) == SQLITE_OK)
+-    while (sqlite3_step(st) == SQLITE_ROW)
+-    {
+-      const long long id = sqlite3_column_int64(st, 0);
+-      if (id < 0 || id > 10000000) { why = "implausible Frames.Id"; sqlite3_finalize(st); sqlite3_close(db); return false; }
+-      if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
+-      t1_by_frame[(size_t)id] = (sqlite3_column_type(st, 1) == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);
+-    }
++  if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.T1");
++  while ((rc = sqlite3_step(st)) == SQLITE_ROW)
++  {
++    const long long id = sqlite3_column_int64(st, 0);
++    if (id < 0 || id > 10000000) return fail("implausible Frames.Id");
++    if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
++    t1_by_frame[(size_t)id] = (sqlite3_column_type(st, 1) == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);
++  }
++  if (rc != SQLITE_DONE) return sqlfail("reading Frames.T1");
+   sqlite3_finalize(st); sqlite3_close(db);
+   if (t1_by_frame.size() < 2) { why = "no Frames rows"; return false; }
+   return true;
+@@ -139,9 +168,16 @@
+ //  * the gate's inputs exactly as dnoise v0.1.0 reads them: six GlobalMetadata values as stored TEXT,
+ //    MAX(NumScans) over ALL frames, and the DiaFrameMsMsWindows rows (DnoiseMs1.h RunMeta / WindowRow);
+ //  * what the Bruker loader made of each raw point, so the tool can invert it: per frame MsMsType,
+-//    NumScans, NumPeaks, opentims' intensity correction -- 100 / atof of sqlite's own text rendering of
+-//    AccumulationTime, as TimsFrameFromSql computes it, with the same library in the same process -- and
+-//    the TimsCalibration row of the rational 1/K0 model.
++//    NumScans, NumPeaks, opentims' intensity correction -- 100 / AccumulationTime from sqlite's text
++//    rendering of the column, converted in the C locale as TimsFrameFromSql's atof is under opentims'
++//    locale guard (recover::opentimsCorrection) -- and the TimsCalibration row of the rational 1/K0 model.
++//    That rendering is the loader's text only where both share one SQLite. In-tree they do (the tool
++//    resolves libOpenMS's bundled sqlite3); a standalone build links its own, and SQLite versions render
++//    a REAL that 15 significant digits do not round-trip differently. The resulting few-ulp change in corr
++//    refused points and never recovered a wrong raw count in a brute force over every raw count below 2^24,
++//    and every AccumulationTime seen (49 .d files) round-trips at 15 digits.
++// Each integer is type- and range-checked before it is narrowed: sqlite3_column_int64 converts a TEXT or
++// REAL cell silently, and a cast wraps -1 into 4294967295.
+ // Refuses wherever tryCreateRationalConverter would NOT install that model (no or an empty table, a
+ // ModelType other than 2, a frame with no or an unknown row): the loader's 1/K0 is then linear.
+ // ---------------------------------------------------------------------------------------------
+@@ -149,77 +185,128 @@
+ {
+   spx::dnoise::RunMeta meta;
+   std::vector<spx::dnoise::WindowRow> windows;
++  /// corr: recover::opentimsCorrection of the frame's AccumulationTime (finite, > 0; whether it is invertible is the caller's check)
+   struct Frame { int msms_type = -1; std::uint32_t num_scans = 0, num_peaks = 0; double corr = 0.0; std::uint32_t cal = 0; };
+   std::vector<Frame> frames;                     ///< by Frames.Id (msms_type -1: no such frame); cal indexes tims_cal
+   std::vector<std::array<double, 10>> tims_cal;  ///< C0..C9 of each TimsCalibration row
++  std::vector<std::uint32_t> ms1_max_scans;      ///< per tims_cal row: the largest NumScans of an MS1 frame referencing it (0: none does)
+ };
+ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::string& why)
+ {
+   out = TdfDnoiseInputs{}; why.clear();
+   sqlite3* db = nullptr;
+   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+-  { why = std::string("cannot open ") + tdf; sqlite3_close(db); return false; }
++  { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
+   sqlite3_stmt* st = nullptr;
+   auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
+-  const char* const linear = " (the loader converts 1/K0 with the linear GlobalMetadata model)";
+-  if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata", -1, &st, nullptr) == SQLITE_OK)
+-    while (sqlite3_step(st) == SQLITE_ROW)
+-    {
+-      const unsigned char* k = sqlite3_column_text(st, 0);
+-      if (!k) continue;
+-      const std::string key = reinterpret_cast<const char*>(k);
+-      std::optional<std::string>* slot = key == "AcquisitionSoftware" ? &out.meta.acquisition_software
+-                                       : key == "MzAcqRangeLower" ? &out.meta.mz_acq_range_lower : key == "MzAcqRangeUpper" ? &out.meta.mz_acq_range_upper
+-                                       : key == "DigitizerNumSamples" ? &out.meta.digitizer_num_samples
+-                                       : key == "OneOverK0AcqRangeLower" ? &out.meta.one_over_k0_acq_range_lower
+-                                       : key == "OneOverK0AcqRangeUpper" ? &out.meta.one_over_k0_acq_range_upper : nullptr;
+-      const unsigned char* v = sqlite3_column_text(st, 1);
+-      if (slot && v) *slot = std::string(reinterpret_cast<const char*>(v), (size_t)sqlite3_column_bytes(st, 1));
+-    }
++  auto sqlfail = [&](const std::string& what, const char* tail = "") { return fail(what + ": " + sqlite3_errmsg(db) + tail); };   // errmsg is read before fail() finalizes
++  auto int_in = [&](int col, long long lo, long long hi, long long& v) {   // a stored INTEGER in [lo, hi]
++    if (sqlite3_column_type(st, col) != SQLITE_INTEGER) return false;
++    v = sqlite3_column_int64(st, col);
++    return v >= lo && v <= hi; };
++  auto cell = [&](int col) {   // a stored value as a refusal names it: NULL spelled out, TEXT quoted
++    const int type = sqlite3_column_type(st, col);
++    if (type == SQLITE_NULL) return std::string("NULL");
++    const unsigned char* x = sqlite3_column_text(st, col);
++    const std::string s = x ? std::string(reinterpret_cast<const char*>(x), (size_t)sqlite3_column_bytes(st, col)) : std::string();
++    return type == SQLITE_INTEGER || type == SQLITE_FLOAT ? s : "'" + s + "'"; };
++  const char* const linear = " (the loader converts 1/K0 with the linear GlobalMetadata model)";
++  int rc = SQLITE_OK;
++  if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read GlobalMetadata");
++  while ((rc = sqlite3_step(st)) == SQLITE_ROW)
++  {
++    const unsigned char* k = sqlite3_column_text(st, 0);
++    if (!k) continue;
++    const std::string key = reinterpret_cast<const char*>(k);
++    std::optional<std::string>* slot = key == "AcquisitionSoftware" ? &out.meta.acquisition_software
++                                     : key == "MzAcqRangeLower" ? &out.meta.mz_acq_range_lower : key == "MzAcqRangeUpper" ? &out.meta.mz_acq_range_upper
++                                     : key == "DigitizerNumSamples" ? &out.meta.digitizer_num_samples
++                                     : key == "OneOverK0AcqRangeLower" ? &out.meta.one_over_k0_acq_range_lower
++                                     : key == "OneOverK0AcqRangeUpper" ? &out.meta.one_over_k0_acq_range_upper : nullptr;
++    const unsigned char* v = sqlite3_column_text(st, 1);
++    if (slot && v) *slot = std::string(reinterpret_cast<const char*>(v), (size_t)sqlite3_column_bytes(st, 1));
++  }
++  if (rc != SQLITE_DONE) return sqlfail("reading GlobalMetadata");
+   sqlite3_finalize(st); st = nullptr;
+-  if (sqlite3_prepare_v2(db, "SELECT MAX(NumScans) FROM Frames", -1, &st, nullptr) != SQLITE_OK || sqlite3_step(st) != SQLITE_ROW) return fail("no Frames table");
+-  { const long long v = sqlite3_column_int64(st, 0);
+-    if (v < 0 || v > 1000000) return fail("implausible MAX(Frames.NumScans)");
++  if (sqlite3_prepare_v2(db, "SELECT MAX(NumScans) FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.NumScans");
++  if ((rc = sqlite3_step(st)) != SQLITE_ROW) return sqlfail("reading MAX(Frames.NumScans)");
++  { long long v = 0;   // NULL: an empty Frames table, refused below. A TEXT cell anywhere is the MAX: it sorts above INTEGER.
++    if (sqlite3_column_type(st, 0) != SQLITE_NULL && !int_in(0, 0, 1000000, v))
++      return fail("MAX(Frames.NumScans) " + cell(0) + " is not an INTEGER in [0, 1000000]");
+     out.meta.max_num_scans = (std::uint32_t)v; }
+   sqlite3_finalize(st); st = nullptr;
+-  if (sqlite3_prepare_v2(db, "SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows "
+-                             "WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL", -1, &st, nullptr) == SQLITE_OK)   // no table: no rows
+-    while (sqlite3_step(st) == SQLITE_ROW)
+-      out.windows.push_back({sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), sqlite3_column_double(st, 2), sqlite3_column_double(st, 3)});
++  // DiaFrameMsMsWindows is optional (no table: dnoise has no gate). Table names resolve case-insensitively.
++  if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = 'DiaFrameMsMsWindows' COLLATE NOCASE", -1, &st, nullptr) != SQLITE_OK)
++    return sqlfail("cannot read the schema");
++  rc = sqlite3_step(st);
++  if (rc != SQLITE_ROW && rc != SQLITE_DONE) return sqlfail("reading the schema");
++  const bool have_windows = rc == SQLITE_ROW;
+   sqlite3_finalize(st); st = nullptr;
++  if (have_windows)
++  {
++    if (sqlite3_prepare_v2(db, "SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows "
++                               "WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL", -1, &st, nullptr) != SQLITE_OK)
++      return sqlfail("cannot read DiaFrameMsMsWindows");
++    while ((rc = sqlite3_step(st)) == SQLITE_ROW)
++    {
++      if (sqlite3_column_type(st, 0) == SQLITE_NULL || sqlite3_column_type(st, 1) == SQLITE_NULL)   // column_int64 would read scan 0
++        return fail("DiaFrameMsMsWindows has a row with a NULL ScanNumBegin or ScanNumEnd");
++      out.windows.push_back({sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), sqlite3_column_double(st, 2), sqlite3_column_double(st, 3)});
++    }
++    if (rc != SQLITE_DONE) return sqlfail("reading DiaFrameMsMsWindows");
++    sqlite3_finalize(st); st = nullptr;
++  }
+   std::vector<std::uint32_t> cal_id;
+   if (sqlite3_prepare_v2(db, "SELECT Id, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration", -1, &st, nullptr) != SQLITE_OK)
+-    return fail(std::string("no TimsCalibration table") + linear);
+-  while (sqlite3_step(st) == SQLITE_ROW)
++    return sqlfail("cannot read TimsCalibration", linear);
++  while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+   {
+     if (sqlite3_column_int(st, 1) != 2) return fail("TimsCalibration ModelType " + std::to_string(sqlite3_column_int(st, 1)) + linear);
++    long long id = 0;
++    if (!int_in(0, 0, 4294967295LL, id)) return fail("TimsCalibration.Id " + cell(0) + " is not an INTEGER in [0, 4294967295]");
+     std::array<double, 10> c{};
+     for (int k = 0; k < 10; ++k) c[(size_t)k] = sqlite3_column_double(st, 2 + k);
+-    cal_id.push_back((std::uint32_t)sqlite3_column_int(st, 0)); out.tims_cal.push_back(c);
++    cal_id.push_back((std::uint32_t)id); out.tims_cal.push_back(c);
+   }
++  if (rc != SQLITE_DONE) return sqlfail("reading TimsCalibration");
+   sqlite3_finalize(st); st = nullptr;
+   if (out.tims_cal.empty()) return fail(std::string("TimsCalibration is empty") + linear);
++  out.ms1_max_scans.assign(out.tims_cal.size(), 0);
+   if (sqlite3_prepare_v2(db, "SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration FROM Frames", -1, &st, nullptr) != SQLITE_OK)
+-    return fail(std::string("Frames has no TimsCalibration column") + linear);
+-  while (sqlite3_step(st) == SQLITE_ROW)
++    return sqlfail("cannot read Frames (Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration)",
++                   " (without a TimsCalibration column the loader converts 1/K0 with the linear GlobalMetadata model)");
++  while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+   {
+-    const long long id = sqlite3_column_int64(st, 0);
+-    if (id < 1 || id > 10000000) return fail("implausible Frames.Id");
++    long long id = 0, type = 0, scans = 0, peaks = 0, cid = 0;
++    if (!int_in(0, 1, 10000000, id)) return fail("implausible Frames.Id " + cell(0));
++    auto bad = [&](int col, const char* name, const std::string& want) {
++      return fail("frame " + std::to_string(id) + ": Frames." + name + " " + cell(col) + " is not " + want); };
++    if (!int_in(1, INT_MIN, INT_MAX, type)) return bad(1, "MsMsType", "an INTEGER in the int range");
++    if (!int_in(2, 0, out.meta.max_num_scans, scans)) return bad(2, "NumScans", "an INTEGER in [0, " + std::to_string(out.meta.max_num_scans) + "]");
++    if (!int_in(3, 0, 4294967295LL, peaks)) return bad(3, "NumPeaks", "an INTEGER in [0, 4294967295]");
++    if (type == 0 && peaks > 0 && scans < 1)
++      return fail("frame " + std::to_string(id) + ": an MS1 frame with " + std::to_string(peaks) + " points (Frames.NumPeaks) and no scans (Frames.NumScans 0)");
+     const unsigned char* acc = sqlite3_column_text(st, 4);
+     if (!acc) return fail("frame " + std::to_string(id) + " has no AccumulationTime");
++    double corr = 0.0;
++    if (!spx::dnoise::recover::opentimsCorrection(std::string(reinterpret_cast<const char*>(acc), (size_t)sqlite3_column_bytes(st, 4)), corr))
++      return fail("frame " + std::to_string(id) + ": Frames.AccumulationTime '" + std::string(reinterpret_cast<const char*>(acc), (size_t)sqlite3_column_bytes(st, 4))
++                  + "' is not a positive decimal number");
+     if (sqlite3_column_type(st, 5) == SQLITE_NULL) return fail("frame " + std::to_string(id) + " has no TimsCalibration row" + linear);
+-    const std::uint32_t cid = (std::uint32_t)sqlite3_column_int(st, 5);
++    if (!int_in(5, 0, 4294967295LL, cid)) return bad(5, "TimsCalibration", "an INTEGER in [0, 4294967295]");
+     size_t ci = cal_id.size();
+-    for (size_t i = 0; i < cal_id.size(); ++i) if (cal_id[i] == cid) ci = i;   // a repeated Id: the last row, as the loader's map keeps it
++    for (size_t i = 0; i < cal_id.size(); ++i) if (cal_id[i] == (std::uint32_t)cid) ci = i;   // a repeated Id: the last row, as the loader's map keeps it
+     if (ci == cal_id.size()) return fail("frame " + std::to_string(id) + " references an unknown TimsCalibration row" + linear);
+     if ((size_t)id >= out.frames.size()) out.frames.resize((size_t)id + 1);
+     TdfDnoiseInputs::Frame& f = out.frames[(size_t)id];
+-    f.msms_type = sqlite3_column_int(st, 1);
+-    f.num_scans = (std::uint32_t)sqlite3_column_int64(st, 2);
+-    f.num_peaks = (std::uint32_t)sqlite3_column_int64(st, 3);
+-    f.corr = 100.0 / std::atof(reinterpret_cast<const char*>(acc));
++    f.msms_type = (int)type;
++    f.num_scans = (std::uint32_t)scans;
++    f.num_peaks = (std::uint32_t)peaks;
++    f.corr = corr;
+     f.cal = (std::uint32_t)ci;
++    if (f.msms_type == 0) out.ms1_max_scans[ci] = std::max(out.ms1_max_scans[ci], f.num_scans);
+   }
++  if (rc != SQLITE_DONE) return sqlfail("reading Frames");
+   sqlite3_finalize(st); sqlite3_close(db);
+   if (out.frames.size() < 2) { why = "no Frames rows"; return false; }
+   return true;
+```
+
+### 7.3 src/spextractor.cpp
+
+```diff
+--- a/src/spextractor.cpp (pre-fix-pass snapshot)
++++ b/src/spextractor.cpp (current)
+@@ -1691,6 +1691,19 @@
+     for (auto& a : s.getFloatDataArrays()) a.shrink_to_fit();
+     for (auto& a : s.getIntegerDataArrays()) a.shrink_to_fit();
+     for (auto& a : s.getStringDataArrays()) a.shrink_to_fit();
++  }
++
++  /// [ms1-finite] Refuses an input with a non-finite MS1 m/z. Nothing after the pick is defined on one, prune on or off:
++  /// sortByPosition leaves finite m/z out of order around a NaN while isSorted() stays true, a NaN band edge leaves two
++  /// band cores owning nothing, and MassTraceDetection's m/z search matches anything. Rethrown past the stream fallback.
++  struct Ms1MzError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
++  inline void requireFiniteMs1Mz(const MSSpectrum& s)
++  {
++    for (Size i = 0; i < s.size(); ++i)
++      if (!std::isfinite(s[i].getMZ()))
++        throw Ms1MzError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
++                         "[ms1] MS1 spectrum has a non-finite m/z (" + std::to_string(s[i].getMZ()) + ") at peak " + std::to_string(i)
++                         + " of " + std::to_string(s.size()) + " after peak picking; the input is malformed and the run is refused", s.getNativeID());
+   }
+ 
+   /// [ms1-prune 2026-09-10] Picked MS1 centroids at or below trace:noise_threshold_int, dropped at load.
+@@ -1755,8 +1768,9 @@
+       chain(true, [&kept](Size) { ++kept; });
+       c.picked += (long long)n;
+       // A non-finite m/z hides from is_sorted, so the band builder's lower_bound over it lands where the spectrum's
+-      // LENGTH decides -- which the prune changes. Such a spectrum stays whole, and is counted.
+-      if (!finite) { ++c.bad_mz; c.kept += (long long)n; return; }
++      // LENGTH decides -- which the prune changes. Both load paths refuse such a spectrum right after its pick, so it
++      // never reaches this line and bad_mz stays 0.
++      if (!finite) requireFiniteMs1Mz(s);   // [ms1-finite] unreachable, both load paths refuse first; throws if a future entry point skips them
+       c.kept += (long long)kept;
+       if (kept == n) return;
+       std::vector<Size> keep;
+@@ -1811,24 +1825,25 @@
+   ///             chord misses by bins; the loader's own record, lastMzCalibration(), is checked per batch too);
+   ///  scan       the float32 1/K0 is RationalScan2ImConverter's value of one of the frame's scans, matched in its
+   ///             TimsCalibration row's table within kImTol -- far inside half the smallest step between scans;
+-  ///  intensity  opentims stored (uint32)(raw * 100 / AccumulationTime + 0.5), and exactly one raw count may give
++  ///  intensity  opentims stored (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5), and exactly one raw count may give
+   ///             the value: bit-identity needs the raw one (the corrected one flips 9 of 3.1 M kept points on TNBC).
+-  /// A spectrum must be the whole raw frame (Frames.NumPeaks points: no aggregated or centroided frame). The kept
+-  /// points are selected in place, so a frame the filter empties stays in the map with an empty IM array.
++  /// The arithmetic is DnoiseMs1.h's spx::dnoise::recover (contraction off, unit-tested); this struct turns its refusals
++  /// into messages. A spectrum must be the whole raw frame (Frames.NumPeaks points: no aggregated or centroided frame),
++  /// and every MS1 frame with points must reach the filter exactly once (seen). The kept points are selected in place,
++  /// so a frame the filter empties stays in the map with an empty IM array.
+   struct DnoiseRun
+   {
+-    struct Counts { long long frames = 0, emptied = 0, raw = 0, streak = 0, halo = 0, kept = 0; double cpu = 0.0; };
++    struct Counts { long long frames = 0, emptied = 0, raw = 0, streak = 0, halo = 0, kept = 0; double cpu = 0.0; uint32_t fid = 0; };
+     /// one per thread for one batch: dnoise's Scratch plus the recovered integers (~45 B per raw point in flight)
+     struct Work { spx::dnoise::Scratch w; std::vector<uint32_t> scan, tof, raw; std::vector<uint8_t> keep; std::vector<Size> idx; };
+-    static constexpr double kTofTol = 1e-6;   ///< bins: the round trip is exact to 2.3e-10 on both benchmark files
+-    static constexpr float kImTol = 1e-6f;    ///< 1/K0: a float32 step is ~1.2e-7 there, adjacent scans >= 8.8e-4 apart
+     bool on = false;                          ///< dnoise:ms1 true on a Bruker .d, set up
+     spx::dnoise::Params p;
+     std::optional<spx::dnoise::Ms1WindowGate> gate;
+     spextractor::TdfDnoiseInputs tdf;
+-    std::vector<std::vector<float>> im_asc;   ///< per TimsCalibration row: the float32 1/K0 of every scan, ascending
++    std::vector<std::vector<float>> im_asc;   ///< per TimsCalibration row: the float32 1/K0 of each scan its MS1 frames have, ascending
+     std::vector<char> im_falls;               ///< the row's 1/K0 falls with the scan, so its im_asc is reversed
+     Counts total;
++    spx::dnoise::FrameCoverage seen;          ///< the frame ids add() merged, each once
+ 
+     static double threadCpu_() { timespec ts; return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 : 0.0; }
+ 
+@@ -1840,33 +1855,33 @@
+       spx::dnoise::GateBuild g = spx::dnoise::buildMs1WindowGate(tdf.meta, tdf.windows, p);
+       if (!g.error.empty()) return "the dnoise MS1 port cannot build its window gate from this file: " + g.error;
+       gate = std::move(g.gate);
+-      for (size_t id = 1; id < tdf.frames.size(); ++id)   // at or below 0.5 every corrected value has two raw counts
+-        if (tdf.frames[id].msms_type == 0 && !(tdf.frames[id].corr > 0.5 && tdf.frames[id].corr < 1e6))
+-          return "MS1 frame " + std::to_string(id) + ": opentims' intensity correction 100 / AccumulationTime = " + std::to_string(tdf.frames[id].corr) + " is not invertible";
+-      const size_t n_scans = tdf.meta.max_num_scans;
+-      for (const auto& c : tdf.tims_cal)
++      for (size_t id = 1; id < tdf.frames.size(); ++id)   // below 1 (AccumulationTime > 100 ms) raw counts share a corrected value
++        if (tdf.frames[id].msms_type == 0)
++          if (std::string r = spx::dnoise::recover::correctionRefusal(id, tdf.frames[id].corr); !r.empty()) return r;
++      // one table per TimsCalibration row, over the most scans an MS1 frame using it has (tdf.ms1_max_scans): a row no MS1
++      // frame uses stays empty and matches nothing. The gate keeps the run's MAX(NumScans), as dnoise does.
++      im_asc.assign(tdf.tims_cal.size(), {});
++      im_falls.assign(tdf.tims_cal.size(), 0);
++      for (size_t ci = 0; ci < tdf.tims_cal.size(); ++ci)
+       {
+-        std::vector<float> v(n_scans);
+-        for (size_t s = 0; s < n_scans; ++s)   // RationalScan2ImConverter::applyFormula term for term, then frameToSpectrum's float cast
+-        {
+-          double V = c[2] + ((c[3] - c[2]) / c[1]) * ((double)s - c[4] - c[0]);
+-          if (V == 0.0) V = 1e-10;
+-          double denom = c[6] + c[7] / V;
+-          if (denom == 0.0) denom = 1e-10;
+-          v[s] = static_cast<float>(1.0 / denom);
+-        }
+-        const bool falls = n_scans > 1 && v[1] < v[0];
+-        if (falls) std::reverse(v.begin(), v.end());
+-        for (size_t s = 1; s < n_scans; ++s)
+-          if (!(v[s] - v[s - 1] > 4.0f * kImTol))   // strictly monotonic, finite, no two scans within reach of one value
+-            return "the TimsCalibration model does not separate every scan by more than " + std::to_string(4.0f * kImTol) + " 1/K0";
+-        im_asc.push_back(std::move(v));
+-        im_falls.push_back(falls);
++        bool falls = false;
++        const std::string r = spx::dnoise::recover::buildScanTable(tdf.tims_cal[ci], tdf.ms1_max_scans[ci], im_asc[ci], falls);
++        if (!r.empty()) return r;
++        im_falls[ci] = falls;
+       }
++      reset();
+       on = true;
+       return std::string();
+     }
+ 
++    /// The scans each row's table covers, for the setup log: "944", or "944,0" with a row no MS1 frame uses.
++    String scanTables() const
++    {
++      String out;
++      for (size_t ci = 0; ci < tdf.ms1_max_scans.size(); ++ci) out += (ci ? "," : "") + String(tdf.ms1_max_scans[ci]);
++      return out;
++    }
++
+     /// The loader must have calibrated m/z with the model the TOF recovery inverts. Serially, once per batch.
+     void checkLoader() const
+     {
+@@ -1875,33 +1890,27 @@
+                           "table model, and the loader calibrated m/z otherwise; -dnoise:ms1 false runs without MS1 denoising", BrukerTimsFile::lastMzCalibration());
+     }
+ 
+-    /// The scan whose float32 1/K0 in @p asc (reversed when @p falls) lies within kImTol of @p v; -1 for none.
+-    static long scanOf(const std::vector<float>& asc, bool falls, float v)
+-    {
+-      if (asc.empty()) return -1;
+-      const float* b = asc.data();
+-      for (size_t n = asc.size(); n > 1; ) { const size_t h = n / 2; if (b[h] <= v) b += h; n -= h; }   // the last entry <= v, else the first
+-      size_t i = (size_t)(b - asc.data());
+-      if (i + 1 < asc.size() && std::fabs(asc[i + 1] - v) < std::fabs(asc[i] - v)) ++i;
+-      if (!(std::fabs(asc[i] - v) <= kImTol)) return -1;
+-      return falls ? (long)(asc.size() - 1 - i) : (long)i;
+-    }
+-
+     /// One MS1 spectrum as the loader delivered it, filtered in place. @p k is the calling thread's, @p c the frame's.
+     void frame(MSSpectrum& s, Work& k, Counts& c) const
+     {
++      using spx::dnoise::recover::Refusal;
+       const double cpu0 = threadCpu_();
+       const uint32_t fid = frameIdOf(s.getNativeID());
+       const Size n = s.size();
+       auto refuse = [&](const String& what) {
+         return DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] " + what + "; -dnoise:ms1 false runs without MS1 denoising", s.getNativeID()); };
+-      if (fid == 0 || fid >= tdf.frames.size() || tdf.frames[fid].msms_type != 0) throw refuse("an MS1 spectrum is not an MS1 frame of the input's analysis.tdf");
++      const bool has_im = s.containsIMData();
++      switch (spx::dnoise::recover::frameCheck(tdf.frames, fid, n, has_im, has_im ? s.getFloatDataArrays()[s.getIMData().first].size() : 0))
++      {
++        case Refusal::none: break;
++        case Refusal::frame: throw refuse("an MS1 spectrum is not an MS1 frame of the input's analysis.tdf");
++        case Refusal::peaks:
++          throw refuse("frame " + String(fid) + " arrived with " + String(n) + " of its " + String(tdf.frames[fid].num_peaks) + " raw points: only a whole raw frame can be denoised (no frame aggregation, no loader centroiding)");
++        default: throw refuse("frame " + String(fid) + " carries no 1/K0 per point");   // Refusal::im
++      }
+       const spextractor::TdfDnoiseInputs::Frame& fr = tdf.frames[fid];
+-      if (n != fr.num_peaks)
+-        throw refuse("frame " + String(fid) + " arrived with " + String(n) + " of its " + String(fr.num_peaks) + " raw points: only a whole raw frame can be denoised (no frame aggregation, no loader centroiding)");
+-      ++c.frames; c.raw += (long long)n;
++      ++c.frames; c.raw += (long long)n; c.fid = fid;
+       if (n == 0) { c.cpu += threadCpu_() - cpu0; return; }
+-      if (!s.containsIMData() || s.getFloatDataArrays()[s.getIMData().first].size() != n) throw refuse("frame " + String(fid) + " carries no 1/K0 per point");
+       const auto& im = s.getFloatDataArrays()[s.getIMData().first];
+       const TofAxis& ax = tofAxis();
+       const double b = ax.factor(fid), corr = fr.corr;
+@@ -1910,20 +1919,20 @@
+       k.scan.resize(n); k.tof.resize(n); k.raw.resize(n);
+       for (Size i = 0; i < n; ++i)
+       {
+-        const double t = ax.cal.mzToTof(s[i].getMZ(), b), bin = std::nearbyint(t);
+-        if (!(std::fabs(t - bin) <= kTofTol && bin >= 0.0 && bin <= 4294967295.0))
+-          throw refuse("m/z " + String(s[i].getMZ()) + " in frame " + String(fid) + " is not the MzCalibration table model's value of a TOF bin (" + String(t) + "): the loader calibrated m/z otherwise");
+-        const long scan = scanOf(asc, falls, im[i]);
+-        if (scan < 0 || (uint32_t)scan >= fr.num_scans)
+-          throw refuse("1/K0 " + String(im[i]) + " in frame " + String(fid) + " is not the TimsCalibration model's value of one of its " + String(fr.num_scans) + " scans: the loader converted 1/K0 otherwise");
+         const float v = s[i].getIntensity();
+-        uint32_t raw = 0; int hits = 0;
+-        if (v >= 0.0f && v < 16777216.0f && v == std::floor(v))   // a float holds every such count exactly
+-          for (double r = std::max(0.0, std::floor((v - 0.5) / corr) - 1.0), r_end = std::ceil((v + 0.5) / corr) + 1.0; r <= r_end; r += 1.0)
+-            if ((uint32_t)(r * corr + 0.5) == (uint32_t)v) { raw = (uint32_t)r; ++hits; }   // opentims.cpp: double(raw) * correction + 0.5, into a uint32
+-        if (hits != 1)
+-          throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of exactly one raw count (" + String(hits) + " found)");
+-        k.tof[i] = (uint32_t)bin; k.scan[i] = (uint32_t)scan; k.raw[i] = raw;
++        double t = 0.0; int hits = 0;
++        switch (spx::dnoise::recover::recoverPoint(ax.cal, b, s[i].getMZ(), im[i], v, corr, asc, falls, fr.num_scans, k.tof[i], k.scan[i], k.raw[i], t, hits))
++        {
++          case Refusal::none: break;
++          case Refusal::tof:
++            throw refuse("m/z " + String(s[i].getMZ()) + " in frame " + String(fid) + " is not the MzCalibration table model's value of a TOF bin (" + String(t) + "): the loader calibrated m/z otherwise");
++          case Refusal::scan:
++            throw refuse("1/K0 " + String(im[i]) + " in frame " + String(fid) + " is not the TimsCalibration model's value of one of its " + String(fr.num_scans) + " scans: the loader converted 1/K0 otherwise");
++          case Refusal::intensity_range:
++            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is >= 2^24 = 16777216: the loader's float32 intensity no longer identifies one raw count");
++          default:   // Refusal::intensity
++            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of exactly one raw count (" + String(hits) + " found)");
++        }
+       }
+       const spx::dnoise::FrameCounts fc = spx::dnoise::denoiseMs1Frame(k.scan.data(), k.tof.data(), k.raw.data(), n, fr.num_scans, p, gate ? &*gate : nullptr, k.w, k.keep);
+       c.streak += (long long)fc.after_streak; c.halo += (long long)fc.after_halo; c.kept += (long long)fc.kept; c.emptied += (fc.kept == 0);
+@@ -1937,8 +1946,31 @@
+       c.cpu += threadCpu_() - cpu0;
+     }
+ 
++    /// A batch's per-spectrum counts, serially: each denoised frame (a slot with frames 0 is an MS2 spectrum's) marked
++    /// once -- a frame delivered twice is refused, it would be filtered and traced twice.
+     void add(const std::vector<Counts>& v)
+-    { for (const Counts& c : v) { total.frames += c.frames; total.emptied += c.emptied; total.raw += c.raw; total.streak += c.streak; total.halo += c.halo; total.kept += c.kept; total.cpu += c.cpu; } }
++    {
++      for (const Counts& c : v)
++      {
++        if (c.frames == 0) continue;
++        if (!seen.mark(c.fid))
++          throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(c.fid) + " reached the filter twice: the loader delivered it more than once; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(c.fid));
++        total.frames += c.frames; total.emptied += c.emptied; total.raw += c.raw; total.streak += c.streak; total.halo += c.halo; total.kept += c.kept; total.cpu += c.cpu;
++      }
++    }
++
++    /// After the load, serially: every MS1 frame with points (Frames.NumPeaks > 0) reached the filter. Counts cannot
++    /// tell -- a frame delivered twice and a missing one with equal NumPeaks cancel out -- so this reads the marks.
++    void requireComplete() const
++    {
++      if (const size_t miss = seen.firstMissing(tdf.frames))
++        throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(miss) + " (" + String(tdf.frames[miss].num_peaks)
++                          + " raw points in Frames.NumPeaks) never reached the filter: the loader did not deliver every MS1 frame; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(miss));
++    }
++
++    /// The counts and marks back to none: at setup, and when a failed stream load falls back to the resident one, which
++    /// delivers every frame again.
++    void reset() { total = Counts(); seen.reset(); }
+ 
+     /// The applied parameters and the run's gate size, for the log and spx:dnoise_ms1_params.
+     String params() const
+@@ -2125,6 +2157,9 @@
+       // MS1 stays a PeakMap (MassTraceDetection needs it whole), but its pick is NOT small: 1,343
+       // frames x ~690k raw peaks = 37% of all peaks, and it used to run serially here (~400 s of
+       // LOAD, measured 2026-09-02). Buffer and pick in parallel like MS2; order is kept by index.
++      // [dnoise] the loader chose its m/z model before its first frame: refuse at that frame, not after a whole batch
++      // (flushMS1_ checks every batch again and stays the authority)
++      if (dnoise && dnoise->on && !dn_loader_checked_) { dnoise->checkLoader(); dn_loader_checked_ = true; }
+       ms1_buf_.push_back(std::move(s));
+       ++frames_seen;
+       if (ms1_buf_.size() >= kBatchMS1_()) flushMS1_();
+@@ -2159,6 +2194,7 @@
+           if (dn) dnoise->frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);   // [dnoise] the raw points, before the pick
+           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+           ensureIMArrayName(s);
++          requireFiniteMs1Mz(s);   // [ms1-finite] before the prune, prune on or off
+         }
+         catch (...)
+         {
+@@ -2263,6 +2299,7 @@
+     std::vector<uint32_t> scratch_mzq_; std::vector<float> scratch_inten_; std::vector<uint16_t> scratch_imq_;
+     PeakPickerIM& picker_;
+     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
++    bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
+     map<WinKey, PeakSlab>& windows_;
+     PeakMap& ms1_;
+     CompactStats& stats_;
+@@ -2611,7 +2648,7 @@
+                           "sub-threshold witnesses that leave no two kept peaks further apart than the band halo (20 x "
+                           "trace:mass_error_ppm), so every band spectrum that exists without the prune still exists. "
+                           "OUTPUT-IDENTICAL (class D): byte-identical spectra either way; only the MS1 map shrinks -- measured at one "
+-                          "cell per tile with dnoise:ms1 false, peak memory dataset D 31.82 -> 26.49 GB, TNBC 009 about 69 -> 34.7 GB. Bound "
++                          "cell per tile with dnoise:ms1 false, peak memory dataset D 31.99 -> 25.90 GB, TNBC 009 69.11 -> 31.97 GB. Bound "
+                           "to trace:noise_threshold_int -- it has no threshold of its own. false = keep every picked centroid.", false);
+     setValidStrings_("perf:ms1_prune", {"true", "false"});
+     registerIntOption_("perf:trace_bands", "<n>", 12, "Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
+@@ -2681,13 +2718,14 @@
+                           "DEFAULT ON since 2026-09-10. CHANGES OUTPUT: peptides dataset D -4.3% Sage / -4.0% MSFragger, TNBC 009 +1.5% / "
+                           "-0.5%, entrapment FDR inside the gate (measured with dnoise run as a preprocessor at one cell per tile, and "
+                           "carried over because this in-tool path gives digest-identical output). Against the default perf:ms1_prune true "
+-                          "at one cell per tile: peak memory D 26.46 -> 22.41 GB (-15%), TNBC 009 34.67 -> 25.41 GB (-27%); wall time "
+-                          "about -15%. -dnoise:ms1 false picks every raw MS1 point (the output before 2026-09-10).", false);
++                          "at one cell per tile: peak memory D 25.90 -> 22.48 GB (-13%), TNBC 009 31.97 -> 25.17 GB (-21%); wall D 4:13 -> "
++                          "3:41 (-13%), TNBC 009 10:25 -> 10:46 (no gain on a shared node; its MS1 load got slower, 58.5 -> 68.4 s). "
++                          "-dnoise:ms1 false picks every raw MS1 point (the output before 2026-09-10).", false);
+     setValidStrings_("dnoise:ms1", {"true", "false"});
+     registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: TOF bins on each side of a point's own bin summed per scan (dnoise --mz-half-width).", false, true);
+     registerIntOption_("dnoise:min_feature_length", "<scans>", 5, "Streak filter: OCCUPIED scans a run needs; bridged empty scans do not count (dnoise --min-feature-length).", false, true);
+     registerIntOption_("dnoise:max_internal_gap", "<scans>", 2, "Streak filter: empty scans a run may bridge (dnoise --max-internal-gap).", false, true);
+-    registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes, each over the previous pass's survivors; 0 keeps every point (dnoise --iterations).", false, true);
++    registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes, each over the previous pass's survivors; 0 skips the streak filter, and the halo filter and the window gate still run unless dnoise:halo / dnoise:dia_ms1_window are false (dnoise --iterations).", false, true);
+     registerIntOption_("dnoise:min_window_intensity", "<counts>", 0, "Streak filter: raw window sum a scan needs to count as occupied (dnoise --min-window-intensity).", false, true);
+     registerIntOption_("dnoise:min_feature_intensity", "<counts>", 0, "Streak filter: raw sum a run needs over its span (dnoise --min-feature-intensity).", false, true);
+     registerStringOption_("dnoise:halo", "<true/false>", "true", "Halo filter, once, on the streak survivors: keep a point at >= halo_peak_fraction of the most intense survivor in its box outside its own TOF bin (false = dnoise --no-halo).", false, true);
+@@ -3932,6 +3970,10 @@
+         break;
+       }
+     }
++    // the .d loader's configuration; set here because the dnoise setup below predicts the loader's m/z model from it
++    BrukerTimsFile::Config cfg;
++    cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
++    cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
+     // [dnoise] dnoise v0.1.0's MS1 path on the raw frames (DnoiseRun), set up once for the run: every refusal the options
+     // and the tdf can decide comes here, in milliseconds, before the load
+     DnoiseRun dnoise;
+@@ -3944,6 +3986,15 @@
+         return Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "dnoise:ms1 " + why + " -dnoise:ms1 false runs without MS1 denoising."); };
+       if (getIntOption_("trace:native_ms1_neighbors") > 0)
+         throw refuse("denoises each raw MS1 frame, and trace:native_ms1_neighbors > 0 sums neighbouring frames before SpeXtractor sees them.");
++      // The loader's m/z model, predicted: under the default AUTO strategy an SDK path (the Config's, else
++      // OPENMS_BRUKER_SDK_PATH) makes openTimsDataHandle calibrate m/z through the Bruker SDK, which the TOF recovery
++      // cannot invert. An SDK that then fails to load would leave the table model, so this can refuse a run that would
++      // have recovered: fail-closed. checkLoader() confirms the loader's actual choice during the load.
++      { const char* env_sdk = std::getenv("OPENMS_BRUKER_SDK_PATH");
++        const std::string sdk = !cfg.bruker_sdk_path.empty() ? cfg.bruker_sdk_path : std::string(env_sdk ? env_sdk : "");
++        if (!sdk.empty())
++          throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, but with a Bruker SDK path set (" + String(sdk)
++                       + ") the loader calibrates m/z through the Bruker SDK: unset OPENMS_BRUKER_SDK_PATH to denoise."); }
+       String why_axis;
+       if (!tofAxis().ok && !loadTofAxis(in + "/analysis.tdf", why_axis))   // the TOF recovery runs during the load
+         throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, which is not usable here (" + why_axis + ").");
+@@ -3964,7 +4015,8 @@
+       const std::string why = dnoise.setup(in + "/analysis.tdf");
+       if (!why.empty()) throw refuse("cannot be exact on this input: " + why + ".");
+       writeLogInfo_("[dnoise] " + String(spx::dnoise::kPortedFrom) + " MS1 path on the raw frames, before the pick: " + dnoise.params()
+-                    + "; " + String(dnoise.im_asc.size()) + " TimsCalibration row(s) over " + String(dnoise.tdf.meta.max_num_scans) + " scans");
++                    + "; " + String(dnoise.im_asc.size()) + " TimsCalibration row(s) over " + String(dnoise.tdf.meta.max_num_scans)
++                    + " scans (MAX(Frames.NumScans), the gate's); scan tables per row over its MS1 frames' scans: " + dnoise.scanTables());
+     }
+     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
+     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
+@@ -3973,9 +4025,6 @@
+     // A/B) holds the whole run and slices it, as before.
+     bool tile_source = false;
+     PickCompactConsumer::FrameTables run_tables;   // the reader's frozen tables, kept for pass 2
+-    BrukerTimsFile::Config cfg;
+-    cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
+-    cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
+     PeakPickerIM spicker;
+     {
+       Param sp = spicker.getParameters();
+@@ -4103,6 +4152,7 @@
+       }
+       catch (const FrameTableError&) { throw; }   // structural: never fall back onto partial slabs
+       catch (const DnoiseError&) { throw; }       // [dnoise] a refusal of the input, not a reader failure
++      catch (const Ms1MzError&) { throw; }        // [ms1-finite] a refusal of the input, not a reader failure
+       catch (const Exception::BaseException& e)
+       {
+         writeLogWarn_(String("[stream] streaming load failed (") + e.getName()
+@@ -4151,7 +4201,8 @@
+       ms2_by_window.clear();
+       cstat = CompactStats();
+       ms1_prune.reset();
+-      dnoise.total = DnoiseRun::Counts();   // [dnoise] the resident pick below filters every frame again
++      for (auto& v : ms1Hist_()) v.store(0, std::memory_order_relaxed);   // [ms1-hist] the failed attempt's picked peaks
++      dnoise.reset();   // [dnoise] counts and frame marks: the resident pick below filters every frame again
+       ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);
+       Phase _ph("LOAD(full)");
+       FileHandler().loadExperiment(in, exp,
+@@ -4214,10 +4265,13 @@
+       try
+       {
+         MSSpectrum& s = exp[i];
+-        if (!s.containsIMData()) continue;
++        // [dnoise] before the ion-mobility skip, as the streaming consumer filters every MS1 frame: frame() refuses a
++        // non-empty MS1 frame without 1/K0 and counts an empty one, so no MS1 frame bypasses it and both paths count alike
+         if (dnoise.on && s.getMSLevel() == 1) dnoise.frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);
++        if (!s.containsIMData()) continue;
+         if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+         ensureIMArrayName(s); // so MassTraceDetection reads per-peak IM (IM-aware tracing) [C-1]
++        if (s.getMSLevel() == 1) requireFiniteMs1Mz(s);   // [ms1-finite] exactly the spectra the prune and the MS1 map take
+       }
+       catch (...)
+       {
+@@ -4227,6 +4281,9 @@
+     }
+     if (pick_err) std::rethrow_exception(pick_err);
+     dnoise.add(dn_cnt);
++    // [dnoise] each thread's scratch keeps the capacity of its largest frame (up to ~4 GiB at 100 threads): free it with
++    // the pick, not at the end of this block after the prune and the dispatch
++    std::vector<DnoiseRun::Work>().swap(dn_work); std::vector<DnoiseRun::Counts>().swap(dn_cnt);
+     // [ms1-prune] exactly the MS1 spectra the dispatch below keeps, pruned as flushMS1_ prunes a batch
+     if (ms1_prune.on) ms1_prune.batch(exp.getSpectra(), [](const MSSpectrum& s) { return s.containsIMData() && s.getMSLevel() == 1; });
+ 
+@@ -4268,14 +4325,14 @@
+                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
+                     + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
+                     + String(ms1_pk) + " peaks (" + String(ms1_pk * 20 / (1024ULL * 1024ULL)) + " MB as PeakMap)." + clk_() + rss_() + mem_()); // [mem]
+-      if (dnoise.on) writeLogInfo_(dnoise.summary());   // [dnoise] after the MS1 load, whichever path picked it
++      if (dnoise.on)   // [dnoise] after the MS1 load, whichever path picked it: every MS1 frame with points exactly once
++      { dnoise.requireComplete(); writeLogInfo_(dnoise.summary()); }
+       if (ms1_prune.on)
+       { const Ms1Prune::Counts& t = ms1_prune.total;
+         writeLogInfo_("[ms1-prune] picked " + String(t.picked) + " survivors " + String(t.survivors) + " witnesses " + String(t.kept - t.survivors)
+                       + " at_noise " + String(t.at_noise) + " nan " + String(t.nan) + " bad_mz " + String(t.bad_mz) + ": kept " + String(t.kept) + " peaks = "
+                       + String(t.kept * 20 / (1024LL * 1024LL)) + " MB as PeakMap of " + String(t.picked * 20 / (1024LL * 1024LL)) + " MB picked; sample "
+                       + String(ms1_prune.sample.size()) + " m/z from " + String(ms1_prune.frames) + " spectra"
+-                      + (t.bad_mz ? String(" (bad_mz: spectra with a non-finite m/z, kept whole)") : String())
+                       + (ms1_prune.no_witness ? String(" -- SPEXTRACTOR_MS1_PRUNE_NO_WITNESS: survivors only, a negative control, output NOT identical") : String())
+                       + (ms1_prune.no_chain ? String(" -- SPEXTRACTOR_MS1_PRUNE_NO_CHAIN: interior chain links dropped, a negative control, output NOT identical") : String())); }
+     }
+```
+
+### 7.4 tests/test_dnoise_ms1.cpp
+
+```diff
+--- a/tests/test_dnoise_ms1.cpp (pre-fix-pass snapshot)
++++ b/tests/test_dnoise_ms1.cpp (current)
+@@ -5,12 +5,17 @@
+ // blob-decoded, every point). What is pinned here is what that identity rests on: both files' gate boxes -- D's three
+ // FMA-sensitive edges and TNBC 009's "Bruker otofControl" widening included --, each streak, halo and gate rule on a
+ // synthetic frame, and the optimised implementation against a direct transliteration of the Rust on random frames.
++// Also the tool's point recovery (recover::) against the loader's forward maths, and its frame bookkeeping.
+ #include "DnoiseMs1.h"
++#include "TdfMzCalibration.h"   // the m/z model the patched loader calibrates with, which recover::recoverPoint inverts
+ #include <algorithm>
++#include <array>
+ #include <cfloat>
++#include <clocale>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
+ #include <initializer_list>
+ #include <iterator>
+ #include <limits>
+@@ -302,7 +307,7 @@
+   p.iterations = 1000;
+   CHECK(kept(run(g, 100, p).keep, 0, 5) == 0, "iterations 1000");
+   p.iterations = 0;
+-  CHECK(kept(run(g, 100, p).keep, 0, 5) == 5, "iterations 0 keeps every point");
++  CHECK(kept(run(g, 100, p).keep, 0, 5) == 5, "iterations 0: the streak filter keeps every point");
+ 
+   p = dn::Params{};
+   p.halo = false;
+@@ -410,6 +415,10 @@
+   const Run r = run(f, 100, dn::Params{}, gate ? &*gate : nullptr);
+   CHECK(r.keep == std::vector<std::uint8_t>({0, 0, 1, 1, 1, 0, 0, 0, 0, 0}), "the gate is ANDed after streak and halo");
+   CHECK(r.counts.raw == 10 && r.counts.after_streak == 10 && r.counts.after_halo == 10 && r.counts.kept == 3, "stage counts");
++  dn::Params p0;
++  p0.iterations = 0;
++  const Run r0 = run(f, 100, p0, gate ? &*gate : nullptr);
++  CHECK(r0.counts.after_halo == 10 && r0.counts.kept == 3, "iterations 0 still runs the halo and the gate");
+ }
+ 
+ // ---- a direct transliteration of dnoise (filter.rs, halo.rs, writer.rs order) -----------------------------------------
+@@ -658,8 +667,232 @@
+   }
+   CHECK(bad == 0, "%d of %d random frames differ from the transliteration", bad, trials);
+   CHECK(kept_points > points / 20 && kept_points < points / 2, "random frames too trivial: %zu of %zu kept", kept_points, points);
++}
++
++// ---- point recovery (recover::) ---------------------------------------------------------------------------------------
++// The loader's forward maths, kept apart from the header's inverse: TdfMzCalibration::tofToMz (the patched loader's model),
++// RationalScan2ImConverter::applyFormula followed by frameToSpectrum's float cast, and opentims' intensity correction.
++// Inputs are metadata only -- MzCalibration, frame 1's T1, TimsCalibration, AccumulationTime -- of the two files above.
++struct RecoverFile
++{
++  const char* name;
++  spextractor::TdfMzCalibration cal;
++  double t1;                        ///< frame 1's T1
++  long n_bins;                      ///< DigitizerNumSamples
++  std::array<double, 10> tims;      ///< TimsCalibration C0..C9
++  u32 n_scans;
++  const char* accumulation_time;    ///< as sqlite renders it
++  std::array<float, 4> im_gold;     ///< the loader's float32 1/K0 of scans 0, 1, n/2 and n-1
++  u32 no_preimage;                  ///< the first corrected value no raw count gives
++};
++
++static RecoverFile recoverD()
++{
++  RecoverFile f{"D", {}, 25.727120813485598, 634073,
++                {1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644, 167.9496150068565, 16.646316600032645, 2241.865411900982},
++                944, "99.958", {0x1.6e4c14p+0f, 0x1.6e124p+0f, 0x1.03cfc8p+0f, 0x1.33a7e6p-1f}, 1190};
++  f.cal.model_type = 1; f.cal.digitizer_timebase = 0.125; f.cal.digitizer_delay = 25655.375; f.cal.C0 = 279.3262846272992;
++  f.cal.C1 = 155279.13067653627; f.cal.C2 = 0.001260061434461731; f.cal.T1_ref = 25.693668980735552; f.cal.dC1 = 20.0;
++  return f;
++}
++static RecoverFile recoverTnbc()
++{
++  RecoverFile f{"TNBC 009", {}, 25.393315017452863, 399967,
++                {1, 917, 217.9811466010841, 74.83820441307512, 33.0, 1, 0.02256006096271849, 131.32054866963384, 12.961442137235451, 2637.0446006790567},
++                918, "99.953", {0x1.a33458p+0f, 0x1.a2ec16p+0f, 0x1.201aa4p+0f, 0x1.343b72p-1f}, 1064};
++  f.cal.model_type = 1; f.cal.digitizer_timebase = 0.2; f.cal.digitizer_delay = 25030.2; f.cal.C0 = 314.59993079240667;
++  f.cal.C1 = 155508.97802581752; f.cal.C2 = 0.0; f.cal.T1_ref = 25.41837029204028; f.cal.dC1 = 20.0;
++  return f;
++}
++
++#if defined(__GNUC__) && !defined(__clang__)
++#pragma GCC push_options
++#pragma GCC optimize("fp-contract=off")
++#endif
++static float loaderIm(const std::array<double, 10>& c, double s)   // RationalScan2ImConverter.cpp:47-55, then a float
++{
++#if defined(__clang__)
++  #pragma clang fp contract(off)
++#endif
++  double V = c[2] + ((c[3] - c[2]) / c[1]) * (s - c[4] - c[0]);
++  if (V == 0.0) V = 1e-10;
++  double denom = c[6] + c[7] / V;
++  if (denom == 0.0) denom = 1e-10;
++  return static_cast<float>(1.0 / denom);
++}
++static u32 opentimsCorrect(u32 raw, double corr)   // opentims.cpp:225
++{
++#if defined(__clang__)
++  #pragma clang fp contract(off)
++#endif
++  return static_cast<u32>(static_cast<double>(raw) * corr + 0.5);
++}
++#if defined(__GNUC__) && !defined(__clang__)
++#pragma GCC pop_options
++#endif
++
++static void testRecover()
++{
++  namespace rc = dn::recover;
++  using R = rc::Refusal;
++  u32 tof = 0, scan = 0, raw = 0;
++  double t = 0.0;
++  int hits = 0;
++
++  // intensity correction: 100 / AccumulationTime, the text parsed whole and in the C locale
++  double corr = 0.0;
++  CHECK(rc::opentimsCorrection("99.958", corr) && corr == 0x1.001b896437031p+0, "corr('99.958') = %a", corr);
++  CHECK(rc::opentimsCorrection("99.953", corr) && corr == 0x1.001ed0ffd561bp+0, "corr('99.953') = %a", corr);
++  CHECK(rc::opentimsCorrection("100", corr) && corr == 1.0, "corr('100') = %a", corr);
++  for (const char* s : {"99,953", "abc", "0", "-0", "-99.958", "", " 99.958", "99.958 ", "99.958ms", "inf", "nan", "0x1p3", "1e-999"})
++    CHECK(!rc::opentimsCorrection(s, corr), "opentimsCorrection(\"%s\") must refuse", s);
++  bool comma_locale = false;
++  if (const char* prev = std::setlocale(LC_NUMERIC, nullptr))
++  {
++    const std::string saved = prev;
++    if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") && std::strtod("99.953", nullptr) == 99.0)   // atof would read 99 here
++    {
++      comma_locale = true;
++      CHECK(rc::opentimsCorrection("99.953", corr) && corr == 100.0 / 99.953, "under de_DE, corr('99.953') = %a", corr);
++    }
++    std::setlocale(LC_NUMERIC, saved.c_str());
++  }
++  CHECK(rc::correctionRefusal(7, 0x1.001b896437031p+0).empty() && rc::correctionRefusal(7, 1.0).empty() &&
++          rc::correctionRefusal(7, std::nextafter(1.0, 2.0)).empty(), "corr >= 1 is invertible");
++  const std::string r125 = rc::correctionRefusal(7, 100.0 / 125.0);
++  CHECK(r125.find("MS1 frame 7: AccumulationTime 125 ms exceeds 100 ms") == 0 && r125.find("= 0.8 < 1") != std::string::npos,
++        "AccumulationTime 125 ms: '%s'", r125.c_str());
++  CHECK(rc::opentimsCorrection("100.042", corr) && corr < 1.0 && !rc::correctionRefusal(1, corr).empty(), "AccumulationTime 100.042 ms is refused");
++  CHECK(!rc::correctionRefusal(7, 0.5).empty() && !rc::correctionRefusal(7, std::nextafter(1.0, 0.0)).empty() &&
++          !rc::correctionRefusal(7, 1e6).empty() && !rc::correctionRefusal(7, std::numeric_limits<double>::infinity()).empty(),
++        "corr 0.5, 1 - 1 ulp, 1e6 and inf are refused");
++
++  for (const RecoverFile& f : {recoverD(), recoverTnbc()})
++  {
++    const double b = f.cal.frameFactor(f.t1);
++    double c = 0.0;
++    rc::opentimsCorrection(f.accumulation_time, c);
++    std::vector<float> asc;
++    bool falls = false;
++    const std::string why = rc::buildScanTable(f.tims, f.n_scans, asc, falls);
++    CHECK(why.empty() && falls && asc.size() == f.n_scans, "%s: scan table (%s), falls %d", f.name, why.c_str(), int(falls));
++    const float im0 = loaderIm(f.tims, 0.0);
++
++    // TOF: every digitizer bin comes back; half a bin and +1 ppm off are refused
++    long tof_bad = 0, half_bad = 0, ppm_bad = 0;
++    for (long bin = 0; bin < f.n_bins; ++bin)
++    {
++      const double mz = f.cal.tofToMz(static_cast<double>(bin), b);
++      tof_bad += rc::recoverPoint(f.cal, b, mz, im0, 0.0f, c, asc, falls, f.n_scans, tof, scan, raw, t, hits) != R::none || tof != static_cast<u32>(bin);
++      half_bad += rc::recoverPoint(f.cal, b, f.cal.tofToMz(static_cast<double>(bin) + 0.5, b), im0, 0.0f, c, asc, falls, f.n_scans, tof, scan, raw, t, hits) != R::tof;
++      ppm_bad += rc::recoverPoint(f.cal, b, mz * (1.0 + 1e-6), im0, 0.0f, c, asc, falls, f.n_scans, tof, scan, raw, t, hits) != R::tof;
++    }
++    CHECK(tof_bad == 0 && half_bad == 0 && ppm_bad == 0, "%s TOF: %ld of %ld bins lost, %ld half-bin and %ld +1 ppm m/z not refused",
++          f.name, tof_bad, f.n_bins, half_bad, ppm_bad);
++
++    // scan: the loader's float32 goldens; every scan comes back, also 1 ulp off; half a scan off matches none
++    const u32 at[4] = {0, 1, f.n_scans / 2, f.n_scans - 1};
++    for (int k = 0; k < 4; ++k)
++      CHECK(loaderIm(f.tims, at[k]) == f.im_gold[static_cast<std::size_t>(k)], "%s scan %u: 1/K0 %a, want %a", f.name, at[k],
++            loaderIm(f.tims, at[k]), f.im_gold[static_cast<std::size_t>(k)]);
++    long scan_bad = 0, ulp_bad = 0, half_hit = 0;
++    for (u32 s = 0; s < f.n_scans; ++s)
++    {
++      const float v = loaderIm(f.tims, s);
++      scan_bad += rc::scanOf(asc, falls, v) != static_cast<long>(s);
++      ulp_bad += rc::scanOf(asc, falls, std::nextafter(v, 10.0f)) != static_cast<long>(s) || rc::scanOf(asc, falls, std::nextafter(v, 0.0f)) != static_cast<long>(s);
++      half_hit += rc::scanOf(asc, falls, loaderIm(f.tims, s + 0.5)) >= 0;
++    }
++    CHECK(scan_bad == 0 && ulp_bad == 0 && half_hit == 0, "%s scans: %ld lost, %ld lost 1 ulp off, %ld half-scan values matched", f.name, scan_bad, ulp_bad, half_hit);
++    const double mz = f.cal.tofToMz(1000.0, b);
++    const float last = loaderIm(f.tims, f.n_scans - 1);
++    CHECK(rc::recoverPoint(f.cal, b, mz, last, 0.0f, c, asc, falls, f.n_scans - 1, tof, scan, raw, t, hits) == R::scan,
++          "%s: scan %u in a frame of %u scans is refused", f.name, f.n_scans - 1, f.n_scans - 1);
++    CHECK(rc::recoverPoint(f.cal, b, mz, last, 0.0f, c, asc, falls, f.n_scans, tof, scan, raw, t, hits) == R::none && scan == f.n_scans - 1 && tof == 1000,
++          "%s: the last scan of a whole frame", f.name);
++
++    // intensity: every raw count whose correction stays below 2^24 comes back uniquely -- all below 2^20, every 7th above
++    long raw_bad = 0, raws = 0;
++    for (u32 r = 0;; r += r < (1u << 20) ? 1 : 7)
++    {
++      const u32 v = opentimsCorrect(r, c);
++      if (v >= 16777216u) break;
++      raw_bad += rc::recoverPoint(f.cal, b, mz, im0, static_cast<float>(v), c, asc, falls, f.n_scans, tof, scan, raw, t, hits) != R::none || raw != r || hits != 1;
++      ++raws;
++    }
++    CHECK(raw_bad == 0 && raws > 3000000, "%s intensity: %ld of %ld raw counts do not come back uniquely", f.name, raw_bad, raws);
++    CHECK(rc::recoverPoint(f.cal, b, mz, im0, static_cast<float>(f.no_preimage), c, asc, falls, f.n_scans, tof, scan, raw, t, hits) == R::intensity && hits == 0,
++          "%s: corrected value %u has no raw count (%d found)", f.name, f.no_preimage, hits);
++  }
++
++  // intensity edge cases, on D's frame geometry
++  const RecoverFile d = recoverD();
++  const double b = d.cal.frameFactor(d.t1), mz = d.cal.tofToMz(1000.0, b);
++  std::vector<float> asc;
++  bool falls = false;
++  rc::buildScanTable(d.tims, d.n_scans, asc, falls);
++  const float im0 = loaderIm(d.tims, 0.0);
++  auto point = [&](float v, double c) { return rc::recoverPoint(d.cal, b, mz, im0, v, c, asc, falls, d.n_scans, tof, scan, raw, t, hits); };
++  rc::opentimsCorrection("99.958", corr);
++  CHECK(point(0.0f, corr) == R::none && raw == 0 && hits == 1, "v 0 is raw 0");
++  CHECK(point(12.5f, corr) == R::intensity && hits == 0 && point(-1.0f, corr) == R::intensity && point(std::nanf(""), corr) == R::intensity,
++        "a fraction, a negative and NaN are refused");
++  CHECK(point(16777216.0f, corr) == R::intensity_range && point(std::numeric_limits<float>::infinity(), corr) == R::intensity_range &&
++          point(16777215.0f, 1.0) == R::none && raw == 16777215, "2^24 and inf are out of range, 2^24 - 1 is not");
++  // opentims' operation order decides ties: at '99.968', raw 1562 corrects to 1562 ((raw * 100) / at would give 1563)
++  rc::opentimsCorrection("99.968", corr);
++  CHECK(opentimsCorrect(1562, corr) == 1562 && point(1562.0f, corr) == R::none && raw == 1562 && hits == 1 && point(1563.0f, corr) == R::intensity && hits == 0,
++        "the '99.968' tie: 1562 recovers, 1563 has no raw count");
++  rc::opentimsCorrection("125", corr);
++  CHECK(point(2.0f, corr) == R::intensity && hits == 2, "corr 0.8: raw counts 2 and 3 both give 2 (%d found)", hits);
++  rc::opentimsCorrection("50", corr);
++  CHECK(opentimsCorrect(1u << 23, corr) == 16777216u && point(16777216.0f, corr) == R::intensity_range, "corr 2: raw 2^23 gives 2^24, refused");
++  // the corr >= 1 threshold: no two raw counts collide at corr 1, 1 + 1 ulp or 100/96 (tie-prone), below 2^20
++  long premise_bad = 0;
++  for (const double c : {1.0, std::nextafter(1.0, 2.0), 100.0 / 96.0})
++    for (u32 r = 0; r < (1u << 20); ++r)
++      premise_bad += point(static_cast<float>(opentimsCorrect(r, c)), c) != R::none || raw != r;
++  CHECK(premise_bad == 0, "corr >= 1: %ld raw counts below 2^20 do not come back", premise_bad);
++
++  // scan tables span the scans their MS1 frames have (TdfDnoiseInputs::ms1_max_scans): TNBC's row separates its 918 scans
++  // but not 40,000 (its pole is near scan 38,722); a row with its pole inside 918 scans, or a flat one, separates none,
++  // yet over 0 scans -- no MS1 frame references it -- it is an empty table that matches nothing
++  const RecoverFile tn = recoverTnbc();
++  CHECK(rc::buildScanTable(tn.tims, 918, asc, falls).empty() && !rc::buildScanTable(tn.tims, 40000, asc, falls).empty(),
++        "TNBC's row: 918 scans separate, 40,000 do not");
++  std::array<double, 10> pole = tn.tims, flat = d.tims;
++  pole[4] -= 38300.0;
++  flat[3] = flat[2];
++  CHECK(!rc::buildScanTable(pole, 918, asc, falls).empty() && !rc::buildScanTable(flat, 944, asc, falls).empty(), "a pole or a flat row is refused");
++  CHECK(rc::buildScanTable(pole, 0, asc, falls).empty() && asc.empty() && rc::scanOf(asc, falls, im0) == -1, "over 0 scans: an empty table");
++  CHECK(rc::buildScanTable(d.tims, 1, asc, falls).empty() && asc.size() == 1 && !falls && rc::scanOf(asc, falls, im0) == 0, "one scan");
++
++  // frame checks, in order
++  struct Row { int msms_type; u32 num_peaks; };
++  const std::vector<Row> rows = {{-1, 0}, {0, 5}, {9, 5}, {0, 0}};
++  CHECK(rc::frameCheck(rows, 0, 5, true, 5) == R::frame && rc::frameCheck(rows, 4, 5, true, 5) == R::frame && rc::frameCheck(rows, 2, 5, true, 5) == R::frame,
++        "frame 0, a frame past the table and an MS2 frame are refused");
++  CHECK(rc::frameCheck(rows, 1, 4, true, 4) == R::peaks && rc::frameCheck(rows, 1, 6, true, 6) == R::peaks, "a spectrum must hold NumPeaks points");
++  CHECK(rc::frameCheck(rows, 1, 5, false, 0) == R::im && rc::frameCheck(rows, 1, 5, true, 4) == R::im, "points need a 1/K0 each");
++  CHECK(rc::frameCheck(rows, 1, 5, true, 5) == R::none && rc::frameCheck(rows, 3, 0, false, 0) == R::none, "a whole frame; an empty frame needs no 1/K0 array");
++
++  if (g_fail == 0) std::printf("    point recovery%s\n", comma_locale ? " (also under a de_DE LC_NUMERIC)" : " (no de_DE locale here: the LC_NUMERIC case is skipped)");
+ }
+ 
++static void testCoverage()
++{
++  struct Row { int msms_type; u32 num_peaks; };
++  const std::vector<Row> frames = {{-1, 0}, {0, 5}, {9, 7}, {0, 0}, {0, 2}};   // 1 MS1, 2 MS2, 3 an MS1 frame without points, 4 MS1
++  dn::FrameCoverage cov;
++  CHECK(cov.firstMissing(frames) == 1, "nothing marked: frame 1 is missing");
++  CHECK(cov.mark(1) && !cov.mark(1), "a frame denoised twice is refused");
++  CHECK(cov.firstMissing(frames) == 4, "frame 4 is missing, not the MS2 frame 2 or the empty MS1 frame 3");
++  CHECK(cov.mark(4) && cov.firstMissing(frames) == 0, "complete");
++  CHECK(cov.mark(3) && !cov.mark(3), "an empty MS1 frame that arrives is marked, and refused the second time");
++  cov.reset();
++  CHECK(cov.firstMissing(frames) == 1 && cov.mark(1) && cov.mark(4) && cov.firstMissing(frames) == 0, "reset clears every mark");
++}
++
+ int main()
+ {
+   int before = g_fail;
+@@ -679,6 +912,11 @@
+   if (g_fail == before)
+     std::printf("OK  %zu random frames (%zu points, %zu kept) identical to a transliteration of the Rust, in either input order\n",
+                 frames, points, kept_points);
++  before = g_fail;
++  testRecover();
++  testCoverage();
++  if (g_fail == before)
++    std::printf("OK  point recovery on D and TNBC 009 metadata: every TOF bin and scan, raw counts to 2^24; correction, frame and coverage rules\n");
+   if (g_fail) std::fprintf(stderr, "%d check(s) failed\n", g_fail);
+   return g_fail ? 1 : 0;
+ }
+```
+
+### 7.5 CMakeLists.txt
+
+```diff
+--- a/CMakeLists.txt (pre-fix-pass snapshot)
++++ b/CMakeLists.txt (current)
+@@ -33,6 +33,18 @@
+ target_include_directories(test_dnoise_ms1 PRIVATE src)
+ target_compile_options(test_dnoise_ms1 PRIVATE ${SPX_NO_FP_CONTRACT})
+ add_test(NAME dnoise_ms1 COMMAND test_dnoise_ms1)
++# src/TdfLoad.h reads analysis.tdf through sqlite3, so its test builds wherever SQLite is found (not on the Windows
++# portability leg). It includes the calibration model as the patched OpenMS installs it; the shim maps that include onto
++# src/TdfMzCalibration.h, the same file.
++find_package(SQLite3 QUIET)
++if(SQLite3_FOUND)
++  configure_file(src/TdfMzCalibration.h ${CMAKE_CURRENT_BINARY_DIR}/shim/OpenMS/FORMAT/TdfMzCalibration.h COPYONLY)
++  add_executable(test_tdf_load tests/test_tdf_load.cpp)
++  target_include_directories(test_tdf_load PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/shim)
++  target_compile_options(test_tdf_load PRIVATE ${SPX_NO_FP_CONTRACT})
++  target_link_libraries(test_tdf_load PRIVATE SQLite::SQLite3)
++  add_test(NAME tdf_load COMMAND test_tdf_load)
++endif()
+ if(SPEXTRACTOR_TESTS_ONLY)
+   add_executable(test_calibration_cpp tests/test_calibration_cpp.cpp)
+   target_include_directories(test_calibration_cpp PRIVATE src)
+```
+
+### 7.6 scripts/sync_cluster.sh
+
+```diff
+--- a/scripts/sync_cluster.sh (pre-fix-pass snapshot)
++++ b/scripts/sync_cluster.sh (current)
+@@ -1,90 +1,178 @@
+ #!/bin/bash
++# shellcheck disable=SC2086,SC2029  # INPUTS/SHIP are path lists split on purpose; the ssh commands expand locally on purpose
+ # Deploy src/spextractor.cpp to the cluster OpenMS tree, rebuild, record provenance.
+-# The ONLY sanctioned deploy path (2026-09-01 review, hardened per kimi F7/F8/F11 + codex #17-22):
++# The ONLY sanctioned deploy path (2026-09-01 review, hardened per kimi F7/F8/F11 + codex #17-22; made a
++# transaction 2026-09-10 per codex #3 / kimi #3 of the stage-2 review):
++#   usage: scripts/sync_cluster.sh [node, default ibminode05] [--allow-dirty]
+ #   - refuses staged OR unstaged dirt (git status --porcelain), --allow-dirty to override
+-#   - remote lock so deploys cannot interleave with each other
+-#   - old source kept as .bak; restored if the build fails (no silent src/binary drift)
+-#   - provenance records OpenMS version + EPD-patch marker count, not just our source
+-#   - every deploy appended to deploys.log on the node
++#   - every file is uploaded into a fresh mktemp stage dir: NOTHING shared is written before the remote lock
++#   - under the lock, one node-side script: staged-bytes check, patch check, both unit tests (from the stage),
++#     backup of every build input, promotion by rename, build, provenance hashed on the node
++#   - any failure before the commit restores EVERY build input (touched, so make recompiles whatever the
++#     failed build compiled against them); the old provenance comes back only if bin/spextractor AND
++#     libOpenMS.so still match it (a failed build relinks libOpenMS.so first), else it is parked as .stale
++#   - suite and bench tools ship only after a committed build; every deploy appended to deploys.log
++#   - the node-side script writes only to its log: a dropped ssh channel cannot SIGPIPE it half-way
++# tests/test_sync_cluster_txn.sh runs this script against a fake node (CI does, on Linux); run it after any change.
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ NODE=${1:-ibminode05}
++R=/scratch/kohlbach
++TOOLS=/ceph/ibmi/abi/oliver/spextract/tools
++TESTS=/ceph/ibmi/abi/oliver/spextract/tests
+ SRC=src/spextractor.cpp
+-REMOTE_SRC=/scratch/kohlbach/OpenMS/src/topp/spextractor.cpp
+-if [ -n "$(git status --porcelain -- "$SRC" src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp)" ]; then
++INPUTS="$SRC src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
++# The e2e suite, its golden file (check 9 reads ../tests/calibration_golden.json), the gate chains'
++# digest/diff tools and the remote launcher: each drifted once when it did not travel with the source.
++SHIP="test/test_spextractor.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
++for f in $INPUTS $SHIP; do [ -f "$f" ] || { echo "REFUSED: $f does not exist - nothing changed" >&2; exit 1; }; done
++DIRT=$(git status --porcelain -- $INPUTS)
++if [ -n "$DIRT" ]; then
+   if [ "${2:-}" != "--allow-dirty" ]; then
+-    echo "REFUSED: $SRC has staged or unstaged changes. Commit first, or pass --allow-dirty." >&2; exit 1
++    printf 'REFUSED: build inputs have staged or unstaged changes. Commit first, or pass --allow-dirty.\n%s\n' "$DIRT" >&2; exit 1
+   fi
+   DIRTY="+dirty"
+ else
+   DIRTY=""
+ fi
+-SHA=$(shasum -a 256 "$SRC" | cut -d' ' -f1)
+-HDR_SHA=$(shasum -a 256 src/TdfMzCalibration.h | cut -d' ' -f1)
+-# tool_headers_sha256 covers DnoiseMs1.h since 2026-09-10 (the dnoise MS1 port): earlier deploys hashed two files
+-HDRS_SHA=$(cat src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h | shasum -a 256 | cut -d' ' -f1)
+ GITREV="$(git rev-parse --short HEAD)${DIRTY}"
+-scp -q "$SRC" "$NODE":"${REMOTE_SRC}.new"
+-# the calibration model is header-only and lives in THIS repo; the OpenMS patch includes it, so it
+-# must travel with every deploy or the cluster build silently uses a stale copy
+-scp -q src/TdfMzCalibration.h "$NODE":/scratch/kohlbach/OpenMS/src/openms/include/OpenMS/FORMAT/
+-# The tool's other headers live next to its source in the OpenMS topp directory. They were copied by
+-# hand once and then drifted: a rename left the cluster building against a stale TdfLoad.h. Sync them.
+-scp -q src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h "$NODE":/scratch/kohlbach/OpenMS/src/topp/
+-# The end-to-end suite lives at the deployment point and is what every verification run executes.
+-# It drifted once already: a newly added check silently did not run because the copy was stale.
+-scp -q test/test_spextractor.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
+-# Check 9 reads ../tests/calibration_golden.json relative to the suite; ship it too, or the deployed
+-# suite silently runs against whatever copy was there before.
+-ssh "$NODE" "mkdir -p /ceph/ibmi/abi/oliver/spextract/tests /scratch/kohlbach/spextractor_unit"
+-scp -q tests/calibration_golden.json "$NODE":/ceph/ibmi/abi/oliver/spextract/tests/
+-# The dnoise port's unit test, run on the node before the build (below). Not next to the header: an include of
+-# "DnoiseMs1.h" searches the test's own directory first, so a copy there would shadow the one the tool compiles.
+-scp -q tests/test_dnoise_ms1.cpp "$NODE":/scratch/kohlbach/spextractor_unit/
+-# The gate chains digest and diff outputs with the bench tools at the deployment point. They drifted
+-# once (2026-09-10): a stale semantic_digest.py without the zero-padded-count normalisation reported a
+-# tile-identical file as DIFFERS. Ship them with every deploy.
+-scp -q bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
+-# The remote launcher. Every long job is started through it, so it must not exist only on ceph with
+-# no history -- and a stale copy would silently reintroduce the ssh-channel hang it exists to avoid.
+-scp -q bench/launch.sh "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
+-# 771 explicitly, not chmod +x: the tools dir carries a default ACL (default:group::rwx,
+-# other:---), so a file created by a redirect or a python write lands 0660 with NO exec bit
+-# regardless of umask -- which is how three drivers silently lost theirs on 2026-09-07.
+-ssh "$NODE" "chmod 771 /ceph/ibmi/abi/oliver/spextract/tools/launch.sh"
+-# Refuse to deploy into a tree that has lost the calibration patch: it would build fine, silently
+-# revert masses to the -5..-11 ppm chord, and record a clean-looking provenance [kimi review].
+-ssh "$NODE" "grep -q TdfMzCalibration /scratch/kohlbach/OpenMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
+-  echo "REFUSED: the cluster OpenMS tree has no calibration patch applied." >&2
+-  echo "  run: scripts/apply_openms_patches.sh /scratch/kohlbach/OpenMS   (on the node)" >&2
+-  exit 1; }
+-
+-ssh "$NODE" "set -eu
+-  mkdir /scratch/kohlbach/.deploy.lock 2>/dev/null || { echo 'REFUSED: another deploy holds the lock' >&2; exit 1; }
+-  trap 'rmdir /scratch/kohlbach/.deploy.lock' EXIT
+-  cp -p '$REMOTE_SRC' '${REMOTE_SRC}.bak' 2>/dev/null || true
+-  mv '${REMOTE_SRC}.new' '$REMOTE_SRC'
+-  cd /scratch/kohlbach/OpenMS/build
+-  # The dnoise port's unit test with the tool's own compiler and flags (it pins D's FMA-sensitive gate boxes, so it
+-  # checks exactly these flags); a failure refuses the deploy like a failed build.
+-  UT=/scratch/kohlbach/spextractor_unit
+-  CXX=\$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' CMakeCache.txt)
+-  FL=\$(sed -n 's/^CXX_FLAGS = //p' src/topp/CMakeFiles/spextractor.dir/flags.make)
+-  if [ -z \"\$CXX\" ] || [ -z \"\$FL\" ] || ! { \"\$CXX\" \$FL -I/scratch/kohlbach/OpenMS/src/topp \$UT/test_dnoise_ms1.cpp -o \$UT/test_dnoise_ms1 && \$UT/test_dnoise_ms1; } > \$UT/test_dnoise_ms1.log 2>&1; then
+-    mv '${REMOTE_SRC}.bak' '$REMOTE_SRC' 2>/dev/null || true
+-    cat \$UT/test_dnoise_ms1.log >&2
+-    echo \"dnoise unit test FAILED (compiler [\$CXX] flags [\$FL]) - source restored, binary and provenance unchanged\" >&2; exit 2
++[ -z "$(for f in $INPUTS $SHIP; do basename "$f"; done | sort | uniq -d)" ] || { echo "REFUSED: two staged files share a name" >&2; exit 1; }
++TMP=$(mktemp -d); STAGE=""; HANDED=0
++trap 'rm -rf "$TMP"; [ -z "$STAGE" ] || [ "$HANDED" = 1 ] || ssh "$NODE" "rm -rf $STAGE" || true' EXIT
++shasum -a 256 $INPUTS $SHIP | sed 's#  .*/#  #' > "$TMP/SHA256SUMS"
++cat > "$TMP/txn.sh" <<'TXN'
++#!/bin/bash
++# shellcheck disable=SC2086,SC2013  # FL, BUILD_INPUTS, PROMOTED and CXX_INCLUDES are word lists split on purpose
++# Node-side deploy transaction written by scripts/sync_cluster.sh. Args: STAGE GITREV R TOOLS TESTS.
++set -euo pipefail
++S=$1; GITREV=$2; R=$3; TOOLS=$4; TESTS=$5
++OMS=$R/OpenMS; BUILD=$OMS/build; TOPP=$OMS/src/topp; UT=$R/spextractor_unit; U=$S/unit
++LOCK=$R/.deploy.lock; PROV=$BUILD/bin/spextractor.provenance
++BUILD_INPUTS="spextractor.cpp TdfMzCalibration.h TdfLoad.h MzPeakStreamLoad.h DnoiseMs1.h"
++# The calibration model is header-only and lives in this repo; the OpenMS patch includes it from the
++# library's include dir. The tool's other headers live next to its source (a hand copy once drifted).
++dest() { if [ "$1" = TdfMzCalibration.h ]; then echo "$OMS/src/openms/include/OpenMS/FORMAT/$1"; else echo "$TOPP/$1"; fi; }
++sha() { sha256sum "$1" | cut -d' ' -f1; }
++finish() {
++  rc=$?; set +e
++  if [ "$COMMITTED" != 1 ]; then
++    for f in $PROMOTED; do
++      d=$(dest "$f")
++      if [ -e "$S/bak/$f" ]; then mv -f "$S/bak/$f" "$d" && touch "$d"; else rm -f "$d"; fi
++    done
++    [ -z "$PROMOTED" ] || echo "ROLLED BACK every promoted build input:$PROMOTED"
++    if [ -e "$S/prov.prev" ]; then
++      if grep -qx "binary_sha256=$(sha "$BUILD/bin/spextractor")" "$S/prov.prev" &&
++         grep -qx "libopenms_sha256=$(sha "$BUILD/lib/libOpenMS.so")" "$S/prov.prev"; then
++        mv -f "$S/prov.prev" "$PROV"; echo "bin/spextractor, libOpenMS.so and provenance unchanged"
++      else
++        mv -f "$S/prov.prev" "$PROV.stale"
++        echo "FAIL-CLOSED: the failed build changed bin/spextractor or libOpenMS.so; there is NO provenance" \
++             "(old one parked at $PROV.stale). Run make spextractor on the restored tree, or deploy again."
++      fi
++    fi
++  elif [ "$rc" != 0 ]; then
++    echo "COMMITTED (binary + provenance), but a post-commit step failed (rc $rc): suite/tools may be stale"
+   fi
+-  cat \$UT/test_dnoise_ms1.log
+-  if ! make spextractor -j32 > /scratch/kohlbach/build_sync_\$(date +%Y%m%d-%H%M%S).log 2>&1; then
+-    mv '${REMOTE_SRC}.bak' '$REMOTE_SRC' 2>/dev/null || true
+-    echo 'BUILD FAILED - source restored, binary and provenance unchanged' >&2; exit 2
+-  fi
+-  OMSVER=\$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
+-  EPD=/scratch/kohlbach/OpenMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
+-  { printf 'src_sha256=%s\ncalibration_header_sha256=$HDR_SHA\ntool_headers_sha256=$HDRS_SHA\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\nmasstrace_move_markers=%s\nlibopenms_sha256=%s\ndnoise_unit_test=passed\n' \
+-      '$SHA' '$GITREV' \"\$(date -Is)\" \"\$(sha256sum bin/spextractor | cut -d' ' -f1)\" \
+-      \"\$OMSVER\" \"\$(sha256sum \$EPD | cut -d' ' -f1)\" \"\$(grep -c 'SpeXtractor\|lock' \$EPD || true)\" \
+-      \"\$(grep -c 'MassTrace(MassTrace &&)' /scratch/kohlbach/OpenMS/src/openms/include/OpenMS/KERNEL/MassTrace.h || true)\" \"\$(sha256sum lib/libOpenMS.so | cut -d' ' -f1)\"
+-  } > bin/spextractor.provenance.tmp && mv bin/spextractor.provenance.tmp bin/spextractor.provenance
+-  cat bin/spextractor.provenance | tee -a /scratch/kohlbach/deploys.log"
++  rm -rf "$S"; rm -f "$LOCK/owner"; rmdir "$LOCK"
++  exit "$rc"
++}
++trap 'rm -rf "$S"' EXIT
++mkdir "$LOCK" 2>/dev/null || { echo "REFUSED: another deploy holds $LOCK ($(cat "$LOCK/owner" 2>/dev/null || echo 'owner unknown')) - nothing changed"; exit 1; }
++COMMITTED=0; PROMOTED=""
++trap finish EXIT
++# Without these, a signal runs finish at once, while make is still writing bin/spextractor and libOpenMS.so, so
++# the provenance check reads a binary the build then replaces. A trapped signal waits for the running command.
++trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
++echo "$S pid $$ $(date -Is)" > "$LOCK/owner" || true
++cd "$S"
++sha256sum -c --quiet SHA256SUMS || { echo "REFUSED: staged files differ from the local ones - nothing changed"; exit 1; }
++# Refuse a tree that has lost the calibration patch: it would build fine, silently revert masses to the
++# -5..-11 ppm chord, and record a clean-looking provenance [kimi review].
++grep -q TdfMzCalibration "$OMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
++  echo "REFUSED: the cluster OpenMS tree has no calibration patch applied - nothing changed"
++  echo "  run: scripts/apply_openms_patches.sh $OMS   (on the node)"; exit 1; }
++# Both unit tests with the tool's own compiler and flags (test_dnoise_ms1 pins D's FMA-sensitive gate boxes),
++# BEFORE anything is promoted. They compile in a copy of the repo layout made from the hash-checked staged files
++# ($U/src, $U/tests, and $U/inc/OpenMS/FORMAT for the calibration header under the name the OpenMS patch installs):
++# the very bytes renamed into the tree below and re-verified after the build. No tree header can stand in for
++# them -- until the promotion the tree still holds the previous deploy's copies.
++CXX=$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "$BUILD/CMakeCache.txt")
++FLAGS_MAKE=$BUILD/src/topp/CMakeFiles/spextractor.dir/flags.make
++FL=$(sed -n 's/^CXX_FLAGS = //p' "$FLAGS_MAKE")
++if [ -z "$CXX" ] || [ -z "$FL" ]; then
++  echo "unit tests FAILED: no compiler [$CXX] or flags [$FL] in $BUILD - nothing promoted, tree unchanged"; exit 2
++fi
++mkdir -p "$U/src" "$U/tests" "$U/inc/OpenMS/FORMAT"
++for f in $BUILD_INPUTS; do cp -p "$f" "$U/src/"; done
++cp -p TdfMzCalibration.h "$U/inc/OpenMS/FORMAT/"
++cp -p test_dnoise_ms1.cpp test_tdf_load.cpp "$U/tests/"
++unit_failed() { cat "$U/$1.log"; echo "$1 unit test FAILED (compiler [$CXX] flags [$FL]) - nothing promoted, tree unchanged"; exit 2; }
++# TMPDIR: whatever a test writes stays in the stage, which finish removes.
++{ "$CXX" $FL -I"$U/src" -I"$U/inc" "$U/tests/test_dnoise_ms1.cpp" -o "$U/test_dnoise_ms1" &&
++  TMPDIR=$U "$U/test_dnoise_ms1"; } > "$U/test_dnoise_ms1.log" 2>&1 || unit_failed test_dnoise_ms1
++cat "$U/test_dnoise_ms1.log"
++# test_tdf_load also needs SQLite: the sqlite3.h the tool compiles against (the first of its include dirs that has
++# one; on the cluster OpenMS's bundled SQLite) and the static library libOpenMS.so is linked from, which is where
++# the tool's sqlite3_* symbols come from. A node without either skips the test, and the provenance says so.
++SQL_INC=""
++for i in $(sed -n 's/^CXX_INCLUDES = //p' "$FLAGS_MAKE"); do
++  if [ -z "$SQL_INC" ] && [ -f "${i#-I}/sqlite3.h" ]; then SQL_INC=${i#-I}; fi
++done
++SQL_LIB=$BUILD/lib/libsqlite3.a
++if [ -z "$SQL_INC" ]; then
++  TDF_UT="skipped(no sqlite3.h in the tool include dirs)"
++elif [ ! -f "$SQL_LIB" ]; then
++  TDF_UT="skipped(no $SQL_LIB)"
++else
++  { "$CXX" $FL -I"$U/src" -I"$U/inc" -I"$SQL_INC" "$U/tests/test_tdf_load.cpp" "$SQL_LIB" -lpthread -ldl -lm -o "$U/test_tdf_load" &&
++    TMPDIR=$U "$U/test_tdf_load"; } > "$U/test_tdf_load.log" 2>&1 || unit_failed test_tdf_load
++  cat "$U/test_tdf_load.log"; TDF_UT=passed
++fi
++if [ "$TDF_UT" != passed ]; then echo "tdf_load unit test SKIPPED: $TDF_UT" | tee "$U/test_tdf_load.log"; fi
++mkdir "$S/bak"
++for f in $BUILD_INPUTS; do d=$(dest "$f"); if [ -e "$d" ]; then cp -p "$d" "$S/bak/$f"; fi; done
++for f in $BUILD_INPUTS; do printf '%s  %s\n' "$(awk -v f="$f" '$2 == f {print $1}' SHA256SUMS)" "$(dest "$f")"; done > promoted.sha256
++# No provenance while the tree is in flux: a hard kill from here on leaves none rather than a stale one.
++if [ -e "$PROV" ]; then mv -f "$PROV" "$S/prov.prev"; fi
++for f in $BUILD_INPUTS; do
++  PROMOTED="$PROMOTED $f"
++  # rename within one filesystem; touch so the file is newer than every object of any earlier build
++  d=$(dest "$f"); mv -f "$S/$f" "$d"; touch "$d"
++done
++BLOG=$R/build_sync_$(date +%Y%m%d-%H%M%S).log
++if ! (cd "$BUILD" && make spextractor -j32) > "$BLOG" 2>&1 < /dev/null; then
++  tail -n 20 "$BLOG"; echo "BUILD FAILED ($BLOG)"; exit 2
++fi
++# A writer outside the lock (a hand copy, a patch script) during the build would make the provenance a lie.
++sha256sum -c --quiet promoted.sha256 || { echo "REFUSED: a build input changed during the build"; exit 2; }
++cd "$BUILD"
++# tool_headers_sha256 covers DnoiseMs1.h since 2026-09-10 (the dnoise MS1 port): earlier deploys hashed two files.
++# tdf_load_unit_test since 2026-09-10 (fix pass G): passed, or skipped(<why>) on a node without SQLite.
++HDRS_SHA=$(cat "$TOPP/TdfLoad.h" "$TOPP/MzPeakStreamLoad.h" "$TOPP/DnoiseMs1.h" | sha256sum | cut -d' ' -f1)
++OMSVER=$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
++EPD=$OMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
++printf 'src_sha256=%s\ncalibration_header_sha256=%s\ntool_headers_sha256=%s\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\nmasstrace_move_markers=%s\nlibopenms_sha256=%s\ndnoise_unit_test=passed\ntdf_load_unit_test=%s\n' \
++  "$(sha "$TOPP/spextractor.cpp")" "$(sha "$(dest TdfMzCalibration.h)")" "$HDRS_SHA" "$GITREV" "$(date -Is)" \
++  "$(sha bin/spextractor)" "$OMSVER" "$(sha "$EPD")" "$(grep -c 'SpeXtractor\|lock' "$EPD" || true)" \
++  "$(grep -c 'MassTrace(MassTrace &&)' "$OMS/src/openms/include/OpenMS/KERNEL/MassTrace.h" || true)" \
++  "$(sha lib/libOpenMS.so)" "$TDF_UT" > "$PROV.tmp"
++COMMITTED=1; mv -f "$PROV.tmp" "$PROV"          # the commit point
++cat "$PROV" >> "$R/deploys.log"; cat "$PROV"
++if [ -e "$S/bak/spextractor.cpp" ]; then mv -f "$S/bak/spextractor.cpp" "$TOPP/spextractor.cpp.bak"; fi
++mkdir -p "$UT" "$TESTS"
++cp "$U/tests/test_dnoise_ms1.cpp" "$U/test_dnoise_ms1.log" "$U/tests/test_tdf_load.cpp" "$U/test_tdf_load.log" "$UT/"
++cp "$S/test_spextractor.py" "$S/semantic_digest.py" "$S/mzml_specdiff.py" "$S/tile_concat.py" "$S/ledger_report.py" "$S/launch.sh" "$TOOLS/"
++cp "$S/calibration_golden.json" "$TESTS/"
++# 771 explicitly, not chmod +x: the tools dir carries a default ACL (default:group::rwx, other:---), so a file
++# created by a redirect or a python write lands 0660 with NO exec bit regardless of umask -- which is how
++# three drivers silently lost theirs on 2026-09-07.
++chmod 771 "$TOOLS/launch.sh"
++echo "DEPLOY COMMITTED"
++TXN
++STAGE=$(ssh "$NODE" "mktemp -d $R/.deploy.stage.XXXXXX")
++case "$STAGE" in "$R"/.deploy.stage.??????) ;; *) echo "REFUSED: unexpected stage dir [$STAGE]" >&2; STAGE=""; exit 1;; esac
++scp -q $INPUTS $SHIP "$TMP/SHA256SUMS" "$TMP/txn.sh" "$NODE:$STAGE/"
++HANDED=1
++echo "node-side transaction log: $NODE:$STAGE.log"
++ssh "$NODE" "bash $STAGE/txn.sh $STAGE $GITREV $R $TOOLS $TESTS > $STAGE.log 2>&1 < /dev/null; rc=\$?; cat $STAGE.log; exit \$rc"
+```
+
+### 7.7 .github/workflows/build.yml
+
+```diff
+--- a/.github/workflows/build.yml (pre-fix-pass snapshot)
++++ b/.github/workflows/build.yml (current)
+@@ -81,6 +81,18 @@
+             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+           cmake --build spextractor/build
+ 
++      # The C++ unit tests again, under the tool build's own flags (tests.yml builds them without OpenMS):
++      # dnoise_ms1 pins D's FMA-sensitive gate boxes, tdf_load the analysis.tdf metadata loader. Each must
++      # actually run -- a regex that matches no registered test passes vacuously.
++      - name: C++ unit tests in the tool build (dnoise MS1 port, analysis.tdf loader)
++        run: |
++          set -o pipefail
++          ctest --test-dir spextractor/build --output-on-failure --no-tests=error -R 'dnoise|tdf_load' | tee "$RUNNER_TEMP/ctest.txt"
++          for t in dnoise_ms1 tdf_load; do
++            grep -Eq "Test +#[0-9]+: $t" "$RUNNER_TEMP/ctest.txt" \
++              || { echo "::error::no $t test ran in the tool build"; exit 1; }
++          done
++
+       # OpenMS refuses to start without its share/ directory (unit definitions, CV terms). A source
+       # build does not install it, so point at the tree directly. Without this the binary dies on
+       # --help with an uncaught exception whose message never reaches the log.
+```
+
+### 7.8 .github/workflows/tests.yml
+
+```diff
+--- a/.github/workflows/tests.yml (pre-fix-pass snapshot)
++++ b/.github/workflows/tests.yml (current)
+@@ -33,6 +33,42 @@
+       - name: C++ golden tests -- calibration model and dnoise MS1 port (the C++ that ships)
+         run: ctest --test-dir build -C Release --output-on-failure
+ 
++      # DnoiseMs1.h refuses to compile under value-changing floating-point flags (its #error); assert it does, for
++      # every flag whose predefined macro this compiler sets (a '+' joins flags that only act together). GCC sets
++      # __RECIPROCAL_MATH__, __ASSOCIATIVE_MATH__, __NO_SIGNED_ZEROS__ for their flags. clang sets none of these,
++      # and __ARM_FP_FAST for -funsafe-math-optimizations and -ffp-model=fast only on arm64, so its list is what
++      # the guard can see there. The compile without a flag comes first, so a refusal below is the flag's.
++      - name: DnoiseMs1.h refuses unsafe floating-point flags
++        if: runner.os != 'Windows'
++        shell: bash
++        run: |
++          case "${{ matrix.cc }}" in
++            gcc*)             FLAGS="-ffast-math -Ofast -ffinite-math-only -freciprocal-math -funsafe-math-optimizations -fno-signed-zeros -fassociative-math+-fno-signed-zeros+-fno-trapping-math" ;;
++            appleclang-arm64) FLAGS="-ffast-math -Ofast -ffinite-math-only -funsafe-math-optimizations -ffp-model=fast" ;;
++            *) echo "::error::no unsafe-flag list for ${{ matrix.cc }}"; exit 1 ;;
++          esac
++          G="$RUNNER_TEMP/guard.cpp"
++          printf '#include "DnoiseMs1.h"\n' > "$G"
++          c++ -std=c++20 -fsyntax-only -I src "$G" || { echo "::error::DnoiseMs1.h does not compile on its own"; exit 1; }
++          fail=0
++          for f in $FLAGS; do
++            # shellcheck disable=SC2086  # ${f//+/ } splits a '+'-joined combination into its flags
++            if c++ -std=c++20 -fsyntax-only ${f//+/ } -I src "$G" 2> "$G.err"; then
++              echo "::error::DnoiseMs1.h compiled under $f"; fail=1
++            elif grep -Eq 'DnoiseMs1\.h:[0-9]+:[0-9]+: (fatal )?error:' "$G.err" && grep -q '#error' "$G.err"; then
++              echo "  ok: $f refused by the #error"
++            else
++              cat "$G.err"; echo "::error::$f broke the compile, but not through the DnoiseMs1.h #error"; fail=1
++            fi
++          done
++          exit $fail
++
++      # scripts/sync_cluster.sh's deploy transaction (stage, lock, unit tests from the stage, rollback, fail-closed
++      # provenance) against a fake node; it never contacts a host. One leg is enough: it tests a bash script.
++      - name: Deploy transaction harness (scripts/sync_cluster.sh against a fake node)
++        if: matrix.os == 'ubuntu-latest'
++        run: bash tests/test_sync_cluster_txn.sh
++
+       - name: Calibration golden test (Python reference implementation)
+         run: python3 tests/test_calibration.py
+ 
+```
+
+### 7.9 test/test_spextractor.py
+
+```diff
+--- a/test/test_spextractor.py (pre-fix-pass snapshot)
++++ b/test/test_spextractor.py (current)
+@@ -19,7 +19,10 @@
+   ... 19. MS1 prune        perf:ms1_prune leaves the spectra byte-identical; dropping its witnesses does not
+      19b. prune chain      a band kept alive only by interior chain links: dropping just the links changes it
+      19c. stored order     MS1 spectra stored in descending m/z give the ascending fixture's result, prune off or on
++     19d. non-finite m/z   a NaN or infinite MS1 m/z is refused right after the pick, before the prune, prune off or on
+       20. dnoise:ms1       on by default, it filters a Bruker .d only: an mzML is skipped, logged, stamped, unchanged
++      21. dnoise SDK       a .d holding only its analysis.tdf: with a Bruker SDK path set, dnoise:ms1 refuses before the
++                           load; without one the run gets past the dnoise setup and fails in the loader
+ 
+ These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
+ without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
+@@ -179,6 +182,46 @@
+                     ("DigitizerNumSamples", "634073")])
+     db.commit(); db.close()
+     return path
++
++
++def synth_fake_d(d):
++    """A Bruker .d holding only its analysis.tdf: no analysis.tdf_bin, so the loader cannot read a single frame.
++
++    The metadata carries everything the tool decides before the load: dataset D's MzCalibration row and the
++    GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- dataset D's TimsCalibration row,
++    ten Frames (ids 1 and 6 MS1) of 944 scans with integer NumScans/NumPeaks and AccumulationTime 99.958 ms, and 24
++    diaPASEF window rows. The shapes are those of the dnoise port's second-review fixtures.
++    """
++    import sqlite3, json
++    g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests", "calibration_golden.json")))[0]
++    os.makedirs(d, exist_ok=True)
++    path = os.path.join(d, "analysis.tdf")
++    if os.path.exists(path):
++        os.remove(path)
++    db = sqlite3.connect(path)
++    db.execute("CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT)")
++    db.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
++                   [("AcquisitionSoftware", "timsTOF"), ("DigitizerNumSamples", "634073"),
++                    ("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
++                    ("OneOverK0AcqRangeLower", "0.600000"), ("OneOverK0AcqRangeUpper", "1.400000")])
++    db.execute("CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase REAL,"
++               " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL, C3 REAL, C4 REAL)")
++    db.execute("INSERT INTO MzCalibration VALUES (1,?,?,?,?,?,?,?,?,0,0,0)",
++               (g["model_type"], g["timebase"], g["delay"], g["C0"], g["C1"], g["C2"], g["T1_ref"], g["dC1"]))
++    db.execute("CREATE TABLE TimsCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER NOT NULL, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9)")
++    db.execute("INSERT INTO TimsCalibration VALUES (1, 2, ?,?,?,?,?,?,?,?,?,?)",
++               (1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644,
++                167.9496150068565, 16.646316600032645, 2241.865411900982))
++    db.execute("CREATE TABLE Frames (Id INTEGER PRIMARY KEY, Time REAL, MsMsType INTEGER, NumScans INTEGER, NumPeaks INTEGER,"
++               " AccumulationTime REAL, TimsCalibration INTEGER, MzCalibration INTEGER, T1 REAL)")
++    db.executemany("INSERT INTO Frames VALUES (?,?,?,944,1000,99.958,1,1,?)",
++                   [(i, 0.1 * i, 0 if i % 5 == 1 else 9, g["T1_ref"] + 0.03 * (i % 3)) for i in range(1, 11)])
++    db.execute("CREATE TABLE DiaFrameMsMsWindows (WindowGroup INTEGER, ScanNumBegin INTEGER, ScanNumEnd INTEGER,"
++               " IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL)")
++    db.executemany("INSERT INTO DiaFrameMsMsWindows VALUES (?,?,?,?,?,?)",
++                   [(1 + k % 12, 34 + (k * 7) % 400, 500 + (k * 13) % 400, 400.0 + 0.5 * k, 25.0, 30.0) for k in range(24)])
++    db.commit(); db.close()
++    return d
+ 
+ 
+ def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
+@@ -685,6 +728,23 @@
+                 assert det and det == want_det, \
+                     f"bands {bands} prune {prune}: [det]/[ms1-edges] lines differ from the ascending fixture:\n  asc  {want_det}\n  desc {det}"
+     check("MS1 spectra stored in descending m/z give the ascending result, prune off and on", c19c)
++
++    # 19d: a non-finite MS1 m/z is refused after the pick and BEFORE the prune, prune off and on alike. synth packs m/z as
++    #      float64 (19c decodes '<d'), so NaN and inf survive the mzML round trip. The [ms1-prune] line is logged after the
++    #      resident prune, so its absence shows the refusal happens in the pick loop. The stream-fallback passthrough runs
++    #      only on streamed .d/mzPeak input and stays covered by the cluster gates, as flushMS1_ already is.
++    def c19d():
++        for tag, bad in (("nan", float("nan")), ("inf", float("inf"))):
++            inp_n = os.path.join(work, f"prune_{tag}.mzML")
++            synth(inp_n, n_cycles=21, ms1_extra=lambda c: prune_extra(c) + ([(bad, 5000.0, 0.95)] if c == 10 else []))
++            for bands in (1, 48):
++                for prune in ("false", "true"):
++                    r = run(binary, inp_n, os.path.join(work, f"{tag}_b{bands}_{prune}.mzML"),
++                            extra=("-perf:ms1_trace_bands", str(bands), "-perf:ms1_prune", prune), expect_fail=True)
++                    log = r.stdout + r.stderr
++                    assert "non-finite m/z" in log, f"{tag} bands {bands} prune {prune}: not refused for its m/z:\n" + log[-800:]
++                    assert "[ms1-prune]" not in log, f"{tag} bands {bands} prune {prune}: refused only after the load summary, not at the pick"
++    check("a non-finite MS1 m/z is refused before the prune, prune off and on", c19d)
+ 
+     # 20: dnoise:ms1 (default true) denoises the raw MS1 frames of a Bruker .d, which this suite cannot build. What it
+     #     can pin is the rest of the contract: an mzML is not filtered but skipped, logged and stamped, and
+@@ -704,7 +764,27 @@
+         assert digest(on) == digest(off) == digest(out_def), "the spectra depend on dnoise:ms1 on an input it does not filter"
+     check("dnoise:ms1 skips an mzML (logged and stamped), 'false' stamps off, the spectra are unchanged", c20)
+ 
+-    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2   # + 19b, 19c
++    # 21: dnoise:ms1 inverts the loader's m/z through the tdf's MzCalibration table model, but with a Bruker SDK path set
++    #     the loader calibrates through the SDK, so the setup refuses before the load. The input is a .d holding only its
++    #     analysis.tdf (synth_fake_d: no analysis.tdf_bin, the loader cannot read a frame). With OPENMS_BRUKER_SDK_PATH the
++    #     run must be refused naming dnoise:ms1 and the SDK, with no dnoise setup line and no loader output; without it the
++    #     same input must get past the dnoise setup and fail in the loader, which shows the refusal comes first.
++    def c21():
++        fake = synth_fake_d(os.path.join(work, "fake.d"))
++        env = dict(os.environ)
++        for v in ("OPENMS_BRUKER_SDK_PATH", "SPEXTRACTOR_MZPEAK_TDF", "SPEXTRACTOR_TILE_RESIDENT"): env.pop(v, None)
++        setup_line = "MS1 path on the raw frames, before the pick"
++        r = run(binary, fake, os.path.join(work, "fake_sdk.mzML"), expect_fail=True, env=dict(env, OPENMS_BRUKER_SDK_PATH="/nonexistent"))
++        log = r.stdout + r.stderr
++        assert "dnoise:ms1" in log and "Bruker SDK" in log, "OPENMS_BRUKER_SDK_PATH set: not refused naming dnoise:ms1 and the Bruker SDK:\n" + log[-800:]
++        assert setup_line not in log and "[stream]" not in log, "OPENMS_BRUKER_SDK_PATH set: refused only after the dnoise setup or the load:\n" + log[-800:]
++        r = run(binary, fake, os.path.join(work, "fake_table.mzML"), expect_fail=True, env=env)
++        log = r.stdout + r.stderr
++        assert setup_line in log, "no Bruker SDK path: the fake .d did not get past the dnoise setup:\n" + log[-1500:]
++        assert "[stream] streaming load failed" in log, "no Bruker SDK path: the run did not fail in the loader (no analysis.tdf_bin):\n" + log[-800:]
++    check("dnoise:ms1 refuses a Bruker SDK calibration before the load, and gets past its setup without one", c21)
++
++    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2   # + 19b, 19c; + 19d, 21
+     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
+     return 1 if fails else 0
+ 
+```
+
+### 7.10 README.md
+
+````diff
+--- a/README.md (pre-fix-pass snapshot)
++++ b/README.md (current)
+@@ -111,8 +111,8 @@
+ | `-perf:malloc_trim` | `true` | return the allocator's free pages at the two phase boundaries (glibc). Trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition (the loop re-faults the returned pages cold); byte-identical output either way. Off when time, not memory, is the constraint |
+ | `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output**: measured, it is slightly *more* sensitive on a large file (+2.0% Sage peptides at unchanged entrapment FDR) for 1.75× the memory and ~1.7× the wall |
+ | `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (exact partition with a halo). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both gate datasets (set overlap 99.4% on dataset D, 89–99% on dataset A); 1 = off |
+-| `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 13–21% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 15–27%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
+-| `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: PRUNE_NUMBERS_FINAL |
++| `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 13–21% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 13–21%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
++| `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: dataset D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB |
+ | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
+ | `-trace:band_edges` | `acquisition` | the integer detector's per-window band edges come from the tdf's metadata (the digitizer's last bin) instead of the window's resident peaks, so a streaming reader can reproduce them. Measured neutral on both benchmark files (Sage +1/+1, MSFragger 0/−3, entrapment +0.00/+0.01 points); `slab` reproduces the pre‑2026‑09‑10 output |
+ | `-tile:cells_per_tile` | 0 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. Memory becomes one tile's once the streaming readers land (steps 3-5 of the tiling plan); on today's resident source it is a correctness switch |
+@@ -191,20 +191,24 @@
+ python3 test/test_spextractor.py build/spextractor
+ ```
+ 
+-Twenty-two end-to-end checks against a synthetic acquisition cover:
++Twenty-four end-to-end checks against a synthetic acquisition cover:
+ - isotope ownership and the charge floor;
+ - parameter validation;
+ - thread- and tile-count invariance;
+ - mass-trace extension across missing cycles;
+ - that the shipped detector is the one that actually runs;
+-- that the MS1 prune changes no output, with negative controls that must change it.
++- that the MS1 prune changes no output, with negative controls that must change it;
++- that a non-finite MS1 m/z is refused before the prune;
++- that `dnoise:ms1` refuses a Bruker SDK calibration before the load.
+ 
+-No fixtures, no framework, no network. The suite has no Bruker `.d`, so it cannot run the in-tool
+-dnoise filter. That filter is covered by `tests/test_dnoise_ms1.cpp` (gate boxes and filter rules)
+-and by the cluster digest gates.
++No fixtures, no framework, no network. The suite's only Bruker `.d` holds an `analysis.tdf` and no
++frame data, so it cannot run the in-tool dnoise filter. That filter is covered by
++`tests/test_dnoise_ms1.cpp` (gate boxes, filter rules and the per-point recovery), by
++`tests/test_tdf_load.cpp` (the tdf reader on corrupt, incomplete and out-of-range tables; built only
++where SQLite3 is found) and by the cluster digest gates.
+ 
+-`tests/` additionally holds the calibration and dnoise unit tests and the entrapment-FDR scoring
+-used for the benchmark record.
++`tests/` additionally holds the calibration, dnoise and tdf-reader unit tests and the entrapment-FDR
++scoring used for the benchmark record.
+ 
+ ## Layout
+ 
+````
+
+### 7.11 CONTRIBUTING.md
+
+````diff
+--- a/CONTRIBUTING.md (pre-fix-pass snapshot)
++++ b/CONTRIBUTING.md (current)
+@@ -33,7 +33,7 @@
+ ## Running the tests
+ 
+ ```bash
+-python3 test/test_spextractor.py /path/to/spextractor     # 22 end-to-end checks, synthetic input
++python3 test/test_spextractor.py /path/to/spextractor     # 24 end-to-end checks, synthetic input
+ cmake -B build -DSPEXTRACTOR_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build
+ ```
+ 
+````
+
+### 7.12 CHANGELOG.md
+
+```diff
+--- a/CHANGELOG.md (pre-fix-pass snapshot)
++++ b/CHANGELOG.md (current)
+@@ -15,14 +15,77 @@
+     - TNBC 009: +1.5% and −0.5%;
+     - entrapment FDR inside the control's interval on D, just below it on TNBC 009.
+   - New reference digests: D `e43672a0`, TNBC 009 `3aafd0b5`.
+-  - Memory at one cell per tile, against the prune-on default: D peak 26.5 → 22.4 GB, TNBC 009 34.7 → 25.4 GB;
+-    wall about −15%.
++  - Memory at one cell per tile, against the prune-on default: D peak 25.90 → 22.48 GB (−13%), TNBC 009
++    31.97 → 25.17 GB (−21%); wall D 4:13 → 3:41 (−13%), TNBC 009 10:25 → 10:46 (no gain on a shared node, where
++    its MS1 load got slower, 58.5 → 68.4 s).
+   - Bruker `.d` input only. Other inputs are not filtered, and the header records it (`spx:dnoise_ms1`).
+   - It refuses in milliseconds, naming the escape, when `trace:native_ms1_neighbors` > 0, or when a point's
+     flight-time index, scan index or raw intensity cannot be recovered exactly from the loader's values.
+   - `-dnoise:ms1 false` restores the previous output. Defaulting it on was the user's decision, taken with the
+     dataset D result in hand.
+ 
++### Fixed (2026-09-10) -- the dnoise port's second review; digests unchanged on every accepted input
++
++- **AccumulationTime is read as opentims reads it**: the tdf's text is parsed in the classic locale, whole, finite and
++  above 0. A decimal-comma locale used to turn "99.953" into 99. A frame above 100 ms (a correction below 1, several
++  raw counts per intensity) is refused at setup, and a corrected intensity at or above 2^24 has its own refusal.
++- **Every sqlite call of the tdf reader is checked**: each prepare, `SQLITE_DONE` after every row loop, the optional
++  `DiaFrameMsMsWindows` table decided from `sqlite_master` instead of from a failed query, and sqlite's own error text
++  in the refusal; the calibration and axis-bound readers likewise. A corrupt page used to end the windows loop as if
++  complete (1,554 of 3,000 windows on a probe; no gate at all on a one-page table). NULL `ScanNumBegin`/`ScanNumEnd`
++  are refused.
++- **Frames values are type- and range-checked before narrowing**: `NumScans`, `NumPeaks`, `MsMsType`, `TimsCalibration`
++  and `MAX(NumScans)` must be stored integers in range, and an MS1 frame with points needs a scan. The refusal names the
++  frame and the column; `NumScans` −1 used to become 4,294,967,295.
++- **The 1/K0 scan tables are built per TimsCalibration row over the scans of the MS1 frames that use it**, not over
++  the run's `MAX(NumScans)`, so an unused row or scans no MS1 frame has no longer refuse a run. The window gate keeps
++  the run's maximum, as dnoise does.
++- **The loader's m/z model is checked on the first MS1 frame**, not after a batch of 256, and before the load when a
++  Bruker SDK path is set (`OPENMS_BRUKER_SDK_PATH`): the loader then calibrates m/z through the SDK, which the TOF
++  recovery cannot invert.
++- **Every MS1 frame is denoised exactly once.** The resident pick filters an MS1 frame before its ion-mobility skip,
++  as the streaming consumer does, and a per-frame bitmap refuses a frame delivered twice or a non-empty MS1 frame never
++  delivered.
++- **A non-finite MS1 m/z is refused right after the pick**, on both load paths, prune on or off, and past the stream
++  fallback. It used to pass silently; sorted out of order around it, the band builder could drop every trace between
++  two band edges. The `[ms1-prune]` line keeps its `bad_mz` field, now always 0.
++- The resident load frees the filter's per-thread scratch right after the pick (up to ~4 GiB at 100 threads), and a
++  stream fallback zeroes the `[ms1-hist]` counters.
++- `dnoise:iterations 0` skips the streak filter only; the halo filter and the window gate still run (the help said it
++  kept every point).
++- **`scripts/sync_cluster.sh` deploys as one transaction on the node.** It uploaded sources and headers before taking
++  the lock, and a failed unit test or build restored only the `.cpp`. It now stages every file with checksums, takes
++  the lock, runs the unit test from the stage, promotes by rename, re-checks the hashes after the build, writes the
++  provenance only on commit, and restores every promoted input on any failure.
++- Comments: opentims computes `(uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5)`, the order the recovery
++  inverts; the tdf reader no longer claims to share opentims' SQLite library outside an in-tree build.
++- Left as they are, on purpose: no runtime self-test of the gate against third-party compiler flags, no ledger charge
++  for the filter's scratch, the 2^24 intensity bound and the recovery's search bounds.
++
++### Changed (2026-09-10) -- byte-identical
++
++- **The point recovery moved into `DnoiseMs1.h`** (`spx::dnoise::recover`), inside its contraction-off region, where
++  the unit test reaches it; `DnoiseRun` maps its refusals to the same messages.
++- **`DnoiseMs1.h` refuses more floating-point flags at compile time**: a compiler that announces reciprocal or
++  associative math, no signed zeros or ARM fast FP (`__RECIPROCAL_MATH__`, `__ASSOCIATIVE_MATH__`,
++  `__NO_SIGNED_ZEROS__`, `__ARM_FP_FAST`). Only clang on x86-64, and clang `-freciprocal-math` on arm64, still slip past.
++- **`-ffp-contract=off` stays on for the whole tool.** Builds for FMA-capable targets such as arm64 or `-march=haswell`
++  are now contraction-free like the cluster reference; default x86-64 builds and all pins are unchanged.
++
++### Tests (2026-09-10)
++
++- e2e 22 → 24 checks. **19d**: a NaN or infinite MS1 m/z is refused before the prune, at 1 and 48 bands, prune off and
++  on. **21**: a `.d` holding only an `analysis.tdf` is refused before any loader output when `OPENMS_BRUKER_SDK_PATH` is
++  set, and without it gets past the dnoise setup and fails in the loader.
++- `tests/test_dnoise_ms1.cpp`: the point recovery on both benchmark files' metadata (every TOF bin, every scan also at
++  ±1 ulp, every raw count below 2^24, each refusal), the delivery bitmap, and `iterations 0` still running the halo and
++  the gate.
++- `tests/test_tdf_load.cpp`, new, built only where SQLite3 is found: temporary tdfs with absent, column-less and
++  corrupt window tables, a corrupt Frames page and out-of-range Frames values.
++- CI: negative compile steps for the refused flags; `build.yml` runs the dnoise unit tests through ctest in the full
++  tool build; the Linux leg runs `tests/test_sync_cluster_txn.sh` (a fake node behind ssh/scp shims) against
++  `scripts/sync_cluster.sh`.
++
+ ### Performance (2026-09-10) -- byte-identical
+ 
+ - **Picked MS1 centroids the tracer can never use are dropped at load** (`perf:ms1_prune`, default `true`).
+@@ -30,7 +93,7 @@
+     minimal chain of sub-threshold witnesses. The band edges are sampled before pruning. Together these keep every
+     MS1 band spectrum and the tracer's input exact.
+   - Digests are identical with the prune off and on on both benchmark files, and on dnoise-filtered input.
+-  - Peak at one cell per tile, with dnoise off: PRUNE_NUMBERS_FINAL.
++  - Peak at one cell per tile, with dnoise off: D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB.
+ - **A probe for a trim between tiles** (`SPEXTRACTOR_TILE_TRIM=1`). This is an analysis instrument: the tile-count
+   analysis is in docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.
+ 
+```
+
+## 8. New files, full text (line-numbered)
+
+### 8.1 tests/test_tdf_load.cpp (330 lines)
+
+```cpp
+    1| // Tests of src/TdfLoad.h: every analysis.tdf read the tool makes is whole or refused, and each refusal names what it
+    2| // refuses. Needs SQLite, not OpenMS: CMake builds it only where it finds SQLite3, with a shim include directory that maps
+    3| // <OpenMS/FORMAT/TdfMzCalibration.h> onto src/TdfMzCalibration.h. The fixtures are synthetic tdfs shaped like dataset D's,
+    4| // written through the sqlite3 C API into a temporary directory; corrupted ones get 12 bytes of 0xff over a page header.
+    5| #include "TdfLoad.h"
+    6| #include <chrono>
+    7| #include <clocale>
+    8| #include <cstdint>
+    9| #include <cstdio>
+   10| #include <cstdlib>
+   11| #include <filesystem>
+   12| #include <fstream>
+   13| #include <string>
+   14| #include <vector>
+   15| 
+   16| namespace dn = spx::dnoise;
+   17| using spextractor::TdfDnoiseInputs;
+   18| 
+   19| static int g_fail = 0;
+   20| #define CHECK(cond, ...)                              \
+   21|   do                                                  \
+   22|   {                                                   \
+   23|     if (!(cond))                                      \
+   24|     {                                                 \
+   25|       std::fprintf(stderr, "FAIL line %d: ", __LINE__); \
+   26|       std::fprintf(stderr, __VA_ARGS__);              \
+   27|       std::fputc('\n', stderr);                       \
+   28|       ++g_fail;                                       \
+   29|     }                                                 \
+   30|   } while (0)
+   31| 
+   32| static std::filesystem::path g_dir;
+   33| static constexpr long kPageSize = 4096;
+   34| 
+   35| [[noreturn]] static void fixtureFailed(const std::string& what)
+   36| {
+   37|   std::fprintf(stderr, "fixture failed: %s\n", what.c_str());
+   38|   std::exit(2);
+   39| }
+   40| 
+   41| /// D's metadata, MzCalibration and TimsCalibration rows; @p n_frames frames (every fifth MS1, 944 scans, 1000 points,
+   42| /// AccumulationTime 99.958); @p n_windows window rows in a table named @p windows (nullptr: no table). Frames columns carry
+   43| /// no type, so a test can store TEXT or REAL where Bruker stores INTEGER.
+   44| static std::string dShaped(int n_frames = 10, int n_windows = 24, const char* windows = "DiaFrameMsMsWindows")
+   45| {
+   46|   std::string s =
+   47|     "PRAGMA page_size = " + std::to_string(kPageSize) + ";"
+   48|     "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT);"
+   49|     "INSERT INTO GlobalMetadata VALUES ('AcquisitionSoftware', 'timsTOF'), ('DigitizerNumSamples', '634073'), ('MzAcqRangeLower', '99.990834'),"
+   50|     "  ('MzAcqRangeUpper', '1700.000000'), ('OneOverK0AcqRangeLower', '0.600000'), ('OneOverK0AcqRangeUpper', '1.400000');"
+   51|     "CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4);"
+   52|     "INSERT INTO MzCalibration VALUES (1, 1, 0.125, 25655.375, 25.693668980735552, 20, 279.3262846272992, 155279.13067653627, 0.001260061434461731, 0, 0, 0);"
+   53|     "CREATE TABLE TimsCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER NOT NULL, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9);"
+   54|     "INSERT INTO TimsCalibration VALUES (1, 2, 1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644,"
+   55|     "  167.9496150068565, 16.646316600032645, 2241.865411900982);"
+   56|     "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, MzCalibration, T1);"
+   57|     "WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < " + std::to_string(n_frames) + ")"
+   58|     "  INSERT INTO Frames SELECT i, CASE WHEN i % 5 = 1 THEN 0 ELSE 9 END, 944, 1000, 99.958, 1, 1, 25.727120813485598 + i * 1e-6 FROM k;";
+   59|   if (windows)
+   60|     s += std::string("CREATE TABLE ") + windows + " (WindowGroup INTEGER, ScanNumBegin INTEGER, ScanNumEnd INTEGER, IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL);"
+   61|          "WITH RECURSIVE k(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM k WHERE i < " + std::to_string(n_windows - 1) + ")"
+   62|          "  INSERT INTO " + windows + " SELECT 1 + i % 12, 34 + (i * 7) % 400, 500 + (i * 13) % 400, 400.0 + 0.5 * i, 25.0, 30.0 FROM k;";
+   63|   return s;
+   64| }
+   65| 
+   66| static std::string makeTdf(const std::string& name, const std::string& sql)
+   67| {
+   68|   const std::string path = (g_dir / name).string();
+   69|   std::filesystem::remove(path);
+   70|   sqlite3* db = nullptr;
+   71|   if (sqlite3_open(path.c_str(), &db) != SQLITE_OK) fixtureFailed("cannot create " + path);
+   72|   char* err = nullptr;
+   73|   if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK)
+   74|     fixtureFailed(name + ": " + (err ? err : "?") + "\n" + sql);
+   75|   sqlite3_close(db);
+   76|   return path;
+   77| }
+   78| 
+   79| static long long rootPage(const std::string& path, const char* table)
+   80| {
+   81|   sqlite3* db = nullptr;
+   82|   sqlite3_stmt* st = nullptr;
+   83|   long long page = 0;
+   84|   if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK &&
+   85|       sqlite3_prepare_v2(db, "SELECT rootpage FROM sqlite_master WHERE name = ?", -1, &st, nullptr) == SQLITE_OK &&
+   86|       sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
+   87|     page = sqlite3_column_int64(st, 0);
+   88|   sqlite3_finalize(st);
+   89|   sqlite3_close(db);
+   90|   if (page < 1) fixtureFailed(std::string("no root page for ") + table + " in " + path);
+   91|   return page;
+   92| }
+   93| 
+   94| static std::vector<unsigned char> readPage(const std::string& path, long long page)
+   95| {
+   96|   std::ifstream in(path, std::ios::binary);
+   97|   in.seekg((page - 1) * kPageSize);
+   98|   std::vector<unsigned char> b(static_cast<std::size_t>(kPageSize));
+   99|   if (!in.read(reinterpret_cast<char*>(b.data()), kPageSize)) fixtureFailed("cannot read page " + std::to_string(page) + " of " + path);
+  100|   return b;
+  101| }
+  102| 
+  103| static void corruptPage(const std::string& path, long long page)
+  104| {
+  105|   std::fstream io(path, std::ios::in | std::ios::out | std::ios::binary);
+  106|   io.seekp((page - 1) * kPageSize);
+  107|   const char ff[12] = {'\xff', '\xff', '\xff', '\xff', '\xff', '\xff', '\xff', '\xff', '\xff', '\xff', '\xff', '\xff'};
+  108|   if (!io.write(ff, sizeof ff)) fixtureFailed("cannot corrupt page " + std::to_string(page) + " of " + path);
+  109| }
+  110| 
+  111| /// Corrupt the middle leaf of @p table, whose root must be an interior table page (0x05) over leaf pages (0x0d).
+  112| static void corruptMiddleLeaf(const std::string& path, const char* table)
+  113| {
+  114|   const std::vector<unsigned char> root = readPage(path, rootPage(path, table));
+  115|   if (root[0] != 0x05) fixtureFailed(std::string(table) + "'s root is not an interior page");
+  116|   const auto be = [](const unsigned char* p, int n) { std::uint32_t v = 0; for (int i = 0; i < n; ++i) v = (v << 8) | p[i]; return v; };
+  117|   const std::uint32_t cells = be(&root[3], 2);
+  118|   std::vector<std::uint32_t> kids;
+  119|   for (std::uint32_t i = 0; i < cells; ++i) kids.push_back(be(&root[be(&root[12 + 2 * i], 2)], 4));   // each cell starts with its left child
+  120|   kids.push_back(be(&root[8], 4));                                                                  // and the right-most child
+  121|   const std::uint32_t leaf = kids[kids.size() / 2];
+  122|   if (kids.size() < 3 || readPage(path, leaf)[0] != 0x0d) fixtureFailed(std::string(table) + ": the middle child is not a leaf");
+  123|   corruptPage(path, leaf);
+  124| }
+  125| 
+  126| static bool has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
+  127| 
+  128| static bool loads(const std::string& path, TdfDnoiseInputs& in, std::string& why) { return spextractor::loadTdfDnoise(path, in, why); }
+  129| 
+  130| /// loadTdfDnoise must refuse @p sql's tdf with a reason that contains @p part.
+  131| static void refused(const char* name, const std::string& sql, const char* part)
+  132| {
+  133|   TdfDnoiseInputs in;
+  134|   std::string why;
+  135|   const bool ok = loads(makeTdf(std::string(name) + ".tdf", sql), in, why);
+  136|   CHECK(!ok && has(why, part), "%s: loadTdfDnoise %s (%s), want a refusal naming '%s'", name, ok ? "accepted" : "refused", why.c_str(), part);
+  137| }
+  138| 
+  139| static void testWindows()
+  140| {
+  141|   TdfDnoiseInputs in;
+  142|   std::string why;
+  143|   const std::string ok = makeTdf("ok24.tdf", dShaped());
+  144|   CHECK(loads(ok, in, why) && in.windows.size() == 24 && in.meta.max_num_scans == 944 && in.frames.size() == 11 && in.tims_cal.size() == 1,
+  145|         "ok24: %s, %zu windows, %u scans, %zu frame slots", why.c_str(), in.windows.size(), in.meta.max_num_scans, in.frames.size());
+  146|   const dn::GateBuild g = dn::buildMs1WindowGate(in.meta, in.windows, dn::Params{});
+  147|   CHECK(g.error.empty() && g.gate && g.gate->boxes().size() == 24, "ok24: gate (%s)", g.error.c_str());
+  148|   CHECK(in.meta.acquisition_software == std::optional<std::string>("timsTOF") && in.meta.digitizer_num_samples == std::optional<std::string>("634073"),
+  149|         "ok24: GlobalMetadata as stored text");
+  150| 
+  151|   const std::string absent = makeTdf("absent.tdf", dShaped(10, 0, nullptr));
+  152|   CHECK(loads(absent, in, why) && in.windows.empty() && !dn::buildMs1WindowGate(in.meta, in.windows, dn::Params{}).gate,
+  153|         "absent: no DiaFrameMsMsWindows table is no gate, not a refusal (%s)", why.c_str());
+  154|   CHECK(loads(makeTdf("lower.tdf", dShaped(10, 24, "diaframemsmswindows")), in, why) && in.windows.size() == 24,
+  155|         "the table name resolves case-insensitively: %s, %zu windows", why.c_str(), in.windows.size());
+  156|   refused("nocol", dShaped() + "ALTER TABLE DiaFrameMsMsWindows DROP COLUMN IsolationWidth;", "IsolationWidth");
+  157|   refused("null_begin", dShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumBegin = NULL WHERE rowid = 3;", "NULL ScanNumBegin");
+  158|   refused("null_end", dShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumEnd = NULL WHERE rowid = 3;", "ScanNumEnd");
+  159| 
+  160|   // corruption: a whole one-page table and one leaf of eighteen used to read as no gate and as half a gate
+  161|   const std::string c24 = makeTdf("corrupt24.tdf", dShaped());
+  162|   corruptPage(c24, rootPage(c24, "DiaFrameMsMsWindows"));
+  163|   CHECK(!loads(c24, in, why) && has(why, "malformed") && has(why, "DiaFrameMsMsWindows"), "corrupt24: %s", why.c_str());
+  164|   CHECK(loads(makeTdf("ok3000.tdf", dShaped(10, 3000)), in, why) && in.windows.size() == 3000, "ok3000: %s, %zu windows", why.c_str(), in.windows.size());
+  165|   const std::string c3000 = makeTdf("corruptmid3000.tdf", dShaped(10, 3000));
+  166|   corruptMiddleLeaf(c3000, "DiaFrameMsMsWindows");
+  167|   CHECK(!loads(c3000, in, why) && has(why, "malformed"), "corruptmid3000: %s (%zu windows)", why.c_str(), in.windows.size());
+  168| }
+  169| 
+  170| static void testFrames()
+  171| {
+  172|   TdfDnoiseInputs in;
+  173|   std::string why;
+  174|   CHECK(loads(makeTdf("frames_ok.tdf", dShaped()), in, why), "D-shaped: %s", why.c_str());
+  175|   const TdfDnoiseInputs::Frame f1 = in.frames.size() > 2 ? in.frames[1] : TdfDnoiseInputs::Frame{}, f2 = in.frames.size() > 2 ? in.frames[2] : TdfDnoiseInputs::Frame{};
+  176|   double corr = 0.0;
+  177|   CHECK(dn::recover::opentimsCorrection("99.958", corr) && f1.msms_type == 0 && f1.num_scans == 944 && f1.num_peaks == 1000 && f1.corr == corr && f1.cal == 0 &&
+  178|           f2.msms_type == 9 && in.frames[0].msms_type == -1, "D-shaped frames: MS1 %d/%u/%u corr %a, MS2 %d", f1.msms_type, f1.num_scans, f1.num_peaks, f1.corr, f2.msms_type);
+  179|   CHECK(in.ms1_max_scans == std::vector<std::uint32_t>{944}, "ms1_max_scans");
+  180|   // the tool instantiates recover:: and FrameCoverage on TdfDnoiseInputs::Frame
+  181|   CHECK(dn::recover::frameCheck(in.frames, 1, 1000, true, 1000) == dn::recover::Refusal::none &&
+  182|           dn::recover::frameCheck(in.frames, 2, 1000, true, 1000) == dn::recover::Refusal::frame, "frameCheck on the loaded table");
+  183|   dn::FrameCoverage cov;
+  184|   CHECK(cov.firstMissing(in.frames) == 1 && cov.mark(1) && cov.mark(6) && cov.firstMissing(in.frames) == 0, "FrameCoverage on the loaded table");
+  185| 
+  186|   // every integer is typed and ranged before it is narrowed
+  187|   refused("scans_neg", dShaped() + "UPDATE Frames SET NumScans = -1 WHERE Id = 3;", "NumScans");
+  188|   refused("scans_2p32", dShaped() + "UPDATE Frames SET NumScans = 4294967297 WHERE Id = 3;", "NumScans");
+  189|   refused("scans_text", dShaped() + "UPDATE Frames SET NumScans = '944' WHERE Id = 3;", "NumScans");
+  190|   refused("scans_real", dShaped() + "UPDATE Frames SET NumScans = 100.5 WHERE Id = 3;", "NumScans");
+  191|   refused("peaks_2p32", dShaped() + "UPDATE Frames SET NumPeaks = 4294967301 WHERE Id = 3;", "NumPeaks");
+  192|   refused("peaks_neg", dShaped() + "UPDATE Frames SET NumPeaks = -1 WHERE Id = 3;", "NumPeaks");
+  193|   refused("type_2p31", dShaped() + "UPDATE Frames SET MsMsType = 2147483648 WHERE Id = 3;", "MsMsType");
+  194|   refused("type_text", dShaped() + "UPDATE Frames SET MsMsType = '0' WHERE Id = 3;", "MsMsType");
+  195|   refused("cal_2p32", dShaped() + "UPDATE Frames SET TimsCalibration = 4294967297 WHERE Id = 3;", "TimsCalibration");
+  196|   refused("cal_null", dShaped() + "UPDATE Frames SET TimsCalibration = NULL WHERE Id = 3;", "TimsCalibration");
+  197|   refused("cal_unknown", dShaped() + "UPDATE Frames SET TimsCalibration = 7 WHERE Id = 3;", "unknown TimsCalibration");
+  198|   refused("calid_2p32", dShaped() + "INSERT INTO TimsCalibration SELECT 4294967297, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration;",
+  199|           "TimsCalibration.Id");
+  200|   refused("ms1_no_scans", dShaped() + "UPDATE Frames SET NumScans = 0 WHERE Id = 6;", "no scans");
+  201|   CHECK(loads(makeTdf("ms1_empty.tdf", dShaped() + "UPDATE Frames SET NumScans = 0, NumPeaks = 0 WHERE Id = 6;"), in, why) && in.frames[6].num_peaks == 0,
+  202|         "an MS1 frame with neither scans nor points is accepted: %s", why.c_str());
+  203|   CHECK(loads(makeTdf("ms2_no_scans.tdf", dShaped() + "UPDATE Frames SET NumScans = 0 WHERE Id = 7;"), in, why), "an MS2 frame without scans is not the port's: %s", why.c_str());
+  204|   refused("no_frames", dShaped() + "DELETE FROM Frames;", "no Frames rows");
+  205|   refused("no_metadata", dShaped() + "DROP TABLE GlobalMetadata;", "GlobalMetadata");
+  206|   refused("no_timscal", dShaped() + "DROP TABLE TimsCalibration;", "linear");
+  207|   refused("no_timscal_col", dShaped() + "ALTER TABLE Frames DROP COLUMN TimsCalibration;", "TimsCalibration");
+  208|   refused("modeltype", dShaped() + "UPDATE TimsCalibration SET ModelType = 1;", "ModelType 1");
+  209|   {
+  210|     std::string w;
+  211|     CHECK(!spextractor::loadTdfDnoise((g_dir / "does_not_exist.tdf").string(), in, w) && has(w, "cannot open"), "a missing file: %s", w.c_str());
+  212|   }
+  213| 
+  214|   // a scan table per TimsCalibration row over its own MS1 frames' scans: MS1 frames on a TNBC-shaped row with 918 scans,
+  215|   // MS2 frames on a flat row with 40,000 -- the file's MAX(NumScans), which the gate still uses
+  216|   const std::string two = dShaped() +
+  217|     "UPDATE TimsCalibration SET C3 = C2;"
+  218|     "INSERT INTO TimsCalibration VALUES (2, 2, 1, 917, 217.9811466010841, 74.83820441307512, 33.0, 1, 0.02256006096271849, 131.32054866963384,"
+  219|     "  12.961442137235451, 2637.0446006790567);"
+  220|     "UPDATE Frames SET TimsCalibration = 2, NumScans = 918 WHERE MsMsType = 0;"
+  221|     "UPDATE Frames SET NumScans = 40000 WHERE MsMsType <> 0;";
+  222|   CHECK(loads(makeTdf("two_rows.tdf", two), in, why) && in.meta.max_num_scans == 40000 && in.ms1_max_scans == std::vector<std::uint32_t>({0, 918}) &&
+  223|           in.frames[1].cal == 1 && in.frames[2].cal == 0, "two rows: %s, max %u", why.c_str(), in.meta.max_num_scans);
+  224|   std::vector<float> asc;
+  225|   bool falls = false;
+  226|   CHECK(in.tims_cal.size() == 2 && in.ms1_max_scans.size() == 2 && dn::recover::buildScanTable(in.tims_cal[0], in.ms1_max_scans[0], asc, falls).empty() &&
+  227|           dn::recover::buildScanTable(in.tims_cal[1], in.ms1_max_scans[1], asc, falls).empty() &&
+  228|           !dn::recover::buildScanTable(in.tims_cal[1], in.meta.max_num_scans, asc, falls).empty() &&
+  229|           !dn::recover::buildScanTable(in.tims_cal[0], in.meta.max_num_scans, asc, falls).empty(),
+  230|         "each row's table over its MS1 scans builds; over the file's MAX neither would");
+  231| 
+  232|   // corruption in the middle of Frames: refused at setup, and by the calibration read (whose T1 loop used to stop early)
+  233|   const std::string ok3000 = makeTdf("frames3000.tdf", dShaped(3000));
+  234|   {
+  235|     spextractor::TdfMzCalibration cal;
+  236|     std::vector<double> t1;
+  237|     std::string w;
+  238|     CHECK(loads(ok3000, in, why) && in.frames.size() == 3001, "frames3000: %s", why.c_str());
+  239|     CHECK(spextractor::loadTdfCalibration(ok3000, cal, t1, w) && t1.size() == 3001 && t1[3000] == 25.727120813485598 + 3000 * 1e-6 && cal.C1 == 155279.13067653627,
+  240|           "loadTdfCalibration frames3000: %s (%zu T1)", w.c_str(), t1.size());
+  241|     const std::string bad = makeTdf("framescorrupt3000.tdf", dShaped(3000));
+  242|     corruptMiddleLeaf(bad, "Frames");
+  243|     CHECK(!loads(bad, in, why) && has(why, "malformed"), "a corrupt Frames leaf: %s", why.c_str());
+  244|     CHECK(!spextractor::loadTdfCalibration(bad, cal, t1, w) && has(w, "malformed"), "loadTdfCalibration, a corrupt Frames leaf: %s", w.c_str());
+  245|   }
+  246| }
+  247| 
+  248| static void testAccumulationTime()
+  249| {
+  250|   TdfDnoiseInputs in;
+  251|   std::string why;
+  252|   int k = 0;
+  253|   for (const char* text : {"99,953", "abc", "0", "-99.958", " 99.958", "99.958ms", ""})
+  254|     refused(("acc_bad" + std::to_string(k++)).c_str(), dShaped() + "UPDATE Frames SET AccumulationTime = '" + text + "' WHERE Id = 6;", "AccumulationTime");
+  255|   refused("acc_null", dShaped() + "UPDATE Frames SET AccumulationTime = NULL WHERE Id = 6;", "AccumulationTime");
+  256|   double corr = 0.0;
+  257|   CHECK(loads(makeTdf("acc_text.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
+  258|           in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "AccumulationTime as TEXT and as REAL: %s", why.c_str());
+  259|   // above 100 ms the correction loads, and the setup refusal names it
+  260|   CHECK(loads(makeTdf("acc_125.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '125' WHERE Id = 6;"), in, why) && in.frames[6].corr == 0.8 &&
+  261|           has(dn::recover::correctionRefusal(6, in.frames[6].corr), "AccumulationTime 125 ms exceeds 100 ms") &&
+  262|           dn::recover::correctionRefusal(1, in.frames[1].corr).empty(), "AccumulationTime 125: %s", why.c_str());
+  263|   CHECK(loads(makeTdf("acc_100042.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = 100.042 WHERE Id = 6;"), in, why) && in.frames[6].corr < 1.0 &&
+  264|           !dn::recover::correctionRefusal(6, in.frames[6].corr).empty(), "AccumulationTime 100.042 (REAL): %s", why.c_str());
+  265|   // opentims parses under a C-locale guard; so must the port, whatever LC_NUMERIC the process has
+  266|   bool comma = false;
+  267|   if (const char* prev = std::setlocale(LC_NUMERIC, nullptr))
+  268|   {
+  269|     const std::string saved = prev;
+  270|     if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") && std::strtod("99.953", nullptr) == 99.0)
+  271|     {
+  272|       comma = true;
+  273|       CHECK(loads(makeTdf("acc_de.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
+  274|               in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "under de_DE: %s", why.c_str());
+  275|       refused("acc_de_comma", dShaped() + "UPDATE Frames SET AccumulationTime = '99,953' WHERE Id = 6;", "AccumulationTime");
+  276|     }
+  277|     std::setlocale(LC_NUMERIC, saved.c_str());
+  278|   }
+  279|   (void)corr;
+  280|   if (!comma) std::printf("    (no de_DE locale here: the LC_NUMERIC case is skipped)\n");
+  281| }
+  282| 
+  283| static void testCalibrationAndBounds()
+  284| {
+  285|   spextractor::TdfMzCalibration cal;
+  286|   std::vector<double> t1;
+  287|   std::string why;
+  288|   const std::string ok = makeTdf("cal_ok.tdf", dShaped());
+  289|   CHECK(spextractor::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
+  290|         "loadTdfCalibration: %s", why.c_str());
+  291|   CHECK(spextractor::loadTdfCalibration(makeTdf("cal_nocol.tdf", dShaped() + "ALTER TABLE Frames DROP COLUMN MzCalibration;"), cal, t1, why),
+  292|         "no Frames.MzCalibration column and one MzCalibration row: %s", why.c_str());
+  293|   CHECK(!spextractor::loadTdfCalibration(makeTdf("cal_nocol2.tdf", dShaped() + "ALTER TABLE Frames DROP COLUMN MzCalibration;"
+  294|                                                  "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"),
+  295|                                          cal, t1, why) && has(why, "need exactly 1"), "no column and two rows: %s", why.c_str());
+  296|   CHECK(!spextractor::loadTdfCalibration(makeTdf("cal_two.tdf", dShaped() + "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"
+  297|                                                  "UPDATE Frames SET MzCalibration = 2 WHERE Id = 4;"), cal, t1, why) && has(why, "2 distinct"),
+  298|         "frames on two MzCalibration rows: %s", why.c_str());
+  299|   CHECK(!spextractor::loadTdfCalibration(makeTdf("cal_notable.tdf", dShaped() + "DROP TABLE MzCalibration;"), cal, t1, why) && has(why, "MzCalibration"),
+  300|         "no MzCalibration table: %s", why.c_str());
+  301| 
+  302|   spextractor::TdfAxisBounds bd;
+  303|   CHECK(spextractor::loadTdfAxisBounds(ok, bd, why) && bd.n_bins == 634073 && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0, "loadTdfAxisBounds: %s", why.c_str());
+  304|   CHECK(!spextractor::loadTdfAxisBounds(makeTdf("bounds_notable.tdf", dShaped() + "DROP TABLE GlobalMetadata;"), bd, why) && has(why, "GlobalMetadata"),
+  305|         "no GlobalMetadata: %s", why.c_str());
+  306| }
+  307| 
+  308| int main()
+  309| {
+  310|   g_dir = std::filesystem::temp_directory_path() /
+  311|           ("spx_test_tdf_load_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  312|   std::filesystem::create_directories(g_dir);
+  313|   std::printf("SQLite %s, fixtures in %s\n", sqlite3_libversion(), g_dir.string().c_str());
+  314|   int before = g_fail;
+  315|   testWindows();
+  316|   if (g_fail == before) std::printf("OK  DiaFrameMsMsWindows: whole (24, 3000), absent = no gate, any case; a missing column, a NULL scan, a corrupt page refused\n");
+  317|   before = g_fail;
+  318|   testFrames();
+  319|   if (g_fail == before) std::printf("OK  Frames and TimsCalibration: typed and ranged before narrowing; per-row scan need; corrupt leaf refused\n");
+  320|   before = g_fail;
+  321|   testAccumulationTime();
+  322|   if (g_fail == before) std::printf("OK  AccumulationTime: whole C-locale decimal > 0; above 100 ms the setup refusal\n");
+  323|   before = g_fail;
+  324|   testCalibrationAndBounds();
+  325|   if (g_fail == before) std::printf("OK  loadTdfCalibration and loadTdfAxisBounds: whole reads, schema-decided fallback\n");
+  326|   std::error_code ec;
+  327|   std::filesystem::remove_all(g_dir, ec);
+  328|   if (g_fail) std::fprintf(stderr, "%d check(s) failed\n", g_fail);
+  329|   return g_fail ? 1 : 0;
+  330| }
+```
+
+### 8.2 tests/test_sync_cluster_txn.sh (232 lines)
+
+```bash
+    1| #!/usr/bin/env bash
+    2| # shellcheck disable=SC2016,SC2034,SC2086  # checks are single-quoted strings eval'd by ok(); fixture paths are mktemp dirs
+    3| # Transaction harness for scripts/sync_cluster.sh (stage-2 review, codex #3 / kimi #3). It runs the real script
+    4| # against a fake node through ssh/scp shims and never contacts a host: it aborts unless the shims come first on
+    5| # PATH and no real cluster path survives the substitution into its copy of the script.
+    6| # The fake node keeps what makes a deploy transaction hard on the real one: make decides by mtime, the Makefile
+    7| # generator relinks libOpenMS.so (which compiles the calibration header) before the tool compiles, a compile
+    8| # reads its inputs long before the build writes the binary, and the unit tests compile against whichever copy of
+    9| # a header the include path reaches first (each fake test fails unless it sees the staged copy).
+   10| #   bash tests/test_sync_cluster_txn.sh                              # scripts/sync_cluster.sh of this checkout
+   11| #   SYNC_SCRIPT=/tmp/mutant.sh bash tests/test_sync_cluster_txn.sh   # any other copy; a broken one must FAIL
+   12| # Needs git, make, ar and a C++ compiler; shims date -Is and sha256sum where the host lacks them (macOS).
+   13| set -uo pipefail
+   14| export LC_ALL=C   # deterministic sort; quiets perl's shasum on hosts whose locale is unset or invalid
+   15| HERE=$(cd "$(dirname "$0")/.." && pwd)
+   16| SCRIPT=${SYNC_SCRIPT:-$HERE/scripts/sync_cluster.sh}
+   17| [ -f "$SCRIPT" ] || { echo "ABORT: no $SCRIPT"; exit 99; }
+   18| V=$(mktemp -d "${TMPDIR:-/tmp}/sync_txn.XXXXXX") || exit 99
+   19| mkdir -p "$V/shim" "$V/ver"
+   20| PASS=0; FAIL=0
+   21| ok() { if eval "$2"; then echo "  ok   $1"; PASS=$((PASS+1)); else echo "  FAIL $1   [$2]"; FAIL=$((FAIL+1)); fi; }
+   22| 
+   23| cat > "$V/shim/ssh" <<'EOF'
+   24| #!/usr/bin/env bash
+   25| # ssh [opts] HOST CMD -> CMD, run here: the node paths in the script under test were rewritten into the fake node
+   26| while [ $# -gt 0 ]; do case $1 in -o) shift 2;; -*) shift;; *) break;; esac; done
+   27| shift
+   28| exec bash -c "$*"
+   29| EOF
+   30| cat > "$V/shim/scp" <<'EOF'
+   31| #!/usr/bin/env bash
+   32| # scp [-q] SRC... HOST:DIR -> cp; TORN=<name> then corrupts that file in DIR (a torn upload)
+   33| a=(); for x in "$@"; do [ "$x" = -q ] || a+=("$x"); done
+   34| n=${#a[@]}; dst=${a[n-1]}; dst=${dst#*:}; unset "a[n-1]"
+   35| cp "${a[@]}" "$dst" || exit 1
+   36| if [ -n "${TORN:-}" ] && [ -d "$dst" ] && [ -e "$dst/$TORN" ]; then printf 'x' >> "$dst/$TORN"; fi
+   37| EOF
+   38| chmod +x "$V/shim/ssh" "$V/shim/scp"
+   39| ln -s "$BASH" "$V/shim/bash"   # the "node" runs the transaction under the harness's own bash
+   40| if ! date -Is > /dev/null 2>&1; then   # BSD date
+   41|   printf '#!/usr/bin/env bash\nif [ "${1:-}" = -Is ]; then exec %s +%%Y-%%m-%%dT%%H:%%M:%%S%%z; fi\nexec %s "$@"\n' \
+   42|     "$(command -v date)" "$(command -v date)" > "$V/shim/date"
+   43|   chmod +x "$V/shim/date"
+   44| fi
+   45| if ! command -v sha256sum > /dev/null; then
+   46|   printf '#!/usr/bin/env bash\nexec shasum -a 256 "$@"\n' > "$V/shim/sha256sum"; chmod +x "$V/shim/sha256sum"
+   47| fi
+   48| export PATH=$V/shim:$PATH
+   49| for t in ssh scp bash; do
+   50|   [ "$(command -v $t)" = "$V/shim/$t" ] || { echo "ABORT: the $t shim is not first on PATH"; exit 99; }
+   51| done
+   52| 
+   53| set_flags() {  # yes|no: whether the tool's include path reaches a sqlite3.h (on the cluster: OpenMS's bundled SQLite)
+   54|   local sq=""; [ "$1" = yes ] && sq="-I$SQ "
+   55|   printf 'CXX_INCLUDES = -I%s/src/openms/extern/SQLiteCpp/include %s-I%s/src/openms/include -isystem %s/contrib/include\nCXX_FLAGS = -std=c++17 -O0\n' \
+   56|     "$O" "$sq" "$O" "$R" > $O/build/src/topp/CMakeFiles/spextractor.dir/flags.make
+   57| }
+   58| mk_node() {
+   59|   N=$1; R=$N/scratch; TOOLS=$N/ceph/tools; TESTS=$N/ceph/tests; O=$R/OpenMS; PROV=$O/build/bin/spextractor.provenance
+   60|   SQ=$O/src/openms/extern/SQLiteCpp/sqlite3
+   61|   mkdir -p $O/src/topp $O/src/openms/include/OpenMS/FORMAT $O/src/openms/include/OpenMS/KERNEL \
+   62|            $O/src/openms/source/FORMAT $O/src/openms/source/FEATUREFINDER $O/build/bin $O/build/lib \
+   63|            $O/build/src/topp/CMakeFiles/spextractor.dir $SQ $TOOLS
+   64|   printf 'CMAKE_CXX_COMPILER:FILEPATH=%s\nCF_OPENMS_PACKAGE_VERSION_FULLSTRING:INTERNAL=3.5.0-fake\n' "$(command -v c++)" > $O/build/CMakeCache.txt
+   65|   set_flags yes
+   66|   printf '#include <OpenMS/FORMAT/TdfMzCalibration.h>\n' > $O/src/openms/source/FORMAT/BrukerTimsFile.cpp
+   67|   printf '// SpeXtractor lock\n' > $O/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
+   68|   printf 'MassTrace(MassTrace &&) = default;\n' > $O/src/openms/include/OpenMS/KERNEL/MassTrace.h
+   69|   printf '0\n' > $O/slow
+   70|   # the bundled SQLite: its header in the tool's include path, the static library libOpenMS.so is linked from
+   71|   printf 'int fake_sqlite3_version();\n' > $SQ/sqlite3.h
+   72|   printf 'int fake_sqlite3_version() { return 3049002; }\n' > $V/fake_sqlite3.cpp
+   73|   { c++ -c $V/fake_sqlite3.cpp -o $V/fake_sqlite3.o && ar rcs $O/build/lib/libsqlite3.a $V/fake_sqlite3.o; } || { echo "ABORT: cannot build the fake SQLite"; exit 99; }
+   74|   # real make/mtime semantics; like CMake's Makefile generator, libOpenMS relinks before the tool compiles, and
+   75|   # the tool's compile reads its inputs before the (slow) rest of the build writes the binary. A failing compile
+   76|   # takes a second after the relink, as a real one does: make with 1 s timestamps (macOS make 3.81) would
+   77|   # otherwise see a header restored in the same second as no newer than the lib.
+   78|   printf '%b\n' \
+   79|    'I=../src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h' 'T=../src/topp' \
+   80|    'spextractor: bin/spextractor' \
+   81|    'lib/libOpenMS.so: $(I) ../src/openms/source/FORMAT/BrukerTimsFile.cpp' '\tcat $^ > $@' \
+   82|    'bin/spextractor: lib/libOpenMS.so $(T)/spextractor.cpp $(T)/TdfLoad.h $(T)/MzPeakStreamLoad.h $(T)/DnoiseMs1.h' \
+   83|    '\tcat $^ > $@.part' \
+   84|    '\ttouch ../building; sleep $$(cat ../slow); rm -f ../building' \
+   85|    '\tif grep -q BREAK_BUILD $(T)/spextractor.cpp; then sleep 1; echo "error: forced compile failure" >&2; exit 1; fi' \
+   86|    '\tmv -f $@.part $@' '.PHONY: spextractor' > $O/build/Makefile
+   87| }
+   88| install_script() {  # path-substituted copy; refuses if any real cluster path survives
+   89|   sed -e "s#/scratch/kohlbach#$R#g" -e "s#/ceph/ibmi/abi/oliver/spextract#$N/ceph#g" "$1" > "$2"
+   90|   if grep -n '/scratch/kohlbach\|/ceph/ibmi' "$2"; then echo "ABORT: real path survived in $2"; exit 98; fi
+   91| }
+   92| SHIPPED="test/test_spextractor.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
+   93| mk_repo() {
+   94|   mkdir -p $1/src $1/tests $1/test $1/bench $1/scripts
+   95|   git -C $1 init -q && git -C $1 config user.email t@t && git -C $1 config user.name t && git -C $1 config commit.gpgsign false
+   96|   install_script "$2" $1/scripts/sync_cluster.sh
+   97| }
+   98| set_version() {  # repo tag calib dnoise_ok tdf_ok [cpp extra]
+   99|   local D=$1
+  100|   printf '// spextractor %s\n%s\n' "$2" "${6:-}" > $D/src/spextractor.cpp
+  101|   printf '#define CALIB_TAG "%s"\n' "$3" > $D/src/TdfMzCalibration.h
+  102|   printf '#define TDF_OK %s // TdfLoad %s\n' "$5" "$2" > $D/src/TdfLoad.h
+  103|   printf '// MzPeakStreamLoad %s\n' "$2" > $D/src/MzPeakStreamLoad.h
+  104|   printf '#define DNOISE_OK %s // %s\n' "$4" "$2" > $D/src/DnoiseMs1.h
+  105|   # both include forms the real tests may use; each test fails unless it compiled against the staged headers
+  106|   printf '#include "DnoiseMs1.h"\n#include <OpenMS/FORMAT/TdfMzCalibration.h>\n#include <cstring>\nint main() { return DNOISE_OK && !std::strcmp(CALIB_TAG, "%s") ? 0 : 1; } // %s\n' "$3" "$2" > $D/tests/test_dnoise_ms1.cpp
+  107|   printf '#include "TdfLoad.h"\n#include "../src/TdfMzCalibration.h"\n#include <sqlite3.h>\n#include <cstring>\nint main() { return TDF_OK && fake_sqlite3_version() == 3049002 && !std::strcmp(CALIB_TAG, "%s") ? 0 : 1; } // %s\n' "$3" "$2" > $D/tests/test_tdf_load.cpp
+  108|   for f in $SHIPPED; do printf '# %s %s\n' "$f" "$2" > $D/$f; done
+  109|   git -C $D add src tests test bench scripts && git -C $D commit -qm "$2"
+  110|   mkdir -p $V/ver/$2 && (cd $D && cp -R src tests test bench $V/ver/$2/) && git -C $D rev-parse --short HEAD > $V/ver/$2/REV
+  111| }
+  112| deploy() { local repo=$1 out=$2; shift 2; (cd "$repo" && bash scripts/sync_cluster.sh fakenode "$@") > "$out" 2>&1; echo $?; }
+  113| mt()   { stat -c %y "$1" 2> /dev/null || stat -f %Fm "$1"; }
+  114| snap() { (cd "$N" && find . \( -type f -o -type d \) ! -name '.deploy.stage.*.log' ! -name 'build_sync_*.log' | LC_ALL=C sort |
+  115|          while read -r f; do if [ -d "$f" ]; then echo "D $f"; else printf '%s %s %s\n' "$(shasum -a 256 "$f" | cut -c1-16)" "$(mt "$f")" "$f"; fi; done); }
+  116| same() { cmp -s "$1" "$2"; }
+  117| shaf() { shasum -a 256 "$1" | cut -d' ' -f1; }
+  118| pv()   { sed -n "s/^$1=//p" "$2"; }
+  119| tree_is() { local W=$V/ver/$1
+  120|   same $W/src/spextractor.cpp $O/src/topp/spextractor.cpp && same $W/src/TdfMzCalibration.h $O/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h &&
+  121|   same $W/src/TdfLoad.h $O/src/topp/TdfLoad.h && same $W/src/MzPeakStreamLoad.h $O/src/topp/MzPeakStreamLoad.h && same $W/src/DnoiseMs1.h $O/src/topp/DnoiseMs1.h; }
+  122| ship_is() { local W=$V/ver/$1 f; for f in test/test_spextractor.py bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh; do same $W/$f "$TOOLS/$(basename $f)" || return 1; done
+  123|   same $W/tests/calibration_golden.json $TESTS/calibration_golden.json && same $W/tests/test_dnoise_ms1.cpp $R/spextractor_unit/test_dnoise_ms1.cpp &&
+  124|   same $W/tests/test_tdf_load.cpp $R/spextractor_unit/test_tdf_load.cpp && [ -e $R/spextractor_unit/test_dnoise_ms1.log ] && [ -e $R/spextractor_unit/test_tdf_load.log ]; }
+  125| prov_is() { local W=$V/ver/$1 P=${2:-$PROV}
+  126|   [ "$(pv src_sha256 $P)" = "$(shaf $W/src/spextractor.cpp)" ] && [ "$(pv calibration_header_sha256 $P)" = "$(shaf $W/src/TdfMzCalibration.h)" ] &&
+  127|   [ "$(pv tool_headers_sha256 $P)" = "$(cat $W/src/TdfLoad.h $W/src/MzPeakStreamLoad.h $W/src/DnoiseMs1.h | shasum -a 256 | cut -d' ' -f1)" ] &&
+  128|   [ "$(pv git $P)" = "$(cat $W/REV)" ]; }
+  129| ut_is() { [ "$(pv dnoise_unit_test $PROV)" = passed ] && [ "$(pv tdf_load_unit_test $PROV)" = "$1" ]; }
+  130| prov_truthful() { [ -e $PROV ] && [ "$(pv binary_sha256 $PROV)" = "$(shaf $O/build/bin/spextractor)" ] && [ "$(pv libopenms_sha256 $PROV)" = "$(shaf $O/build/lib/libOpenMS.so)" ]; }
+  131| clean() { [ ! -e $R/.deploy.lock ] && [ -z "$(find $R -maxdepth 1 -type d -name '.deploy.stage.*')" ]; }
+  132| records() { grep -c '^src_sha256=' $R/deploys.log 2> /dev/null || echo 0; }
+  133| wait_for()  { local i=0; while [ ! -e "$1" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; [ -e "$1" ]; }
+  134| wait_gone() { local i=0; while [ -e "$1" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; [ ! -e "$1" ]; }
+  135| 
+  136| echo "== $SCRIPT"
+  137| mk_node $V/node; mk_repo $V/repoA "$SCRIPT"
+  138| set_version $V/repoA v0 c0 1 1
+  139| rc=$(deploy $V/repoA $V/s0.out)
+  140| ok "S0 first deploy commits (rc $rc)" '[ $rc = 0 ] && tree_is v0 && ship_is v0 && prov_is v0 && prov_truthful && ut_is passed && clean && [ $(records) = 1 ]'
+  141| set_version $V/repoA v1 c1 1 1
+  142| rc=$(deploy $V/repoA $V/s1.out)
+  143| ok "S1 success: inputs, tools, provenance all v1; old cpp kept as .bak (rc $rc)" '[ $rc = 0 ] && tree_is v1 && ship_is v1 && prov_is v1 && prov_truthful && same $V/ver/v0/src/spextractor.cpp $O/src/topp/spextractor.cpp.bak && clean && [ $(records) = 2 ]'
+  144| ok "S1 both unit tests passed against the staged v1 headers while the tree still held v0's" 'ut_is passed && grep -q "^tdf_load_unit_test=passed" $V/s1.out'
+  145| ok "S1 build tree is up to date after commit" '(cd $O/build && make -q bin/spextractor)'
+  146| ok "S1 transaction log reached the caller" 'grep -q "DEPLOY COMMITTED" $V/s1.out'
+  147| 
+  148| sleep 1; S=$(snap); set_version $V/repoA v2 c2 0 1
+  149| rc=$(deploy $V/repoA $V/s2.out)
+  150| ok "S2 dnoise unit-test failure: rc 2, node byte- AND mtime-identical, nothing promoted" '[ $rc = 2 ] && [ "$S" = "$(snap)" ] && grep -q "test_dnoise_ms1 unit test FAILED.*nothing promoted" $V/s2.out'
+  151| S=$(snap); set_version $V/repoA v2b c2 1 0
+  152| rc=$(deploy $V/repoA $V/s2b.out)
+  153| ok "S2b tdf_load unit-test failure: rc 2, node byte- AND mtime-identical, nothing promoted" '[ $rc = 2 ] && [ "$S" = "$(snap)" ] && grep -q "test_tdf_load unit test FAILED.*nothing promoted" $V/s2b.out'
+  154| 
+  155| cp $PROV $V/prov_v1; lib_v1=$(shaf $O/build/lib/libOpenMS.so)
+  156| set_version $V/repoA v3 c3 1 1 BREAK_BUILD
+  157| rc=$(deploy $V/repoA $V/s3.out)
+  158| ok "S3 build failure (calibration changed): rc 2, every input restored, tools untouched" '[ $rc = 2 ] && tree_is v1 && ship_is v1 && clean && [ $(records) = 2 ]'
+  159| ok "S3 failed build had relinked libOpenMS.so (the fixture reproduces the cluster logs)" '[ "$(shaf $O/build/lib/libOpenMS.so)" != "$lib_v1" ]'
+  160| ok "S3 provenance fail-closed: absent, parked as .stale == v1 provenance" '[ ! -e $PROV ] && same $PROV.stale $V/prov_v1 && grep -q FAIL-CLOSED $V/s3.out'
+  161| ok "S3 restored calibration header is newer than the lib the failed build relinked (next make relinks it)" '! (cd $O/build && make -q lib/libOpenMS.so)'
+  162| (cd $O/build && make spextractor > /dev/null 2>&1)
+  163| ok "S3 recovery: make on the restored tree reproduces the v1 binary and lib the parked provenance names" '[ "$(shaf $O/build/lib/libOpenMS.so)" = "$(pv libopenms_sha256 $PROV.stale)" ] && [ "$(shaf $O/build/bin/spextractor)" = "$(pv binary_sha256 $PROV.stale)" ]'
+  164| mv $PROV.stale $PROV
+  165| 
+  166| set_version $V/repoA v4 c1 1 1 BREAK_BUILD
+  167| rc=$(deploy $V/repoA $V/s3b.out)
+  168| ok "S3b build failure (calibration unchanged): rc 2, inputs restored, provenance restored and truthful" '[ $rc = 2 ] && tree_is v1 && same $PROV $V/prov_v1 && prov_truthful && [ ! -e $PROV.stale ] && clean'
+  169| 
+  170| mkdir $R/.deploy.lock && echo "someone else" > $R/.deploy.lock/owner
+  171| S=$(snap); set_version $V/repoA v5 c5 1 1
+  172| rc=$(deploy $V/repoA $V/s4.out)
+  173| ok "S4 lock held: rc 1, REFUSED, node byte- and mtime-identical (no stage left)" '[ $rc = 1 ] && grep -q "REFUSED: another deploy holds" $V/s4.out && [ "$S" = "$(snap)" ]'
+  174| rm -rf $R/.deploy.lock
+  175| 
+  176| printf '4\n' > $O/slow
+  177| git clone -q $V/repoA $V/repoB && git -C $V/repoB config user.email t@t && git -C $V/repoB config user.name t && git -C $V/repoB config commit.gpgsign false
+  178| set_version $V/repoA v6 c6 1 1; set_version $V/repoB v7 c7 1 1
+  179| ( deploy $V/repoA $V/s5a.out > $V/s5a.rc ) &
+  180| wait_for $O/building
+  181| rcb=$(deploy $V/repoB $V/s5b.out); wait; rca=$(cat $V/s5a.rc)
+  182| ok "S5 concurrent: B refused while A builds (rcA $rca, rcB $rcb)" '[ $rca = 0 ] && [ $rcb = 1 ] && grep -q "REFUSED: another deploy holds" $V/s5b.out'
+  183| ok "S5 tree, tools and provenance are exactly A (v6); no byte of B (v7) anywhere on the node" 'tree_is v6 && ship_is v6 && prov_is v6 && prov_truthful && clean && [ -z "$(grep -rl v7 $N --exclude="*.log" --exclude=libsqlite3.a)" ]'
+  184| printf '0\n' > $O/slow
+  185| 
+  186| cp $O/src/openms/source/FORMAT/BrukerTimsFile.cpp $V/bruker.keep; printf 'unpatched\n' > $O/src/openms/source/FORMAT/BrukerTimsFile.cpp
+  187| S=$(snap); set_version $V/repoA v8 c8 1 1
+  188| rc=$(deploy $V/repoA $V/s6.out)
+  189| ok "S6 calibration patch missing: rc 1, node unchanged" '[ $rc = 1 ] && grep -q "no calibration patch" $V/s6.out && [ "$S" = "$(snap)" ]'
+  190| cp $V/bruker.keep $O/src/openms/source/FORMAT/BrukerTimsFile.cpp; (cd $O/build && make spextractor > /dev/null 2>&1)
+  191| 
+  192| S=$(snap); set_version $V/repoA v9 c9 1 1
+  193| rc=$(TORN=TdfLoad.h deploy $V/repoA $V/s7.out)
+  194| ok "S7 torn upload: rc 1, node unchanged" '[ $rc = 1 ] && grep -q "staged files differ" $V/s7.out && [ "$S" = "$(snap)" ]'
+  195| 
+  196| printf '4\n' > $O/slow; set_version $V/repoA v10 c10 1 1
+  197| ( deploy $V/repoA $V/s8.out > $V/s8.rc ) &
+  198| wait_for $O/building; printf '// intruder outside the lock\n' > $O/src/topp/TdfLoad.h; wait; rc=$(cat $V/s8.rc)
+  199| ok "S8 lockless writer during build: rc 2, inputs back to v6, no provenance recorded for the mixed binary" '[ $rc = 2 ] && grep -q "changed during the build" $V/s8.out && tree_is v6 && [ ! -e $PROV ] && [ -e $PROV.stale ] && clean'
+  200| 
+  201| # S9 needs a truthful provenance to lose: rebuild the restored v6 tree, which reproduces what the parked one names
+  202| (cd $O/build && make spextractor > /dev/null 2>&1); mv $PROV.stale $PROV
+  203| ok "S9 setup: the restored tree rebuilds to the parked v6 provenance" 'prov_is v6 && prov_truthful'
+  204| set_version $V/repoA v11 c6 1 1
+  205| ( deploy $V/repoA $V/s9.out > $V/s9.rc ) &
+  206| wait_for $O/building && kill -TERM "$(sed -n 's/^.* pid \([0-9][0-9]*\) .*$/\1/p' $R/.deploy.lock/owner)"
+  207| wait; rc=$(cat $V/s9.rc); wait_gone $O/building; sleep 0.5   # a make the transaction abandoned would finish here
+  208| ok "S9 SIGTERM to the transaction mid-build: it lets make finish, then rolls back every input (rc $rc)" '[ $rc = 143 ] && tree_is v6 && grep -q "ROLLED BACK" $V/s9.out && ! grep -q "DEPLOY COMMITTED" $V/s9.out && clean'
+  209| ok "S9 after the killed build no provenance names a binary it does not describe" '[ ! -e $PROV ] || prov_truthful'
+  210| printf '0\n' > $O/slow
+  211| 
+  212| set_flags no; set_version $V/repoA v12 c12 1 0
+  213| rc=$(deploy $V/repoA $V/s10.out)
+  214| ok "S10 no sqlite3.h in the tool include dirs: test_tdf_load skipped, deploy commits and the provenance says so (rc $rc)" '[ $rc = 0 ] && tree_is v12 && prov_is v12 && prov_truthful && ut_is "skipped(no sqlite3.h in the tool include dirs)" && grep -q "tdf_load unit test SKIPPED" $V/s10.out && grep -q skipped $R/spextractor_unit/test_tdf_load.log && clean'
+  215| set_flags yes; mv $O/build/lib/libsqlite3.a $V/libsqlite3.a.keep; set_version $V/repoA v13 c13 1 1
+  216| rc=$(deploy $V/repoA $V/s10b.out)
+  217| ok "S10b no bundled libsqlite3.a: skipped, commits, provenance names the missing library (rc $rc)" '[ $rc = 0 ] && tree_is v13 && prov_truthful && ut_is "skipped(no $O/build/lib/libsqlite3.a)" && clean'
+  218| mv $V/libsqlite3.a.keep $O/build/lib/libsqlite3.a
+  219| 
+  220| S=$(snap); git -C $V/repoA rm -q tests/test_tdf_load.cpp && git -C $V/repoA commit -qm "drop test_tdf_load"
+  221| rc=$(deploy $V/repoA $V/s11.out)
+  222| ok "S11 a build input missing from the checkout: rc 1, REFUSED before anything reaches the node" '[ $rc = 1 ] && grep -q "REFUSED: tests/test_tdf_load.cpp does not exist" $V/s11.out && [ "$S" = "$(snap)" ]'
+  223| 
+  224| set_version $V/repoA v14 c14 1 1; printf '// uncommitted\n' >> $V/repoA/src/TdfLoad.h
+  225| S=$(snap); rc=$(deploy $V/repoA $V/s12.out)
+  226| ok "S12 uncommitted build input: rc 1, REFUSED naming the file, node unchanged" '[ $rc = 1 ] && grep -q "src/TdfLoad.h" $V/s12.out && grep -q -- "--allow-dirty" $V/s12.out && [ "$S" = "$(snap)" ]'
+  227| rc=$(deploy $V/repoA $V/s12b.out --allow-dirty)
+  228| ok "S12b node argument + --allow-dirty: commits the working-tree bytes as <rev>+dirty (rc $rc)" '[ $rc = 0 ] && same $V/repoA/src/TdfLoad.h $O/src/topp/TdfLoad.h && [ "$(pv git $PROV)" = "$(cat $V/ver/v14/REV)+dirty" ] && prov_truthful && ut_is passed && clean'
+  229| 
+  230| echo "== $PASS passed, $FAIL failed"
+  231| if [ "$FAIL" = 0 ]; then rm -rf "$V"; else echo "   fixture kept for inspection: $V"; fi
+  232| [ "$FAIL" = 0 ]
+```
+
+## 9. Full current text (line-numbered)
+
+### 9.1 src/DnoiseMs1.h (732 lines)
+
+```cpp
+    1| #ifndef SPEXTRACTOR_DNOISE_MS1_H
+    2| #define SPEXTRACTOR_DNOISE_MS1_H
+    3| // Copyright (c) 2026, SpeXtractor authors. BSD-3-Clause.
+    4| //
+    5| // PORTED CODE: this file is a C++ port of the default MS1 path of dnoise v0.1.0
+    6| //   Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; github.com/pgarrett-scripts/dnoise,
+    7| //   tag v0.1.0 (commit fa750c9). MIT License, Copyright (c) 2026 Patrick Garrett.
+    8| // The MIT notice is reproduced in LICENSES/dnoise-MIT.txt and covers the ported logic: src/filter.rs,
+    9| // src/halo.rs, src/dia_ms1.rs, the gate construction in src/writer.rs and src/tdf/mod.rs, and the
+   10| // timsrust 0.4.2 metadata converters dnoise builds that gate with.
+   11| //
+   12| // Header-only and dependency-free for the same reason as TdfMzCalibration.h: the tool and the
+   13| // OpenMS-free unit test (tests/test_dnoise_ms1.cpp) compile the same code.
+   14| //
+   15| // The contract is BIT-IDENTITY with dnoise, not a better filter: for one MS1 frame, the keep mask is
+   16| // exactly the set of points dnoise v0.1.0 (default flags, diaPASEF) writes back -- for GlobalMetadata values
+   17| // that are finite decimal literals equal to zero or of magnitude in [DBL_MIN, DBL_MAX]. A value dnoise would
+   18| // parse otherwise (inf/infinity/nan in any case, overflow to inf, underflow to 0 or a subnormal) makes the port
+   19| // refuse the run where dnoise builds a degenerate gate. Every rule below was
+   20| // checked against the binary's output; each "obvious fix" changes that output measurably (points that
+   21| // differ on D frame 8724, 144,814 kept):
+   22| //   1. Stage order: the streak filter on the raw points, `iterations` passes, each summing only the
+   23| //      previous pass's survivors (1 pass: 24,906); then the halo ONCE, with the streak survivors as
+   24| //      its reference set (raw points as reference: 122); then the window gate ANDed (gate first: 199).
+   25| //   2. Raw u32 intensities from the frame blob, not the corrected ones the loaders return -- opentims computes
+   26| //      (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5), and the Bruker SDK corrects them too. At default
+   27| //      settings they only enter the halo ratio, yet on 24 TNBC 009 frames the corrected values flip 9 of 3.1
+   28| //      million kept points.
+   29| //   3. Streak: min_feature_length counts OCCUPIED scans of a gap-bridged run, not its span; points are
+   30| //      kept by span, which only matters for zero-intensity points.
+   31| //   4. Halo: the reference skips EVERY point in the point's own TOF column (that is what spares a
+   32| //      streak), ties are kept (strict >: 15), and an empty box keeps the point.
+   33| //   5. Gate: timsrust's two-point chord calibration (sqrt-linear over MzAcqRange/DigitizerNumSamples,
+   34| //      linear 1/K0 over max NumScans), NOT TdfMzCalibration.h; +-5 Da on the m/z range when the file
+   35| //      says "Bruker otofControl" (TOF edges move 317-1,953 bins without it); ScanNumEnd -- exclusive in
+   36| //      the schema -- converted as if inclusive (42); the union of every window row of every group.
+   37| //   6. Floating-point contraction. On D the 0.05 1/K0 pad is 59 scans to within an ulp, so gate scan
+   38| //      bounds are floor/ceil of values like 542.9999999999999; fusing `intercept + slope * scan` into
+   39| //      one FMA flips 3 of D's 24 boxes (13 points on 8724). The builder keeps that product apart
+   40| //      through a volatile and is compiled with contraction off; CMakeLists.txt passes -ffp-contract=off
+   41| //      as well. Flags that rewrite more than contraction are refused at compile time below wherever the
+   42| //      compiler announces them in a macro: -ffast-math/-Ofast, -ffinite-math-only, /fp:fast, x87 excess
+   43| //      precision; GCC's -funsafe-math-optimizations, -freciprocal-math, -fassociative-math and
+   44| //      -fno-signed-zeros; clang's -funsafe-math-optimizations and -ffp-model=fast on arm64 (__ARM_FP_FAST).
+   45| //      Only clang slips past: -freciprocal-math, -fassociative-math and -fno-signed-zeros on every target,
+   46| //      -funsafe-math-optimizations and -ffp-model=fast on x86-64. Do not use them: -freciprocal-math,
+   47| //      -funsafe-math-optimizations and -ffp-model=fast each move D's boxes. tests/test_dnoise_ms1.cpp pins
+   48| //      D's boxes, the three FMA-sensitive ones included.
+   49| // Not ported, because dnoise's defaults never reach it on diaPASEF MS1: the mz_ppm width override,
+   50| // frame_half_width neighbourhoods, the selection-polygon gate (skipped whenever DiaFrameMsMsInfo and
+   51| // DiaFrameMsMsWindows map frames to windows), crop, smooth/watershed/box-centroid, and the MS2 paths.
+   52| // Also here, because the in-tool bit-identity rests on them: recover::, which inverts what the Bruker loader
+   53| // delivers (m/z, float32 1/K0, corrected intensity) back to the integers dnoise filters, and FrameCoverage,
+   54| // which holds the tool to denoising every MS1 frame exactly once.
+   55| 
+   56| #pragma once
+   57| #include <algorithm>
+   58| #include <array>
+   59| #include <cfloat>
+   60| #include <charconv>   // integer std::from_chars (parseU32)
+   61| #include <cmath>
+   62| #include <cstddef>
+   63| #include <cstdint>
+   64| #include <limits>
+   65| #include <locale>
+   66| #include <optional>
+   67| #include <sstream>
+   68| #include <stdexcept>
+   69| #include <string>
+   70| #include <utility>
+   71| #include <vector>
+   72| 
+   73| // Point 6: strict IEEE binary64 or no build, for every value-changing flag the compiler announces in a macro (GCC one per
+   74| // flag, clang on arm64 only __ARM_FP_FAST); none can be switched off per function. __NO_TRAPPING_MATH__ is left out: it is
+   75| // clang's default behaviour, under which every golden was measured.
+   76| #if defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__) || defined(_M_FP_FAST) || \
+   77|     (defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD != 0) || defined(__RECIPROCAL_MATH__) || defined(__ASSOCIATIVE_MATH__) || \
+   78|     defined(__NO_SIGNED_ZEROS__) || defined(__ARM_FP_FAST)
+   79| #error "DnoiseMs1.h needs strict IEEE binary64 arithmetic to stay bit-identical with dnoise: build without -ffast-math/-Ofast, -ffinite-math-only, -funsafe-math-optimizations, -freciprocal-math, -fassociative-math, -fno-signed-zeros, -ffp-model=fast, /fp:fast and x87 excess precision (-mfpmath=387)"
+   80| #endif
+   81| 
+   82| namespace spx::dnoise
+   83| {
+   84| 
+   85| inline constexpr const char* kPortedFrom = "dnoise v0.1.0 (fa750c9)";
+   86| 
+   87| /// dnoise v0.1.0's MS1 knobs at its built-in defaults (params.rs:23-34, 52-60, 189-196; main.rs:367-437, 598-607).
+   88| /// Integer widths follow the Rust fields; unsigned arithmetic saturates or wraps where Rust's does.
+   89| struct Params
+   90| {
+   91|   // streak ("vertical IM feature") filter, filter.rs
+   92|   std::uint32_t mz_half_width = 3;          ///< window [c - w, c + w] around each TOF index c, saturating
+   93|   std::size_t min_feature_length = 5;       ///< occupied scans a run needs; bridged empty scans do not count
+   94|   std::size_t max_internal_gap = 2;         ///< empty scans a run may bridge (a larger step breaks it)
+   95|   std::uint64_t min_window_intensity = 0;   ///< window sum a scan needs to count as occupied (and > 0)
+   96|   std::uint64_t min_feature_intensity = 0;  ///< window sum over the run's whole span
+   97|   std::size_t iterations = 2;               ///< streak passes, each over the previous survivors; 0 = no streak pass (halo and gate still apply)
+   98|   // halo filter, halo.rs
+   99|   bool halo = true;
+  100|   double halo_peak_fraction = 0.15;         ///< keep iff I >= fraction * (max off-column I in the box)
+  101|   std::uint32_t halo_mz_idx_half_width = 80;
+  102|   std::size_t halo_scan_half_width = 2;
+  103|   // diaPASEF MS1 window gate, dia_ms1.rs + writer.rs:978-1021
+  104|   bool dia_ms1_window = true;
+  105|   double dia_ms1_mz_pad = 5.0;              ///< Da added on both sides of every isolation window
+  106|   double dia_ms1_im_pad = 0.05;             ///< 1/K0 added on both sides
+  107| };
+  108| 
+  109| /// What timsrust 0.4.2's MetadataReader reads for the gate: GlobalMetadata values exactly as stored (TEXT,
+  110| /// unparsed -- the builder parses them the way Rust does; std::nullopt for an absent key), and
+  111| /// SELECT MAX(NumScans) FROM Frames over ALL frames, MS1 and MS2 alike.
+  112| struct RunMeta
+  113| {
+  114|   std::optional<std::string> acquisition_software;         ///< AcquisitionSoftware
+  115|   std::optional<std::string> mz_acq_range_lower;           ///< MzAcqRangeLower
+  116|   std::optional<std::string> mz_acq_range_upper;           ///< MzAcqRangeUpper
+  117|   std::optional<std::string> digitizer_num_samples;        ///< DigitizerNumSamples
+  118|   std::optional<std::string> one_over_k0_acq_range_lower;  ///< OneOverK0AcqRangeLower
+  119|   std::optional<std::string> one_over_k0_acq_range_upper;  ///< OneOverK0AcqRangeUpper
+  120|   std::uint32_t max_num_scans = 0;
+  121| };
+  122| 
+  123| /// One row of tdf/mod.rs:246-249, i.e. of
+  124| ///   SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows
+  125| ///   WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL
+  126| /// No such table means no rows. DISTINCT does not change the union, so duplicates are harmless.
+  127| struct WindowRow
+  128| {
+  129|   std::int64_t scan_num_begin = 0;
+  130|   std::int64_t scan_num_end = 0;   ///< exclusive in the schema; dnoise converts it as if inclusive
+  131|   double isolation_mz = 0.0;
+  132|   double isolation_width = 0.0;
+  133| };
+  134| 
+  135| /// A padded isolation window as an inclusive integer (scan, TOF index) box (dia_ms1.rs TofScanBox).
+  136| struct GateBox
+  137| {
+  138|   std::uint32_t scan_lo = 0, scan_hi = 0, tof_lo = 0, tof_hi = 0;
+  139| };
+  140| 
+  141| /// The union of all padded windows as per-scan merged TOF intervals (dia_ms1.rs DiaMs1Gate). Immutable once
+  142| /// built, so one gate serves every thread.
+  143| class Ms1WindowGate
+  144| {
+  145| public:
+  146|   /// dia_ms1.rs:43-73. No gate without boxes or scans. A box with tof_hi < tof_lo is skipped; scan bounds are
+  147|   /// clamped onto the last scan; touching intervals (lo <= hi + 1) merge, which leaves membership unchanged.
+  148|   static std::optional<Ms1WindowGate> fromBoxes(const std::vector<GateBox>& boxes, std::uint32_t num_scans)
+  149|   {
+  150|     if (boxes.empty() || num_scans == 0) return std::nullopt;
+  151|     std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> per_scan(num_scans);
+  152|     for (const GateBox& b : boxes)
+  153|     {
+  154|       if (b.tof_hi < b.tof_lo) continue;
+  155|       const std::uint32_t lo = std::min(b.scan_lo, num_scans - 1), hi = std::min(b.scan_hi, num_scans - 1);
+  156|       for (std::uint32_t s = lo; s <= hi; ++s) per_scan[s].emplace_back(b.tof_lo, b.tof_hi);
+  157|     }
+  158|     Ms1WindowGate g;
+  159|     g.boxes_ = boxes;
+  160|     g.row_.assign(1, 0);
+  161|     for (auto& row : per_scan)
+  162|     {
+  163|       std::sort(row.begin(), row.end());
+  164|       for (const auto& iv : row)
+  165|       {
+  166|         const bool merge = g.iv_.size() > g.row_.back() &&
+  167|                            iv.first <= (g.iv_.back().second == std::numeric_limits<std::uint32_t>::max() ? g.iv_.back().second : g.iv_.back().second + 1);
+  168|         if (merge) g.iv_.back().second = std::max(g.iv_.back().second, iv.second);
+  169|         else g.iv_.push_back(iv);
+  170|       }
+  171|       g.row_.push_back(g.iv_.size());
+  172|     }
+  173|     return g;
+  174|   }
+  175| 
+  176|   /// dia_ms1.rs:76-84: inside some window; a scan past the run's last scan is outside.
+  177|   bool contains(std::uint32_t scan, std::uint32_t tof) const
+  178|   {
+  179|     if (scan >= numScans()) return false;
+  180|     const auto b = iv_.begin() + static_cast<std::ptrdiff_t>(row_[scan]);
+  181|     const auto e = iv_.begin() + static_cast<std::ptrdiff_t>(row_[scan + 1]);
+  182|     const auto it = std::partition_point(b, e, [tof](const std::pair<std::uint32_t, std::uint32_t>& iv) { return iv.second < tof; });
+  183|     return it != e && tof >= it->first;
+  184|   }
+  185| 
+  186|   std::uint32_t numScans() const { return static_cast<std::uint32_t>(row_.size() - 1); }
+  187|   /// The padded boxes in window-row order, before the per-scan clamp and merge (for logging and tests).
+  188|   const std::vector<GateBox>& boxes() const { return boxes_; }
+  189| 
+  190| private:
+  191|   Ms1WindowGate() = default;
+  192|   std::vector<GateBox> boxes_;
+  193|   std::vector<std::size_t> row_;                                ///< intervals of scan s: [row_[s], row_[s + 1])
+  194|   std::vector<std::pair<std::uint32_t, std::uint32_t>> iv_;     ///< inclusive [tof_lo, tof_hi], sorted per scan
+  195| };
+  196| 
+  197| namespace detail
+  198| {
+  199| /// Rust's `f as u32`: saturating, NaN -> 0.
+  200| inline std::uint32_t asU32(double v)
+  201| {
+  202|   if (!(v > 0.0)) return 0;
+  203|   if (v >= 4294967296.0) return std::numeric_limits<std::uint32_t>::max();
+  204|   return static_cast<std::uint32_t>(v);
+  205| }
+  206| 
+  207| /// `str::parse::<u32>()`: one optional '+', then decimal digits, no overflow, nothing else.
+  208| inline bool parseU32(const std::string& s, std::uint32_t& out)
+  209| {
+  210|   const char* b = s.data();
+  211|   const char* const e = b + s.size();
+  212|   if (b != e && *b == '+') ++b;
+  213|   if (b == e || *b < '0' || *b > '9') return false;
+  214|   const auto r = std::from_chars(b, e, out);
+  215|   return r.ec == std::errc() && r.ptr == e;
+  216| }
+  217| 
+  218| /// `str::parse::<f64>()` on the finite-decimal domain of the contract at the top: Rust's grammar
+  219| /// [+-]? (d+ | d+.d* | d*.d+) ([eE][+-]?d+)?, no whitespace, correctly rounded, locale-independent (a Qt application
+  220| /// may have set a decimal-comma C locale), and a value that is zero or of magnitude in [DBL_MIN, DBL_MAX]. inf, nan,
+  221| /// overflow, underflow to zero and subnormals -- all of which Rust accepts -- are refused, alike on every library.
+  222| inline bool parseF64(const std::string& s, double& out)
+  223| {
+  224|   std::size_t i = 0;
+  225|   if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+  226|   const std::size_t start = i;
+  227|   bool nonzero = false;   // a non-zero MANTISSA digit: "0e999" is zero, "1e-999" underflows
+  228|   auto digits = [&s, &i, &nonzero](bool mantissa) {
+  229|     std::size_t k = 0;
+  230|     for (; i < s.size() && s[i] >= '0' && s[i] <= '9'; ++i, ++k) nonzero = nonzero || (mantissa && s[i] != '0');
+  231|     return k; };
+  232|   std::size_t mantissa = digits(true);
+  233|   if (i < s.size() && s[i] == '.') { ++i; mantissa += digits(true); }
+  234|   if (mantissa == 0) return false;
+  235|   if (i < s.size() && (s[i] == 'e' || s[i] == 'E'))
+  236|   {
+  237|     ++i;
+  238|     if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+  239|     if (digits(false) == 0) return false;
+  240|   }
+  241|   if (i != s.size()) return false;
+  242|   const std::string body = (s[0] == '-' ? "-" : "") + s.substr(start);
+  243|   // ONE conversion path on every platform: the classic-locale stream, whose num_get converts through strtod in the C
+  244|   // locale (correctly rounded; the grammar is already checked, so it only converts). Libraries disagree on how they
+  245|   // report a range error -- failbit, or a silent 0 or subnormal -- so the domain is checked on the value instead.
+  246|   std::istringstream in(body);
+  247|   in.imbue(std::locale::classic());
+  248|   double v = 0.0;
+  249|   in >> v;
+  250|   const double a = std::fabs(v);
+  251|   if (in.fail() || (nonzero ? !(a >= DBL_MIN && a <= DBL_MAX) : v != 0.0)) return false;
+  252|   out = v;
+  253|   return true;
+  254| }
+  255| } // namespace detail
+  256| 
+  257| /// buildMs1WindowGate's result.
+  258| struct GateBuild
+  259| {
+  260|   std::optional<Ms1WindowGate> gate;  ///< no value: this run has no gate (not requested, no usable window rows, no scans)
+  261|   std::string error;                  ///< non-empty: the run is refused here -- a timsrust MetadataReader error, or a metadata value outside the port's finite-decimal domain
+  262| };
+  263| 
+  264| // Contraction off for everything the gate builder and the point recovery compute (point 6 at the top). Clang attaches its
+  265| // pragma to each operation, so it survives inlining, but an explicit -ffp-contract=fast overrides it -- hence also the
+  266| // volatile in the builder. GCC applies the optimize pragma to every function defined before pop_options.
+  267| #if defined(__GNUC__) && !defined(__clang__)
+  268| #pragma GCC push_options
+  269| #pragma GCC optimize("fp-contract=off")
+  270| #endif
+  271| 
+  272| /// The run's diaPASEF MS1 window gate, exactly as dnoise v0.1.0 builds it once per run (writer.rs:978-1021 with
+  273| /// timsrust 0.4.2 metadata_reader.rs:59-102, tof_to_mz.rs, scan_to_im.rs), in the Rust evaluation order.
+  274| inline GateBuild buildMs1WindowGate(const RunMeta& meta, const std::vector<WindowRow>& rows, const Params& p)
+  275| {
+  276| #if defined(__clang__)
+  277|   #pragma clang fp contract(off)
+  278| #endif
+  279|   GateBuild out;
+  280|   if (!p.dia_ms1_window) return out;
+  281|   // tdf/mod.rs:251-252 cast with `i64 as u32` (wrapping); :265 drops ScanNumEnd <= ScanNumBegin.
+  282|   std::vector<WindowRow> usable;
+  283|   for (const WindowRow& r : rows)
+  284|     if (static_cast<std::uint32_t>(r.scan_num_end) > static_cast<std::uint32_t>(r.scan_num_begin)) usable.push_back(r);
+  285|   if (usable.empty()) return out;   // writer.rs:984-986: no gate, and the metadata is never read
+  286| 
+  287|   auto number = [&out](const std::optional<std::string>& v, const char* key, double& x) {
+  288|     if (!v) out.error = std::string("GlobalMetadata has no ") + key;
+  289|     else if (!detail::parseF64(*v, x)) out.error = std::string("GlobalMetadata ") + key + " '" + *v + "' is not a finite decimal number of magnitude zero or in [DBL_MIN, DBL_MAX]";
+  290|     return out.error.empty();
+  291|   };
+  292|   double mz_min = 0.0, mz_max = 0.0, im_min = 0.0, im_max = 0.0;
+  293|   std::uint32_t tof_max_index = 0;
+  294|   if (!meta.acquisition_software) { out.error = "GlobalMetadata has no AcquisitionSoftware"; return out; }
+  295|   if (!number(meta.mz_acq_range_lower, "MzAcqRangeLower", mz_min) || !number(meta.mz_acq_range_upper, "MzAcqRangeUpper", mz_max) ||
+  296|       !number(meta.one_over_k0_acq_range_lower, "OneOverK0AcqRangeLower", im_min) ||
+  297|       !number(meta.one_over_k0_acq_range_upper, "OneOverK0AcqRangeUpper", im_max))
+  298|     return out;
+  299|   if (!meta.digitizer_num_samples || !detail::parseU32(*meta.digitizer_num_samples, tof_max_index))
+  300|   {
+  301|     out.error = "GlobalMetadata DigitizerNumSamples '" + meta.digitizer_num_samples.value_or("") + "' is missing or not a u32";
+  302|     return out;
+  303|   }
+  304|   if (*meta.acquisition_software == "Bruker otofControl") { mz_min -= 5.0; mz_max += 5.0; }   // metadata_reader.rs:67-70
+  305|   if (meta.max_num_scans == 0) return out;                                                     // writer.rs:988-991
+  306|   const std::uint32_t num_scans = meta.max_num_scans;
+  307| 
+  308|   const double tof_intercept = std::sqrt(mz_min);                                              // Tof2MzConverter::from_boundaries
+  309|   const double tof_slope = (std::sqrt(mz_max) - tof_intercept) / static_cast<double>(tof_max_index);
+  310|   const double scan_intercept = im_max;                                                        // Scan2ImConverter::from_boundaries
+  311|   const double scan_slope = (im_min - scan_intercept) / static_cast<double>(num_scans);
+  312|   std::vector<GateBox> boxes;
+  313|   for (const WindowRow& r : usable)
+  314|   {
+  315|     const double mz_lo = r.isolation_mz - r.isolation_width / 2.0;                            // tdf/mod.rs:258-259
+  316|     const double mz_hi = r.isolation_mz + r.isolation_width / 2.0;
+  317|     const double t0 = (std::sqrt(mz_lo - p.dia_ms1_mz_pad) - tof_intercept) / tof_slope;       // Tof2MzConverter::invert
+  318|     const double t1 = (std::sqrt(mz_hi + p.dia_ms1_mz_pad) - tof_intercept) / tof_slope;
+  319|     GateBox b;
+  320|     b.tof_lo = detail::asU32(std::fmax(std::floor(std::fmin(t0, t1)), 0.0));                  // f64::min/max ignore NaN, as fmin/fmax
+  321|     b.tof_hi = detail::asU32(std::fmax(std::ceil(std::fmax(t1, t0)), 0.0));
+  322|     // Scan2ImConverter::convert as two separate IEEE operations; the binary matches only the unfused result. The
+  323|     // product passes through a volatile, a barrier no optimiser can fuse across: clang does not honour its pragma
+  324|     // under an explicit -ffp-contract=fast.
+  325|     volatile double scaled0 = scan_slope * static_cast<double>(static_cast<std::uint32_t>(r.scan_num_begin));
+  326|     volatile double scaled1 = scan_slope * static_cast<double>(static_cast<std::uint32_t>(r.scan_num_end));
+  327|     const double im0 = scan_intercept + scaled0;
+  328|     const double im1 = scan_intercept + scaled1;
+  329|     const double s0 = (std::fmax(im0, im1) + p.dia_ms1_im_pad - scan_intercept) / scan_slope;  // Scan2ImConverter::invert
+  330|     const double s1 = (std::fmin(im0, im1) - p.dia_ms1_im_pad - scan_intercept) / scan_slope;
+  331|     b.scan_lo = detail::asU32(std::fmax(std::floor(std::fmin(s0, s1)), 0.0));
+  332|     b.scan_hi = std::min(detail::asU32(std::fmax(std::ceil(std::fmax(s0, s1)), 0.0)), num_scans - 1);
+  333|     boxes.push_back(b);
+  334|   }
+  335|   out.gate = Ms1WindowGate::fromBoxes(boxes, num_scans);
+  336|   return out;
+  337| }
+  338| 
+  339| /// [dnoise] Point recovery. The Bruker loader delivers m/z, a float32 1/K0 and a corrected intensity, not the (scan, TOF
+  340| /// bin, raw count) dnoise filters, so the tool (DnoiseRun in spextractor.cpp) inverts all three per point and refuses the
+  341| /// run on anything that does not recover exactly. The arithmetic lives here -- dependency-free, contraction off, pinned by
+  342| /// tests/test_dnoise_ms1.cpp against the loader's forward maths on both benchmark files' metadata -- and the caller turns a
+  343| /// Refusal into its message.
+  344| namespace recover
+  345| {
+  346| inline constexpr double kTofTol = 1e-6;   ///< bins: the round trip is exact to 2.3e-10 on both benchmark files
+  347| inline constexpr float kImTol = 1e-6f;    ///< 1/K0: a float32 step is ~1.2e-7 there, adjacent scans >= 8.8e-4 apart
+  348| 
+  349| /// opentims' intensity correction of a frame, 100.0 / AccumulationTime (opentims.cpp:74), from the column's whole sqlite
+  350| /// text. opentims converts that text with atof inside its read_sql locale guard, so in the C locale; detail::parseF64 is
+  351| /// the same correctly rounded conversion on every text it accepts, whatever LC_NUMERIC the process has. false unless the
+  352| /// text is a finite decimal number > 0.
+  353| inline bool opentimsCorrection(const std::string& text, double& corr)
+  354| {
+  355|   double at = 0.0;
+  356|   if (!detail::parseF64(text, at) || !(at > 0.0)) return false;
+  357|   corr = 100.0 / at;
+  358|   return true;
+  359| }
+  360| 
+  361| /// Why the raw counts of MS1 frame @p fid cannot be recovered through its correction @p corr, or empty when they can. At
+  362| /// corr >= 1 (AccumulationTime <= 100 ms) raw counts below 2^24 do not collide (checked exhaustively at 19 values, 1 + 1 ulp
+  363| /// among them); below 1 they do, from raw 3 at 125 ms and from raw 1191 at 100.042 ms. 1e6 is a plausibility bound.
+  364| inline std::string correctionRefusal(std::size_t fid, double corr)
+  365| {
+  366|   if (corr >= 1.0 && corr < 1e6) return std::string();
+  367|   std::ostringstream m;   // the classic locale, as for every number this header reads
+  368|   m.imbue(std::locale::classic());
+  369|   m << "MS1 frame " << fid << ": ";
+  370|   if (corr < 1.0)
+  371|     m << "AccumulationTime " << 100.0 / corr << " ms exceeds 100 ms, so opentims' intensity correction 100/" << 100.0 / corr << " = "
+  372|       << corr << " < 1 maps several raw counts to one intensity and the raw counts dnoise filters cannot be recovered";
+  373|   else
+  374|     m << "opentims' intensity correction 100 / AccumulationTime = " << corr << " is not invertible";
+  375|   return m.str();
+  376| }
+  377| 
+  378| /// The float32 1/K0 of each of @p n_scans scans under one TimsCalibration row @p c (C0..C9) as the loader converts them --
+  379| /// RationalScan2ImConverter::applyFormula term for term, then frameToSpectrum's float cast -- into @p asc, ascending;
+  380| /// @p falls: 1/K0 falls with the scan, so @p asc is reversed. Empty, or why scanOf cannot be exact over these scans: the
+  381| /// values must rise strictly by more than 4 * kImTol, so no float32 lies within kImTol of two of them. 0 scans give an
+  382| /// empty table, which matches nothing. After a refusal @p asc and @p falls mean nothing.
+  383| inline std::string buildScanTable(const std::array<double, 10>& c, std::size_t n_scans, std::vector<float>& asc, bool& falls)
+  384| {
+  385| #if defined(__clang__)
+  386|   #pragma clang fp contract(off)
+  387| #endif
+  388|   std::vector<float>& v = asc;
+  389|   v.assign(n_scans, 0.0f);
+  390|   for (std::size_t s = 0; s < n_scans; ++s)
+  391|   {
+  392|     double V = c[2] + ((c[3] - c[2]) / c[1]) * ((double)s - c[4] - c[0]);
+  393|     if (V == 0.0) V = 1e-10;
+  394|     double denom = c[6] + c[7] / V;
+  395|     if (denom == 0.0) denom = 1e-10;
+  396|     v[s] = static_cast<float>(1.0 / denom);
+  397|   }
+  398|   falls = n_scans > 1 && v[1] < v[0];
+  399|   if (falls) std::reverse(v.begin(), v.end());
+  400|   for (std::size_t s = 1; s < n_scans; ++s)
+  401|     if (!(v[s] - v[s - 1] > 4.0f * kImTol))   // strictly monotonic, finite, no two scans within reach of one value
+  402|       return "the TimsCalibration model does not separate every scan by more than " + std::to_string(4.0f * kImTol) + " 1/K0";
+  403|   return std::string();
+  404| }
+  405| 
+  406| /// The scan whose float32 1/K0 in @p asc (reversed when @p falls) lies within kImTol of @p v; -1 for none.
+  407| inline long scanOf(const std::vector<float>& asc, bool falls, float v)
+  408| {
+  409|   if (asc.empty()) return -1;
+  410|   const float* b = asc.data();
+  411|   for (std::size_t n = asc.size(); n > 1; ) { const std::size_t h = n / 2; if (b[h] <= v) b += h; n -= h; }   // the last entry <= v, else the first
+  412|   std::size_t i = (std::size_t)(b - asc.data());
+  413|   if (i + 1 < asc.size() && std::fabs(asc[i + 1] - v) < std::fabs(asc[i] - v)) ++i;
+  414|   if (!(std::fabs(asc[i] - v) <= kImTol)) return -1;
+  415|   return falls ? (long)(asc.size() - 1 - i) : (long)i;
+  416| }
+  417| 
+  418| /// Why a spectrum cannot be denoised as a raw frame, or one of its points not recovered.
+  419| enum class Refusal
+  420| {
+  421|   none,
+  422|   frame,           ///< its frame id is 0, past the Frames table, or not an MS1 frame (MsMsType 0)
+  423|   peaks,           ///< it holds other than the frame's NumPeaks points: not the whole raw frame
+  424|   im,              ///< it has points but no 1/K0 per point
+  425|   tof,             ///< the m/z is not the MzCalibration table model's value of a TOF bin (within kTofTol)
+  426|   scan,            ///< the 1/K0 is not the TimsCalibration model's value of one of the frame's scans (within kImTol)
+  427|   intensity,       ///< the intensity is not opentims' correction of exactly one raw count
+  428|   intensity_range  ///< the intensity is >= 2^24 = 16777216 (inf included): its float32 no longer identifies one raw count
+  429| };
+  430| 
+  431| /// The checks on a spectrum before any of its points, in this order. @p frames is the run's Frames table by Id (any row
+  432| /// type with msms_type and num_peaks: TdfDnoiseInputs::Frame in the tool), @p n the spectrum's points, @p has_im whether it
+  433| /// carries a 1/K0 array and @p im_n that array's size (ignored without one). A frame without points needs no 1/K0 array.
+  434| template <class FrameRow>
+  435| inline Refusal frameCheck(const std::vector<FrameRow>& frames, std::uint32_t fid, std::size_t n, bool has_im, std::size_t im_n)
+  436| {
+  437|   if (fid == 0 || fid >= frames.size() || frames[fid].msms_type != 0) return Refusal::frame;
+  438|   if (n != frames[fid].num_peaks) return Refusal::peaks;
+  439|   if (n != 0 && (!has_im || im_n != n)) return Refusal::im;
+  440|   return Refusal::none;
+  441| }
+  442| 
+  443| /// One point of a frame with factor @p b (Cal::mzToTof inverts the m/z model the loader calibrated with:
+  444| /// TdfMzCalibration in the tool), correction @p corr (correctionRefusal empty, so the search visits at most five raw
+  445| /// counts), scan table @p asc / @p falls (buildScanTable) and @p num_scans scans: the TOF bin, scan and raw count the
+  446| /// loader turned into @p mz, @p im and @p v. Checked in that order; on Refusal::none @p tof, @p scan and @p raw hold the
+  447| /// point. For a message: @p t is the fractional TOF, @p hits the raw counts whose correction is @p v (0 until the
+  448| /// intensity is checked).
+  449| template <class Cal>
+  450| inline Refusal recoverPoint(const Cal& cal, double b, double mz, float im, float v, double corr, const std::vector<float>& asc,
+  451|                             bool falls, std::uint32_t num_scans, std::uint32_t& tof, std::uint32_t& scan, std::uint32_t& raw,
+  452|                             double& t, int& hits)
+  453| {
+  454| #if defined(__clang__)
+  455|   #pragma clang fp contract(off)
+  456| #endif
+  457|   hits = 0;
+  458|   t = cal.mzToTof(mz, b);
+  459|   const double bin = std::nearbyint(t);
+  460|   if (!(std::fabs(t - bin) <= kTofTol && bin >= 0.0 && bin <= 4294967295.0)) return Refusal::tof;
+  461|   const long s = scanOf(asc, falls, im);
+  462|   if (s < 0 || (std::uint32_t)s >= num_scans) return Refusal::scan;
+  463|   if (v >= 16777216.0f) return Refusal::intensity_range;   // a float32 holds every count below 2^24 exactly, and no more
+  464|   std::uint32_t found = 0;
+  465|   int n = 0;
+  466|   if (v >= 0.0f && v < 16777216.0f && v == std::floor(v))
+  467|     for (double r = std::max(0.0, std::floor((v - 0.5) / corr) - 1.0), r_end = std::ceil((v + 0.5) / corr) + 1.0; r <= r_end; r += 1.0)
+  468|       if ((std::uint32_t)(r * corr + 0.5) == (std::uint32_t)v) { found = (std::uint32_t)r; ++n; }   // opentims.cpp:225: double(raw) * correction + 0.5, into a uint32
+  469|   hits = n;
+  470|   if (n != 1) return Refusal::intensity;
+  471|   tof = (std::uint32_t)bin; scan = (std::uint32_t)s; raw = found;
+  472|   return Refusal::none;
+  473| }
+  474| } // namespace recover
+  475| 
+  476| #if defined(__GNUC__) && !defined(__clang__)
+  477| #pragma GCC pop_options
+  478| #endif
+  479| 
+  480| /// Points left after each stage of one frame, for logging.
+  481| struct FrameCounts
+  482| {
+  483|   std::uint64_t raw = 0;
+  484|   std::uint64_t after_streak = 0;
+  485|   std::uint64_t after_halo = 0;   ///< == after_streak with the halo off
+  486|   std::uint64_t kept = 0;         ///< after the window gate; == after_halo without one
+  487| };
+  488| 
+  489| /// Working memory of denoiseMs1Frame, one per thread, reused so a thread's frames do not reallocate.
+  490| /// Its contents between calls mean nothing.
+  491| struct Scratch
+  492| {
+  493|   std::vector<std::uint32_t> idx, idx2;             ///< radix sort by TOF
+  494|   std::vector<std::uint32_t> tof, scan, inten, id;  ///< live points in TOF order; id = input position
+  495|   std::vector<std::uint8_t> mark;
+  496|   std::vector<std::uint64_t> sum;                   ///< per-scan window sums, valid where stamp == the window
+  497|   std::vector<std::uint32_t> stamp;
+  498|   std::vector<std::uint32_t> touched;
+  499|   std::vector<std::pair<std::uint32_t, std::uint32_t>> spans;
+  500|   std::vector<std::size_t> row, cursor;             ///< halo: survivors of scan s at [row[s], row[s + 1])
+  501|   std::vector<std::uint32_t> htof, hinten, hpos;
+  502| };
+  503| 
+  504| namespace detail
+  505| {
+  506| /// Drop the live points (TOF-ordered arrays of @p w) whose mark is 0; returns how many remain.
+  507| inline std::size_t compact(Scratch& w, std::size_t m)
+  508| {
+  509|   std::size_t k = 0;
+  510|   for (std::size_t j = 0; j < m; ++j)
+  511|     if (w.mark[j])
+  512|     {
+  513|       w.tof[k] = w.tof[j]; w.scan[k] = w.scan[j]; w.inten[k] = w.inten[j]; w.id[k] = w.id[j];
+  514|       ++k;
+  515|     }
+  516|   return k;
+  517| }
+  518| 
+  519| /// One streak pass (filter.rs:14-129) over the first @p m live points; returns the survivors left in place.
+  520| inline std::size_t streakPass(Scratch& w, std::size_t m, std::size_t num_scans, const Params& p)
+  521| {
+  522|   const std::uint32_t* const t = w.tof.data();
+  523|   const std::uint32_t* const s = w.scan.data();
+  524|   const std::uint32_t* const v = w.inten.data();
+  525|   const std::uint32_t hw = p.mz_half_width, u32max = std::numeric_limits<std::uint32_t>::max();
+  526|   w.mark.assign(m, 0);
+  527|   w.stamp.assign(num_scans, 0);
+  528|   w.sum.resize(num_scans);
+  529|   std::uint32_t window = 0;   // at most one window per live point, and m < 2^32
+  530|   std::size_t lo = 0, hi = 0;
+  531|   for (std::size_t k = 0; k < m;)
+  532|   {
+  533|     const std::uint32_t c = t[k];
+  534|     std::size_t kb = k + 1;
+  535|     while (kb < m && t[kb] == c) ++kb;   // the block of points at TOF c; only these are decided here
+  536|     // [c - w, c + w], saturating (filter.rs:48-51). Both ends only grow with c, so two pointers replace the
+  537|     // binary searches.
+  538|     const std::uint32_t lo_val = c >= hw ? c - hw : 0, hi_val = c <= u32max - hw ? c + hw : u32max;
+  539|     while (t[lo] < lo_val) ++lo;
+  540|     while (hi < m && t[hi] <= hi_val) ++hi;
+  541|     ++window;
+  542|     w.touched.clear();
+  543|     for (std::size_t j = lo; j < hi; ++j)
+  544|     {
+  545|       const std::uint32_t sc = s[j];
+  546|       if (w.stamp[sc] != window) { w.stamp[sc] = window; w.sum[sc] = 0; w.touched.push_back(sc); }
+  547|       w.sum[sc] += v[j];
+  548|     }
+  549|     auto occupied = [&w, &p](std::uint32_t sc) { return w.sum[sc] > 0 && w.sum[sc] >= p.min_window_intensity; };
+  550|     std::size_t n_occupied = 0;
+  551|     for (const std::uint32_t sc : w.touched) n_occupied += occupied(sc);
+  552|     // A run holds at most every occupied scan of the window, so fewer than min_feature_length accept nothing.
+  553|     if (n_occupied != 0 && n_occupied >= p.min_feature_length)
+  554|     {
+  555|       std::sort(w.touched.begin(), w.touched.end());
+  556|       w.spans.clear();
+  557|       std::size_t first = 0, last = 0, count = 0;   // positions in touched of the open run's first/last occupied scan
+  558|       auto close = [&]() {
+  559|         if (count < p.min_feature_length) return;   // occupied scans, not the span (filter.rs:86-92)
+  560|         if (p.min_feature_intensity > 0)            // the span's sum, sub-floor scans included (filter.rs:93-96)
+  561|         {
+  562|           std::uint64_t total = 0;
+  563|           for (std::size_t q = first; q <= last; ++q) total += w.sum[w.touched[q]];
+  564|           if (total < p.min_feature_intensity) return;
+  565|         }
+  566|         w.spans.emplace_back(w.touched[first], w.touched[last]);
+  567|       };
+  568|       bool open = false;
+  569|       for (std::size_t q = 0; q < w.touched.size(); ++q)
+  570|       {
+  571|         if (!occupied(w.touched[q])) continue;
+  572|         if (open && static_cast<std::size_t>(w.touched[q] - w.touched[last]) > p.max_internal_gap + 1) { close(); open = false; }
+  573|         if (!open) { open = true; first = q; count = 0; }
+  574|         last = q;
+  575|         ++count;
+  576|       }
+  577|       if (open) close();
+  578|       if (!w.spans.empty())
+  579|         for (std::size_t j = k; j < kb; ++j)   // kept iff the scan lies in an accepted run's span (filter.rs:108-118)
+  580|         {
+  581|           const std::uint32_t sc = s[j];
+  582|           const auto sp = std::partition_point(w.spans.begin(), w.spans.end(),
+  583|                                                [sc](const std::pair<std::uint32_t, std::uint32_t>& r) { return r.second < sc; });
+  584|           if (sp != w.spans.end() && sc >= sp->first) w.mark[j] = 1;
+  585|         }
+  586|     }
+  587|     k = kb;
+  588|   }
+  589|   return compact(w, m);
+  590| }
+  591| } // namespace detail
+  592| 
+  593| /// dnoise v0.1.0's default MS1 denoising of ONE frame (writer.rs:838-853). Inputs are the frame's points in any
+  594| /// order: 0-based scan index (< @p num_scans, the frame's NumScans), TOF index, and RAW blob intensity. @p gate is
+  595| /// the run's buildMs1WindowGate() result, or nullptr for none. On return keep[i] == 1 iff dnoise keeps point i.
+  596| /// A pure function of its inputs: @p w is working memory only, so any thread may process any frame.
+  597| /// Throws std::invalid_argument for a scan index >= num_scans (dnoise panics there), and -- before any allocation, and
+  598| /// before @p keep or an input point is touched -- for more than 2^32-1 points or scans: points are indexed as u32, and
+  599| /// num_scans <= 2^32-1 keeps `num_scans + 1` and `scan + 1` from wrapping (OpenMS is 64-bit only).
+  600| inline FrameCounts denoiseMs1Frame(const std::uint32_t* scan, const std::uint32_t* tof, const std::uint32_t* intensity,
+  601|                                    std::size_t n, std::size_t num_scans, const Params& p, const Ms1WindowGate* gate,
+  602|                                    Scratch& w, std::vector<std::uint8_t>& keep)
+  603| {
+  604|   FrameCounts c;
+  605|   c.raw = n;
+  606|   if (n > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("dnoise: more than 2^32-1 points in one frame");
+  607|   if (num_scans > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("dnoise: more than 2^32-1 scans in one frame");
+  608|   keep.assign(n, 0);
+  609|   if (n == 0) return c;
+  610|   std::uint32_t max_tof = 0;
+  611|   for (std::size_t i = 0; i < n; ++i)
+  612|   {
+  613|     if (scan[i] >= num_scans)
+  614|       throw std::invalid_argument("dnoise: scan index " + std::to_string(scan[i]) + " outside a frame of " + std::to_string(num_scans) + " scans");
+  615|     max_tof = std::max(max_tof, tof[i]);
+  616|   }
+  617| 
+  618|   // Points in TOF order (stable LSD radix sort, 11-bit digits); set semantics make the tie order irrelevant.
+  619|   w.idx.resize(n);
+  620|   w.idx2.resize(n);
+  621|   for (std::size_t i = 0; i < n; ++i) w.idx[i] = static_cast<std::uint32_t>(i);
+  622|   for (unsigned shift = 0; shift < 32 && (shift == 0 || (max_tof >> shift) != 0); shift += 11)
+  623|   {
+  624|     std::array<std::size_t, 2049> start{};
+  625|     for (std::size_t k = 0; k < n; ++k) ++start[((tof[w.idx[k]] >> shift) & 2047u) + 1];
+  626|     for (std::size_t d = 0; d < 2048; ++d) start[d + 1] += start[d];
+  627|     for (std::size_t k = 0; k < n; ++k) w.idx2[start[(tof[w.idx[k]] >> shift) & 2047u]++] = w.idx[k];
+  628|     w.idx.swap(w.idx2);
+  629|   }
+  630|   w.id.swap(w.idx);
+  631|   w.tof.resize(n);
+  632|   w.scan.resize(n);
+  633|   w.inten.resize(n);
+  634|   for (std::size_t k = 0; k < n; ++k)
+  635|   {
+  636|     const std::uint32_t i = w.id[k];
+  637|     w.tof[k] = tof[i]; w.scan[k] = scan[i]; w.inten[k] = intensity[i];
+  638|   }
+  639| 
+  640|   // 1. Streak filter (filter.rs:133-165). A pass that removes nothing is a fixed point: every further pass
+  641|   //    would see the same input, so stopping there is exact.
+  642|   std::size_t m = n;
+  643|   for (std::size_t pass = 0; pass < p.iterations && m > 0; ++pass)
+  644|   {
+  645|     const std::size_t before = m;
+  646|     m = detail::streakPass(w, m, num_scans, p);
+  647|     if (m == before) break;
+  648|   }
+  649|   c.after_streak = m;
+  650| 
+  651|   // 2. Halo (halo.rs:24-101), once, with the streak survivors as both the points judged and the reference;
+  652|   //    simultaneous, so a point it drops still counts as a neighbour's reference.
+  653|   if (p.halo && m > 0)
+  654|   {
+  655|     w.row.assign(num_scans + 1, 0);
+  656|     for (std::size_t j = 0; j < m; ++j) ++w.row[w.scan[j] + 1];
+  657|     for (std::size_t r = 0; r < num_scans; ++r) w.row[r + 1] += w.row[r];
+  658|     w.cursor.assign(w.row.begin(), w.row.end() - 1);
+  659|     w.htof.resize(m);
+  660|     w.hinten.resize(m);
+  661|     w.hpos.resize(m);
+  662|     for (std::size_t j = 0; j < m; ++j)   // stable by scan over TOF order: (scan, TOF) order
+  663|     {
+  664|       const std::size_t d = w.cursor[w.scan[j]]++;
+  665|       w.htof[d] = w.tof[j]; w.hinten[d] = w.inten[j]; w.hpos[d] = static_cast<std::uint32_t>(j);
+  666|     }
+  667|     w.mark.assign(m, 0);
+  668|     const std::size_t sw = p.halo_scan_half_width;
+  669|     const std::uint32_t mw = p.halo_mz_idx_half_width, u32max = std::numeric_limits<std::uint32_t>::max();
+  670|     const std::uint32_t* const ht = w.htof.data();
+  671|     for (std::size_t r = 0; r < num_scans; ++r)
+  672|       for (std::size_t i = w.row[r]; i < w.row[r + 1]; ++i)
+  673|       {
+  674|         const std::uint32_t ti = ht[i];
+  675|         const std::size_t v_lo = r >= sw ? r - sw : 0, v_hi = sw >= num_scans - 1 - r ? num_scans - 1 : r + sw;
+  676|         const std::uint32_t t_lo = ti >= mw ? ti - mw : 0, t_hi = ti <= u32max - mw ? ti + mw : u32max;
+  677|         std::uint32_t best = 0;
+  678|         for (std::size_t vs = v_lo; vs <= v_hi; ++vs)
+  679|         {
+  680|           const std::uint32_t* const e = ht + w.row[vs + 1];
+  681|           for (const std::uint32_t* q = std::lower_bound(ht + w.row[vs], e, t_lo); q != e && *q <= t_hi; ++q)
+  682|             if (*q != ti && w.hinten[static_cast<std::size_t>(q - ht)] > best) best = w.hinten[static_cast<std::size_t>(q - ht)];
+  683|         }
+  684|         // The Rust double compare, verbatim: no addition, so nothing to contract; best == 0 keeps.
+  685|         if (static_cast<double>(w.hinten[i]) >= p.halo_peak_fraction * static_cast<double>(best)) w.mark[w.hpos[i]] = 1;
+  686|       }
+  687|     m = detail::compact(w, m);
+  688|   }
+  689|   c.after_halo = m;
+  690| 
+  691|   // 3. The window gate, ANDed per point (writer.rs:846-853).
+  692|   for (std::size_t j = 0; j < m; ++j)
+  693|     if (gate == nullptr || gate->contains(w.scan[j], w.tof[j]))
+  694|     {
+  695|       keep[w.id[j]] = 1;
+  696|       ++c.kept;
+  697|     }
+  698|   return c;
+  699| }
+  700| 
+  701| /// [dnoise] That a run denoised every MS1 frame with points exactly once. Counts cannot tell: a frame denoised twice and a
+  702| /// missing one with equal NumPeaks cancel out. So one mark per frame id -- set serially as each batch's counts are merged,
+  703| /// checked once after the load, and reset with the counts when a failed stream load falls back to the resident one.
+  704| class FrameCoverage
+  705| {
+  706| public:
+  707|   /// Mark frame @p fid (an id frameCheck accepted) as denoised; false if it already was.
+  708|   bool mark(std::uint32_t fid)
+  709|   {
+  710|     if (fid >= seen_.size()) seen_.resize(static_cast<std::size_t>(fid) + 1, 0);
+  711|     if (seen_[fid]) return false;
+  712|     seen_[fid] = 1;
+  713|     return true;
+  714|   }
+  715|   /// The first MS1 frame with points in @p frames (by Id; any row type with msms_type and num_peaks) that was not marked,
+  716|   /// or 0 when every one was.
+  717|   template <class FrameRow>
+  718|   std::size_t firstMissing(const std::vector<FrameRow>& frames) const
+  719|   {
+  720|     for (std::size_t id = 1; id < frames.size(); ++id)
+  721|       if (frames[id].msms_type == 0 && frames[id].num_peaks > 0 && (id >= seen_.size() || !seen_[id])) return id;
+  722|     return 0;
+  723|   }
+  724|   void reset() { seen_.clear(); }
+  725| 
+  726| private:
+  727|   std::vector<std::uint8_t> seen_;   ///< by frame id
+  728| };
+  729| 
+  730| } // namespace spx::dnoise
+  731| 
+  732| #endif // SPEXTRACTOR_DNOISE_MS1_H
+```
+
+### 9.2 src/TdfLoad.h (314 lines)
+
+```cpp
+    1| // Read the calibration a Bruker .d actually uses, straight from analysis.tdf via the sqlite3 C API.
+    2| // Kept OUT of TdfMzCalibration.h on purpose: that header is the pure arithmetic model, is installed
+    3| // into the OpenMS tree by the patch script, and is compiled by the dependency-free golden test on
+    4| // every CI platform -- including Windows, which has no sqlite3.h. Only the tool and its sqlite-gated
+    5| // test (tests/test_tdf_load.cpp) need this file.
+    6| #pragma once
+    7| #include <OpenMS/FORMAT/TdfMzCalibration.h>   // the copy the OpenMS patch installs; same header as src/TdfMzCalibration.h
+    8| #include <sqlite3.h>
+    9| #include "DnoiseMs1.h"   // [dnoise] RunMeta, WindowRow: the MS1 port's gate inputs; recover::opentimsCorrection
+   10| #include <algorithm>
+   11| #include <array>
+   12| #include <climits>
+   13| #include <cmath>
+   14| #include <cstdint>
+   15| #include <optional>
+   16| #include <cstdlib>
+   17| #include <limits>
+   18| #include <string>
+   19| #include <vector>
+   20| 
+   21| namespace spextractor
+   22| {
+   23| // ---------------------------------------------------------------------------------------------
+   24| // Read the calibration a .d actually uses, straight from analysis.tdf with the sqlite3 C API.
+   25| //
+   26| // This deliberately does NOT use SQLiteCpp. That wrapper is an OpenMS in-tree extern whose headers
+   27| // are not on the include path of an OpenMS *installation*, so the two callers used to sit behind
+   28| // `#if __has_include(<SQLiteCpp/SQLiteCpp.h>)` -- false for the documented public build -- and fell
+   29| // back to "built without SQLiteCpp", which made the integer detector silently revert to `openms`.
+   30| // The stock-OpenMS CI caught it: 9/10 checks passed and the tenth said the shipped detector never
+   31| // ran. sqlite3.h is what OpenMS itself links, so a missing SQLite is now a compile error, never a
+   32| // behaviour switch.
+   33| //
+   34| // The row is the one the FRAMES reference (Frames.MzCalibration), not "the only row": PXD017703
+   35| // acquisitions carry two rows with every frame on Id 1. Refuses when frames reference more than
+   36| // one row (per-frame recalibration, unsupported). t1_by_frame[id] = Frames.T1, T1_ref when NULL;
+   37| // index 0 is never a frame (Ids start at 1) and is left for the caller to treat as a sentinel.
+   38| //
+   39| // Every read here is whole or refused, with sqlite3_errmsg saying why: each prepare is checked, and
+   40| // each row loop must end in SQLITE_DONE. An error merely ends a loop, so a partial T1 read would give
+   41| // the later frames T1_ref, and a partial window table half a gate, silently. Whether an optional
+   42| // table or column exists is read from the schema, never inferred from a failed query.
+   43| // ---------------------------------------------------------------------------------------------
+   44| /// The run-level bounds of the flight-time axis from GlobalMetadata: the digitizer's sample count
+   45| /// (every bin index is below it -- the absolute bound) and the acquisition's m/z range. Values are
+   46| /// TEXT in the tdf; a NULL, trailing garbage, a non-finite or unordered value refuses with a reason
+   47| /// rather than becoming a bound.
+   48| struct TdfAxisBounds { long n_bins = 0; double mz_lo = 0.0, mz_hi = 0.0; };
+   49| inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::string& why)
+   50| {
+   51|   sqlite3* db = nullptr;
+   52|   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+   53|   { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
+   54|   sqlite3_stmt* st = nullptr; out = TdfAxisBounds{}; int seen = 0; why.clear();
+   55|   auto num = [&](const unsigned char* txt, int nbytes, const char* key, double& v) {
+   56|     if (!txt) { why = std::string(key) + " is NULL"; return false; }
+   57|     char* end = nullptr; const double x = std::strtod(reinterpret_cast<const char*>(txt), &end);
+   58|     // the parse must consume the WHOLE value (sqlite3_column_bytes: an embedded NUL is not an end)
+   59|     if (end == reinterpret_cast<const char*>(txt) || end != reinterpret_cast<const char*>(txt) + nbytes || !std::isfinite(x))
+   60|     { why = std::string(key) + " is not a finite number: '" + std::string(reinterpret_cast<const char*>(txt), (size_t)nbytes) + "'"; return false; }
+   61|     v = x; return true; };
+   62|   if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper','DigitizerNumSamples')", -1, &st, nullptr) != SQLITE_OK)
+   63|   { why = std::string("cannot read GlobalMetadata: ") + sqlite3_errmsg(db); sqlite3_finalize(st); sqlite3_close(db); return false; }
+   64|   bool ok = true; bool have_lo = false, have_hi = false, have_n = false;
+   65|   int rc = SQLITE_DONE;
+   66|   while (ok && (rc = sqlite3_step(st)) == SQLITE_ROW)
+   67|   {
+   68|     const unsigned char* kt = sqlite3_column_text(st, 0); if (!kt) continue;
+   69|     const std::string k = reinterpret_cast<const char*>(kt); double v = 0.0;
+   70|     { bool& have = (k == "MzAcqRangeLower") ? have_lo : (k == "MzAcqRangeUpper") ? have_hi : have_n;
+   71|       if (have) { why = k + " appears twice in GlobalMetadata"; ok = false; break; }   // a repeated key would let the later row win silently
+   72|       have = true; }
+   73|     if (!num(sqlite3_column_text(st, 1), sqlite3_column_bytes(st, 1), k.c_str(), v)) { ok = false; break; }
+   74|     if (k == "MzAcqRangeLower") out.mz_lo = v;
+   75|     else if (k == "MzAcqRangeUpper") out.mz_hi = v;
+   76|     else
+   77|     {
+   78|       // an integral count in [2, 1e8], checked BEFORE the narrowing cast (1e100 -> long is UB)
+   79|       if (!(v >= 2.0 && v <= 100000000.0 && std::trunc(v) == v)) { why = "DigitizerNumSamples is not an integer in [2, 1e8]: " + std::to_string(v); ok = false; break; }
+   80|       out.n_bins = (long)v;
+   81|     }
+   82|     ++seen;
+   83|   }
+   84|   if (ok && rc != SQLITE_DONE) { why = std::string("reading GlobalMetadata: ") + sqlite3_errmsg(db); ok = false; }
+   85|   sqlite3_finalize(st); sqlite3_close(db);
+   86|   if (!ok) return false;
+   87|   if (seen < 3) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(seen) + " of 3)"; return false; }
+   88|   // plausibility: a TIMS acquisition ends far below 1e5 m/z; a corrupt but finite value beyond
+   89|   // that would drive the flight-time conversion past the axis (review 3a, round 2)
+   90|   if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= 1.0e5) || out.n_bins < 2 || out.n_bins > 100000000L)
+   91|   { why = "GlobalMetadata bounds are not usable: MzAcqRange " + std::to_string(out.mz_lo) + "-" + std::to_string(out.mz_hi) + ", DigitizerNumSamples " + std::to_string(out.n_bins); return false; }
+   92|   return true;
+   93| }
+   94| 
+   95| inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
+   96|                                std::vector<double>& t1_by_frame, std::string& why)
+   97| {
+   98|   sqlite3* db = nullptr;
+   99|   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+  100|   { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
+  101|   sqlite3_stmt* st = nullptr;
+  102|   auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
+  103|   auto sqlfail = [&](const std::string& what) { return fail(what + ": " + sqlite3_errmsg(db)); };   // errmsg is read before fail() finalizes
+  104|   int rc = SQLITE_OK;
+  105|   bool frames_have_cal = false;   // PRAGMA table_info: one row per column, the name in column 1, matched ASCII case-insensitively as sqlite resolves it
+  106|   auto is_cal = [](const unsigned char* c) {
+  107|     const char* w = "mzcalibration";
+  108|     for (; *c && *w; ++c, ++w) if ((*c >= 'A' && *c <= 'Z' ? *c + 32 : *c) != *w) return false;
+  109|     return !*c && !*w; };
+  110|   if (sqlite3_prepare_v2(db, "PRAGMA table_info(Frames)", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read the Frames schema");
+  111|   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+  112|   { const unsigned char* c = sqlite3_column_text(st, 1); frames_have_cal = frames_have_cal || (c && is_cal(c)); }
+  113|   if (rc != SQLITE_DONE) return sqlfail("reading the Frames schema");
+  114|   sqlite3_finalize(st); st = nullptr;
+  115|   long long cal_id = -1; int ncal = 0;
+  116|   if (frames_have_cal)
+  117|   {
+  118|     if (sqlite3_prepare_v2(db, "SELECT DISTINCT MzCalibration FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.MzCalibration");
+  119|     while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
+  120|     if (rc != SQLITE_DONE) return sqlfail("reading Frames.MzCalibration");
+  121|     sqlite3_finalize(st); st = nullptr;
+  122|     if (ncal != 1) return fail("frames reference " + std::to_string(ncal) + " distinct MzCalibration rows");
+  123|   }
+  124|   else
+  125|   {
+  126|     // Frames has no MzCalibration column (a minimal or very old tdf): fall back to the single-row
+  127|     // rule rather than refusing -- the reference is then unambiguous only if there IS one row.
+  128|     if (sqlite3_prepare_v2(db, "SELECT Id FROM MzCalibration", -1, &st, nullptr) != SQLITE_OK) return sqlfail("Frames has no MzCalibration column, and MzCalibration cannot be read");
+  129|     while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
+  130|     if (rc != SQLITE_DONE) return sqlfail("reading MzCalibration");
+  131|     sqlite3_finalize(st); st = nullptr;
+  132|     if (ncal != 1) return fail("Frames has no MzCalibration column and MzCalibration has " + std::to_string(ncal) + " rows (need exactly 1)");
+  133|   }
+  134|   if (sqlite3_prepare_v2(db, "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 "
+  135|                              "FROM MzCalibration WHERE Id = ?", -1, &st, nullptr) != SQLITE_OK)
+  136|     return sqlfail("cannot read MzCalibration");
+  137|   rc = sqlite3_bind_int64(st, 1, cal_id);
+  138|   if (rc == SQLITE_OK) rc = sqlite3_step(st);
+  139|   if (rc == SQLITE_DONE) return fail("no MzCalibration row with Id " + std::to_string(cal_id));
+  140|   if (rc != SQLITE_ROW) return sqlfail("reading MzCalibration row " + std::to_string(cal_id));
+  141|   cal.model_type = sqlite3_column_int(st, 0);
+  142|   cal.digitizer_timebase = sqlite3_column_double(st, 1); cal.digitizer_delay = sqlite3_column_double(st, 2);
+  143|   cal.C0 = sqlite3_column_double(st, 3); cal.C1 = sqlite3_column_double(st, 4);
+  144|   cal.C2 = (sqlite3_column_type(st, 5) == SQLITE_NULL) ? std::numeric_limits<double>::quiet_NaN()
+  145|                                                        : sqlite3_column_double(st, 5);
+  146|   cal.T1_ref = sqlite3_column_double(st, 6); cal.dC1 = sqlite3_column_double(st, 7); cal.dC2 = sqlite3_column_double(st, 8);
+  147|   cal.C3 = sqlite3_column_double(st, 9); cal.C4 = sqlite3_column_double(st, 10);
+  148|   sqlite3_finalize(st); st = nullptr;
+  149|   if (std::isnan(cal.C2)) return fail("MzCalibration C2 is NULL (missing, not zero)");
+  150|   if (!cal.isSupported()) return fail(cal.unsupportedReason());
+  151|   t1_by_frame.clear();
+  152|   if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.T1");
+  153|   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+  154|   {
+  155|     const long long id = sqlite3_column_int64(st, 0);
+  156|     if (id < 0 || id > 10000000) return fail("implausible Frames.Id");
+  157|     if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
+  158|     t1_by_frame[(size_t)id] = (sqlite3_column_type(st, 1) == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);
+  159|   }
+  160|   if (rc != SQLITE_DONE) return sqlfail("reading Frames.T1");
+  161|   sqlite3_finalize(st); sqlite3_close(db);
+  162|   if (t1_by_frame.size() < 2) { why = "no Frames rows"; return false; }
+  163|   return true;
+  164| }
+  165| 
+  166| // ---------------------------------------------------------------------------------------------
+  167| // [dnoise] What the MS1 port (DnoiseMs1.h) reads besides the m/z calibration. Two kinds, kept apart:
+  168| //  * the gate's inputs exactly as dnoise v0.1.0 reads them: six GlobalMetadata values as stored TEXT,
+  169| //    MAX(NumScans) over ALL frames, and the DiaFrameMsMsWindows rows (DnoiseMs1.h RunMeta / WindowRow);
+  170| //  * what the Bruker loader made of each raw point, so the tool can invert it: per frame MsMsType,
+  171| //    NumScans, NumPeaks, opentims' intensity correction -- 100 / AccumulationTime from sqlite's text
+  172| //    rendering of the column, converted in the C locale as TimsFrameFromSql's atof is under opentims'
+  173| //    locale guard (recover::opentimsCorrection) -- and the TimsCalibration row of the rational 1/K0 model.
+  174| //    That rendering is the loader's text only where both share one SQLite. In-tree they do (the tool
+  175| //    resolves libOpenMS's bundled sqlite3); a standalone build links its own, and SQLite versions render
+  176| //    a REAL that 15 significant digits do not round-trip differently. The resulting few-ulp change in corr
+  177| //    refused points and never recovered a wrong raw count in a brute force over every raw count below 2^24,
+  178| //    and every AccumulationTime seen (49 .d files) round-trips at 15 digits.
+  179| // Each integer is type- and range-checked before it is narrowed: sqlite3_column_int64 converts a TEXT or
+  180| // REAL cell silently, and a cast wraps -1 into 4294967295.
+  181| // Refuses wherever tryCreateRationalConverter would NOT install that model (no or an empty table, a
+  182| // ModelType other than 2, a frame with no or an unknown row): the loader's 1/K0 is then linear.
+  183| // ---------------------------------------------------------------------------------------------
+  184| struct TdfDnoiseInputs
+  185| {
+  186|   spx::dnoise::RunMeta meta;
+  187|   std::vector<spx::dnoise::WindowRow> windows;
+  188|   /// corr: recover::opentimsCorrection of the frame's AccumulationTime (finite, > 0; whether it is invertible is the caller's check)
+  189|   struct Frame { int msms_type = -1; std::uint32_t num_scans = 0, num_peaks = 0; double corr = 0.0; std::uint32_t cal = 0; };
+  190|   std::vector<Frame> frames;                     ///< by Frames.Id (msms_type -1: no such frame); cal indexes tims_cal
+  191|   std::vector<std::array<double, 10>> tims_cal;  ///< C0..C9 of each TimsCalibration row
+  192|   std::vector<std::uint32_t> ms1_max_scans;      ///< per tims_cal row: the largest NumScans of an MS1 frame referencing it (0: none does)
+  193| };
+  194| inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::string& why)
+  195| {
+  196|   out = TdfDnoiseInputs{}; why.clear();
+  197|   sqlite3* db = nullptr;
+  198|   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+  199|   { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
+  200|   sqlite3_stmt* st = nullptr;
+  201|   auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
+  202|   auto sqlfail = [&](const std::string& what, const char* tail = "") { return fail(what + ": " + sqlite3_errmsg(db) + tail); };   // errmsg is read before fail() finalizes
+  203|   auto int_in = [&](int col, long long lo, long long hi, long long& v) {   // a stored INTEGER in [lo, hi]
+  204|     if (sqlite3_column_type(st, col) != SQLITE_INTEGER) return false;
+  205|     v = sqlite3_column_int64(st, col);
+  206|     return v >= lo && v <= hi; };
+  207|   auto cell = [&](int col) {   // a stored value as a refusal names it: NULL spelled out, TEXT quoted
+  208|     const int type = sqlite3_column_type(st, col);
+  209|     if (type == SQLITE_NULL) return std::string("NULL");
+  210|     const unsigned char* x = sqlite3_column_text(st, col);
+  211|     const std::string s = x ? std::string(reinterpret_cast<const char*>(x), (size_t)sqlite3_column_bytes(st, col)) : std::string();
+  212|     return type == SQLITE_INTEGER || type == SQLITE_FLOAT ? s : "'" + s + "'"; };
+  213|   const char* const linear = " (the loader converts 1/K0 with the linear GlobalMetadata model)";
+  214|   int rc = SQLITE_OK;
+  215|   if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read GlobalMetadata");
+  216|   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+  217|   {
+  218|     const unsigned char* k = sqlite3_column_text(st, 0);
+  219|     if (!k) continue;
+  220|     const std::string key = reinterpret_cast<const char*>(k);
+  221|     std::optional<std::string>* slot = key == "AcquisitionSoftware" ? &out.meta.acquisition_software
+  222|                                      : key == "MzAcqRangeLower" ? &out.meta.mz_acq_range_lower : key == "MzAcqRangeUpper" ? &out.meta.mz_acq_range_upper
+  223|                                      : key == "DigitizerNumSamples" ? &out.meta.digitizer_num_samples
+  224|                                      : key == "OneOverK0AcqRangeLower" ? &out.meta.one_over_k0_acq_range_lower
+  225|                                      : key == "OneOverK0AcqRangeUpper" ? &out.meta.one_over_k0_acq_range_upper : nullptr;
+  226|     const unsigned char* v = sqlite3_column_text(st, 1);
+  227|     if (slot && v) *slot = std::string(reinterpret_cast<const char*>(v), (size_t)sqlite3_column_bytes(st, 1));
+  228|   }
+  229|   if (rc != SQLITE_DONE) return sqlfail("reading GlobalMetadata");
+  230|   sqlite3_finalize(st); st = nullptr;
+  231|   if (sqlite3_prepare_v2(db, "SELECT MAX(NumScans) FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.NumScans");
+  232|   if ((rc = sqlite3_step(st)) != SQLITE_ROW) return sqlfail("reading MAX(Frames.NumScans)");
+  233|   { long long v = 0;   // NULL: an empty Frames table, refused below. A TEXT cell anywhere is the MAX: it sorts above INTEGER.
+  234|     if (sqlite3_column_type(st, 0) != SQLITE_NULL && !int_in(0, 0, 1000000, v))
+  235|       return fail("MAX(Frames.NumScans) " + cell(0) + " is not an INTEGER in [0, 1000000]");
+  236|     out.meta.max_num_scans = (std::uint32_t)v; }
+  237|   sqlite3_finalize(st); st = nullptr;
+  238|   // DiaFrameMsMsWindows is optional (no table: dnoise has no gate). Table names resolve case-insensitively.
+  239|   if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = 'DiaFrameMsMsWindows' COLLATE NOCASE", -1, &st, nullptr) != SQLITE_OK)
+  240|     return sqlfail("cannot read the schema");
+  241|   rc = sqlite3_step(st);
+  242|   if (rc != SQLITE_ROW && rc != SQLITE_DONE) return sqlfail("reading the schema");
+  243|   const bool have_windows = rc == SQLITE_ROW;
+  244|   sqlite3_finalize(st); st = nullptr;
+  245|   if (have_windows)
+  246|   {
+  247|     if (sqlite3_prepare_v2(db, "SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows "
+  248|                                "WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL", -1, &st, nullptr) != SQLITE_OK)
+  249|       return sqlfail("cannot read DiaFrameMsMsWindows");
+  250|     while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+  251|     {
+  252|       if (sqlite3_column_type(st, 0) == SQLITE_NULL || sqlite3_column_type(st, 1) == SQLITE_NULL)   // column_int64 would read scan 0
+  253|         return fail("DiaFrameMsMsWindows has a row with a NULL ScanNumBegin or ScanNumEnd");
+  254|       out.windows.push_back({sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), sqlite3_column_double(st, 2), sqlite3_column_double(st, 3)});
+  255|     }
+  256|     if (rc != SQLITE_DONE) return sqlfail("reading DiaFrameMsMsWindows");
+  257|     sqlite3_finalize(st); st = nullptr;
+  258|   }
+  259|   std::vector<std::uint32_t> cal_id;
+  260|   if (sqlite3_prepare_v2(db, "SELECT Id, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration", -1, &st, nullptr) != SQLITE_OK)
+  261|     return sqlfail("cannot read TimsCalibration", linear);
+  262|   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+  263|   {
+  264|     if (sqlite3_column_int(st, 1) != 2) return fail("TimsCalibration ModelType " + std::to_string(sqlite3_column_int(st, 1)) + linear);
+  265|     long long id = 0;
+  266|     if (!int_in(0, 0, 4294967295LL, id)) return fail("TimsCalibration.Id " + cell(0) + " is not an INTEGER in [0, 4294967295]");
+  267|     std::array<double, 10> c{};
+  268|     for (int k = 0; k < 10; ++k) c[(size_t)k] = sqlite3_column_double(st, 2 + k);
+  269|     cal_id.push_back((std::uint32_t)id); out.tims_cal.push_back(c);
+  270|   }
+  271|   if (rc != SQLITE_DONE) return sqlfail("reading TimsCalibration");
+  272|   sqlite3_finalize(st); st = nullptr;
+  273|   if (out.tims_cal.empty()) return fail(std::string("TimsCalibration is empty") + linear);
+  274|   out.ms1_max_scans.assign(out.tims_cal.size(), 0);
+  275|   if (sqlite3_prepare_v2(db, "SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration FROM Frames", -1, &st, nullptr) != SQLITE_OK)
+  276|     return sqlfail("cannot read Frames (Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration)",
+  277|                    " (without a TimsCalibration column the loader converts 1/K0 with the linear GlobalMetadata model)");
+  278|   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+  279|   {
+  280|     long long id = 0, type = 0, scans = 0, peaks = 0, cid = 0;
+  281|     if (!int_in(0, 1, 10000000, id)) return fail("implausible Frames.Id " + cell(0));
+  282|     auto bad = [&](int col, const char* name, const std::string& want) {
+  283|       return fail("frame " + std::to_string(id) + ": Frames." + name + " " + cell(col) + " is not " + want); };
+  284|     if (!int_in(1, INT_MIN, INT_MAX, type)) return bad(1, "MsMsType", "an INTEGER in the int range");
+  285|     if (!int_in(2, 0, out.meta.max_num_scans, scans)) return bad(2, "NumScans", "an INTEGER in [0, " + std::to_string(out.meta.max_num_scans) + "]");
+  286|     if (!int_in(3, 0, 4294967295LL, peaks)) return bad(3, "NumPeaks", "an INTEGER in [0, 4294967295]");
+  287|     if (type == 0 && peaks > 0 && scans < 1)
+  288|       return fail("frame " + std::to_string(id) + ": an MS1 frame with " + std::to_string(peaks) + " points (Frames.NumPeaks) and no scans (Frames.NumScans 0)");
+  289|     const unsigned char* acc = sqlite3_column_text(st, 4);
+  290|     if (!acc) return fail("frame " + std::to_string(id) + " has no AccumulationTime");
+  291|     double corr = 0.0;
+  292|     if (!spx::dnoise::recover::opentimsCorrection(std::string(reinterpret_cast<const char*>(acc), (size_t)sqlite3_column_bytes(st, 4)), corr))
+  293|       return fail("frame " + std::to_string(id) + ": Frames.AccumulationTime '" + std::string(reinterpret_cast<const char*>(acc), (size_t)sqlite3_column_bytes(st, 4))
+  294|                   + "' is not a positive decimal number");
+  295|     if (sqlite3_column_type(st, 5) == SQLITE_NULL) return fail("frame " + std::to_string(id) + " has no TimsCalibration row" + linear);
+  296|     if (!int_in(5, 0, 4294967295LL, cid)) return bad(5, "TimsCalibration", "an INTEGER in [0, 4294967295]");
+  297|     size_t ci = cal_id.size();
+  298|     for (size_t i = 0; i < cal_id.size(); ++i) if (cal_id[i] == (std::uint32_t)cid) ci = i;   // a repeated Id: the last row, as the loader's map keeps it
+  299|     if (ci == cal_id.size()) return fail("frame " + std::to_string(id) + " references an unknown TimsCalibration row" + linear);
+  300|     if ((size_t)id >= out.frames.size()) out.frames.resize((size_t)id + 1);
+  301|     TdfDnoiseInputs::Frame& f = out.frames[(size_t)id];
+  302|     f.msms_type = (int)type;
+  303|     f.num_scans = (std::uint32_t)scans;
+  304|     f.num_peaks = (std::uint32_t)peaks;
+  305|     f.corr = corr;
+  306|     f.cal = (std::uint32_t)ci;
+  307|     if (f.msms_type == 0) out.ms1_max_scans[ci] = std::max(out.ms1_max_scans[ci], f.num_scans);
+  308|   }
+  309|   if (rc != SQLITE_DONE) return sqlfail("reading Frames");
+  310|   sqlite3_finalize(st); sqlite3_close(db);
+  311|   if (out.frames.size() < 2) { why = "no Frames rows"; return false; }
+  312|   return true;
+  313| }
+  314| } // namespace spextractor
+```
+
+### 9.3 scripts/sync_cluster.sh (178 lines)
+
+```bash
+    1| #!/bin/bash
+    2| # shellcheck disable=SC2086,SC2029  # INPUTS/SHIP are path lists split on purpose; the ssh commands expand locally on purpose
+    3| # Deploy src/spextractor.cpp to the cluster OpenMS tree, rebuild, record provenance.
+    4| # The ONLY sanctioned deploy path (2026-09-01 review, hardened per kimi F7/F8/F11 + codex #17-22; made a
+    5| # transaction 2026-09-10 per codex #3 / kimi #3 of the stage-2 review):
+    6| #   usage: scripts/sync_cluster.sh [node, default ibminode05] [--allow-dirty]
+    7| #   - refuses staged OR unstaged dirt (git status --porcelain), --allow-dirty to override
+    8| #   - every file is uploaded into a fresh mktemp stage dir: NOTHING shared is written before the remote lock
+    9| #   - under the lock, one node-side script: staged-bytes check, patch check, both unit tests (from the stage),
+   10| #     backup of every build input, promotion by rename, build, provenance hashed on the node
+   11| #   - any failure before the commit restores EVERY build input (touched, so make recompiles whatever the
+   12| #     failed build compiled against them); the old provenance comes back only if bin/spextractor AND
+   13| #     libOpenMS.so still match it (a failed build relinks libOpenMS.so first), else it is parked as .stale
+   14| #   - suite and bench tools ship only after a committed build; every deploy appended to deploys.log
+   15| #   - the node-side script writes only to its log: a dropped ssh channel cannot SIGPIPE it half-way
+   16| # tests/test_sync_cluster_txn.sh runs this script against a fake node (CI does, on Linux); run it after any change.
+   17| set -euo pipefail
+   18| cd "$(dirname "$0")/.."
+   19| NODE=${1:-ibminode05}
+   20| R=/scratch/kohlbach
+   21| TOOLS=/ceph/ibmi/abi/oliver/spextract/tools
+   22| TESTS=/ceph/ibmi/abi/oliver/spextract/tests
+   23| SRC=src/spextractor.cpp
+   24| INPUTS="$SRC src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
+   25| # The e2e suite, its golden file (check 9 reads ../tests/calibration_golden.json), the gate chains'
+   26| # digest/diff tools and the remote launcher: each drifted once when it did not travel with the source.
+   27| SHIP="test/test_spextractor.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
+   28| for f in $INPUTS $SHIP; do [ -f "$f" ] || { echo "REFUSED: $f does not exist - nothing changed" >&2; exit 1; }; done
+   29| DIRT=$(git status --porcelain -- $INPUTS)
+   30| if [ -n "$DIRT" ]; then
+   31|   if [ "${2:-}" != "--allow-dirty" ]; then
+   32|     printf 'REFUSED: build inputs have staged or unstaged changes. Commit first, or pass --allow-dirty.\n%s\n' "$DIRT" >&2; exit 1
+   33|   fi
+   34|   DIRTY="+dirty"
+   35| else
+   36|   DIRTY=""
+   37| fi
+   38| GITREV="$(git rev-parse --short HEAD)${DIRTY}"
+   39| [ -z "$(for f in $INPUTS $SHIP; do basename "$f"; done | sort | uniq -d)" ] || { echo "REFUSED: two staged files share a name" >&2; exit 1; }
+   40| TMP=$(mktemp -d); STAGE=""; HANDED=0
+   41| trap 'rm -rf "$TMP"; [ -z "$STAGE" ] || [ "$HANDED" = 1 ] || ssh "$NODE" "rm -rf $STAGE" || true' EXIT
+   42| shasum -a 256 $INPUTS $SHIP | sed 's#  .*/#  #' > "$TMP/SHA256SUMS"
+   43| cat > "$TMP/txn.sh" <<'TXN'
+   44| #!/bin/bash
+   45| # shellcheck disable=SC2086,SC2013  # FL, BUILD_INPUTS, PROMOTED and CXX_INCLUDES are word lists split on purpose
+   46| # Node-side deploy transaction written by scripts/sync_cluster.sh. Args: STAGE GITREV R TOOLS TESTS.
+   47| set -euo pipefail
+   48| S=$1; GITREV=$2; R=$3; TOOLS=$4; TESTS=$5
+   49| OMS=$R/OpenMS; BUILD=$OMS/build; TOPP=$OMS/src/topp; UT=$R/spextractor_unit; U=$S/unit
+   50| LOCK=$R/.deploy.lock; PROV=$BUILD/bin/spextractor.provenance
+   51| BUILD_INPUTS="spextractor.cpp TdfMzCalibration.h TdfLoad.h MzPeakStreamLoad.h DnoiseMs1.h"
+   52| # The calibration model is header-only and lives in this repo; the OpenMS patch includes it from the
+   53| # library's include dir. The tool's other headers live next to its source (a hand copy once drifted).
+   54| dest() { if [ "$1" = TdfMzCalibration.h ]; then echo "$OMS/src/openms/include/OpenMS/FORMAT/$1"; else echo "$TOPP/$1"; fi; }
+   55| sha() { sha256sum "$1" | cut -d' ' -f1; }
+   56| finish() {
+   57|   rc=$?; set +e
+   58|   if [ "$COMMITTED" != 1 ]; then
+   59|     for f in $PROMOTED; do
+   60|       d=$(dest "$f")
+   61|       if [ -e "$S/bak/$f" ]; then mv -f "$S/bak/$f" "$d" && touch "$d"; else rm -f "$d"; fi
+   62|     done
+   63|     [ -z "$PROMOTED" ] || echo "ROLLED BACK every promoted build input:$PROMOTED"
+   64|     if [ -e "$S/prov.prev" ]; then
+   65|       if grep -qx "binary_sha256=$(sha "$BUILD/bin/spextractor")" "$S/prov.prev" &&
+   66|          grep -qx "libopenms_sha256=$(sha "$BUILD/lib/libOpenMS.so")" "$S/prov.prev"; then
+   67|         mv -f "$S/prov.prev" "$PROV"; echo "bin/spextractor, libOpenMS.so and provenance unchanged"
+   68|       else
+   69|         mv -f "$S/prov.prev" "$PROV.stale"
+   70|         echo "FAIL-CLOSED: the failed build changed bin/spextractor or libOpenMS.so; there is NO provenance" \
+   71|              "(old one parked at $PROV.stale). Run make spextractor on the restored tree, or deploy again."
+   72|       fi
+   73|     fi
+   74|   elif [ "$rc" != 0 ]; then
+   75|     echo "COMMITTED (binary + provenance), but a post-commit step failed (rc $rc): suite/tools may be stale"
+   76|   fi
+   77|   rm -rf "$S"; rm -f "$LOCK/owner"; rmdir "$LOCK"
+   78|   exit "$rc"
+   79| }
+   80| trap 'rm -rf "$S"' EXIT
+   81| mkdir "$LOCK" 2>/dev/null || { echo "REFUSED: another deploy holds $LOCK ($(cat "$LOCK/owner" 2>/dev/null || echo 'owner unknown')) - nothing changed"; exit 1; }
+   82| COMMITTED=0; PROMOTED=""
+   83| trap finish EXIT
+   84| # Without these, a signal runs finish at once, while make is still writing bin/spextractor and libOpenMS.so, so
+   85| # the provenance check reads a binary the build then replaces. A trapped signal waits for the running command.
+   86| trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+   87| echo "$S pid $$ $(date -Is)" > "$LOCK/owner" || true
+   88| cd "$S"
+   89| sha256sum -c --quiet SHA256SUMS || { echo "REFUSED: staged files differ from the local ones - nothing changed"; exit 1; }
+   90| # Refuse a tree that has lost the calibration patch: it would build fine, silently revert masses to the
+   91| # -5..-11 ppm chord, and record a clean-looking provenance [kimi review].
+   92| grep -q TdfMzCalibration "$OMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
+   93|   echo "REFUSED: the cluster OpenMS tree has no calibration patch applied - nothing changed"
+   94|   echo "  run: scripts/apply_openms_patches.sh $OMS   (on the node)"; exit 1; }
+   95| # Both unit tests with the tool's own compiler and flags (test_dnoise_ms1 pins D's FMA-sensitive gate boxes),
+   96| # BEFORE anything is promoted. They compile in a copy of the repo layout made from the hash-checked staged files
+   97| # ($U/src, $U/tests, and $U/inc/OpenMS/FORMAT for the calibration header under the name the OpenMS patch installs):
+   98| # the very bytes renamed into the tree below and re-verified after the build. No tree header can stand in for
+   99| # them -- until the promotion the tree still holds the previous deploy's copies.
+  100| CXX=$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "$BUILD/CMakeCache.txt")
+  101| FLAGS_MAKE=$BUILD/src/topp/CMakeFiles/spextractor.dir/flags.make
+  102| FL=$(sed -n 's/^CXX_FLAGS = //p' "$FLAGS_MAKE")
+  103| if [ -z "$CXX" ] || [ -z "$FL" ]; then
+  104|   echo "unit tests FAILED: no compiler [$CXX] or flags [$FL] in $BUILD - nothing promoted, tree unchanged"; exit 2
+  105| fi
+  106| mkdir -p "$U/src" "$U/tests" "$U/inc/OpenMS/FORMAT"
+  107| for f in $BUILD_INPUTS; do cp -p "$f" "$U/src/"; done
+  108| cp -p TdfMzCalibration.h "$U/inc/OpenMS/FORMAT/"
+  109| cp -p test_dnoise_ms1.cpp test_tdf_load.cpp "$U/tests/"
+  110| unit_failed() { cat "$U/$1.log"; echo "$1 unit test FAILED (compiler [$CXX] flags [$FL]) - nothing promoted, tree unchanged"; exit 2; }
+  111| # TMPDIR: whatever a test writes stays in the stage, which finish removes.
+  112| { "$CXX" $FL -I"$U/src" -I"$U/inc" "$U/tests/test_dnoise_ms1.cpp" -o "$U/test_dnoise_ms1" &&
+  113|   TMPDIR=$U "$U/test_dnoise_ms1"; } > "$U/test_dnoise_ms1.log" 2>&1 || unit_failed test_dnoise_ms1
+  114| cat "$U/test_dnoise_ms1.log"
+  115| # test_tdf_load also needs SQLite: the sqlite3.h the tool compiles against (the first of its include dirs that has
+  116| # one; on the cluster OpenMS's bundled SQLite) and the static library libOpenMS.so is linked from, which is where
+  117| # the tool's sqlite3_* symbols come from. A node without either skips the test, and the provenance says so.
+  118| SQL_INC=""
+  119| for i in $(sed -n 's/^CXX_INCLUDES = //p' "$FLAGS_MAKE"); do
+  120|   if [ -z "$SQL_INC" ] && [ -f "${i#-I}/sqlite3.h" ]; then SQL_INC=${i#-I}; fi
+  121| done
+  122| SQL_LIB=$BUILD/lib/libsqlite3.a
+  123| if [ -z "$SQL_INC" ]; then
+  124|   TDF_UT="skipped(no sqlite3.h in the tool include dirs)"
+  125| elif [ ! -f "$SQL_LIB" ]; then
+  126|   TDF_UT="skipped(no $SQL_LIB)"
+  127| else
+  128|   { "$CXX" $FL -I"$U/src" -I"$U/inc" -I"$SQL_INC" "$U/tests/test_tdf_load.cpp" "$SQL_LIB" -lpthread -ldl -lm -o "$U/test_tdf_load" &&
+  129|     TMPDIR=$U "$U/test_tdf_load"; } > "$U/test_tdf_load.log" 2>&1 || unit_failed test_tdf_load
+  130|   cat "$U/test_tdf_load.log"; TDF_UT=passed
+  131| fi
+  132| if [ "$TDF_UT" != passed ]; then echo "tdf_load unit test SKIPPED: $TDF_UT" | tee "$U/test_tdf_load.log"; fi
+  133| mkdir "$S/bak"
+  134| for f in $BUILD_INPUTS; do d=$(dest "$f"); if [ -e "$d" ]; then cp -p "$d" "$S/bak/$f"; fi; done
+  135| for f in $BUILD_INPUTS; do printf '%s  %s\n' "$(awk -v f="$f" '$2 == f {print $1}' SHA256SUMS)" "$(dest "$f")"; done > promoted.sha256
+  136| # No provenance while the tree is in flux: a hard kill from here on leaves none rather than a stale one.
+  137| if [ -e "$PROV" ]; then mv -f "$PROV" "$S/prov.prev"; fi
+  138| for f in $BUILD_INPUTS; do
+  139|   PROMOTED="$PROMOTED $f"
+  140|   # rename within one filesystem; touch so the file is newer than every object of any earlier build
+  141|   d=$(dest "$f"); mv -f "$S/$f" "$d"; touch "$d"
+  142| done
+  143| BLOG=$R/build_sync_$(date +%Y%m%d-%H%M%S).log
+  144| if ! (cd "$BUILD" && make spextractor -j32) > "$BLOG" 2>&1 < /dev/null; then
+  145|   tail -n 20 "$BLOG"; echo "BUILD FAILED ($BLOG)"; exit 2
+  146| fi
+  147| # A writer outside the lock (a hand copy, a patch script) during the build would make the provenance a lie.
+  148| sha256sum -c --quiet promoted.sha256 || { echo "REFUSED: a build input changed during the build"; exit 2; }
+  149| cd "$BUILD"
+  150| # tool_headers_sha256 covers DnoiseMs1.h since 2026-09-10 (the dnoise MS1 port): earlier deploys hashed two files.
+  151| # tdf_load_unit_test since 2026-09-10 (fix pass G): passed, or skipped(<why>) on a node without SQLite.
+  152| HDRS_SHA=$(cat "$TOPP/TdfLoad.h" "$TOPP/MzPeakStreamLoad.h" "$TOPP/DnoiseMs1.h" | sha256sum | cut -d' ' -f1)
+  153| OMSVER=$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
+  154| EPD=$OMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
+  155| printf 'src_sha256=%s\ncalibration_header_sha256=%s\ntool_headers_sha256=%s\ngit=%s\nbuilt=%s\nbinary_sha256=%s\nopenms=%s\nepd_sha256=%s\nepd_patch_markers=%s\nmasstrace_move_markers=%s\nlibopenms_sha256=%s\ndnoise_unit_test=passed\ntdf_load_unit_test=%s\n' \
+  156|   "$(sha "$TOPP/spextractor.cpp")" "$(sha "$(dest TdfMzCalibration.h)")" "$HDRS_SHA" "$GITREV" "$(date -Is)" \
+  157|   "$(sha bin/spextractor)" "$OMSVER" "$(sha "$EPD")" "$(grep -c 'SpeXtractor\|lock' "$EPD" || true)" \
+  158|   "$(grep -c 'MassTrace(MassTrace &&)' "$OMS/src/openms/include/OpenMS/KERNEL/MassTrace.h" || true)" \
+  159|   "$(sha lib/libOpenMS.so)" "$TDF_UT" > "$PROV.tmp"
+  160| COMMITTED=1; mv -f "$PROV.tmp" "$PROV"          # the commit point
+  161| cat "$PROV" >> "$R/deploys.log"; cat "$PROV"
+  162| if [ -e "$S/bak/spextractor.cpp" ]; then mv -f "$S/bak/spextractor.cpp" "$TOPP/spextractor.cpp.bak"; fi
+  163| mkdir -p "$UT" "$TESTS"
+  164| cp "$U/tests/test_dnoise_ms1.cpp" "$U/test_dnoise_ms1.log" "$U/tests/test_tdf_load.cpp" "$U/test_tdf_load.log" "$UT/"
+  165| cp "$S/test_spextractor.py" "$S/semantic_digest.py" "$S/mzml_specdiff.py" "$S/tile_concat.py" "$S/ledger_report.py" "$S/launch.sh" "$TOOLS/"
+  166| cp "$S/calibration_golden.json" "$TESTS/"
+  167| # 771 explicitly, not chmod +x: the tools dir carries a default ACL (default:group::rwx, other:---), so a file
+  168| # created by a redirect or a python write lands 0660 with NO exec bit regardless of umask -- which is how
+  169| # three drivers silently lost theirs on 2026-09-07.
+  170| chmod 771 "$TOOLS/launch.sh"
+  171| echo "DEPLOY COMMITTED"
+  172| TXN
+  173| STAGE=$(ssh "$NODE" "mktemp -d $R/.deploy.stage.XXXXXX")
+  174| case "$STAGE" in "$R"/.deploy.stage.??????) ;; *) echo "REFUSED: unexpected stage dir [$STAGE]" >&2; STAGE=""; exit 1;; esac
+  175| scp -q $INPUTS $SHIP "$TMP/SHA256SUMS" "$TMP/txn.sh" "$NODE:$STAGE/"
+  176| HANDED=1
+  177| echo "node-side transaction log: $NODE:$STAGE.log"
+  178| ssh "$NODE" "bash $STAGE/txn.sh $STAGE $GITREV $R $TOOLS $TESTS > $STAGE.log 2>&1 < /dev/null; rc=\$?; cat $STAGE.log; exit \$rc"
+```
+
+## 10. src/spextractor.cpp, current text: struct DnoiseRun (lines 1820-1993) and every changed region with about 80 lines of context (line-numbered; 6075 lines in the file)
+
+### 10.1 src/spextractor.cpp lines 1614-2382
+
+```cpp
+ 1614|   ///
+ 1615|   /// MEASURED: `loadExperiment` reaches 90.3 GB RSS / 99.0 GB peak at t=0s, BEFORE any compaction
+ 1616|   /// exists — so the compact store (10 B/peak, 20.9 GB for 2.19e9 peaks) can never lower the peak.
+ 1617|   /// The floor is the whole run being resident at once. BrukerTimsFile::loadDIAStreaming hands us one
+ 1618|   /// frame at a time, so we peak-pick and compact each frame on arrival and never hold the raw run.
+ 1619|   ///
+ 1620|   /// Windows are keyed by the SAME (lo,hi) isolation-window key used downstream, taken from the
+ 1621|   /// spectrum's own precursor, so routing is identical to the old split - not by swath_nr, whose
+ 1622|   /// ordering is the reader's business and need not match ours.
+ 1623|   /// Isolation window identity: (lo*100, hi*100, WindowGroup). The group is part of it because
+ 1624|   /// one diaPASEF scheme (Meier 2020 "py3", PXD017703) acquires the SAME m/z window in two window
+ 1625|   /// groups with shifted, overlapping ion-mobility slices ~1.7 s apart in the cycle. Keyed by m/z
+ 1626|   /// alone the two halves land in one window as all of group A then all of group B (RT not
+ 1627|   /// monotone, and a precursor outside the overlap would see every other frame empty). Every
+ 1628|   /// other scheme has one slice per m/z, so for those this key orders and partitions exactly as
+ 1629|   /// the old (lo, hi) pair did.
+ 1630|   using WinKey = std::array<int, 3>;
+ 1631| 
+ 1632|   /// [frames] A frame-table failure is STRUCTURAL and fatal: the loader's recoverable catch
+ 1633|   /// ("streaming load failed ... falling back to loadExperiment") would otherwise append a second
+ 1634|   /// full load onto the partial slabs and MS1 map it leaves behind (Codex, frame-tables review).
+ 1635|   struct FrameTableError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
+ 1636| 
+ 1637|   /// [tile-1] The step-1 probe of the tiling plan (review correction C7): keep only the MS2 frames of
+ 1638|   /// ONE RT range plus a halo, applied AFTER picking so batches are unchanged; score only the
+ 1639|   /// precursors whose apex is in the range; freeze the window tof edges and the Pearson support
+ 1640|   /// (SPEXTRACTOR_TOF_EDGES, SPEXTRACTOR_G_FILE) so they are the whole-run values. It prices the
+ 1641|   /// boundary effect and the halo CPU of an RT tile with no reader/writer code. Probe only.
+ 1642|   struct TileProbe
+ 1643|   {
+ 1644|     bool on = false; double lo = 0, hi = 0, halo = 0;
+ 1645|     static const TileProbe& get()
+ 1646|     {
+ 1647|       static const TileProbe p = []{
+ 1648|         TileProbe t;
+ 1649|         if (const char* e = std::getenv("SPEXTRACTOR_MS2_RT_RANGE"))
+ 1650|           if (std::sscanf(e, "%lf,%lf,%lf", &t.lo, &t.hi, &t.halo) == 3) t.on = true;
+ 1651|         return t; }();
+ 1652|       return p;
+ 1653|     }
+ 1654|     bool keepFrame(double rt) const { return !on || (rt >= lo - halo && rt <= hi + halo); }
+ 1655|     bool core(double rt) const { return !on || (rt >= lo && rt < hi); }
+ 1656|     /// SPEXTRACTOR_WINDOW_FILE: one line per window, "<lo>-<hi>\t<G>\t<tlo>\t<thi>" as the whole
+ 1657|     /// run logged them ([gstat] and [tof]); the probe freezes all three so a partial window is
+ 1658|     /// scored on the whole window's support and traced in the whole window's bands.
+ 1659|     struct Row { size_t G = 0; unsigned tlo = 0, thi = 0; };
+ 1660|     static bool row(const std::string& key, Row& out)
+ 1661|     {
+ 1662|       static const std::map<std::string, Row> rows = []{
+ 1663|         std::map<std::string, Row> m;
+ 1664|         if (const char* e = std::getenv("SPEXTRACTOR_WINDOW_FILE"))
+ 1665|         {
+ 1666|           std::ifstream f(e); std::string ln;
+ 1667|           while (std::getline(f, ln))
+ 1668|           {
+ 1669|             char k[128]; unsigned long g; unsigned a, b;
+ 1670|             if (std::sscanf(ln.c_str(), "%127s %lu %u %u", k, &g, &a, &b) == 4) m[k] = Row{(size_t)g, a, b};
+ 1671|           }
+ 1672|           if (m.empty()) throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "SPEXTRACTOR_WINDOW_FILE has no rows", e);
+ 1673|         }
+ 1674|         return m; }();
+ 1675|       const auto it = rows.find(key);
+ 1676|       if (it == rows.end()) { if (!rows.empty()) throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "SPEXTRACTOR_WINDOW_FILE has no row for window", key); return false; }
+ 1677|       out = it->second; return true;
+ 1678|     }
+ 1679|   };
+ 1680| 
+ 1681|   /// The MS1 band partition's halo in units of trace:mass_error_ppm: detectTraces_ widens every band by
+ 1682|   /// this many tolerances on each side, and the load-time MS1 prune is exact only because its hop is
+ 1683|   /// derived from the same number. There is deliberately only this one. [ms1-prune]
+ 1684|   constexpr double kBandHaloPpmMul = 20.0;
+ 1685| 
+ 1686|   /// MSSpectrum::select right-sizes the peaks but reserves every data array at its OLD size (OpenMS MSSpectrum.cpp:49,
+ 1687|   /// 71, 93): without this a selected spectrum keeps its Ion Mobility array's capacity for every peak it lost, 4 B each
+ 1688|   /// (+2.3 GB resident on dataset D's pruned MS1 map). [ms1-prune] [dnoise]
+ 1689|   inline void shrinkDataArrays(MSSpectrum& s)
+ 1690|   {
+ 1691|     for (auto& a : s.getFloatDataArrays()) a.shrink_to_fit();
+ 1692|     for (auto& a : s.getIntegerDataArrays()) a.shrink_to_fit();
+ 1693|     for (auto& a : s.getStringDataArrays()) a.shrink_to_fit();
+ 1694|   }
+ 1695| 
+ 1696|   /// [ms1-finite] Refuses an input with a non-finite MS1 m/z. Nothing after the pick is defined on one, prune on or off:
+ 1697|   /// sortByPosition leaves finite m/z out of order around a NaN while isSorted() stays true, a NaN band edge leaves two
+ 1698|   /// band cores owning nothing, and MassTraceDetection's m/z search matches anything. Rethrown past the stream fallback.
+ 1699|   struct Ms1MzError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
+ 1700|   inline void requireFiniteMs1Mz(const MSSpectrum& s)
+ 1701|   {
+ 1702|     for (Size i = 0; i < s.size(); ++i)
+ 1703|       if (!std::isfinite(s[i].getMZ()))
+ 1704|         throw Ms1MzError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+ 1705|                          "[ms1] MS1 spectrum has a non-finite m/z (" + std::to_string(s[i].getMZ()) + ") at peak " + std::to_string(i)
+ 1706|                          + " of " + std::to_string(s.size()) + " after peak picking; the input is malformed and the run is refused", s.getNativeID());
+ 1707|   }
+ 1708| 
+ 1709|   /// [ms1-prune 2026-09-10] Picked MS1 centroids at or below trace:noise_threshold_int, dropped at load.
+ 1710|   /// MassTraceDetection never traces them (its work map keeps (double)intensity > noise only), yet they
+ 1711|   /// are ~81% of dataset D's picked MS1 map. Two things still read them, and both are kept exact:
+ 1712|   ///  (i)  the band EDGES are quantiles of a stride-97 m/z sample of the whole map, so the sample is taken
+ 1713|   ///       here, from the sorted spectrum BEFORE a peak is removed, and detectTraces_ uses it;
+ 1714|   ///  (ii) a band spectrum EXISTS iff any peak lies in the band's range, and one whose peaks are all
+ 1715|   ///       sub-threshold is still a SCAN to MassTraceDetection (it counts against min_sample_rate; an
+ 1716|   ///       absent one does not). So a spectrum keeps its first and last peak plus the fewest sub-threshold
+ 1717|   ///       witnesses that leave no two consecutive kept peaks more than hop (relative m/z) apart. A band
+ 1718|   ///       range with its halo is at least 2 hop / (1 - hop) of its lower bound wide, so a range that
+ 1719|   ///       holds any peak holds a kept one -- with a factor-2 margin over floating-point rounding.
+ 1720|   /// Brute-forced against a model of the band builder and MassTraceDetection's filter: 0 of 360,968 band
+ 1721|   /// checks differ, 37,119 without the witnesses. Never removes a spectrum or strips the IM array.
+ 1722|   struct Ms1Prune
+ 1723|   {
+ 1724|     struct Counts { long long picked = 0, survivors = 0, kept = 0, at_noise = 0, nan = 0, bad_mz = 0; };
+ 1725|     bool on = false;              ///< perf:ms1_prune
+ 1726|     bool no_witness = false;      ///< SPEXTRACTOR_MS1_PRUNE_NO_WITNESS=1: survivors only -- a negative control, NOT exact
+ 1727|     bool no_chain = false;        ///< SPEXTRACTOR_MS1_PRUNE_NO_CHAIN=1: interior chain links dropped, anchors kept -- a negative control, NOT exact
+ 1728|     double noise = 0.0;           ///< trace:noise_threshold_int, the very double MassTraceDetection is given
+ 1729|     double hop = 0.0;             ///< trace:mass_error_ppm x 1e-6 x kBandHaloPpmMul
+ 1730|     std::vector<double> sample;   ///< the stride-97 m/z sample of every spectrum pruned so far, taken unpruned
+ 1731|     size_t frames = 0, sample_n = 0;   ///< spectra pruned; the sample size their picked counts imply
+ 1732|     Counts total;
+ 1733| 
+ 1734|     void reset() { std::vector<double>().swap(sample); frames = sample_n = 0; total = Counts(); }
+ 1735| 
+ 1736|     /// One spectrum: sort by m/z (a no-op on a picked one), write the m/z values detectTraces_ would
+ 1737|     /// sample to @p samp, then keep the survivors and the witnesses. The chain runs once to count, and a second
+ 1738|     /// time to collect only when it removes a peak: a spectrum it would not shrink costs no index vector and no select.
+ 1739|     void frame(MSSpectrum& s, double* samp, Counts& c) const
+ 1740|     {
+ 1741|       s.sortByPosition();
+ 1742|       const Size n = s.size();
+ 1743|       for (Size i = 0; i < n; i += 97) *samp++ = s[i].getMZ();
+ 1744|       const Size none = (Size)-1;
+ 1745|       auto reach = [&](Size k, double x) { const double m = s[k].getMZ(); return x <= m + hop * m; };
+ 1746|       bool finite = true;
+ 1747|       auto chain = [&](bool count, auto&& take) {   // take(i) for every kept peak, in ascending order
+ 1748|         Size last = none, cand = none;   // the last kept peak; the farthest sub-threshold peak within its reach
+ 1749|         for (Size i = 0; i < n; ++i)
+ 1750|         {
+ 1751|           const double v = s[i].getIntensity();   // float -> double, as MassTraceDetection reads it
+ 1752|           const bool surv = v > noise;            // its own test; the complement also drops NaN and == noise
+ 1753|           const double x = s[i].getMZ();
+ 1754|           if (count) { c.survivors += surv; c.at_noise += (v == noise); c.nan += (v != v); finite = finite && std::isfinite(x); }
+ 1755|           if (no_witness) { if (surv) take(i); continue; }
+ 1756|           if (last != none && reach(last, x)) { if (surv) { take(i); last = i; cand = none; } else cand = i; continue; }
+ 1757|           if (cand != none)                       // out of reach: the candidate becomes a witness first
+ 1758|           {
+ 1759|             if (!no_chain) take(cand);            // (the NO_CHAIN control walks on from it without keeping it)
+ 1760|             last = cand; cand = none;
+ 1761|             if (reach(last, x)) { if (surv) { take(i); last = i; } else cand = i; continue; }
+ 1762|           }
+ 1763|           take(i); last = i;                      // the first peak, or the far side of a gap nothing bridges
+ 1764|         }
+ 1765|         if (cand != none) take(cand);             // the last peak
+ 1766|       };
+ 1767|       Size kept = 0;
+ 1768|       chain(true, [&kept](Size) { ++kept; });
+ 1769|       c.picked += (long long)n;
+ 1770|       // A non-finite m/z hides from is_sorted, so the band builder's lower_bound over it lands where the spectrum's
+ 1771|       // LENGTH decides -- which the prune changes. Both load paths refuse such a spectrum right after its pick, so it
+ 1772|       // never reaches this line and bad_mz stays 0.
+ 1773|       if (!finite) requireFiniteMs1Mz(s);   // [ms1-finite] unreachable, both load paths refuse first; throws if a future entry point skips them
+ 1774|       c.kept += (long long)kept;
+ 1775|       if (kept == n) return;
+ 1776|       std::vector<Size> keep;
+ 1777|       keep.reserve(kept);
+ 1778|       chain(false, [&keep](Size i) { keep.push_back(i); });
+ 1779|       s.select(keep);        // peaks and every data array in lockstep
+ 1780|       shrinkDataArrays(s);   // select right-sizes only the peaks
+ 1781|     }
+ 1782| 
+ 1783|     /// Prune every spectrum of @p v that @p take selects, in parallel. A spectrum's sample size does not
+ 1784|     /// depend on the prune, so the offsets are fixed first; the order is irrelevant (detectTraces_ sorts).
+ 1785|     void batch(std::vector<MSSpectrum>& v, bool (*take)(const MSSpectrum&))
+ 1786|     {
+ 1787|       std::vector<char> sel(v.size());
+ 1788|       std::vector<size_t> off(v.size());
+ 1789|       size_t at = sample.size();
+ 1790|       for (size_t i = 0; i < v.size(); ++i) { sel[i] = take(v[i]); off[i] = at; if (sel[i]) at += (v[i].size() + 96) / 97; }
+ 1791|       sample.resize(at);
+ 1792|       std::vector<Counts> cs(v.size());
+ 1793|       std::exception_ptr err;
+ 1794|       #pragma omp parallel for schedule(dynamic, 1)
+ 1795|       for (long i = 0; i < (long)v.size(); ++i)
+ 1796|       {
+ 1797|         if (!sel[(size_t)i]) continue;
+ 1798|         try { frame(v[(size_t)i], sample.data() + off[(size_t)i], cs[(size_t)i]); }
+ 1799|         catch (...)
+ 1800|         {
+ 1801|           #pragma omp critical(ms1_prune_err)
+ 1802|           if (!err) err = std::current_exception();
+ 1803|         }
+ 1804|       }
+ 1805|       if (err) std::rethrow_exception(err);
+ 1806|       for (size_t i = 0; i < v.size(); ++i)
+ 1807|       {
+ 1808|         if (!sel[i]) continue;
+ 1809|         const Counts& c = cs[i];
+ 1810|         ++frames; sample_n += (size_t)(c.picked + 96) / 97;
+ 1811|         total.picked += c.picked; total.survivors += c.survivors; total.kept += c.kept; total.at_noise += c.at_noise; total.nan += c.nan; total.bad_mz += c.bad_mz;
+ 1812|       }
+ 1813|     }
+ 1814|   };
+ 1815| 
+ 1816|   /// [dnoise] A refusal of the MS1 port. Rethrown past the stream load's fallback, which would otherwise read
+ 1817|   /// the whole run a second time only to refuse it there.
+ 1818|   struct DnoiseError : Exception::InvalidValue { using Exception::InvalidValue::InvalidValue; };
+ 1819| 
+ 1820|   /// [dnoise 2026-09-10] dnoise v0.1.0's default MS1 path (DnoiseMs1.h) on every MS1 frame of a Bruker .d, on the
+ 1821|   /// raw points, before the pick. The loader hands over m/z, 1/K0 and a corrected intensity, not the integers
+ 1822|   /// dnoise filters, so all three are recovered and CHECKED per point, and the run is refused rather than
+ 1823|   /// filtered on anything that does not recover exactly:
+ 1824|   ///  TOF        the MzCalibration table model's inverse at the frame's factor lies within kTofTol of a bin (the
+ 1825|   ///             chord misses by bins; the loader's own record, lastMzCalibration(), is checked per batch too);
+ 1826|   ///  scan       the float32 1/K0 is RationalScan2ImConverter's value of one of the frame's scans, matched in its
+ 1827|   ///             TimsCalibration row's table within kImTol -- far inside half the smallest step between scans;
+ 1828|   ///  intensity  opentims stored (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5), and exactly one raw count may give
+ 1829|   ///             the value: bit-identity needs the raw one (the corrected one flips 9 of 3.1 M kept points on TNBC).
+ 1830|   /// The arithmetic is DnoiseMs1.h's spx::dnoise::recover (contraction off, unit-tested); this struct turns its refusals
+ 1831|   /// into messages. A spectrum must be the whole raw frame (Frames.NumPeaks points: no aggregated or centroided frame),
+ 1832|   /// and every MS1 frame with points must reach the filter exactly once (seen). The kept points are selected in place,
+ 1833|   /// so a frame the filter empties stays in the map with an empty IM array.
+ 1834|   struct DnoiseRun
+ 1835|   {
+ 1836|     struct Counts { long long frames = 0, emptied = 0, raw = 0, streak = 0, halo = 0, kept = 0; double cpu = 0.0; uint32_t fid = 0; };
+ 1837|     /// one per thread for one batch: dnoise's Scratch plus the recovered integers (~45 B per raw point in flight)
+ 1838|     struct Work { spx::dnoise::Scratch w; std::vector<uint32_t> scan, tof, raw; std::vector<uint8_t> keep; std::vector<Size> idx; };
+ 1839|     bool on = false;                          ///< dnoise:ms1 true on a Bruker .d, set up
+ 1840|     spx::dnoise::Params p;
+ 1841|     std::optional<spx::dnoise::Ms1WindowGate> gate;
+ 1842|     spextractor::TdfDnoiseInputs tdf;
+ 1843|     std::vector<std::vector<float>> im_asc;   ///< per TimsCalibration row: the float32 1/K0 of each scan its MS1 frames have, ascending
+ 1844|     std::vector<char> im_falls;               ///< the row's 1/K0 falls with the scan, so its im_asc is reversed
+ 1845|     Counts total;
+ 1846|     spx::dnoise::FrameCoverage seen;          ///< the frame ids add() merged, each once
+ 1847| 
+ 1848|     static double threadCpu_() { timespec ts; return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 : 0.0; }
+ 1849| 
+ 1850|     /// Read the tdf, build the gate and the scan tables. Empty = ready; anything else is why the run is refused.
+ 1851|     std::string setup(const std::string& tdf_path)
+ 1852|     {
+ 1853|       std::string why;
+ 1854|       if (!spextractor::loadTdfDnoise(tdf_path, tdf, why)) return why;
+ 1855|       spx::dnoise::GateBuild g = spx::dnoise::buildMs1WindowGate(tdf.meta, tdf.windows, p);
+ 1856|       if (!g.error.empty()) return "the dnoise MS1 port cannot build its window gate from this file: " + g.error;
+ 1857|       gate = std::move(g.gate);
+ 1858|       for (size_t id = 1; id < tdf.frames.size(); ++id)   // below 1 (AccumulationTime > 100 ms) raw counts share a corrected value
+ 1859|         if (tdf.frames[id].msms_type == 0)
+ 1860|           if (std::string r = spx::dnoise::recover::correctionRefusal(id, tdf.frames[id].corr); !r.empty()) return r;
+ 1861|       // one table per TimsCalibration row, over the most scans an MS1 frame using it has (tdf.ms1_max_scans): a row no MS1
+ 1862|       // frame uses stays empty and matches nothing. The gate keeps the run's MAX(NumScans), as dnoise does.
+ 1863|       im_asc.assign(tdf.tims_cal.size(), {});
+ 1864|       im_falls.assign(tdf.tims_cal.size(), 0);
+ 1865|       for (size_t ci = 0; ci < tdf.tims_cal.size(); ++ci)
+ 1866|       {
+ 1867|         bool falls = false;
+ 1868|         const std::string r = spx::dnoise::recover::buildScanTable(tdf.tims_cal[ci], tdf.ms1_max_scans[ci], im_asc[ci], falls);
+ 1869|         if (!r.empty()) return r;
+ 1870|         im_falls[ci] = falls;
+ 1871|       }
+ 1872|       reset();
+ 1873|       on = true;
+ 1874|       return std::string();
+ 1875|     }
+ 1876| 
+ 1877|     /// The scans each row's table covers, for the setup log: "944", or "944,0" with a row no MS1 frame uses.
+ 1878|     String scanTables() const
+ 1879|     {
+ 1880|       String out;
+ 1881|       for (size_t ci = 0; ci < tdf.ms1_max_scans.size(); ++ci) out += (ci ? "," : "") + String(tdf.ms1_max_scans[ci]);
+ 1882|       return out;
+ 1883|     }
+ 1884| 
+ 1885|     /// The loader must have calibrated m/z with the model the TOF recovery inverts. Serially, once per batch.
+ 1886|     void checkLoader() const
+ 1887|     {
+ 1888|       if (BrukerTimsFile::lastMzCalibration() != "tdf_table_modeltype1")
+ 1889|         throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 denoising recovers each point's TOF bin through the MzCalibration "
+ 1890|                           "table model, and the loader calibrated m/z otherwise; -dnoise:ms1 false runs without MS1 denoising", BrukerTimsFile::lastMzCalibration());
+ 1891|     }
+ 1892| 
+ 1893|     /// One MS1 spectrum as the loader delivered it, filtered in place. @p k is the calling thread's, @p c the frame's.
+ 1894|     void frame(MSSpectrum& s, Work& k, Counts& c) const
+ 1895|     {
+ 1896|       using spx::dnoise::recover::Refusal;
+ 1897|       const double cpu0 = threadCpu_();
+ 1898|       const uint32_t fid = frameIdOf(s.getNativeID());
+ 1899|       const Size n = s.size();
+ 1900|       auto refuse = [&](const String& what) {
+ 1901|         return DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] " + what + "; -dnoise:ms1 false runs without MS1 denoising", s.getNativeID()); };
+ 1902|       const bool has_im = s.containsIMData();
+ 1903|       switch (spx::dnoise::recover::frameCheck(tdf.frames, fid, n, has_im, has_im ? s.getFloatDataArrays()[s.getIMData().first].size() : 0))
+ 1904|       {
+ 1905|         case Refusal::none: break;
+ 1906|         case Refusal::frame: throw refuse("an MS1 spectrum is not an MS1 frame of the input's analysis.tdf");
+ 1907|         case Refusal::peaks:
+ 1908|           throw refuse("frame " + String(fid) + " arrived with " + String(n) + " of its " + String(tdf.frames[fid].num_peaks) + " raw points: only a whole raw frame can be denoised (no frame aggregation, no loader centroiding)");
+ 1909|         default: throw refuse("frame " + String(fid) + " carries no 1/K0 per point");   // Refusal::im
+ 1910|       }
+ 1911|       const spextractor::TdfDnoiseInputs::Frame& fr = tdf.frames[fid];
+ 1912|       ++c.frames; c.raw += (long long)n; c.fid = fid;
+ 1913|       if (n == 0) { c.cpu += threadCpu_() - cpu0; return; }
+ 1914|       const auto& im = s.getFloatDataArrays()[s.getIMData().first];
+ 1915|       const TofAxis& ax = tofAxis();
+ 1916|       const double b = ax.factor(fid), corr = fr.corr;
+ 1917|       const std::vector<float>& asc = im_asc[fr.cal];
+ 1918|       const bool falls = im_falls[fr.cal] != 0;
+ 1919|       k.scan.resize(n); k.tof.resize(n); k.raw.resize(n);
+ 1920|       for (Size i = 0; i < n; ++i)
+ 1921|       {
+ 1922|         const float v = s[i].getIntensity();
+ 1923|         double t = 0.0; int hits = 0;
+ 1924|         switch (spx::dnoise::recover::recoverPoint(ax.cal, b, s[i].getMZ(), im[i], v, corr, asc, falls, fr.num_scans, k.tof[i], k.scan[i], k.raw[i], t, hits))
+ 1925|         {
+ 1926|           case Refusal::none: break;
+ 1927|           case Refusal::tof:
+ 1928|             throw refuse("m/z " + String(s[i].getMZ()) + " in frame " + String(fid) + " is not the MzCalibration table model's value of a TOF bin (" + String(t) + "): the loader calibrated m/z otherwise");
+ 1929|           case Refusal::scan:
+ 1930|             throw refuse("1/K0 " + String(im[i]) + " in frame " + String(fid) + " is not the TimsCalibration model's value of one of its " + String(fr.num_scans) + " scans: the loader converted 1/K0 otherwise");
+ 1931|           case Refusal::intensity_range:
+ 1932|             throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is >= 2^24 = 16777216: the loader's float32 intensity no longer identifies one raw count");
+ 1933|           default:   // Refusal::intensity
+ 1934|             throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of exactly one raw count (" + String(hits) + " found)");
+ 1935|         }
+ 1936|       }
+ 1937|       const spx::dnoise::FrameCounts fc = spx::dnoise::denoiseMs1Frame(k.scan.data(), k.tof.data(), k.raw.data(), n, fr.num_scans, p, gate ? &*gate : nullptr, k.w, k.keep);
+ 1938|       c.streak += (long long)fc.after_streak; c.halo += (long long)fc.after_halo; c.kept += (long long)fc.kept; c.emptied += (fc.kept == 0);
+ 1939|       if (fc.kept != n)
+ 1940|       {
+ 1941|         k.idx.clear();
+ 1942|         for (Size i = 0; i < n; ++i) if (k.keep[i]) k.idx.push_back(i);
+ 1943|         s.select(k.idx);        // the peaks and every data array in lockstep
+ 1944|         shrinkDataArrays(s);    // select leaves every data array at its raw capacity
+ 1945|       }
+ 1946|       c.cpu += threadCpu_() - cpu0;
+ 1947|     }
+ 1948| 
+ 1949|     /// A batch's per-spectrum counts, serially: each denoised frame (a slot with frames 0 is an MS2 spectrum's) marked
+ 1950|     /// once -- a frame delivered twice is refused, it would be filtered and traced twice.
+ 1951|     void add(const std::vector<Counts>& v)
+ 1952|     {
+ 1953|       for (const Counts& c : v)
+ 1954|       {
+ 1955|         if (c.frames == 0) continue;
+ 1956|         if (!seen.mark(c.fid))
+ 1957|           throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(c.fid) + " reached the filter twice: the loader delivered it more than once; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(c.fid));
+ 1958|         total.frames += c.frames; total.emptied += c.emptied; total.raw += c.raw; total.streak += c.streak; total.halo += c.halo; total.kept += c.kept; total.cpu += c.cpu;
+ 1959|       }
+ 1960|     }
+ 1961| 
+ 1962|     /// After the load, serially: every MS1 frame with points (Frames.NumPeaks > 0) reached the filter. Counts cannot
+ 1963|     /// tell -- a frame delivered twice and a missing one with equal NumPeaks cancel out -- so this reads the marks.
+ 1964|     void requireComplete() const
+ 1965|     {
+ 1966|       if (const size_t miss = seen.firstMissing(tdf.frames))
+ 1967|         throw DnoiseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(miss) + " (" + String(tdf.frames[miss].num_peaks)
+ 1968|                           + " raw points in Frames.NumPeaks) never reached the filter: the loader did not deliver every MS1 frame; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(miss));
+ 1969|     }
+ 1970| 
+ 1971|     /// The counts and marks back to none: at setup, and when a failed stream load falls back to the resident one, which
+ 1972|     /// delivers every frame again.
+ 1973|     void reset() { total = Counts(); seen.reset(); }
+ 1974| 
+ 1975|     /// The applied parameters and the run's gate size, for the log and spx:dnoise_ms1_params.
+ 1976|     String params() const
+ 1977|     {
+ 1978|       return "mz_half_width=" + String(p.mz_half_width) + " min_feature_length=" + String(p.min_feature_length) + " max_internal_gap=" + String(p.max_internal_gap)
+ 1979|              + " iterations=" + String(p.iterations) + " min_window_intensity=" + String(p.min_window_intensity) + " min_feature_intensity=" + String(p.min_feature_intensity)
+ 1980|              + " halo=" + (p.halo ? "true" : "false") + " halo_peak_fraction=" + String(p.halo_peak_fraction) + " halo_mz_idx_half_width=" + String(p.halo_mz_idx_half_width)
+ 1981|              + " halo_scan_half_width=" + String(p.halo_scan_half_width) + " dia_ms1_window=" + (p.dia_ms1_window ? "true" : "false")
+ 1982|              + " dia_ms1_mz_pad=" + String(p.dia_ms1_mz_pad) + " dia_ms1_im_pad=" + String(p.dia_ms1_im_pad) + " gate_boxes=" + String(gate ? gate->boxes().size() : (size_t)0);
+ 1983|     }
+ 1984| 
+ 1985|     String summary() const
+ 1986|     {
+ 1987|       char b[320];
+ 1988|       snprintf(b, sizeof b, "[dnoise] %s MS1: %lld frames (%lld emptied), %lld raw points -> streak %lld -> halo %lld -> window gate: kept %lld MS1 points (%.2f%%); filter CPU %.1f s",
+ 1989|                spx::dnoise::kPortedFrom, total.frames, total.emptied, total.raw, total.streak, total.halo, total.kept,
+ 1990|                total.raw > 0 ? 100.0 * (double)total.kept / (double)total.raw : 0.0, total.cpu);
+ 1991|       return String(b);
+ 1992|     }
+ 1993|   };
+ 1994| 
+ 1995|   class PickCompactConsumer : public FullSwathFileConsumer
+ 1996|   {
+ 1997|   public:
+ 1998|     PickCompactConsumer(PeakPickerIM& picker, map<WinKey, PeakSlab>& windows,
+ 1999|                         PeakMap& ms1, CompactStats& stats,
+ 2000|                         std::function<WinKey(double, double, uint32_t)> keyfn)
+ 2001|       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats), keyfn_(std::move(keyfn)) {}
+ 2002| 
+ 2003|     size_t frames_seen = 0;
+ 2004|     size_t frames_probe_dropped = 0;   ///< [tile-1] MS2 frames outside the probe's range + halo
+ 2005| 
+ 2006|     /// [frames] A window's FROZEN frame table (rt, vendor id) in the reader's delivery order, with
+ 2007|     /// the lockstep cursor: every table frame the reader skipped before the delivered one -- a raw
+ 2008|     /// frame with no peaks, an empty ion-mobility slice, a probe-dropped frame -- is appended EMPTY
+ 2009|     /// with the table's own rt and id, so the slab's frame sequence IS the table's in every mode
+ 2010|     /// (an empty frame is a scan, not a miss; a missing frame would be neither). Measured 0 pads
+ 2011|     /// on both pinned datasets, so today's output is unchanged; under the tiled readers the pads
+ 2012|     /// stand in for the frames that are not resident.
+ 2013|     struct FrameTab
+ 2014|     {
+ 2015|       std::vector<double> rt; std::vector<uint32_t> id;
+ 2016|       size_t cur = 0, delivered = 0, padded = 0;
+ 2017|       /// pad up to the delivered frame (its rt AND vendor id equal the table row's -- an rt alone is
+ 2018|       /// ambiguous when two rows share one, e.g. an mzPeak archive without retention times); false
+ 2019|       /// = not in the table
+ 2020|       bool step(PeakSlab& sl, double t, uint32_t fid, size_t expected_frames)
+ 2021|       {
+ 2022|         while (cur < rt.size() && (rt[cur] != t || id[cur] != fid)) { sl.append(rt[cur], id[cur], nullptr, nullptr, nullptr, 0, expected_frames); ++cur; ++padded; }
+ 2023|         if (cur == rt.size()) return false;
+ 2024|         ++cur; ++delivered; return true;
+ 2025|       }
+ 2026|       void tail(PeakSlab& sl, size_t expected_frames)
+ 2027|       { for (; cur < rt.size(); ++cur, ++padded) sl.append(rt[cur], id[cur], nullptr, nullptr, nullptr, 0, expected_frames); }
+ 2028|     };
+ 2029|     using FrameTables = std::map<WinKey, FrameTab>;
+ 2030|     /// The reader's frozen tables, fetched at the first MS2 flush: both streaming readers publish
+ 2031|     /// their metadata before their first MS2 frame (the .d loader exports its frame table and
+ 2032|     /// windows before its MS2 loop, the mzPeak reader sweeps the archive before decoding). Unset
+ 2033|     /// (an mzML) = no tables, no padding: the slab is its own table.
+ 2034|     std::function<FrameTables()> tablefn;
+ 2035|     const FrameTables& tables() const { return tables_; }
+ 2036|     /// [ms1-prune] pass 1's run-level MS1 prune and its edge sample; null = every picked peak is kept
+ 2037|     Ms1Prune* ms1_prune = nullptr;
+ 2038|     /// [dnoise] the run's MS1 denoising of the raw frames before their pick; null or off = none
+ 2039|     DnoiseRun* dnoise = nullptr;
+ 2040| 
+ 2041|     /// [perf-load] Pick+compact a BATCH of buffered frames in parallel, then append in arrival
+ 2042|     /// order. OpenMS hands frames over a strictly serial `for (fid..) consumeSpectrum(spec)` loop,
+ 2043|     /// so before this the peak picking of 1.26e9 peaks ran on ONE thread and was 53% of total wall
+ 2044|     /// (measured: 1046 s wall, parallel factor 1.0). Buffering here parallelises it without
+ 2045|     /// touching the reader. Appending strictly by buffer index keeps the output order identical to
+ 2046|     /// the serial path; the emitted spectra matched it in m/z and differed in ~2% of intensities at
+ 2047|     /// the 1e-5..1e-4 relative level (Sage count unchanged).
+ 2048|     void flush_()
+ 2049|     {
+ 2050|       if (!tables_init_) { tables_init_ = true; if (tablefn) tables_ = tablefn(); }
+ 2051|       const int n = (int)buf_.size();
+ 2052|       if (n == 0) return;
+ 2053|       const double _tf0 = phase_clock_();
+ 2054|       // [ledger] the batch's RAW frames at 20 B per raw peak: a Peak1D is 16 B (a double position
+ 2055|       // plus a float intensity, padded) and the ion-mobility float array adds 4. Freed one by one
+ 2056|       // inside the pick loop below; this is the load's largest transient, and the reason its peak
+ 2057|       // is not the sum of what survives it. (Both reviews of 2026-09-10 corrected 16 -> 20.)
+ 2058|       long long raw_b = 0;
+ 2059|       for (const auto& sp : buf_) raw_b += (long long)sp.size() * 20;
+ 2060|       LedCharge _raw(LC_SCRATCH, raw_b);
+ 2061|       // per-frame regions of one reusable scratch, sized by the RAW peak counts
+ 2062|       scratch_off_.resize((size_t)n + 1);
+ 2063|       { size_t total = 0; for (int i = 0; i < n; ++i) { scratch_off_[(size_t)i] = total; total += buf_[(size_t)i].size(); } scratch_off_[(size_t)n] = total;
+ 2064|         if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); } }
+ 2065|       static std::atomic<long long> scratch_charged{0};   // [ledger] the reusable compaction scratch, once
+ 2066|       { const long long want = (long long)(scratch_mzq_.capacity() * 4 + scratch_inten_.capacity() * 4 + scratch_imq_.capacity() * 2);
+ 2067|         ledAdd_(LC_SCRATCH, want - scratch_charged.exchange(want)); }
+ 2068|       std::vector<size_t> kept((size_t)n);
+ 2069|       std::vector<double> frt((size_t)n);
+ 2070|       std::vector<uint32_t> fid((size_t)n);
+ 2071|       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
+ 2072|       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
+ 2073|       // SPEXTRACTOR_PICK_SERIAL=1 runs this loop on one thread: the A/B that separates picker
+ 2074|       // scheduling-sensitivity from downstream chaos.
+ 2075|       static const bool par_pick = std::getenv("SPEXTRACTOR_PICK_SERIAL") == nullptr;
+ 2076|       static const bool sched_set = []{ const bool st = std::getenv("SPEXTRACTOR_PICK_STATIC") != nullptr; omp_set_schedule(st ? omp_sched_static : omp_sched_dynamic, st ? 0 : 1); return true; }(); (void)sched_set;
+ 2077|       std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
+ 2078|       // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
+ 2079|       #pragma omp parallel for firstprivate(picker) schedule(runtime) if(par_pick)   // SPEXTRACTOR_PICK_STATIC=1 -> static (history-vs-race probe)
+ 2080|       for (int i = 0; i < n; ++i)
+ 2081|       {
+ 2082|         try
+ 2083|         {
+ 2084|           auto& s = buf_[(size_t)i];
+ 2085|           ensureIMArrayName(s);
+ 2086|           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+ 2087|           ensureIMArrayName(s);
+ 2088|           frt[(size_t)i] = s.getRT();
+ 2089|           fid[(size_t)i] = frameIdOf(s.getNativeID());
+ 2090|           if (fid[(size_t)i] == 0) ++st[(size_t)i].unmapped_frame;
+ 2091|           const size_t o = scratch_off_[(size_t)i];
+ 2092|           kept[(size_t)i] = compactifyInto(s, st[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], scratch_off_[(size_t)i + 1] - o);
+ 2093|           s.clear(true);                                // raw frame dies here, inside the loop
+ 2094|         }
+ 2095|         catch (...)
+ 2096|         {
+ 2097|           #pragma omp critical(pick_err)
+ 2098|           if (!pick_err) pick_err = std::current_exception();
+ 2099|         }
+ 2100|       }
+ 2101|       if (pick_err) std::rethrow_exception(pick_err);
+ 2102|       // Append in arrival order per window, the windows of this batch in parallel: a window's
+ 2103|       // frames stay in order (one thread walks them), distinct windows never touch each other's
+ 2104|       // slab, and the copy of ~1 GB per batch into cold pages no longer runs on one thread.
+ 2105|       struct Batch { PeakSlab* slab; FrameTab* tab; std::vector<int> idx; };
+ 2106|       std::vector<Batch> per_win;
+ 2107|       { std::map<WinKey, size_t> at;
+ 2108|         for (int i = 0; i < n; ++i)
+ 2109|         {
+ 2110|           if (!TileProbe::get().keepFrame(frt[(size_t)i])) { ++frames_probe_dropped; continue; }   // [tile-1]
+ 2111|           stats_ += st[(size_t)i];
+ 2112|           const WinKey& k = key_[(size_t)i];
+ 2113|           auto it = at.find(k);
+ 2114|           if (it == at.end())
+ 2115|           { it = at.emplace(k, per_win.size()).first;
+ 2116|             auto tt = tables_.find(k);
+ 2117|             if (!tables_.empty() && tt == tables_.end())
+ 2118|               throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] a delivered MS2 window is not in the reader's frame table",
+ 2119|                                     String(k[0] / 100.0) + "-" + String(k[1] / 100.0) + " group " + String(k[2]));
+ 2120|             per_win.push_back(Batch{&windows_[k], tt == tables_.end() ? nullptr : &tt->second, {}}); }
+ 2121|           per_win[it->second].idx.push_back(i);
+ 2122|         } }
+ 2123|       const size_t n_ms1 = ms1_.size();
+ 2124|       std::atomic<long long> slab_b{0};   // [ledger] what this batch actually touched
+ 2125|       std::exception_ptr pad_err;
+ 2126|       #pragma omp parallel for schedule(dynamic, 1)
+ 2127|       for (long w = 0; w < (long)per_win.size(); ++w)
+ 2128|       {
+ 2129|         Batch& bw = per_win[(size_t)w];
+ 2130|         for (int i : bw.idx)
+ 2131|         {
+ 2132|           const size_t exp_f = bw.tab ? bw.tab->rt.size() : n_ms1;   // the window's frame count: exact when a table exists
+ 2133|           (void)exp_f;
+ 2134|           if (bw.tab && !bw.tab->step(*bw.slab, frt[(size_t)i], fid[(size_t)i], exp_f))   // [frames] lockstep with the frozen table
+ 2135|           {
+ 2136|             #pragma omp critical(pad_err)
+ 2137|             if (!pad_err) pad_err = std::make_exception_ptr(FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+ 2138|                   "[frames] a delivered MS2 frame (rt, frame id) is not in its window's frozen frame table (window "
+ 2139|                   + String(key_[(size_t)i][0] / 100.0) + "-" + String(key_[(size_t)i][1] / 100.0) + ", frame " + String(fid[(size_t)i]) + ")", String(frt[(size_t)i], 6)));
+ 2140|             break;
+ 2141|           }
+ 2142|           const size_t o = scratch_off_[(size_t)i];
+ 2143|           bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
+ 2144|           slab_b += (long long)kept[(size_t)i] * 10 + 24;   // [ledger] touched bytes: 10 B/peak + the frame's table row
+ 2145|         }
+ 2146|       }
+ 2147|       ledAdd_(LC_SLAB, slab_b);
+ 2148|       if (pad_err) std::rethrow_exception(pad_err);
+ 2149|       flush_wall_() += phase_clock_() - _tf0;
+ 2150|       buf_.clear(); key_.clear();
+ 2151|       loadTrim_();
+ 2152|     }
+ 2153| 
+ 2154|   protected:
+ 2155|     void consumeMS1Spectrum_(MapType::SpectrumType& s) override
+ 2156|     {
+ 2157|       // MS1 stays a PeakMap (MassTraceDetection needs it whole), but its pick is NOT small: 1,343
+ 2158|       // frames x ~690k raw peaks = 37% of all peaks, and it used to run serially here (~400 s of
+ 2159|       // LOAD, measured 2026-09-02). Buffer and pick in parallel like MS2; order is kept by index.
+ 2160|       // [dnoise] the loader chose its m/z model before its first frame: refuse at that frame, not after a whole batch
+ 2161|       // (flushMS1_ checks every batch again and stays the authority)
+ 2162|       if (dnoise && dnoise->on && !dn_loader_checked_) { dnoise->checkLoader(); dn_loader_checked_ = true; }
+ 2163|       ms1_buf_.push_back(std::move(s));
+ 2164|       ++frames_seen;
+ 2165|       if (ms1_buf_.size() >= kBatchMS1_()) flushMS1_();
+ 2166|     }
+ 2167| 
+ 2168|     void flushMS1_()
+ 2169|     {
+ 2170|       const int n = (int)ms1_buf_.size();
+ 2171|       if (n == 0) return;
+ 2172|       const double _tf0 = phase_clock_();
+ 2173|       // [ledger] the buffered RAW MS1 frames at 20 B per raw peak (Peak1D 16 padded + the IM
+ 2174|       // float), held until each is picked in place below. 256 frames x ~690k peaks = ~3.5 GB on
+ 2175|       // dataset D: the largest single transient of pass 1, and the reason the MS1 phase peaks far
+ 2176|       // above the map it produces. Both reviews of 2026-09-10 identified this row independently.
+ 2177|       long long raw_b = 0;
+ 2178|       for (const auto& sp : ms1_buf_) raw_b += (long long)sp.size() * 20;
+ 2179|       LedCharge _raw(LC_SCRATCH, raw_b);
+ 2180|       PeakPickerIM picker = picker_;
+ 2181|       std::exception_ptr pick_err;
+ 2182|       // [dnoise] per thread for this batch only (freed with it), per frame counts merged below
+ 2183|       const bool dn = dnoise && dnoise->on;
+ 2184|       if (dn) dnoise->checkLoader();
+ 2185|       std::vector<DnoiseRun::Work> dn_work(dn ? (size_t)std::max(1, omp_get_max_threads()) : 0);
+ 2186|       std::vector<DnoiseRun::Counts> dn_cnt(dn ? (size_t)n : 0);
+ 2187|       #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
+ 2188|       for (int i = 0; i < n; ++i)
+ 2189|       {
+ 2190|         try
+ 2191|         {
+ 2192|           auto& s = ms1_buf_[(size_t)i];
+ 2193|           ensureIMArrayName(s);
+ 2194|           if (dn) dnoise->frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);   // [dnoise] the raw points, before the pick
+ 2195|           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+ 2196|           ensureIMArrayName(s);
+ 2197|           requireFiniteMs1Mz(s);   // [ms1-finite] before the prune, prune on or off
+ 2198|         }
+ 2199|         catch (...)
+ 2200|         {
+ 2201|           #pragma omp critical(pick_err_ms1)
+ 2202|           if (!pick_err) pick_err = std::current_exception();
+ 2203|         }
+ 2204|       }
+ 2205|       if (pick_err) std::rethrow_exception(pick_err);
+ 2206|       if (dn) dnoise->add(dn_cnt);
+ 2207|       if (ms1HistOn_())
+ 2208|         for (const auto& sp : ms1_buf_)
+ 2209|         {
+ 2210|           long long c[5] = {0, 0, 0, 0, 0};
+ 2211|           for (const auto& pk : sp) { const float v = pk.getIntensity(); ++c[v < 100 ? 0 : v < 300 ? 1 : v < 1000 ? 2 : v < 10000 ? 3 : 4]; }
+ 2212|           for (int k = 0; k < 5; ++k) ms1Hist_()[(size_t)k].fetch_add(c[k], std::memory_order_relaxed);
+ 2213|         }
+ 2214|       // [ms1-prune] after [ms1-hist] (which counts what was PICKED), before the charge below (which is then
+ 2215|       // the kept bytes)
+ 2216|       if (ms1_prune && ms1_prune->on) ms1_prune->batch(ms1_buf_, [](const MSSpectrum&) { return true; });
+ 2217|       { long long mb = 0; for (const auto& s : ms1_buf_) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
+ 2218|       for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
+ 2219|       ms1_buf_.clear();
+ 2220|       flush_wall_() += phase_clock_() - _tf0;
+ 2221|       loadTrim_();
+ 2222|     }
+ 2223| 
+ 2224|     void consumeSwathSpectrum_(MapType::SpectrumType& s, size_t /*swath_nr*/) override
+ 2225|     {
+ 2226|       const auto& prec = s.getPrecursors();
+ 2227|       if (prec.empty()) return;                      // no isolation window -> not routable
+ 2228|       const double c = prec[0].getMZ();
+ 2229|       const double lo = c - prec[0].getIsolationWindowLowerOffset();
+ 2230|       const double hi = c + prec[0].getIsolationWindowUpperOffset();
+ 2231|       flushMS1_();                                   // MS1 arrives first; pick it before any MS2 work
+ 2232|       key_.push_back(keyfn_(lo, hi, windowGroupOf(s.getNativeID())));
+ 2233|       buf_.push_back(std::move(s));                  // pick+compact deferred to flush_()
+ 2234|       ++frames_seen;
+ 2235|       if (buf_.size() >= kBatch_()) flush_();
+ 2236|     }
+ 2237| 
+ 2238|     void ensureMapsAreFilled_() override { finish(); }
+ 2239| 
+ 2240|   public:
+ 2241|     /// Flush the buffered tails. Neither reader calls this for us: FullSwathFileConsumer reaches
+ 2242|     /// ensureMapsAreFilled_ only through retrieveSwathMaps, which this consumer never uses, so
+ 2243|     /// until 2026-09-09 the last `n mod kBatch` MS2 window spectra of every run were dropped
+ 2244|     /// silently (dataset D: 210 of 32,210 = the last 105 frames of the last window group, which
+ 2245|     /// the .d reader emits group-major; at batch 4096 it was 3,538 and two whole windows -- the
+ 2246|     /// "7.2% of Sage peptides" on record for that batch size was this, not the picker).
+ 2247|     void finish()
+ 2248|     {
+ 2249|       flushMS1_(); flush_();
+ 2250|       // [frames] the tail of every delivered window's table; a table window that delivered nothing
+ 2251|       // gets no slab (it is counted as absent by the caller)
+ 2252|       for (auto& kv : tables_)
+ 2253|       { auto w = windows_.find(kv.first); if (w != windows_.end()) kv.second.tail(w->second, kv.second.rt.size()); }
+ 2254|     }
+ 2255| 
+ 2256|   private:
+ 2257|     /// deliberate: 256 frames is ~1 GB of raw buffer at ~37k peaks/frame -- 2.5 work items per
+ 2258|     /// thread at 100 threads (64 gave 8 chunks of 8 = 8 workers), small next to the 12 GB compact
+ 2259|     /// store.
+ 2260|     /// [tile-0b] Overridable for the picker-purity measurement (SPEXTRACTOR_PICK_BATCH). With the
+ 2261|     /// tail flushed (finish()) the batch size must not change the output; 256 stays the default
+ 2262|     /// for the raw-buffer footprint.
+ 2263|     /// [ledger 2026-09-10] The load ends by returning ~17 GiB on dataset D: RSS falls 45,279 ->
+ 2264|     /// 28,052 MiB at the end of LOAD with the charged total unchanged, so the process peak of the
+ 2265|     /// resident arm is one load's worth of allocator free list, not live data. `MALLOC_TRIM_THRESHOLD_`
+ 2266|     /// cannot reach it -- free() only trims the top of the MAIN arena, and with ~100 threads the
+ 2267|     /// retention sits in per-thread arenas (`malloc arena=92188 MB` in the load log). Only an
+ 2268|     /// explicit malloc_trim(0), which walks every arena, returns it. This trims every Nth flush so
+ 2269|     /// the A/B can price the walk; 0 (the default) is exactly today's behaviour.
+ 2270|     static int loadTrimEvery_() { static const int v = []{ const char* e = std::getenv("SPEXTRACTOR_LOAD_TRIM");
+ 2271|                                                            return e ? std::atoi(e) : 0; }(); return v; }
+ 2272|     static void loadTrim_()
+ 2273|     {
+ 2274|       const int n = loadTrimEvery_();
+ 2275|       if (n <= 0) return;
+ 2276|       static std::atomic<long long> k{0};
+ 2277|       const bool due = (k.fetch_add(1, std::memory_order_relaxed) % n == n - 1);
+ 2278| #ifdef __GLIBC__
+ 2279|       if (due) malloc_trim(0);
+ 2280| #else
+ 2281|       (void)due;   // every other trim site in this file is glibc-only for the same reason
+ 2282| #endif
+ 2283|     }
+ 2284|     static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH");
+ 2285|       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
+ 2286|     /// [batch 2026-09-10] ONE knob drove both flushes, and the A/B showed that is the wrong shape.
+ 2287|     /// Shrinking it to 64 takes 9.6% off the process peak for 2.9% of wall, because the peak is the
+ 2288|     /// MS1 staging; but it also re-batches the MS2 TILE reads, whose CPU rose 845 -> 1,192 -> 1,624 s
+ 2289|     /// at 256 -> 64 -> 32 while buying no memory at all -- the MS2 slabs are not what peaks. Splitting
+ 2290|     /// the knob buys the memory on the side that has it and leaves the other side alone. Batch
+ 2291|     /// composition is output-invariant (step 0b), so both are D-class.
+ 2292|     static size_t kBatchMS1_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH_MS1");
+ 2293|       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)0; }();
+ 2294|       return v ? v : kBatch_(); }
+ 2295|     std::vector<MapType::SpectrumType> buf_;
+ 2296|     std::vector<WinKey> key_;
+ 2297|     FrameTables tables_; bool tables_init_ = false;   ///< [frames] the reader's frozen tables + cursors
+ 2298|     std::vector<size_t> scratch_off_;                 ///< per-frame regions of the batch scratch (raw sizes)
+ 2299|     std::vector<uint32_t> scratch_mzq_; std::vector<float> scratch_inten_; std::vector<uint16_t> scratch_imq_;
+ 2300|     PeakPickerIM& picker_;
+ 2301|     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
+ 2302|     bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
+ 2303|     map<WinKey, PeakSlab>& windows_;
+ 2304|     PeakMap& ms1_;
+ 2305|     CompactStats& stats_;
+ 2306|     std::function<WinKey(double, double, uint32_t)> keyfn_;
+ 2307|   };
+ 2308| 
+ 2309|   /// Per-window scoring statistics from IM-sorted fragment traces (see FragStats).
+ 2310|   /// What the scorer needs per window, now that a fragment's profile is a span in the window's
+ 2311|   /// own frame sequence: the Pearson denominator G (distinct frames carrying a REAL fragment
+ 2312|   /// point -- not the window's frame count), per-fragment mean and 1/norm over real points, and
+ 2313|   /// the precursor-to-fragment nearest-frame table. No copy of any profile: the arena is the grid.
+ 2314|   struct FragStats
+ 2315|   {
+ 2316|     vector<double> mean, invnorm;   ///< per fragment, over the full grid of G frames
+ 2317|     vector<int>    nearest_local;   ///< MS1-store frame -> window frame with real fragment data, or -1
+ 2318|     size_t G = 0;
+ 2319|   };
+ 2320| 
+ 2321|   /// The Pearson support is the window's FROZEN frame table: G = F (every frame), and the
+ 2322|   /// MS1 -> window map is the table's, so neither depends on which frames are resident.
+ 2323|   FragStats buildFragStats(const vector<Trace>& frags, const TraceStore& wst, const FrozenWin& fw)
+ 2324|   {
+ 2325|     FragStats g;
+ 2326|     g.G = fw.frames();
+ 2327|     const double G = (double)g.G;
+ 2328|     g.nearest_local = fw.nearest_local;
+ 2329|     g.mean.resize(frags.size()); g.invnorm.resize(frags.size());
+ 2330|     #pragma omp taskloop default(shared)
+ 2331|     for (long ii = 0; ii < (long)frags.size(); ++ii)
+ 2332|     {
+ 2333|       const Trace& f = frags[(size_t)ii];
+ 2334|       double sum = 0, sumsq = 0;
+ 2335|       for (size_t k = 0; k < f.span(); ++k) { const double v = xv(wst, f, k); if (v > 0.0) { sum += v; sumsq += v * v; } }
+ 2336|       g.mean[ii] = sum / G;
+ 2337|       const double var = sumsq - G * g.mean[ii] * g.mean[ii];
+ 2338|       g.invnorm[ii] = var > 0 ? 1.0 / sqrt(var) : 0.0;  // 0 => constant/degenerate -> never correlates
+ 2339|     }
+ 2340|     return g;
+ 2341|   }
+ 2342| 
+ 2343|   /// Canonical total-order sort (RT, precursor m/z, charge, then the fragment sequence):
+ 2344|   /// thread-count-independent and free of RT-tie ambiguity (RT-only sortSpectra is NOT canonical).
+ 2345|   /// Sorts a compact key array and permutes once: std::sort moves what it is handed, and an
+ 2346|   /// MSSpectrum is ~750 bytes against 32 for a key. The keys start in the spectra's order, so
+ 2347|   /// introsort makes the same decisions as sorting the spectra would, ties included. [par-Crit-2]
+ 2348|   /// Tiles are RT-disjoint and RT is the first key, so per-tile sorted blocks concatenate to the
+ 2349|   /// order one sort of everything gives.
+ 2350|   static void canonicalSort_(vector<MSSpectrum>& v)
+ 2351|   {
+ 2352|     struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
+ 2353|     vector<SortKey> keys(v.size());
+ 2354| #pragma omp parallel for schedule(static)
+ 2355|     for (long i = 0; i < (long)v.size(); ++i)
+ 2356|     {
+ 2357|       const MSSpectrum& a = v[i];
+ 2358|       keys[i].rt = a.getRT();
+ 2359|       keys[i].mz = a.getPrecursors().empty() ? 0.0 : a.getPrecursors()[0].getMZ();
+ 2360|       keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
+ 2361|       keys[i].n = (uint32_t)a.size();
+ 2362|       keys[i].idx = (uint32_t)i;
+ 2363|     }
+ 2364|     sort(keys.begin(), keys.end(), [&v](const SortKey& ka, const SortKey& kb) {
+ 2365|       if (ka.rt != kb.rt) return ka.rt < kb.rt;
+ 2366|       if (ka.mz != kb.mz) return ka.mz < kb.mz;
+ 2367|       if (ka.charge != kb.charge) return ka.charge < kb.charge;
+ 2368|       // fragment-sequence tiebreaks so equal-precursor spectra have a canonical order
+ 2369|       if (ka.n != kb.n) return ka.n < kb.n;
+ 2370|       const MSSpectrum& a = v[ka.idx];
+ 2371|       const MSSpectrum& b = v[kb.idx];
+ 2372|       for (Size i = 0; i < a.size(); ++i)
+ 2373|       {
+ 2374|         if (a[i].getMZ() != b[i].getMZ()) return a[i].getMZ() < b[i].getMZ();
+ 2375|         if (a[i].getIntensity() != b[i].getIntensity()) return a[i].getIntensity() < b[i].getIntensity();
+ 2376|       }
+ 2377|       // equal peaks: the fields that still serialise differently -- two overlapping isolation
+ 2378|       // windows can emit one precursor with the same peaks and different offsets (review, step 2)
+ 2379|       const auto& pa = a.getPrecursors(); const auto& pb = b.getPrecursors();
+ 2380|       if (pa.empty() != pb.empty()) return pa.empty();
+ 2381|       if (!pa.empty())
+ 2382|       {
+```
+
+### 10.2 src/spextractor.cpp lines 2571-2808
+
+```cpp
+ 2571|                        "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
+ 2572|                        "0 = all cells in one tile (today's whole-run loop). Output is identical for any n by construction (the cell grid); memory is one tile's.", false, true);
+ 2573|     registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time the valley splitter's smoothing window (chrom_fwhm / scan time) is derived from. 'frame': the acquisition's cycle time (the smallest gap between consecutive MS1 frame times), one value for the whole run and every trace. 'trace': each mass trace's own average cycle time, as OpenMS ElutionPeakDetection does by default -- which a trace with gaps inflates, so long gappy traces got a narrower window than their neighbours and a sub-range of such a trace was split differently from the whole (the behaviour before 2026-09-09).", false, true);
+ 2574|     setValidStrings_("trace:split_scan_time", {"frame", "trace"});
+ 2575|     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' "
+ 2576|                           "(default) works on the global integer m/z axis: it finds a peak's candidate traces by "
+ 2577|                           "arithmetic instead of a tolerance search, and never converts the compact store back "
+ 2578|                           "to double m/z. It needs the vendor flight-time calibration and falls back to 'openms' "
+ 2579|                           "without it. 'openms' is OpenMS MassTraceDetection on a materialised PeakMap. These are "
+ 2580|                           "DIFFERENT algorithms, not reimplementations: they agree on about 85% of the union of "
+ 2581|                           "identified peptides, and which one identifies more depends on the search engine AND the "
+ 2582|                           "file. Integer costs ~40% less memory. See docs/MZ-AXIS-DESIGN.md.", false);
+ 2583|     setValidStrings_("trace:detector", {"openms", "integer"});
+ 2584|     registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace. "
+ 2585|                           "'apex' (default) uses the most intense peak's m/z; 'mean' the OpenMS intensity-weighted "
+ 2586|                           "centroid; 'median' the median. apex was chosen on measured identifications with both "
+ 2587|                           "search engines -- see docs/BASELINE.md. Affects EVERY reported precursor and "
+ 2588|                           "fragment m/z.", false);
+ 2589|     setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
+ 2590|     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic local minima via ElutionPeakDetection (which MassTraceDetection never does - it only terminates on outliers, so two peptides 25 s apart within the m/z tolerance MERGE). Value is chrom_fwhm in seconds; it sets both the Savitzky-Golay window and the local-extrema half-window. 0 = OFF. Try 6-8 (peaks here are 5-30 s). width_filtering is forced off so this only SPLITS, never deletes.", false);
+ 2591|     registerFlag_("diag:selftest_arena", "Run assertions on the MS1 arena compaction (compactUnreferenced) and exit: kept spans must survive a container order that differs from their offset order", true);
+ 2592|     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys via ElutionPeakDetection. DEFAULT 7.0 s: MassTraceDetection never splits at a local minimum, so two peptides eluting ~25 s apart within the m/z tolerance merge into ONE multi-modal trace, producing a merged precursor with the wrong monoisotope and charge. Measured +36.7% peptides on dataset B and +37.4% on dataset A at peptide-level FDR. Costs ~1.7x wall time and ~25% peak RAM. 0 = off.", false);
+ 2593|     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim a mass trace to at most this many "
+ 2594|                           "seconds around its apex, AFTER detection and valley splitting have decided what the peak "
+ 2595|                           "is. Applies to precursor and fragment traces alike. An unbounded trace has no locality: "
+ 2596|                           "15.2%% of dataset D precursor traces span >45 s and the longest spans 1,244 s of a 1,860 s "
+ 2597|                           "gradient, while real chromatographic peaks here are 5-30 s -- so what a 120 s cap removes "
+ 2598|                           "is the far tail of a blob ElutionPeakDetection did not split. Trimming AFTER the fact is "
+ 2599|                           "deliberate: it leaves detection's peak ownership untouched, unlike terminating "
+ 2600|                           "extension, and unlike a length limit that DISCARDS an over-length trace and deletes "
+ 2601|                           "all signal at that m/z (the falsified direction). 0 = no cap. "
+ 2602|                           "CHANGES OUTPUT.", false);
+ 2603|     setMinFloat_("trace:max_span_sec", 0.0);
+ 2604|     registerDoubleOption_("trace:ms2_min_sample_rate", "<r>", -1.0, "MS2 min fraction of visited scans that must contain a peak (MassTraceDetection min_sample_rate). OpenMS default 0.5 hard-deletes gappy fragment traces; MEASURED: 0.3 and 0.1 both LOSE peptides (8,865 -> 8,735 at 0.3), so -1 (= OpenMS 0.5) is the default. Lowering it produces longer, more-merged traces with wrong apexes.", false);
+ 2605|     registerDoubleOption_("trace:ms1_min_sample_rate", "<r>", -1.0, "MS1 min_sample_rate. -1 = OpenMS default 0.5 (strict, MS1 stays strict).", false, true);
+ 2606| 
+ 2607|     // NB: "threads" is reserved by TOPPBase (the standard -threads option), so this lives under "perf".
+ 2608| 
+ 2609|     registerStringOption_("perf:malloc_trim", "<true/false>", "true",
+ 2610|                           "Return the allocator's free pages to the OS at the two phase boundaries (glibc only). "
+ 2611|                           "The window loop's allocations otherwise stack on top of everything the loading and MS1 "
+ 2612|                           "phases freed but the allocator kept: measured on a 2-h acquisition that floor is 138 GB "
+ 2613|                           "at the loop start, and trimming it first takes the run's PEAK from 265 to 186 GB. "
+ 2614|                           "IT IS NOT FREE: the loop then faults those pages back in cold (minor faults +26%), which "
+ 2615|                           "costs about 8.5% of wall time -- so this trades ~30% of peak memory for ~8% of runtime, "
+ 2616|                           "measured interleaved on one node. On by default because memory is what bounds this tool "
+ 2617|                           "(it decides how many isolation windows fit at once, and whether the run fits the machine "
+ 2618|                           "at all). Turn it off when time is the binding constraint. Output is byte-identical "
+ 2619|                           "either way.", false);
+ 2620|     setValidStrings_("perf:malloc_trim", {"true", "false"});
+ 2621|     registerStringOption_("perf:stream_load", "<true/false>", "true",
+ 2622|                           "Read the .d frame-by-frame via BrukerTimsFile::loadDIAStreaming, "
+ 2623|                           "peak-picking and compacting each frame on arrival, instead of loadExperiment() "
+ 2624|                           "which holds the entire run (MEASURED 90.3 GB RSS at t=0s -- that one-shot read IS "
+ 2625|                           "the memory floor and no downstream compaction can lower it, so with this off the "
+ 2626|                           "floor alone exceeds the whole tool's current peak). ON BY DEFAULT since 2026-09-04; "
+ 2627|                           "every benchmark figure on record was taken with it on. Bruker .d only -- ignored "
+ 2628|                           "for other inputs, which fall back to the one-shot reader. "
+ 2629|                           "CHANGES OUTPUT: this is not a pure performance switch. Measured on dataset D 2026-09-04, "
+ 2630|                           "true = 655,776 spectra in 5:11 at 78.4 GB, false = 656,371 in 10:30 at 121.8 GB, "
+ 2631|                           "spectrum lists NOT identical (0.09% more spectra with the one-shot reader). The two "
+ 2632|                           "readers pick peaks on different frame groupings; which is closer to the truth is "
+ 2633|                           "measured 2026-09-05: false is slightly MORE sensitive on a large file (+2.0%% Sage peptides at unchanged entrapment FDR) for 1.75x the memory and ~1.7x the wall. Every benchmark figure used true.", false);
+ 2634|     setValidStrings_("perf:stream_load", {"true", "false"});
+ 2635|     registerIntOption_("trace:native_ms2_neighbors", "<n>", 0, "NATIVE cross-frame aggregation in the READER (BrukerTimsFile Config dia_ms2_n_neighbors): adjacent frames each side, 0=off, 1=3-frame sum, 2=5-frame sum. This sums RAW frames BEFORE centroiding, which is what the reference implementation does; summing AFTER centroiding instead lost 26% of peptides. Requires perf:stream_load.", false);
+ 2636|     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Same, for MS1 frames (BrukerTimsFile Config ms1_n_neighbors). Requires perf:stream_load.", false);
+ 2637| 
+ 2638|     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
+ 2639|     registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic. 'pearson' takes variance over the FULL RT grid, so a fragment present in a handful of points is scored against ~1300 implicit zeros -- it rewards sparse fragments that spike where the precursor spikes, and its scale depends on grid size rather than evidence. 'logoverlap' is the AlphaDIA-style alternative: profile overlap in log space, summed only where the precursor has signal, normalised to [0,1]. The two are on DIFFERENT SCALES, so gate:min_correlation must be retuned when switching.", false);
+ 2640|     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
+ 2641|     registerFlag_("gate:variance_support", "Compute the Pearson co-elution variance over the UNION SUPPORT of the precursor and fragment profiles (points where either is non-zero) rather than the full RT grid G (~1300). Fixes the zero-padding: a fragment present in a handful of grid points is no longer scored against ~1300 implicit zeros, and the score no longer depends on grid size. Only affects gate:coelution=pearson. Retune gate:min_correlation when enabling -- the score scale changes.");
+ 2642|     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Band-parallel MS1 mass-trace detection, same exact-partition scheme as perf:trace_bands. DEFAULT RAISED 12 -> 48 on 2026-09-07: the earlier sweep found more bands to be WORSE (12/24/48 -> 75.0/93.7/147.9 s) but it was measuring a SERIAL band distribution that grew with band count; with that step parallel the order inverts (41.7/27.1/20.4 s at 9.8x/18.4x/32.4x) and 48 was gated on both datasets -- Sage 0.9999 and 0.9994, MSFragger 1.0002 and 1.0203, entrapment FDR 1.26->1.24%% and 1.12->1.07%%. MS1 tracing was running SINGLE-THREADED (the call simply never passed a band count) while MS2 was banded, so the MS1 phase pinned one core. That is invisible at default thresholds because MS1 is only ~4% of frames, but it makes the MS1 SENSITIVITY sweep impossible: lowering trace:noise_threshold_int / ms1_chrom_peak_snr explodes MassTraceDetection's intensity-sorted apex list, and MassTraceDetection is a SERIAL greedy loop, so runtime blows up superlinearly on one core (measured: 40 min with no progress at 1.5 of 128 cores, vs 24 min for a whole default run). 1 = off (old behaviour).", false);
+ 2643|     registerStringOption_("perf:ms1_prune", "<true/false>", "true",
+ 2644|                           "Drop picked MS1 centroids at or below trace:noise_threshold_int as they are loaded, before "
+ 2645|                           "they enter the MS1 map. MassTraceDetection never traces such a peak, but the MS1 band partition "
+ 2646|                           "reads the whole map, so the prune keeps exactly what it reads: the band edges come from the m/z "
+ 2647|                           "sample taken before the prune, and each frame keeps its first and last peak plus the fewest "
+ 2648|                           "sub-threshold witnesses that leave no two kept peaks further apart than the band halo (20 x "
+ 2649|                           "trace:mass_error_ppm), so every band spectrum that exists without the prune still exists. "
+ 2650|                           "OUTPUT-IDENTICAL (class D): byte-identical spectra either way; only the MS1 map shrinks -- measured at one "
+ 2651|                           "cell per tile with dnoise:ms1 false, peak memory dataset D 31.99 -> 25.90 GB, TNBC 009 69.11 -> 31.97 GB. Bound "
+ 2652|                           "to trace:noise_threshold_int -- it has no threshold of its own. false = keep every picked centroid.", false);
+ 2653|     setValidStrings_("perf:ms1_prune", {"true", "false"});
+ 2654|     registerIntOption_("perf:trace_bands", "<n>", 12, "Split each window's fragment m/z range into N bands traced CONCURRENTLY. The diaPASEF method fixes the window count (24 here), which caps window-level parallelism far below the core count; banding lifts the ceiling to threads. Traces cannot span more than trace:mass_error_ppm in m/z, so banding with a halo is exact. 0 = auto (windows x bands >= threads), 1 = off.", false);
+ 2655|     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "Fraction of currently-FREE RAM (/proc/meminfo MemAvailable) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
+ 2656|     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
+ 2657| 
+ 2658|     registerTOPPSubsection_("diag", "Diagnostics ('debug' is reserved by TOPP)");
+ 2659|     registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write MS1 traces and inferred precursors to <prefix>.traces.tsv / <prefix>.precursors.tsv so precursor loss can be attributed to a stage (no trace / no hypothesis / no spectrum) rather than inferred from the final count. Empty = off.", false, true);
+ 2660| 
+ 2661|     registerIntOption_("max_charge", "<n>", 5, "Maximum precursor charge considered during isotope inference.", false);
+ 2662| 
+ 2663|     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
+ 2664|     // any user parameter typo into a FATAL crash instead of a usage message. [bugfix]
+ 2665|     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
+ 2666|     registerIntOption_("charge:min_charge", "<n>", 1, "Minimum precursor charge to emit; hypotheses below it "
+ 2667|                        "are dropped before extraction. DEFAULT CHANGED 2 -> 1 on 2026-09-08. The old default rested on "
+ 2668|                        "dataset D, where z=1 was ~30%% of emission and ~1.7%% of peptides; on a 2-hour tryptic acquisition "
+ 2669|                        "(TNBC) it discards 14-20%% of Sage peptides and most of the MSFragger deficit against the reference "
+ 2670|                        "implementation. Those identifications are physically singly charged: short (7-9 aa), lysine-terminated, "
+ 2671|                        "single-basic-site tryptic peptides whose ion mobility sits +0.29 Vs/cm2 above the 2+ trend line at "
+ 2672|                        "the same m/z in 99.4-99.9%% of cases -- a halved 2+ ion would carry the 2+ mobility. The halved 2+ "
+ 2673|                        "ions that DO occur (~13%% of z=1 calls, sitting on the 2+ band) are re-called by charge:im_charge_veto. "
+ 2674|                        "The z=1 stratum carries ~2.8%% entrapment FDR at a nominal 1%% global cut (a lower true-match prior in that stratum under one pooled threshold, not peptide length; decoys "
+ 2675|                        "reproduce it), so per-charge FDR control downstream is advised. Old text: "
+ 2676|                        "docs/ISOTOPE-DUPLICATION-2026-09-03.md.", false);
+ 2677|     // [route-1] Only 25.7%% of the reference implementation's precursors are matched by us with the RIGHT m/z AND charge;
+ 2678|     // 17.2%% have the wrong charge and 22.9%% (decoy-corrected) the wrong monoisotope. A wrong charge or
+ 2679|     // mono gives a wrong NEUTRAL MASS, so the peptide can never be identified no matter how good the
+ 2680|     // fragments are. Partner-COUNTING cannot tell a real envelope from a coincidence; averagine shape
+ 2681|     // x isotope co-elution can.
+ 2682|     registerStringOption_("charge:scoring", "<mode>", "count", "Charge/monoisotope inference. 'count' is the partner-count heuristic (ties favour LOW charge, break-on-first-miss) and is the DEFAULT: measured against a DIA-NN reference on dataset B it gives 71.8% charge agreement vs 49.7% for 'envelope', and it eliminates the catastrophic 4->2 confusion (10,199 cases) that fabricates a ~-1198 Da phantom modification at m/z 600 in open search. 'envelope' scores each (charge, mono) hypothesis by averagine cosine x isotope co-elution and allows gapped envelopes; it was the default until 2026-07-21 and is kept for comparison. NOTE both are close to trivial: always answering z=2 scores 69.6%.", false);
+ 2683|     setValidStrings_("charge:scoring", {"envelope", "count"});
+ 2684|     registerStringOption_("charge:im_charge_veto", "<true/false>", "true", "Use the ion-mobility charge-state trend "
+ 2685|                           "lines to correct charge halving. In TIMS, 1+ and 2+ ions of the same m/z sit on separate 1/K0 lines "
+ 2686|                           "(~+0.29 Vs/cm2 apart). The count walk calls a real 2+ envelope z=1 whenever its M+1 (+0.5017) is "
+ 2687|                           "missing or already claimed and its M+2 (+1.0034) is present -- measured at ~13%% of z=1 calls on a "
+ 2688|                           "2-hour file, 60%% of them below m/z 750 where a 1+ cannot be scored at all. The 2+ and 3+ lines are "
+ 2689|                           "fitted per run from the run's own confident calls (>= 3 isotopes; 25-Th bin medians, MAD residual "
+ 2690|                           "scale), and a z=1 call whose 1/K0 lies within charge:im_veto_band sigma of the 2+ (3+) line is "
+ 2691|                           "re-assigned 2+; one on the 3+ band is dropped (re-calling it 3+ identified nothing on two files). "
+ 2692|                           "Genuine 1+ ions are untouched: 0.0-0.6%% of identified z=1 peptides sit on the 2+ band.", false);
+ 2693|     setValidStrings_("charge:im_charge_veto", {"true", "false"});
+ 2694|     registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "Half-width of the 2+/3+ mobility band, in MAD-sigma of "
+ 2695|                           "the confident calls' residuals (measured residual sd ~0.037 1/K0 against a 1+/2+ separation of ~0.29).", false);
+ 2696|     registerStringOption_("assembly:require_isotope_support", "<true/false>", "true",
+ 2697|                           "Drop precursor hypotheses with NO isotope partner -- the 'guessed' "
+ 2698|                           "singletons. ON BY DEFAULT since 2026-09-04, when the shipped default (off) was "
+ 2699|                           "measured for the first time and found to be 6.9x SLOWER and worse on both engines: "
+ 2700|                           "dataset D off = 1,255,577 spectra, 36:25 wall, 6.0x occupancy, Sage 12,212 / MSFragger "
+ 2701|                           "12,148; on = 655,776 spectra, 5:15, 65.7x, Sage 12,482 / MSFragger 12,337. An "
+ 2702|                           "earlier measurement (2026-07-26, at 10,036 peptides, before the charge gate, the "
+ 2703|                           "apex estimator and the integer detector) had put the cost at -0.78% peptides; the "
+ 2704|                           "sign has since flipped. Set false to keep the guessed singletons.", false);
+ 2705|     setValidStrings_("assembly:require_isotope_support", {"true", "false"});
+ 2706|     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "Reject a leftward isotope step (the walk that defines the MONOISOTOPE in charge:scoring=count) when the candidate peak is too weak to be a real lighter isotope under averagine. The partner search matches m/z, RT and IM but NEVER intensity, so it can latch onto a noise peak or a co-eluting species one isotope spacing below the true monoisotope -- making the reported precursor mass ~1.00335 Da TOO LIGHT. Closed search hides this (the engine enumerates isotope_errors and corrects it for free); OPEN/blind search turns it into a phantom -1.003 Da modification, and it is our single largest open-search delta-mass artefact on dataset D (8.20%% isotope-shifted PSMs vs the reference implementation's 3.46%%). The bound is averagine's LOOSEST: stepping from isotope m+1 to m the lighter peak is >= (m+1)/lambda times the heavier one, minimised at m=0 -> 1/lambda (lambda = 0.000594*neutral mass), so a value of 1.0 enforces exactly that minimum and never rejects a legitimate envelope; smaller values add slack for noise. 0 = off (old behaviour).", false);
+ 2707|     registerFlag_("charge:mono_averagine_select", "Choose the MONOISOTOPE by averagine envelope fit over the whole isotope run found by the charge:scoring=count walk, instead of taking the furthest-left peak reached. 'Furthest-left' is a STOPPING rule and can only trade over-reach (mono ~1.003 Da too LIGHT, a phantom -1 Da modification in open search) for under-reach (+1.003 Da) -- measured: an averagine STOPPING guard cut the -1 artefact 64%% but tripled +1, because a walk that halts early also leaves the M+1 peak unconsumed so it seeds its own too-heavy precursor. This is a SCORING decision instead: score every candidate mono position in the run by cosine against the averagine envelope and keep the best. Every found peak is still consumed, so de-isotoping and emission are unchanged -- only the reported precursor mass moves.");
+ 2708|     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "IM tolerance for matching isotope partners. Default 0.05 (= 5x the fragment gate). 0.01 is arguable -- isotopes of one species share mobility, so 0.05 can admit cross-species partners -- but 0.01 has not been measured; change it only behind a peptide-set gate.", false);
+ 2709| 
+ 2710|     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
+ 2711|     registerStringOption_("dnoise:ms1", "<true/false>", "true",
+ 2712|                           "Denoise every MS1 frame on its raw points before peak picking: a bit-identical port of dnoise v0.1.0's "
+ 2713|                           "default MS1 path (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT, LICENSES/dnoise-MIT.txt) -- "
+ 2714|                           "the ion-mobility streak filter, the halo filter and the diaPASEF isolation-window gate on each frame's "
+ 2715|                           "(scan, TOF, raw intensity), which are recovered from the loaded frame and checked point by point: a run "
+ 2716|                           "where they do not recover exactly is refused, never filtered approximately (so is trace:native_ms1_neighbors > 0). "
+ 2717|                           "Bruker .d only: an mzML or mzPeak input is not filtered, which is logged and stamped (spx:dnoise_ms1). "
+ 2718|                           "DEFAULT ON since 2026-09-10. CHANGES OUTPUT: peptides dataset D -4.3% Sage / -4.0% MSFragger, TNBC 009 +1.5% / "
+ 2719|                           "-0.5%, entrapment FDR inside the gate (measured with dnoise run as a preprocessor at one cell per tile, and "
+ 2720|                           "carried over because this in-tool path gives digest-identical output). Against the default perf:ms1_prune true "
+ 2721|                           "at one cell per tile: peak memory D 25.90 -> 22.48 GB (-13%), TNBC 009 31.97 -> 25.17 GB (-21%); wall D 4:13 -> "
+ 2722|                           "3:41 (-13%), TNBC 009 10:25 -> 10:46 (no gain on a shared node; its MS1 load got slower, 58.5 -> 68.4 s). "
+ 2723|                           "-dnoise:ms1 false picks every raw MS1 point (the output before 2026-09-10).", false);
+ 2724|     setValidStrings_("dnoise:ms1", {"true", "false"});
+ 2725|     registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: TOF bins on each side of a point's own bin summed per scan (dnoise --mz-half-width).", false, true);
+ 2726|     registerIntOption_("dnoise:min_feature_length", "<scans>", 5, "Streak filter: OCCUPIED scans a run needs; bridged empty scans do not count (dnoise --min-feature-length).", false, true);
+ 2727|     registerIntOption_("dnoise:max_internal_gap", "<scans>", 2, "Streak filter: empty scans a run may bridge (dnoise --max-internal-gap).", false, true);
+ 2728|     registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes, each over the previous pass's survivors; 0 skips the streak filter, and the halo filter and the window gate still run unless dnoise:halo / dnoise:dia_ms1_window are false (dnoise --iterations).", false, true);
+ 2729|     registerIntOption_("dnoise:min_window_intensity", "<counts>", 0, "Streak filter: raw window sum a scan needs to count as occupied (dnoise --min-window-intensity).", false, true);
+ 2730|     registerIntOption_("dnoise:min_feature_intensity", "<counts>", 0, "Streak filter: raw sum a run needs over its span (dnoise --min-feature-intensity).", false, true);
+ 2731|     registerStringOption_("dnoise:halo", "<true/false>", "true", "Halo filter, once, on the streak survivors: keep a point at >= halo_peak_fraction of the most intense survivor in its box outside its own TOF bin (false = dnoise --no-halo).", false, true);
+ 2732|     setValidStrings_("dnoise:halo", {"true", "false"});
+ 2733|     registerDoubleOption_("dnoise:halo_peak_fraction", "<f>", 0.15, "Halo filter: the fraction (dnoise --halo-peak-fraction).", false, true);
+ 2734|     registerIntOption_("dnoise:halo_mz_idx_half_width", "<bins>", 80, "Halo filter: the box's half-width in TOF bins (dnoise --halo-mz-idx-half-width).", false, true);
+ 2735|     registerIntOption_("dnoise:halo_scan_half_width", "<scans>", 2, "Halo filter: the box's half-width in scans (dnoise --halo-scan-half-width).", false, true);
+ 2736|     registerStringOption_("dnoise:dia_ms1_window", "<true/false>", "true", "Keep only MS1 points inside one of the run's diaPASEF isolation windows (every DiaFrameMsMsWindows row), padded, in dnoise's own two-point calibration (false = dnoise --no-dia-ms1-window).", false, true);
+ 2737|     setValidStrings_("dnoise:dia_ms1_window", {"true", "false"});
+ 2738|     registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window gate: m/z added on both sides of every window (dnoise --dia-ms1-mz-pad).", false, true);
+ 2739|     registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window gate: 1/K0 added on both sides of every window (dnoise --dia-ms1-im-pad).", false, true);
+ 2740| 
+ 2741|     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
+ 2742|     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
+ 2743|     // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
+ 2744|     setMinInt_("assembly:min_fragments", 1);
+ 2745|     setMinInt_("assembly:max_fragments", 1);
+ 2746|     setMinInt_("assembly:default_charge", 0);
+ 2747|     setMinInt_("max_charge", 1);
+ 2748|     setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
+ 2749|     setMinFloat_("gate:delta_im", 0.0);
+ 2750|     setMinFloat_("gate:delta_rt", 0.0);
+ 2751|     setMinFloat_("gate:min_correlation", -1.0);
+ 2752|     setMaxFloat_("gate:min_correlation", 1.0);
+ 2753|     setMinFloat_("charge:iso_im_tolerance", 0.0);
+ 2754|     setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
+ 2755|     setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
+ 2756|     setMinFloat_("trace:ms2_noise_threshold_int", 0.0);
+ 2757|     setMinFloat_("trace:noise_threshold_int", 0.0);
+ 2758|     setMinInt_("perf:ms1_trace_bands", 0);      // 0 = auto (documented)
+ 2759|     setMinFloat_("perf:mem_fraction", 0.05);
+ 2760|     setMaxFloat_("perf:mem_fraction", 0.95);
+ 2761|     // [dnoise] dnoise's fields are unsigned, and a negative fraction or pad is not one
+ 2762|     for (const char* o : {"dnoise:mz_half_width", "dnoise:min_feature_length", "dnoise:max_internal_gap", "dnoise:iterations",
+ 2763|                           "dnoise:min_window_intensity", "dnoise:min_feature_intensity", "dnoise:halo_mz_idx_half_width", "dnoise:halo_scan_half_width"})
+ 2764|       setMinInt_(o, 0);
+ 2765|     for (const char* o : {"dnoise:halo_peak_fraction", "dnoise:dia_ms1_mz_pad", "dnoise:dia_ms1_im_pad"}) setMinFloat_(o, 0.0);
+ 2766|     // deliberate: mass-defect filter default OFF (would silently drop PTM/nonspecific — the discovery cases). [H-7]
+ 2767|   }
+ 2768| 
+ 2769|   /// Configure an IM-aware MassTraceDetection and run it on @p map.
+ 2770|   /// MassTraceDetection wrapper. NOTE the apex gate inside MassTraceDetection is
+ 2771|   ///   peak_int > chrom_peak_snr * noise_threshold_int
+ 2772|   /// so the EFFECTIVE apex threshold is snr*noise, while trace MEMBERSHIP only needs > noise.
+ 2773|   /// Leaving snr at the OpenMS default 3.0 silently triples the fragment apex threshold.
+ 2774|   /// the reference implementation deliberately runs MS2 with "more relaxed constraints" than MS1 (Nat Commun 16:95
+ 2775|   /// Methods) — so MS1 and MS2 get INDEPENDENT snr / min-length here. [recall]
+ 2776|   /// `map` is taken by NON-const ref and CLEARED as soon as MassTraceDetection has consumed it:
+ 2777|   /// it is dead from that point on, but at ~20 B/peak (Peak1D 16 + IM float 4) it is ~1.1 GB per
+ 2778|   /// window that would otherwise stay resident through the valley-splitting peak. [compact]
+ 2779|   vector<Trace> detectTraces_(PeakMap& map, TraceStore& store, double delta_im, double noise,
+ 2780|                               double snr, double min_len, double min_sample_rate,
+ 2781|                               double split_valleys, String* span_log, int bands,
+ 2782|                               double split_scan_time,   // the run's cycle time for the splitter, 0 = per trace
+ 2783|                               int in_cat = -1,          // [ledger] the caller's category for `map`, -1 = uncharged
+ 2784|                               int part_cat = LC_BAND,   // [ledger] where this call's band partition belongs
+ 2785|                               Ms1Prune* ms1_prune = nullptr)   // [ms1-prune] the MS1 call only: the pre-prune edge sample
+ 2786|   {
+ 2787|     MassTraceDetection mtd;
+ 2788|     mtd.setLogType(ProgressLogger::NONE); // quiet + thread-safe (called from the parallel window loop)
+ 2789|     Param p = mtd.getParameters();
+ 2790|     p.setValue("mass_error_ppm", getDoubleOption_("trace:mass_error_ppm"));
+ 2791|     p.setValue("noise_threshold_int", noise);
+ 2792|     p.setValue("chrom_peak_snr", snr);
+ 2793|     p.setValue("ion_mobility_tolerance", delta_im);        // IM-aware tracing [C-1]
+ 2794|     p.setValue("min_trace_length", min_len);
+ 2795|     // min_sample_rate (OpenMS default 0.5) requires a peak in >=50% of visited scans AND terminates
+ 2796|     // trace extension when occupancy drops below it — an intensity-INDEPENDENT deletion of gappy but
+ 2797|     // real fragment traces in sparse diaPASEF data. Relaxing it for MS2 is the sole surviving MS2
+ 2798|     // trace-validity lever. [recall]
+ 2799|     if (min_sample_rate >= 0.0) p.setValue("min_sample_rate", min_sample_rate);
+ 2800|     mtd.setParameters(p);
+ 2801| 
+ 2802|     // [epd-parallel] Reusable valley-split step. Called from a balanced parallel-for below, so 12
+ 2803|     // chunks split concurrently instead of once serially. Lock-free now that OpenMS EPD is patched
+ 2804|     // (patches/openms-epd-lockfree.patch); 96 concurrent callers (8 windows x 12 chunks) do not
+ 2805|     // contend. Output is order-independent downstream: MS2 traces are canonically re-sorted right
+ 2806|     // after detectTraces_, and ms1_traces are canonically sorted before inferPrecursors_.
+ 2807|     auto do_split = [&](vector<MassTrace>& in) -> vector<MassTrace> {
+ 2808|       if (split_valleys <= 0.0 || in.empty()) return std::move(in);
+```
+
+### 10.3 src/spextractor.cpp lines 3893-4415
+
+```cpp
+ 3893|     {
+ 3894|       bool given = false;
+ 3895|       for (int i = 1; i < argc && !given; ++i) given = (String(argv[i]) == "-threads");
+ 3896|       if (!given && n_threads_req == 1)
+ 3897|       {
+ 3898|         n_threads_req = std::max(1, (int)std::thread::hardware_concurrency());
+ 3899|         omp_set_num_threads(n_threads_req);
+ 3900|         writeLogInfo_("-threads not given: using all " + String(n_threads_req) + " cores. Pass "
+ 3901|                       "-threads <n> to limit it, which is what you want on a shared machine.");
+ 3902|       }
+ 3903|     }
+ 3904|     const String in = getStringOption_("in");
+ 3905|     const String out = getStringOption_("out");
+ 3906|     const double delta_im = getDoubleOption_("gate:delta_im");
+ 3907|     const double delta_rt = getDoubleOption_("gate:delta_rt");
+ 3908|     if (getFlag_("diag:selftest_arena")) return selftestArena_();
+ 3909|     log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
+ 3910|     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
+ 3911|     mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
+ 3912|     mono_select_ = getFlag_("charge:mono_averagine_select");
+ 3913|     var_support_ = getFlag_("gate:variance_support");
+ 3914|     corr_power_ = getDoubleOption_("assembly:corr_power");
+ 3915|     const double min_corr = getDoubleOption_("gate:min_correlation");
+ 3916|     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
+ 3917|     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
+ 3918|     const Size max_frags = (Size)getIntOption_("assembly:max_fragments");
+ 3919|     const int max_charge = getIntOption_("max_charge");
+ 3920|     mzEstimator() = getStringOption_("trace:mz_estimator");   // before any toTrace() call
+ 3921|     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
+ 3922| 
+ 3923|     PeakMap exp;
+ 3924|     // Accept mzML, mzPeak, or a Bruker .d directory; FileHandler auto-detects the format
+ 3925|     // (mzPeak -> MzPeakFile; .d -> BrukerTimsFile, requires WITH_OPENTIMS).
+ 3926|     PeakMap ms1_map;
+ 3927|     // [ms1-prune] one run-level prune (see Ms1Prune), used by the streaming consumer and the resident dispatch alike
+ 3928|     Ms1Prune ms1_prune;
+ 3929|     ms1_prune.on = (getStringOption_("perf:ms1_prune") == "true");
+ 3930|     ms1_prune.noise = getDoubleOption_("trace:noise_threshold_int");
+ 3931|     ms1_prune.hop = getDoubleOption_("trace:mass_error_ppm") * 1e-6 * kBandHaloPpmMul;
+ 3932|     { const char* e = std::getenv("SPEXTRACTOR_MS1_PRUNE_NO_WITNESS"); ms1_prune.no_witness = e && *e && *e != '0'; }
+ 3933|     { const char* e = std::getenv("SPEXTRACTOR_MS1_PRUNE_NO_CHAIN"); ms1_prune.no_chain = e && *e && *e != '0'; }   // its own switch: check 19b
+ 3934|     map<WinKey, PeakSlab> ms2_by_window;
+ 3935|     CompactStats cstat;
+ 3936|     auto winKey = [](double lo, double hi, uint32_t window_group) -> WinKey {
+ 3937|       return {(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)window_group};
+ 3938|     };
+ 3939|     const bool stream_load = (getStringOption_("perf:stream_load") == "true");
+ 3940|     const bool trim_on = (getStringOption_("perf:malloc_trim") == "true");
+ 3941|     bool streamed = false;
+ 3942|     // [3a] trace:band_edges=acquisition needs the tdf's GlobalMetadata bounds: refuse BEFORE the
+ 3943|     // load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
+ 3944|     // tdf is recovered, below). Milliseconds against minutes of loading.
+ 3945|     const bool band_edges_acq = (getStringOption_("trace:band_edges") == "acquisition");
+ 3946|     if (!band_edges_acq && getStringOption_("trace:detector") == "integer" && getStringOption_("perf:stream_load") == "true"
+ 3947|         && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF && !std::getenv("SPEXTRACTOR_TILE_RESIDENT"))
+ 3948|       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+ 3949|             "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or SPEXTRACTOR_TILE_RESIDENT=1 for the resident source.");
+ 3950|     if (band_edges_acq && std::getenv("SPEXTRACTOR_WINDOW_FILE"))   // an option x env conflict: refuse in milliseconds
+ 3951|       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+ 3952|             "SPEXTRACTOR_WINDOW_FILE overrides the band edges per window (a slab-mode probe); it cannot be combined with trace:band_edges=acquisition.");
+ 3953|     if (band_edges_acq && getStringOption_("trace:detector") == "integer")
+ 3954|     {
+ 3955|       // [3a] The axis is selected HERE, in the order the load below would use it (the first
+ 3956|       // candidate whose calibration loads is THE source), so the bounds that are checked belong to
+ 3957|       // the tdf that will actually calibrate the run -- and the check costs a two-row query rather
+ 3958|       // than the whole load. No candidate at all is NOT an error: the integer detector then falls
+ 3959|       // back to the OpenMS detector further down, loudly, and traces no bands to partition.
+ 3960|       std::vector<std::string> cand{in + "/analysis.tdf"};
+ 3961|       if (const char* sc = std::getenv("SPEXTRACTOR_MZPEAK_TDF")) cand.push_back(sc);
+ 3962|       for (const std::string& c : cand)
+ 3963|       {
+ 3964|         String w_axis;
+ 3965|         if (!loadTofAxis(c, w_axis)) continue;   // not a calibration source; try the next
+ 3966|         if (!(tofAxis().n_bins > 1))
+ 3967|           throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+ 3968|                 "trace:band_edges=acquisition needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + "). Use -trace:band_edges slab, or -trace:detector openms.");
+ 3969|         writeLogInfo_("flight-time axis from " + c + " (preflight): " + String(tofAxis().b_by_frame.size()) + " frame factors; digitizer bins " + String(tofAxis().n_bins) + ", acquisition m/z " + String(tofAxis().acq_lo) + "-" + String(tofAxis().acq_hi));
+ 3970|         break;
+ 3971|       }
+ 3972|     }
+ 3973|     // the .d loader's configuration; set here because the dnoise setup below predicts the loader's m/z model from it
+ 3974|     BrukerTimsFile::Config cfg;
+ 3975|     cfg.dia_ms2_n_neighbors = getIntOption_("trace:native_ms2_neighbors");
+ 3976|     cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
+ 3977|     // [dnoise] dnoise v0.1.0's MS1 path on the raw frames (DnoiseRun), set up once for the run: every refusal the options
+ 3978|     // and the tdf can decide comes here, in milliseconds, before the load
+ 3979|     DnoiseRun dnoise;
+ 3980|     const bool dnoise_req = (getStringOption_("dnoise:ms1") == "true");
+ 3981|     if (dnoise_req && FileHandler::getTypeByFileName(in) != FileTypes::BRUKER_TDF)
+ 3982|       writeLogInfo_("[dnoise] MS1 denoising skipped: the input is not a Bruker .d");
+ 3983|     else if (dnoise_req)
+ 3984|     {
+ 3985|       auto refuse = [](const String& why) {
+ 3986|         return Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "dnoise:ms1 " + why + " -dnoise:ms1 false runs without MS1 denoising."); };
+ 3987|       if (getIntOption_("trace:native_ms1_neighbors") > 0)
+ 3988|         throw refuse("denoises each raw MS1 frame, and trace:native_ms1_neighbors > 0 sums neighbouring frames before SpeXtractor sees them.");
+ 3989|       // The loader's m/z model, predicted: under the default AUTO strategy an SDK path (the Config's, else
+ 3990|       // OPENMS_BRUKER_SDK_PATH) makes openTimsDataHandle calibrate m/z through the Bruker SDK, which the TOF recovery
+ 3991|       // cannot invert. An SDK that then fails to load would leave the table model, so this can refuse a run that would
+ 3992|       // have recovered: fail-closed. checkLoader() confirms the loader's actual choice during the load.
+ 3993|       { const char* env_sdk = std::getenv("OPENMS_BRUKER_SDK_PATH");
+ 3994|         const std::string sdk = !cfg.bruker_sdk_path.empty() ? cfg.bruker_sdk_path : std::string(env_sdk ? env_sdk : "");
+ 3995|         if (!sdk.empty())
+ 3996|           throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, but with a Bruker SDK path set (" + String(sdk)
+ 3997|                        + ") the loader calibrates m/z through the Bruker SDK: unset OPENMS_BRUKER_SDK_PATH to denoise."); }
+ 3998|       String why_axis;
+ 3999|       if (!tofAxis().ok && !loadTofAxis(in + "/analysis.tdf", why_axis))   // the TOF recovery runs during the load
+ 4000|         throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, which is not usable here (" + why_axis + ").");
+ 4001|       spx::dnoise::Params& p = dnoise.p;
+ 4002|       p.mz_half_width = (uint32_t)getIntOption_("dnoise:mz_half_width");
+ 4003|       p.min_feature_length = (size_t)getIntOption_("dnoise:min_feature_length");
+ 4004|       p.max_internal_gap = (size_t)getIntOption_("dnoise:max_internal_gap");
+ 4005|       p.iterations = (size_t)getIntOption_("dnoise:iterations");
+ 4006|       p.min_window_intensity = (uint64_t)getIntOption_("dnoise:min_window_intensity");
+ 4007|       p.min_feature_intensity = (uint64_t)getIntOption_("dnoise:min_feature_intensity");
+ 4008|       p.halo = (getStringOption_("dnoise:halo") == "true");
+ 4009|       p.halo_peak_fraction = getDoubleOption_("dnoise:halo_peak_fraction");
+ 4010|       p.halo_mz_idx_half_width = (uint32_t)getIntOption_("dnoise:halo_mz_idx_half_width");
+ 4011|       p.halo_scan_half_width = (size_t)getIntOption_("dnoise:halo_scan_half_width");
+ 4012|       p.dia_ms1_window = (getStringOption_("dnoise:dia_ms1_window") == "true");
+ 4013|       p.dia_ms1_mz_pad = getDoubleOption_("dnoise:dia_ms1_mz_pad");
+ 4014|       p.dia_ms1_im_pad = getDoubleOption_("dnoise:dia_ms1_im_pad");
+ 4015|       const std::string why = dnoise.setup(in + "/analysis.tdf");
+ 4016|       if (!why.empty()) throw refuse("cannot be exact on this input: " + why + ".");
+ 4017|       writeLogInfo_("[dnoise] " + String(spx::dnoise::kPortedFrom) + " MS1 path on the raw frames, before the pick: " + dnoise.params()
+ 4018|                     + "; " + String(dnoise.im_asc.size()) + " TimsCalibration row(s) over " + String(dnoise.tdf.meta.max_num_scans)
+ 4019|                     + " scans (MAX(Frames.NumScans), the gate's); scan tables per row over its MS1 frames' scans: " + dnoise.scanTables());
+ 4020|     }
+ 4021|     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
+ 4022|     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
+ 4023|     // table regardless), pass 2 reads each tile's MS2 frames through the loader's RT range. The
+ 4024|     // resident source (mzPeak, mzML, perf:stream_load=false, or SPEXTRACTOR_TILE_RESIDENT=1 for an
+ 4025|     // A/B) holds the whole run and slices it, as before.
+ 4026|     bool tile_source = false;
+ 4027|     PickCompactConsumer::FrameTables run_tables;   // the reader's frozen tables, kept for pass 2
+ 4028|     PeakPickerIM spicker;
+ 4029|     {
+ 4030|       Param sp = spicker.getParameters();
+ 4031|       sp.setValue("pickIMCluster:im_tolerance_cluster", getDoubleOption_("gate:delta_im"));
+ 4032|       sp.setValue("pickIMCluster:ppm_tolerance_cluster", getDoubleOption_("trace:mass_error_ppm"));
+ 4033|       if (const char* m = std::getenv("SPEXTRACTOR_PICK_MZ_MODE")) sp.setValue("pickIMCluster:mz_mode", std::string(m));   // [C2 pick-level A/B] weighted|seed|top3
+ 4034|       spicker.setParameters(sp);
+ 4035|     }
+ 4036| 
+ 4037|     if (stream_load)
+ 4038|     {
+ 4039|       // [stream] frame-by-frame: pick + compact on arrival, never hold the whole run.
+ 4040|       // Also the ONLY place the reader's NATIVE pre-centroid frame aggregation is reachable.
+ 4041|       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat, winKey);
+ 4042|       consumer.ms1_prune = &ms1_prune;
+ 4043|       consumer.dnoise = &dnoise;
+ 4044| #ifdef SPEXTRACTOR_WITH_MZPEAK
+ 4045|       const bool in_mzpeak = (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK);
+ 4046| #else
+ 4047|       const bool in_mzpeak = false;
+ 4048| #endif
+ 4049|       // [3b] the streaming source needs the Bruker loader: a .d only, never an mzML or an mzPeak
+ 4050|       // archive (the resident path reads those whole). SPEXTRACTOR_TILE_RESIDENT=1 forces the
+ 4051|       // resident source for a same-build A/B; any other value leaves the default.
+ 4052|       { const char* r = std::getenv("SPEXTRACTOR_TILE_RESIDENT");
+ 4053|         const bool force_resident = r && String(r) != "0" && String(r) != "";
+ 4054|         tile_source = !in_mzpeak && !force_resident && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF; }
+ 4055|       if (tile_source)
+ 4056|       {
+ 4057|         // pass 1: MS1 only; lo > hi selects no MS2 frame, the loader exports the table anyway
+ 4058|         cfg.dia_ms2_rt_lo = std::numeric_limits<double>::infinity();
+ 4059|         cfg.dia_ms2_rt_hi = -std::numeric_limits<double>::infinity();
+ 4060|       }
+ 4061|       // [frames] The frozen frame tables come from the READER's metadata, keyed with the reader's
+ 4062|       // own precursor expressions so the keys equal the consumer's: the .d loader exports its
+ 4063|       // frame table and windows (patch: lastDIAFrameTable/lastDIAWindows; frames with no raw peaks
+ 4064|       // are skipped for every window, as the loop skips them), the mzPeak reader its cached sweep
+ 4065|       // (a spectrum with number_of_peaks == 0 yields only empty window spectra). An mzML is
+ 4066|       // resident and untiled: no table, the slab is its own.
+ 4067|       String table_src_if_ok = "slab";   // becomes the stamp only after the streamed load and the invariant succeed
+ 4068|       if (in_mzpeak)
+ 4069|       {
+ 4070| #ifdef SPEXTRACTOR_WITH_MZPEAK
+ 4071|         table_src_if_ok = "mzpeak";
+ 4072|         if (band_edges_acq && getStringOption_("trace:detector") == "integer")
+ 4073|         {
+ 4074|           // [3a] the sweep recovers the embedded tdf's calibration and bounds; it is cached, so
+ 4075|           // the load below reuses it -- the refusal comes before any peak is decoded
+ 4076|           const auto m = spx::mzPeakRunMeta(in);
+ 4077|           if (!m->exact || !(m->exact->n_bins > 1))
+ 4078|             throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+ 4079|                   "trace:band_edges=acquisition needs DigitizerNumSamples and MzAcqRangeLower/Upper from the archive's (or sidecar) analysis.tdf; not provided (" + String(m->exact ? m->exact->bounds_why : "no exact calibration") + ").");
+ 4080|         }
+ 4081|         consumer.tablefn = [&]() {
+ 4082|           PickCompactConsumer::FrameTables t;
+ 4083|           const auto m = spx::lastMzPeakMeta();
+ 4084|           if (!m) return t;
+ 4085|           for (size_t i : m->ms2)
+ 4086|           {
+ 4087|             if (m->n_peaks[i] == 0) continue;
+ 4088|             for (const auto& w : m->wins[i])
+ 4089|             {
+ 4090|               const double c = 0.5 * (w.lo + w.hi), off = 0.5 * (w.hi - w.lo);   // frameToSpectra_'s precursor
+ 4091|               auto& tab = t[winKey(c - off, c + off, 0)];
+ 4092|               tab.rt.push_back(m->rt[i]); tab.id.push_back(m->frame_id[i] < 0 ? 0u : (uint32_t)m->frame_id[i]);
+ 4093|             }
+ 4094|           }
+ 4095|           return t; };
+ 4096| #endif
+ 4097|       }
+ 4098|       else
+ 4099|       {
+ 4100|         table_src_if_ok = "loader";
+ 4101|         consumer.tablefn = [&]() {
+ 4102|           PickCompactConsumer::FrameTables t;
+ 4103|           const auto& ft = BrukerTimsFile::lastDIAFrameTable();
+ 4104|           for (const auto& w : BrukerTimsFile::lastDIAWindows())
+ 4105|           {
+ 4106|             const auto g = ft.find(w.window_group);
+ 4107|             if (g == ft.end()) continue;
+ 4108|             const double c = w.mz_center, off = w.mz_width / 2.0;                 // BrukerTimsFile's precursor
+ 4109|             const WinKey k = winKey(c - off, c + off, (uint32_t)w.window_group);
+ 4110|             if (t.count(k))   // two table rows with one (m/z, group) key -- the consumer would merge their frames into one slab
+ 4111|               throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] two DIA windows share one (m/z lo, m/z hi, group) key; SpeXtractor keys windows by isolation window and group", String(c - off) + "-" + String(c + off) + " group " + String(w.window_group));
+ 4112|             auto& tab = t[k];
+ 4113|             for (const auto& r : g->second) if (r.num_peaks > 0) { tab.rt.push_back(r.time); tab.id.push_back(r.frame_id); }
+ 4114|           }
+ 4115|           return t; };
+ 4116|       }
+ 4117|       try
+ 4118|       {
+ 4119|         if (in_mzpeak)
+ 4120|         {
+ 4121| #ifdef SPEXTRACTOR_WITH_MZPEAK
+ 4122|           spx::loadMzPeakStreaming(in, consumer, n_threads_req);   // consumer counts frames itself
+ 4123| #else
+ 4124|           throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
+ 4125| #endif
+ 4126|         }
+ 4127|         else BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
+ 4128|         consumer.finish();                                          // the last partial batch
+ 4129|         streamed = true;
+ 4130|         if (ms1HistOn_())
+ 4131|         { const auto& h = ms1Hist_(); long long tot = 0; for (const auto& v : h) tot += v.load();
+ 4132|           auto pc = [&](long long v) { return String(tot > 0 ? 100.0 * (double)v / (double)tot : 0.0); };
+ 4133|           writeLogInfo_("[ms1-hist] picked MS1 peaks " + String(tot) + " by intensity: <100 " + String(h[0].load()) + " (" + pc(h[0].load()) + "%), 100-300 "
+ 4134|                         + String(h[1].load()) + " (" + pc(h[1].load()) + "%), 300-1000 " + String(h[2].load()) + " (" + pc(h[2].load()) + "%), 1000-10000 "
+ 4135|                         + String(h[3].load()) + " (" + pc(h[3].load()) + "%), >=10000 " + String(h[4].load()) + " (" + pc(h[4].load()) + "%)"); }
+ 4136|         phase_stats_()["LOAD(stream)"].wall = phase_clock_();      // [perf-instr] start-to-here
+ 4137|         phase_stats_()["LOAD(stream)"].cpu  = cpu_seconds_();
+ 4138|         phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
+ 4139|         if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
+ 4140|         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
+ 4141|         if (std::getenv("SPEXTRACTOR_LOAD_ONLY"))
+ 4142|         { if (tile_source) writeLogInfo_("[perf-load] SPEXTRACTOR_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
+ 4143|           report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+ 4144|         if (TileProbe::get().on)
+ 4145|           writeLogInfo_("[probe] MS2 RT range " + String(TileProbe::get().lo) + "-" + String(TileProbe::get().hi)
+ 4146|                         + " halo " + String(TileProbe::get().halo) + " s: dropped " + String(consumer.frames_probe_dropped)
+ 4147|                         + " of " + String(consumer.frames_seen - ms1_map.size()) + " MS2 window frames after picking");
+ 4148|         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
+ 4149|                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
+ 4150|                       + String(ms2_by_window.size()) + " (native ms2_neighbors="
+ 4151|                       + String(cfg.dia_ms2_n_neighbors) + ")" + clk_() + rss_() + mem_());
+ 4152|       }
+ 4153|       catch (const FrameTableError&) { throw; }   // structural: never fall back onto partial slabs
+ 4154|       catch (const DnoiseError&) { throw; }       // [dnoise] a refusal of the input, not a reader failure
+ 4155|       catch (const Ms1MzError&) { throw; }        // [ms1-finite] a refusal of the input, not a reader failure
+ 4156|       catch (const Exception::BaseException& e)
+ 4157|       {
+ 4158|         writeLogWarn_(String("[stream] streaming load failed (") + e.getName()
+ 4159|                       + "); falling back to loadExperiment. " + e.getMessage());
+ 4160|       }
+ 4161|       // [3b] the source is COMMITTED only by a successful pass 1: a fallback to the resident load
+ 4162|       // reads the whole run, so the tile loop must slice it rather than call the loader again
+ 4163|       if (!streamed && tile_source)
+ 4164|       { tile_source = false; writeLogWarn_("[3b] the streaming source did not read pass 1; the resident source takes over (the whole run is loaded)."); }
+ 4165|       // [frames] the invariant the frozen tables rest on, checked OUTSIDE the recoverable catch: a
+ 4166|       // delivered window's slab is its table (rt and id, frame for frame) after padding
+ 4167|       if (streamed && tile_source && consumer.tables().empty())
+ 4168|         throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[3b] the .d loader exported no frame table; the tiled source cannot read this input", in);
+ 4169|       if (streamed && !consumer.tables().empty())
+ 4170|       {
+ 4171|         size_t n_pad = 0, n_del = 0, n_absent = 0;
+ 4172|         for (const auto& kv : consumer.tables())
+ 4173|         {
+ 4174|           const String wl = String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0);
+ 4175|           const auto w = ms2_by_window.find(kv.first);
+ 4176|           if (w == ms2_by_window.end()) { ++n_absent; if (!tile_source) writeLogInfo_("[frames] window " + wl + ": absent (no frame delivered), " + String(kv.second.rt.size()) + " in the table"); continue; }
+ 4177|           if (w->second.rt != kv.second.rt || w->second.frame_id != kv.second.id)
+ 4178|             throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] a window's slab is not its frozen frame table after padding", wl);
+ 4179|           n_pad += kv.second.padded; n_del += kv.second.delivered;
+ 4180|           writeLogInfo_("[frames] window " + wl + ": delivered " + String(kv.second.delivered) + ", padded " + String(kv.second.padded) + " of " + String(kv.second.rt.size()));
+ 4181|         }
+ 4182|         frame_table_src = table_src_if_ok;
+ 4183|         run_tables = consumer.tables();
+ 4184|         writeLogInfo_("[frames] source=" + frame_table_src + " windows=" + String(consumer.tables().size()) + " delivered=" + String(n_del) + " padded=" + String(n_pad) + " absent=" + String(n_absent)
+ 4185|                       + (tile_source ? " (pass 1: MS1 only; the windows' frames are read per tile)" : ""));
+ 4186| #ifdef SPEXTRACTOR_WITH_MZPEAK
+ 4187|         if (in_mzpeak && spx::lastMzPeakMeta())
+ 4188|           writeLogInfo_("[frames] mzPeak number_of_peaks: " + String(spx::lastMzPeakMeta()->n_peaks_missing_ms2) + " MS2 spectra lack it and count as present"
+ 4189|                         + (spx::lastMzPeakMeta()->n_peaks_missing_ms2 ? " (a frame with no peaks among them would be padded)" : "; a recorded zero is skipped like the .d loop's"));
+ 4190| #endif
+ 4191|       }
+ 4192|     }
+ 4193| 
+ 4194|     if (!streamed)
+ 4195|     {
+ 4196|       // A failed stream attempt may already have delivered part of the run -- MS1 spectra (sampled, pruned and
+ 4197|       // denoised), window slabs, compaction counts and their ledger charges. The resident load below reads the WHOLE
+ 4198|       // run again and only appends, so discard all of it first: kept, the delivered frames were loaded twice (silently
+ 4199|       // wrong with the prune off, a refusal with it on, "not in retention-time order" once partial slabs existed).
+ 4200|       ms1_map = PeakMap();
+ 4201|       ms2_by_window.clear();
+ 4202|       cstat = CompactStats();
+ 4203|       ms1_prune.reset();
+ 4204|       for (auto& v : ms1Hist_()) v.store(0, std::memory_order_relaxed);   // [ms1-hist] the failed attempt's picked peaks
+ 4205|       dnoise.reset();   // [dnoise] counts and frame marks: the resident pick below filters every frame again
+ 4206|       ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);
+ 4207|       Phase _ph("LOAD(full)");
+ 4208|       FileHandler().loadExperiment(in, exp,
+ 4209| #ifdef SPEXTRACTOR_WITH_MZPEAK
+ 4210|                                    {FileTypes::MZML, FileTypes::MZPEAK, FileTypes::BRUKER_TDF},
+ 4211| #else
+ 4212|                                    {FileTypes::MZML, FileTypes::BRUKER_TDF},
+ 4213| #endif
+ 4214|                                    log_type_);
+ 4215|     }
+ 4216| 
+ 4217|     //-------------------------------------------------------------
+ 4218|     // Input normalization / validation [C-4]
+ 4219|     //-------------------------------------------------------------
+ 4220|     // [stream] The streaming path fills ms1_map/ms2_by_window directly via an IM-aware consumer
+ 4221|     // (PickCompactConsumer calls ensureIMArrayName), leaving `exp` EMPTY -- so the exp-based IM check
+ 4222|     // only applies to the non-streaming load. Running it on the streamed (empty) `exp` wrongly aborted
+ 4223|     // with "no ion-mobility data at MS1", which is why native pre-centroiding aggregation could never
+ 4224|     // be benchmarked. Streamed data is guarded by the ms1_map.empty() check below instead.
+ 4225|     if (!streamed)
+ 4226|     {
+ 4227|       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
+ 4228|       if (imf == IMFormat::NONE)
+ 4229|       {
+ 4230|         writeLogError_("Error: input has no ion-mobility data at MS1. SpeXtractor requires diaPASEF (IM DIA) input.");
+ 4231|         return ILLEGAL_PARAMETERS;
+ 4232|       }
+ 4233|     }
+ 4234|     // deliberate: assumes 1/K0 (VSSC). ms/CCS conversion and FAIMS rejection are Phase 2 [M-2].
+ 4235| 
+ 4236|     // Centroid IM frames that are still profile, keeping per-peak IM at a tolerance no coarser
+ 4237|     // than the trace IM tolerance [C-2]. Split MS1 vs MS2 into separate working maps.
+ 4238|     if (!streamed)
+ 4239|     {
+ 4240|     PeakPickerIM picker;
+ 4241|     Param pp = picker.getParameters();
+ 4242|     pp.setValue("pickIMCluster:im_tolerance_cluster", delta_im);
+ 4243|     pp.setValue("pickIMCluster:ppm_tolerance_cluster", mass_ppm);
+ 4244|     picker.setParameters(pp);
+ 4245| 
+ 4246|     // Peak-pick (centroid) all IM frames in PARALLEL. PeakPickerIM is firstprivate so each thread
+ 4247|     // has its own copy -> the mutable ccs_warning_shown_ flag is not shared (a shared const picker
+ 4248|     // would be a real data race). pickIMCluster mutates only its own spectrum; distinct indices are
+ 4249|     // independent. [par-Crit-1]
+ 4250|     writeLogInfo_("Loaded " + String(exp.size()) + " frames." + clk_() + rss_()); // raw residency peak? [mem]
+ 4251|     writeLogInfo_("Peak-picking " + String(exp.size()) + " frames (OpenMP)...");
+ 4252|     // Param is a deep-copy value type (mutable ParamNode root_, defaulted copy) so firstprivate
+ 4253|     // gives each thread a fully independent picker -> no refcount/COW race. pickIMCluster can throw
+ 4254|     // (e.g. unexpected IM format); an exception escaping an OMP region terminates the process, so
+ 4255|     // capture it and rethrow serially. [par-Crit-1, code-review]
+ 4256|     std::exception_ptr pick_err;
+ 4257|     // [dnoise] as in flushMS1_: the raw MS1 frames of a .d, before their pick (a frame it empties keeps its IM array,
+ 4258|     // so the dispatch below keeps it too)
+ 4259|     if (dnoise.on) dnoise.checkLoader();
+ 4260|     std::vector<DnoiseRun::Work> dn_work(dnoise.on ? (size_t)std::max(1, omp_get_max_threads()) : 0);
+ 4261|     std::vector<DnoiseRun::Counts> dn_cnt(dnoise.on ? exp.size() : 0);
+ 4262|     #pragma omp parallel for firstprivate(picker) schedule(dynamic, 16)
+ 4263|     for (long i = 0; i < (long)exp.size(); ++i)
+ 4264|     {
+ 4265|       try
+ 4266|       {
+ 4267|         MSSpectrum& s = exp[i];
+ 4268|         // [dnoise] before the ion-mobility skip, as the streaming consumer filters every MS1 frame: frame() refuses a
+ 4269|         // non-empty MS1 frame without 1/K0 and counts an empty one, so no MS1 frame bypasses it and both paths count alike
+ 4270|         if (dnoise.on && s.getMSLevel() == 1) dnoise.frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);
+ 4271|         if (!s.containsIMData()) continue;
+ 4272|         if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+ 4273|         ensureIMArrayName(s); // so MassTraceDetection reads per-peak IM (IM-aware tracing) [C-1]
+ 4274|         if (s.getMSLevel() == 1) requireFiniteMs1Mz(s);   // [ms1-finite] exactly the spectra the prune and the MS1 map take
+ 4275|       }
+ 4276|       catch (...)
+ 4277|       {
+ 4278|         #pragma omp critical
+ 4279|         if (!pick_err) pick_err = std::current_exception();
+ 4280|       }
+ 4281|     }
+ 4282|     if (pick_err) std::rethrow_exception(pick_err);
+ 4283|     dnoise.add(dn_cnt);
+ 4284|     // [dnoise] each thread's scratch keeps the capacity of its largest frame (up to ~4 GiB at 100 threads): free it with
+ 4285|     // the pick, not at the end of this block after the prune and the dispatch
+ 4286|     std::vector<DnoiseRun::Work>().swap(dn_work); std::vector<DnoiseRun::Counts>().swap(dn_cnt);
+ 4287|     // [ms1-prune] exactly the MS1 spectra the dispatch below keeps, pruned as flushMS1_ prunes a batch
+ 4288|     if (ms1_prune.on) ms1_prune.batch(exp.getSpectra(), [](const MSSpectrum& s) { return s.containsIMData() && s.getMSLevel() == 1; });
+ 4289| 
+ 4290|     // Serial dispatch: MOVE (not copy) frames into the MS1 map / per-window MS2 maps to avoid
+ 4291|     // transient memory doubling; container inserts aren't thread-safe so this stays serial.
+ 4292|     for (MSSpectrum& s : exp)
+ 4293|     {
+ 4294|       if (!s.containsIMData()) continue;
+ 4295|       if (s.getMSLevel() == 1)
+ 4296|       {
+ 4297|         ms1_map.addSpectrum(std::move(s));
+ 4298|       }
+ 4299|       else if (s.getMSLevel() == 2 && !s.getPrecursors().empty())
+ 4300|       {
+ 4301|         const OpenMS::Precursor& pr = s.getPrecursors()[0];
+ 4302|         double lo = pr.getMZ() - pr.getIsolationWindowLowerOffset();
+ 4303|         double hi = pr.getMZ() + pr.getIsolationWindowUpperOffset();
+ 4304|         ms2_by_window[winKey(lo, hi, windowGroupOf(s.getNativeID()))].append(compactify(s, cstat), ms1_map.size());
+ 4305|         s.clear(true);   // [mem] the picked frame is dead once compacted; waiting for exp.clear()
+ 4306|       }                  // below held the whole picked run (20 B/peak) beside the compact store
+ 4307|     }
+ 4308|     }
+ 4309|     exp.clear(true); // frames moved out; release the container
+ 4310|     {
+ 4311|       size_t cb = 0, cp = 0;
+ 4312|       for (const auto& kv : ms2_by_window) { cb += kv.second.bytes(); cp += kv.second.peaks(); }
+ 4313|       const size_t lost = cstat.no_im_array + cstat.size_mismatch + cstat.bad_mz + cstat.bad_im;
+ 4314|       if (lost)
+ 4315|       {
+ 4316|         writeLogWarn_("[compact] DROPPED " + String(lost) + " peaks: no_im_array=" + String(cstat.no_im_array)
+ 4317|                       + " size_mismatch=" + String(cstat.size_mismatch) + " bad_mz=" + String(cstat.bad_mz)
+ 4318|                       + " bad_im=" + String(cstat.bad_im) + " (kept " + String(cstat.kept) + ") -- if this is"
+ 4319|                       + " nonzero the compact store is NOT lossless and results differ from the old path.");
+ 4320|       }
+ 4321|       size_t ms1_pk = 0; for (const auto& sp : ms1_map) ms1_pk += sp.size();
+ 4322|       { long long sb = 0; for (const auto& kv : ms2_by_window) sb += (long long)kv.second.bytes();
+ 4323|         ledSet_(LC_SLAB, sb); ledSet_(LC_MS1MAP, (long long)ms1_pk * 20); }   // touched bytes; the 2.5x reserve is untouched pages
+ 4324|       writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
+ 4325|                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
+ 4326|                     + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
+ 4327|                     + String(ms1_pk) + " peaks (" + String(ms1_pk * 20 / (1024ULL * 1024ULL)) + " MB as PeakMap)." + clk_() + rss_() + mem_()); // [mem]
+ 4328|       if (dnoise.on)   // [dnoise] after the MS1 load, whichever path picked it: every MS1 frame with points exactly once
+ 4329|       { dnoise.requireComplete(); writeLogInfo_(dnoise.summary()); }
+ 4330|       if (ms1_prune.on)
+ 4331|       { const Ms1Prune::Counts& t = ms1_prune.total;
+ 4332|         writeLogInfo_("[ms1-prune] picked " + String(t.picked) + " survivors " + String(t.survivors) + " witnesses " + String(t.kept - t.survivors)
+ 4333|                       + " at_noise " + String(t.at_noise) + " nan " + String(t.nan) + " bad_mz " + String(t.bad_mz) + ": kept " + String(t.kept) + " peaks = "
+ 4334|                       + String(t.kept * 20 / (1024LL * 1024LL)) + " MB as PeakMap of " + String(t.picked * 20 / (1024LL * 1024LL)) + " MB picked; sample "
+ 4335|                       + String(ms1_prune.sample.size()) + " m/z from " + String(ms1_prune.frames) + " spectra"
+ 4336|                       + (ms1_prune.no_witness ? String(" -- SPEXTRACTOR_MS1_PRUNE_NO_WITNESS: survivors only, a negative control, output NOT identical") : String())
+ 4337|                       + (ms1_prune.no_chain ? String(" -- SPEXTRACTOR_MS1_PRUNE_NO_CHAIN: interior chain links dropped, a negative control, output NOT identical") : String())); }
+ 4338|     }
+ 4339| 
+ 4340|     if (ms1_map.empty())
+ 4341|     {
+ 4342|       writeLogError_("Error: no MS1 ion-mobility frames found; cannot seed precursors.");
+ 4343|       return INCOMPATIBLE_INPUT_DATA;
+ 4344|     }
+ 4345| 
+ 4346|     // [cell] the frozen frame tables (see FrozenWin); today from the resident slabs, before
+ 4347|     // indexRt() frees their frame times and toTof() their frame ids
+ 4348|     map<WinKey, FrozenWin> frozen;
+ 4349|     if (tile_source)
+ 4350|       for (const auto& kv : run_tables)   // [3b] every window of the reader's table, no slab needed
+ 4351|       { FrozenWin& fw = frozen[kv.first]; fw.frame_rt = kv.second.rt; fw.frame_id = kv.second.id; }
+ 4352|     else
+ 4353|       for (const auto& kv : ms2_by_window)
+ 4354|       { FrozenWin& fw = frozen[kv.first]; fw.frame_rt = kv.second.rt; fw.frame_id = kv.second.frame_id; }
+ 4355|     // THE GLOBAL RT AXIS. Every frame contributes one retention time; every trace point sits on a
+ 4356|     // frame. Building it here, once, is what lets a trace point be 8 bytes (frame index +
+ 4357|     // intensity) instead of 16 (RT + intensity), and lets two profiles be aligned by integer
+ 4358|     // equality instead of a binary search per point. Frames are counted once even when an MS1 and
+ 4359|     // an MS2 frame share an RT, which is what makes the index a valid shared key.
+ 4360|     {
+ 4361|       vector<double>& ax = rtAxis();
+ 4362|       ax.clear();
+ 4363|       { size_t nf = ms1_map.size(); for (const auto& kv : ms2_by_window) nf += kv.second.frames();
+ 4364|         ax.reserve(nf + 1024); }   // MS1 *and* every window's MS2 frames land here [mem]
+ 4365|       for (const auto& sp : ms1_map) ax.push_back(sp.getRT());
+ 4366|       for (const auto& kv : frozen) ax.insert(ax.end(), kv.second.frame_rt.begin(), kv.second.frame_rt.end());   // the tables' frame times (== the slabs' after padding)
+ 4367|       sort(ax.begin(), ax.end());
+ 4368|       ax.erase(unique(ax.begin(), ax.end()), ax.end());
+ 4369|       writeLogInfo_("RT axis: " + String(ax.size()) + " distinct frame retention times"
+ 4370|                     + (ax.empty() ? "" : " spanning " + String(ax.front()) + "-" + String(ax.back()) + " s"));
+ 4371|       if (ax.empty())
+ 4372|       {
+ 4373|         writeLogError_("Error: no frame retention times; cannot build the RT axis.");
+ 4374|         return INCOMPATIBLE_INPUT_DATA;
+ 4375|       }
+ 4376|       // [tile-2d] frame times -> axis indices, and the load-time growth slack returned, window by
+ 4377|       // window (one window's copy in flight at a time, not all of them at once).
+ 4378|       const double _ts = phase_clock_(); const long _r0 = rss_mb_();
+ 4379|       size_t reserved = 0;
+ 4380|       for (auto& kv : ms2_by_window) { indexRt(kv.second); reserved += kv.second.reserved(); }
+ 4381|       for (auto& kv : frozen)
+ 4382|       { FrozenWin& fw = kv.second; fw.rt_index.resize(fw.frames()); for (size_t f = 0; f < fw.frames(); ++f) fw.rt_index[f] = rtIndex(fw.frame_rt[f]); }
+ 4383| #ifdef __GLIBC__
+ 4384|       if (trim_on) malloc_trim(0);   // the load's arena churn, returned before the MS1 phase
+ 4385| #endif
+ 4386|       writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis in " + String(phase_clock_() - _ts)
+ 4387|                     + " s; " + String(reserved / (1024ULL * 1024ULL)) + " MB reserved but untouched (virtual only) [RSS "
+ 4388|                     + String(_r0) + " -> " + String(rss_mb_()) + " MB]" + mem_());
+ 4389|     }
+ 4390| 
+ 4391|     //-------------------------------------------------------------
+ 4392|     // MS1 traces + precursor/charge inference (shared, once) [H-8,H-10]
+ 4393|     //-------------------------------------------------------------
+ 4394|     ms1_map.sortSpectra();
+ 4395|     const double ms1_snr = getDoubleOption_("trace:ms1_chrom_peak_snr");
+ 4396|     const double ms2_snr = getDoubleOption_("trace:ms2_chrom_peak_snr");
+ 4397|     const double ms2_minlen = getDoubleOption_("trace:ms2_min_length_sec");
+ 4398|     const double ms2_msr = getDoubleOption_("trace:ms2_min_sample_rate");
+ 4399|     double ms2_split = getDoubleOption_("trace:ms2_split_valleys");
+ 4400|     // [split-scan-time] ONE scalar for the whole run, from the MS1 frame times: one MS1 frame per
+ 4401|     // cycle, so it is the MS2 cadence too. Per window it would differ in the last bits (and per
+ 4402|     // tile later), and a sparse window would not be scanned differently from its neighbours.
+ 4403|     // [cell] The fixed RT cells (tile:rt_sec): interior edges T_1..T_{K-1} on MS1 frame times, so
+ 4404|     // every window's frames split at the same instants; cell k = [T_k, T_{k+1}), T_0 = -inf.
+ 4405|     vector<double> cell_edges;
+ 4406|     String cell_boundaries;
+ 4407|     double cell_pitch = getDoubleOption_("tile:rt_sec");
+ 4408|     if (cell_pitch > 0.0)
+ 4409|     {
+ 4410|       vector<double> rts; rts.reserve(ms1_map.size());
+ 4411|       for (const auto& sp : ms1_map) rts.push_back(sp.getRT());
+ 4412|       std::sort(rts.begin(), rts.end());
+ 4413|       const double cyc = frameSpacing(rts);
+ 4414|       const size_t n = cyc > 0.0 ? std::max<size_t>(1, (size_t)llround(cell_pitch / cyc)) : 0;
+ 4415|       if (n > 0)
+```
+
+## 11. Reminder
+
+Everything you need is inline. Do not run any shell command. Findings ranked by severity, each with
+location, concrete failure scenario and fix; then the short list of areas checked and found clean.

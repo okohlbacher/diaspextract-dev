@@ -33,7 +33,7 @@ arithmetic difference, so equal counts are not equality.
 ## Running the tests
 
 ```bash
-python3 test/test_spextractor.py /path/to/spextractor     # 13 end-to-end checks, synthetic input
+python3 test/test_spextractor.py /path/to/spextractor     # 24 end-to-end checks, synthetic input
 cmake -B build -DSPEXTRACTOR_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build
 ```
 
