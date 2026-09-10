@@ -2852,3 +2852,22 @@ the earlier pins. New pins at the default: **D `8c1b047f`**, **TNBC 009 `bff54a1
 and 300 pins are re-recorded on the flipped build below. Review: docs/reviews/2026-09-10-band-edges/
 (three rounds; the first version's TNBC arm threw on the superset assert because MzAcqRangeUpper
 converts to 399,199 while the digitizer's last bin is 399,966 -- the reviewers' hazard, measured).
+
+**Pins at the flipped defaults (chain `repin` on 7e71998, ibminode05, 07:06-07:40; the reference
+files are kept on `/scratch/kohlbach/pins_acq/` for the reader gates):**
+
+| arm | digest |
+|---|---|
+| D at the default (600, acquisition edges) | **`8c1b047f`** (the value the science gate searched) |
+| D `-1`, `frame` window | `5eb25eb0` |
+| D `-1`, `trace` window | `20afff0b` |
+| D at 300 | `8fde0944` |
+| D at 600 with `-trace:band_edges slab` | `f9e65631` -- the pre-flip path, intact |
+| TNBC 009 at the default | **`bff54a1f`** |
+
+The e2e section of this chain (and of the two before it) came back EMPTY: with the flipped default
+every integer-detector check refused, because the synthetic `analysis.tdf` fixture carried no
+GlobalMetadata and `acquisition` needs it -- and the failure escaped `check()` as a traceback, so
+a chain grepping for "FAIL" or "checks passed" saw nothing at all. Both halves are fixed (8e2f1c0):
+the fixture writes the bounds a real tdf always has, and a suite that cannot run now prints
+`0/0 checks passed; FAIL ...`. **A silent gate section is a failed gate, not a passed one.**
