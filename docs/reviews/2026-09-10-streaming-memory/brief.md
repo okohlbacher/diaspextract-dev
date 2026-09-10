@@ -69,6 +69,40 @@ be recomputed instead of held, could it be per tile instead of per run, and does
 frees actually leave the process? The ledger data below gives live bytes per structure at 250 ms
 resolution alongside RSS, so "freed but retained" is visible as the unattributed column.
 
+**4. Parallelising reading, computing and writing under a central orchestrator.** Today the tile
+loop is strictly sequential in three stages: read tile k (one Bruker loader call, its own internal
+parallelism), compute tile k (an OpenMP task pool over windows x m/z bands), write tile k (a
+streaming mzML writer whose per-block encoding is already parallel). Measured on dataset D at
+three tiles: the reads are 7-27 s each against ~90 s of compute per tile, and the write is ~6 s.
+
+What is the right orchestration, and how far can it go?
+
+* The obvious pipeline is read(k+1) || compute(k) || write(k-1), which costs one extra tile of
+  slabs resident and hides the read entirely. The judged plan calls this step 5 and it is not
+  implemented.
+* But there is a stronger claim available, and the reviewers should test it: **the cell-atomic
+  grid makes tiles independent of each other except for one thing** -- the carry, the boundary
+  fragments a tile hands its successor for scoring. And a tile could RECONSTRUCT its own carry by
+  re-detecting the previous tile's last cell, which is bit-identical by construction (that is what
+  the grid guarantees). If that holds, tiles become embarrassingly parallel: several tiles at once
+  on one machine, or across machines, at the price of one redundant cell per tile (17% of the
+  detection work at six cells per tile, 100% at one).
+* Which resources actually contend? The loader's batch decode is parallel, the detector's bands
+  are OpenMP tasks, the scorer is a task loop over precursors, and the writer's chunk encoders are
+  a parallel for. Running several of these at once on 100+ threads means nested parallelism and a
+  documented libgomp cliff (a taskloop silently serialises past 64 x nthreads tasks). Say what the
+  orchestrator should own: one global task pool with priorities, a thread budget per stage, or
+  separate teams.
+* The write is ORDERED (tiles are RT-disjoint and concatenate into the canonical order). If tiles
+  complete out of order, does the orchestrator buffer blocks, write part-files and merge, or make
+  the writer accept out-of-order blocks and fix the index at the end?
+* What does each of these do to the peak? The measurements below give per-tile read/loop/write
+  peaks, so quantify the pipeline's extra resident set rather than asserting it is small.
+
+Rank these against each other: a prefetch thread is a day's work and hides ~20% of the wall; full
+tile independence is a bigger change and might hide much more, or might not survive the memory
+bound. Say which you would build, in what order, and what measurement decides it.
+
 **A lever the measurements just exposed.** The cells must be fixed (that is what makes the output
 invariant), but a TILE is any GROUP of adjacent cells, and the grouping is free -- output is
 identical for every grouping, proven by digest. On dataset D at pitch 300 grouped 3 cells per
