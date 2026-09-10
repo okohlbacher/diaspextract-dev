@@ -553,3 +553,23 @@ That leaves the memory question pointing somewhere else: at a fixed cell grid, t
 loader decodes each frame once and slices it to every window of its group, so a shard costs a full
 re-decode), to spill slabs, or to reduce the bytes per peak. Reviewers should weigh those against
 each other rather than assuming the grouping fixes it.
+
+
+## The per-tile re-open costs nothing (measured in the step-3b gate, 2026-09-10)
+
+An open question of the judged tiled-reader plan was the price of re-opening the `.d` for every
+tile (sqlite over 72k `Frames` rows plus 134k `DiaFrameMsMsInfo` rows, the T1 column and the window
+table), estimated there at 0.3-1 s per open. Measured on dataset D at 100 threads:
+
+| tiling | loader time per tile (s) | total |
+|---|---|---:|
+| 1 tile | 26.6 | 26.6 s |
+| 3 tiles (pitch 600) | 2.2, 11.9, 10.0 | 24.1 s |
+| 6 tiles (pitch 300) | 0.27, 1.86, 3.88, 6.39, 6.42, 3.65 | 22.5 s |
+
+Six opens are not slower than one; if anything the smaller decodes are slightly faster. The
+re-open is not a reason to hold a persistent handle, and a prefetch design does not have to
+amortise it.
+
+The same rows show the read is proportional to a tile's peaks (0.27 s for 13.0 M peaks, 6.4 s for
+372 M) and that the loader sustains roughly 55-60 M picked peaks per second at 100 threads.
