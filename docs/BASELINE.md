@@ -3062,3 +3062,20 @@ flush breaks the soft window-loop cap the verifiers identified: **26.99 GB, −1
 (13.3 GiB MS1 map + 10.1 GiB free list, ~2.5 GiB live uncharged), which is D's next floor. Trimming
 every 4th flush is dominated. **Untested on TNBC 009**, whose tiled floor is the MS1 partition phase,
 where neither knob acts. Details: data3-batch.md section 8.
+
+### TNBC 009: the pass-1 levers take 6.3 GB off, smaller tiles take nothing (2026-09-10, chain `tnbc2`, d7cc14d)
+
+| 13 tiles unless stated | wall | peak |
+|---|---:|---:|
+| control, first / last | 10:16 / 9:24 | 68.94 / 68.02 GB |
+| MS1 trim after band distribution | 9:39 | 65.94 GB |
+| MS1 trim + MS1-only picker batch 64 + trim every 16th flush | 10:20 | **62.22 GB** |
+| pitch 300 (26 tiles) | 8:44 | 68.72 GB |
+| pitch 300 + the same levers | 9:52 | 62.78 GB |
+
+Pitch-600 arms reproduce `bff54a1f`; the pitch-300 pair agree (`725298dd`). The levers take **−6.3 GB
+(−9.1%)** against the mean control, output identical, wall within the controls' 52 s spread; the peak moves
+from the MS1 partition phase to the end of the load, where the MS1 map (44.2 GiB at the instant) binds.
+**Smaller tiles do not lower the peak** at either lever setting, because the peak is in pass 1. Pitch 300
+halves the scorer's fragment visits (−47%) and trims loop CPU ~10%, but it changes the output and is a
+science knob. Details: docs/reviews/2026-09-10-streaming-memory/data5-tnbc-levers.md.
