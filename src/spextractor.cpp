@@ -1807,6 +1807,47 @@ namespace
     return g;
   }
 
+  /// Canonical total-order sort (RT, precursor m/z, charge, then the fragment sequence):
+  /// thread-count-independent and free of RT-tie ambiguity (RT-only sortSpectra is NOT canonical).
+  /// Sorts a compact key array and permutes once: std::sort moves what it is handed, and an
+  /// MSSpectrum is ~750 bytes against 32 for a key. The keys start in the spectra's order, so
+  /// introsort makes the same decisions as sorting the spectra would, ties included. [par-Crit-2]
+  /// Tiles are RT-disjoint and RT is the first key, so per-tile sorted blocks concatenate to the
+  /// order one sort of everything gives.
+  static void canonicalSort_(vector<MSSpectrum>& v)
+  {
+    struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
+    vector<SortKey> keys(v.size());
+#pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)v.size(); ++i)
+    {
+      const MSSpectrum& a = v[i];
+      keys[i].rt = a.getRT();
+      keys[i].mz = a.getPrecursors().empty() ? 0.0 : a.getPrecursors()[0].getMZ();
+      keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
+      keys[i].n = (uint32_t)a.size();
+      keys[i].idx = (uint32_t)i;
+    }
+    sort(keys.begin(), keys.end(), [&v](const SortKey& ka, const SortKey& kb) {
+      if (ka.rt != kb.rt) return ka.rt < kb.rt;
+      if (ka.mz != kb.mz) return ka.mz < kb.mz;
+      if (ka.charge != kb.charge) return ka.charge < kb.charge;
+      // fragment-sequence tiebreaks so equal-precursor spectra have a canonical order
+      if (ka.n != kb.n) return ka.n < kb.n;
+      const MSSpectrum& a = v[ka.idx];
+      const MSSpectrum& b = v[kb.idx];
+      for (Size i = 0; i < a.size(); ++i)
+      {
+        if (a[i].getMZ() != b[i].getMZ()) return a[i].getMZ() < b[i].getMZ();
+        if (a[i].getIntensity() != b[i].getIntensity()) return a[i].getIntensity() < b[i].getIntensity();
+      }
+      return false;
+    });
+    vector<MSSpectrum> ord; ord.reserve(v.size());
+    for (const SortKey& k : keys) ord.push_back(std::move(v[k.idx]));
+    v.swap(ord);
+  }
+
   /// [tile-2e] Streams spectra to an mzML in BLOCKS: the header once, then every block encoded in
   /// parallel chunks (the tool-side twin of patches/openms-mzml-parallel-write.patch) and appended in
   /// order, the index offsets rebased as each chunk lands. Blocks arrive in the canonical order (a
@@ -1974,6 +2015,10 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run (at a fixed perf:trace_bands; the auto setting 0 ties the band count to the thread count): the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run. DEFAULT 600 since 2026-09-10: on the 30-minute file Sage +0.8% and MSFragger +1.5% with the entrapment FDR 1.16 -> 1.30% (within its interval), on the 2-hour file Sage +0.8%; 300 gains more Sage (+3.4%) at 1.38% entrapment. -1 = one cell = the whole run (the output before the cells).", false, true);
+    registerIntOption_("tile:cells_per_tile", "<n>", 0, "Group the retention-time cells into TILES of n cells each and run the window loop tile by tile: "
+                       "detection on the tile's frames only, scoring of the precursors the tile owns (an MS1 frame time in [T_k - gate:delta_rt, T_{k+1} - gate:delta_rt)) "
+                       "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
+                       "0 = all cells in one tile (today's whole-run loop). Output is identical for any n by construction (the cell grid); memory is one tile's.", false, true);
     registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time the valley splitter's smoothing window (chrom_fwhm / scan time) is derived from. 'frame': the acquisition's cycle time (the smallest gap between consecutive MS1 frame times), one value for the whole run and every trace. 'trace': each mass trace's own average cycle time, as OpenMS ElutionPeakDetection does by default -- which a trace with gaps inflates, so long gappy traces got a narrower window than their neighbours and a sub-range of such a trace was split differently from the whole (the behaviour before 2026-09-09).", false, true);
     setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' "
@@ -3979,8 +4024,6 @@ protected:
       std::stable_sort(window_list.begin(), window_list.end(),
                        [&](const auto& a, const auto& b) { return wbytes(*a.second) > wbytes(*b.second); });
     }
-    vector<vector<MSSpectrum>> win_out(window_list.size());
-    Size win_done = 0;
     // MEMORY vs SPEED: every concurrently-processed window holds its own frames + traces + grid, so
     // peak RSS scales with the number of windows in flight, not with the window count. Capping
     // concurrency trades wall time for RAM. 0 = unlimited (previous behaviour). [mem]
@@ -4145,7 +4188,120 @@ protected:
     if (cell_pitch > 0.0 && getIntOption_("perf:trace_bands") <= 0)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "tile:rt_sec needs a fixed perf:trace_bands: the auto setting (0) ties the band count to the thread count, and each band has its own `visited`, so the output would depend on the threads.");
-    writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows (OpenMP over windows, <="
+    // [tile] The cells grouped into TILES. A tile owns the precursors whose MS1 frame time lies in
+    // [lo - delta_rt, hi - delta_rt) -- the half-open ranges partition RT (lo = -inf for the first,
+    // hi = +inf for the last) -- and traces its windows on the tile's frames only; a precursor's
+    // candidates (|rtOf - rt| <= delta_rt) then lie in [lo - 2 delta_rt, hi): the tile's own
+    // fragments plus those CARRIED from the previous tile (rtOf >= lo - 2 delta_rt, re-carried
+    // transitively). One tile = today's loop, statement for statement.
+    struct Tile { size_t k; double lo, hi; bool last; };
+    vector<Tile> tiles;
+    {
+      const int cpt = getIntOption_("tile:cells_per_tile");
+      const size_t n_cells_run = cell_edges.size() + 1;
+      const size_t per = (cpt <= 0 || cell_pitch <= 0.0) ? n_cells_run : (size_t)cpt;
+      for (size_t c0 = 0; c0 < n_cells_run; c0 += per)
+      {
+        const size_t c1 = std::min(n_cells_run, c0 + per);
+        tiles.push_back(Tile{tiles.size(), c0 == 0 ? -std::numeric_limits<double>::infinity() : cell_edges[c0 - 1],
+                             c1 == n_cells_run ? std::numeric_limits<double>::infinity() : cell_edges[c1 - 1], c1 == n_cells_run});
+      }
+      String tl; for (const Tile& t : tiles) tl += (tl.empty() ? "" : " ") + String("[") + String(t.lo) + "," + String(t.hi) + ")";
+      writeLogInfo_("[tile] " + String(tiles.size()) + " tile(s) of up to " + String(per) + " cell(s): " + tl);
+    }
+    // [tile] Run-level per-window band edges: the whole resident slab's flight-time extremes
+    // (exactly the values the body computed on the whole window), so every tile traces in the
+    // same bands. The bins are converted here, once, in place (toTof is idempotent).
+    map<WinKey, pair<TofIdx, TofIdx>> wbands;
+    if (integer_detector)
+    {
+      for (const auto& w : window_list) wbands[w.first] = {0xFFFFFFFFu, 0};
+      #pragma omp parallel for schedule(dynamic, 1)
+      for (long i = 0; i < (long)window_list.size(); ++i)
+      {
+        PeakSlab& sl = *window_list[(size_t)i].second;
+        toTof(sl);
+        TofIdx tlo = 0xFFFFFFFFu, thi = 0;
+        for (TofIdx t : sl.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
+        wbands.at(window_list[(size_t)i].first) = {tlo, thi};
+      }
+    }
+    // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
+    // the once-only ownership check per precursor (a window's m/z range is tile-independent)
+    struct Carry { vector<Trace> rec; vector<float> inten; };
+    map<WinKey, Carry> carry_in, carry_out;
+    map<WinKey, vector<uint8_t>> visited;
+    for (const auto& w : window_list)
+    {
+      carry_out[w.first];
+      const double lo = w.first[0] / 100.0, hi = w.first[1] / 100.0;
+      const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), lo) - prec_mz.begin();
+      const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), hi) - prec_mz.begin();
+      visited[w.first].assign(phi > plo ? phi - plo : 0, 0);
+    }
+    // [tile] The output: settings and stamps are fixed before the first tile, the mzML writer is
+    // opened once and fed a sorted block per tile (with one tile the count is exact and the bytes
+    // are the bulk writer's); mzPeak output is bulk-only, so it needs one tile.
+    PeakMap out_exp;
+    std::shared_ptr<DataProcessing> out_dp = std::make_shared<DataProcessing>(getProcessingInfo_(DataProcessing::DATA_PROCESSING));
+    // [provenance] Record the emitted-intensity reweighting so an identical historical command line is
+    // still reproducible after assembly:corr_power's default changed 0->2 (2026-07-28). Without this,
+    // the same command produces different intensities across tool versions with no trace of why.
+    // [provenance] WHICH m/z calibration produced this file. Without it an archived mzML is not
+    // attributable to a calibration path and a silent fallback would be invisible afterwards.
+    // The value travels ON THE LOADED EXPERIMENT (set by BrukerTimsFile), not through a header
+    // static: an inline static can be duplicated across a shared-library boundary, in which case
+    // the tool would read its own copy and always report "unset".
+#ifdef SPEXTRACTOR_WITH_MZPEAK
+    if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
+      out_exp.setMetaValue("spx:mz_calibration", spx::lastMzPeakCalibration());   // not BrukerTimsFile's state
+    else
+#endif
+    out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
+    out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
+    out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
+    out_exp.setMetaValue("spx:tile_cells_per_tile", getIntOption_("tile:cells_per_tile"));
+    out_exp.setMetaValue("spx:tiles", (int)tiles.size());
+    out_exp.setMetaValue("spx:frame_table", frame_table_src);   // the frozen tables' source (loader | mzpeak | slab)
+    out_exp.setMetaValue("spx:pearson_G", "frames");
+    out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
+    out_exp.setMetaValue("spx:corr_power", corr_power_);
+    out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
+    out_exp.setMetaValue("spx:require_isotope_support",
+                         (int)(getStringOption_("assembly:require_isotope_support") == "true"));
+    // Output format. The extension is authoritative, because that is what a user typing
+    // `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
+    FileTypes::Type out_type = FileTypes::MZML;
+    const String out_type_opt = getStringOption_("out_type");
+#ifdef SPEXTRACTOR_WITH_MZPEAK
+    if (!out_type_opt.empty())
+      { String t = out_type_opt; t.toLower(); out_type = (t == "mzml") ? FileTypes::MZML : FileTypes::MZPEAK; }
+    else
+    {
+      const FileTypes::Type by_name = FileHandler::getTypeByFileName(out);
+      out_type = (by_name == FileTypes::MZML || by_name == FileTypes::MZPEAK) ? by_name
+                                                                             : FileTypes::MZPEAK;
+    }
+    if (out_type == FileTypes::MZPEAK)
+      writeLogInfo_("Writing mzPeak. NOTE: DDA search engines read mzML, not mzPeak -- if this file "
+                    "is going straight into a search, write .mzML instead (or -out_type mzML).");
+#else
+    // Built without mzPeak support: mzML is the only container this binary can write. Refuse an
+    // explicit request for mzPeak rather than silently writing something else.
+    String out_type_lc = out_type_opt; out_type_lc.toLower();          // toLower() mutates
+    if (!out_type_lc.empty() && out_type_lc != "mzml")
+      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary "
+            "can only write mzML.");
+#endif
+    if (out_type != FileTypes::MZML && tiles.size() > 1)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "mzPeak output is written in one piece; tile:cells_per_tile > 0 needs mzML output (-out_type mzML).");
+    std::unique_ptr<TileWriter> writer;
+    if (out_type == FileTypes::MZML) { writer.reset(new TileWriter(out)); writer->setExperimentalSettings(out_exp); }
+    vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
+    Size n_out = 0;
+    writeLogInfo_("Processing " + String(window_list.size()) + " isolation windows in " + String(tiles.size()) + " tile(s) (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
 
@@ -4171,12 +4327,43 @@ protected:
     // use. `perf:max_concurrent_windows` was computed and logged but never actually checked --
     // the only bound was the byte gate, which over-booked by 3.6x, so nothing ever throttled.
     std::atomic<int> active{0};
+    for (size_t tk = 0; tk < tiles.size(); ++tk)
+    {
+    const Tile& tile = tiles[tk];
+    // [tile] the tile's slabs: one tile = the resident slabs themselves (moved out by the body, as
+    // today); several = a slice of each window's frames in [lo, hi) (the resident source keeps the
+    // whole run: this arm is the exactness gate, not the memory configuration)
+    map<WinKey, PeakSlab> tile_slabs;
+    vector<pair<WinKey, PeakSlab*>> wl;
+    if (tiles.size() == 1) wl = window_list;
+    else
+    {
+      size_t tile_peaks = 0;
+      for (const auto& w : window_list)
+      {
+        const PeakSlab& sl = *w.second;
+        auto frt = [&](size_t f) { return rtAxis()[sl.rt_index[f]]; };
+        size_t f0 = 0, f1 = sl.frames();
+        { size_t lo = 0, hi = sl.frames(); while (lo < hi) { const size_t m = (lo + hi) / 2; if (frt(m) < tile.lo) lo = m + 1; else hi = m; } f0 = lo; }
+        { size_t lo = f0, hi = sl.frames(); while (lo < hi) { const size_t m = (lo + hi) / 2; if (frt(m) < tile.hi) lo = m + 1; else hi = m; } f1 = lo; }
+        PeakSlab& ts = tile_slabs[w.first];
+        ts = sliceFrames(sl, f0, f1);
+        tile_peaks += ts.peaks();
+      }
+      for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
+      std::stable_sort(wl.begin(), wl.end(), [](const auto& a, const auto& b) { return a.second->bytes() > b.second->bytes(); });
+      writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + "): "
+                    + String(wl.size()) + " windows, " + String(tile_peaks) + " peaks resident" + rss_() + mem_());
+    }
+    vector<vector<MSSpectrum>> win_out(wl.size());
+    Size win_done = 0;
+    for (auto& kv : carry_out) kv.second = Carry();
     #pragma omp parallel num_threads(n_threads)
     #pragma omp single
-    for (long wi = 0; wi < (long)window_list.size(); ++wi)
+    for (long wi = 0; wi < (long)wl.size(); ++wi)
     {
       {
-        const size_t need = project(*window_list[wi].second);
+        const size_t need = project(*wl[wi].second);
         for (;;)
         {
           const size_t budget = (size_t)(availableBytes_() * mem_frac);
@@ -4195,10 +4382,10 @@ protected:
       [&]() {
       try
       {
-        const double win_lo = window_list[wi].first[0] / 100.0;
-        const double win_hi = window_list[wi].first[1] / 100.0;
+        const double win_lo = wl[wi].first[0] / 100.0;
+        const double win_hi = wl[wi].first[1] / 100.0;
         // admitted by the master before this task existed; release both charges however we leave
-        const size_t need = project(*window_list[wi].second);
+        const size_t need = project(*wl[wi].second);
         struct Release { std::atomic<size_t>& b; std::atomic<int>& a; size_t n;
                          ~Release() { b -= n; --a; } } rel{inflight, active, need};
         // Per-window stage seconds and the completion line, printed on EVERY exit of the body
@@ -4211,7 +4398,7 @@ protected:
         auto secs = [](auto d) { return std::chrono::duration<double>(d).count(); };
         struct WinDone { std::function<void()> f; ~WinDone() { f(); } } win_done_guard{[&]() {
           #pragma omp critical(winlog)
-          writeLogInfo_("  window " + String(++win_done) + "/" + String(window_list.size()) + " " + String(win_lo) + "-" + String(win_hi)
+          writeLogInfo_("  window " + String(++win_done) + "/" + String(wl.size()) + " " + String(win_lo) + "-" + String(win_hi)
                         + ": prep " + String(w_prep) + " s | trace " + String(w_trace) + " s | split " + String(w_split)
                         + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_()
                         + "\n    [tsub] " + String(win_lo) + "-" + String(win_hi) + " trace = slab " + String(w_slab)
@@ -4226,7 +4413,7 @@ protected:
         if (integer_detector)
         {
           { auto _tsl = std::chrono::steady_clock::now();
-            wslab = std::move(*window_list[wi].second);
+            wslab = std::move(*wl[wi].second);
             toTof(wslab);
             w_slab = secs(std::chrono::steady_clock::now() - _tsl); }
           if (detOn_())
@@ -4237,7 +4424,7 @@ protected:
         }
         else
         {
-          wmap = materializeWindow(*window_list[wi].second);
+          wmap = materializeWindow(*wl[wi].second);
           if (detOn_())   // [det] compact store digest BEFORE tracing: splits "pick" from "trace+assemble"
           {
             // materializeWindow consumed the frames; digest the materialised map instead (same content)
@@ -4247,7 +4434,7 @@ protected:
             writeLogInfo_("[det] window " + String(win_lo) + "-" + String(win_hi) + " compact n=" + String(b.size() / 2) + " digest=" + String(detDigest_(std::move(b))));
           }
         }
-        if (++n_materialised == window_list.size() && trim_on)
+        if (++n_materialised == wl.size() && trim_on)
         { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
 #ifdef __GLIBC__
           malloc_trim(0);
@@ -4282,10 +4469,16 @@ protected:
         const int w_bands = n_bands;
         vector<Trace> frag_traces;
         TraceStore wst;                                   // this window's frame table + arenas; outlives scoring
-        const FrozenWin& fwin = frozen.at(window_list[wi].first);
+        const FrozenWin& fwin = frozen.at(wl[wi].first);
         size_t w_live = 0;                                // [tile-0d] G_live, carried out of the tracing block
         TofIdx w_tlo = 0, w_thi = 0;                      // the window's band edges, for the window-file row
-        if (integer_detector)
+        if (integer_detector && wslab.frames() == 0)
+        {
+          // [tile] no frame of this window lies in the tile: nothing to trace, the carried-in
+          // fragments (below) are all it scores with
+          wst.setFrames(fwin.rt_index, &fwin.b);
+        }
+        else if (integer_detector)
         {
           wst.setFrames(fwin.rt_index, &fwin.b);             // the FROZEN table, not the resident slab's
           // Banded like the OpenMS path. A band SEEDS only in its own flight-time core but may
@@ -4293,8 +4486,8 @@ protected:
           // that two bands can take the same peak (each has its own `visited`), which is the same
           // class of error the OpenMS halo carries -- measured at 0.1% of peptides. Bands are
           // TASKS, so they fill the pool alongside every other window's work.
-          TofIdx tlo = 0xFFFFFFFFu, thi = 0;
-          for (TofIdx t : wslab.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
+          // [tile] the window's RUN-LEVEL band edges (the whole slab's extremes), the same in every tile
+          TofIdx tlo = wbands.at(wl[wi].first).first, thi = wbands.at(wl[wi].first).second;
           { TileProbe::Row pr; if (TileProbe::row(String(win_lo) + "-" + String(win_hi), pr) && pr.thi > pr.tlo) { tlo = pr.tlo; thi = pr.thi; } }   // [tile-1] frozen edges
           w_tlo = tlo; w_thi = thi;
           const int nb = (thi <= tlo) ? 1 : std::max(1, w_bands);
@@ -4492,6 +4685,23 @@ protected:
           writeLogInfo_("MS2 " + ms2_span);
         }
 
+        // [tile] the previous tile's boundary fragments join this window's list, spans copied
+        // onto its arena; their frame indices are the frozen table's already (the same table in
+        // every tile), and they enter BEFORE the content sort, so they take their canonical places.
+        size_t n_carried_in = 0;
+        { const auto cit = carry_in.find(wl[wi].first);
+          if (cit != carry_in.end() && !cit->second.rec.empty())
+          {
+            const Carry& ci = cit->second;
+            frag_traces.reserve(frag_traces.size() + ci.rec.size());
+            for (const Trace& r : ci.rec)
+            {
+              Trace t = r; t.off = (uint32_t)wst.inten.size();
+              wst.inten.insert(wst.inten.end(), ci.inten.begin() + r.off, ci.inten.begin() + r.off + r.len);
+              frag_traces.push_back(t);
+            }
+            n_carried_in = ci.rec.size();
+          } }
         auto _tso = std::chrono::steady_clock::now();
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& t) {
           return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(rtOf(wst, t));
@@ -4569,7 +4779,22 @@ protected:
           // inside this same loop, measured at 43.5% kernel time) -- reproduced here by omission.
           // Divide the budget instead of multiplying it.
           auto _t5 = std::chrono::steady_clock::now();
-          vector<MSSpectrum> pslot(phi > plo ? phi - plo : 0);
+          // [tile] the precursors this tile OWNS (see the tile loop), in index order as before;
+          // each is emitted by exactly one tile -- asserted, never assumed
+          vector<uint32_t> pidx; pidx.reserve(phi > plo ? phi - plo : 0);
+          for (size_t pi = plo; pi < phi; ++pi)
+          {
+            const Precursor_& pc = precursors[pi];
+            if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
+            if (pc.rt < tile.lo - delta_rt || pc.rt >= tile.hi - delta_rt) continue;
+            pidx.push_back((uint32_t)pi);
+          }
+          { vector<uint8_t>& vis = visited.at(wl[wi].first);
+            for (uint32_t pi : pidx)
+              if (vis[pi - plo]++ != 0)
+                throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tile] a precursor is owned by two tiles",
+                                              String(precursors[pi].rt, 6) + " s in window " + String(win_lo) + "-" + String(win_hi)); }
+          vector<MSSpectrum> pslot(pidx.size());
           // grainsize, not num_threads: the pool decides how many threads land here, so a window
           // that outlives its neighbours gets the whole machine instead of a fixed team of 12.
           //
@@ -4596,26 +4821,24 @@ protected:
           // 28 windows x (1 + ~100) = ~2,800 against the 6,400 threshold, with headroom for the
           // band and split taskloops -- a budget to keep in mind before adding another task layer,
           // not a guarantee that holds whatever else is queued.
-          const long n_prec_w = (long)phi - (long)plo;
+          const long n_prec_w = (long)pidx.size();
           const long n_task_w = std::max(1L, std::min((n_prec_w + 31) / 32, (long)n_threads));
-          std::atomic<long> pcur{(long)plo};
+          std::atomic<long> pcur{0};
           #pragma omp taskloop num_tasks(n_task_w) firstprivate(pdense) default(shared)
           for (long w = 0; w < n_task_w; ++w)
           {
             for (;;)
             {
               const long cs = pcur.fetch_add(32);
-              if (cs >= (long)phi) break;
-              const long ce = std::min(cs + 32, (long)phi);
-              for (long pii = cs; pii < ce; ++pii)
+              if (cs >= n_prec_w) break;
+              const long ce = std::min(cs + 32, n_prec_w);
+              for (long j = cs; j < ce; ++j)
               {
-                const size_t pi = (size_t)pii;
-                const Precursor_& pc = precursors[pi];
-                if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
+                const Precursor_& pc = precursors[pidx[(size_t)j]];
                 MSSpectrum ms2;
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
                              delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
-                if (!ms2.empty()) pslot[pi - plo] = std::move(ms2);
+                if (!ms2.empty()) pslot[(size_t)j] = std::move(ms2);
               }
             }
           }
@@ -4627,6 +4850,27 @@ protected:
           t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(_t7 - _t6).count();
           w_emit = secs(_t7 - _t6);
         }
+        // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
+        // whose RT is within 2 delta_rt of this tile's upper edge -- the candidates of a precursor
+        // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
+        if (!tile.last)
+        {
+          Carry& co = carry_out.at(wl[wi].first);
+          const double keep_from = tile.hi - 2.0 * delta_rt;
+          for (const Trace& t : frag_traces)
+            if (rtOf(wst, t) >= keep_from)
+            {
+              Trace c = t; c.off = (uint32_t)co.inten.size();
+              co.inten.insert(co.inten.end(), wst.inten.begin() + t.off, wst.inten.begin() + t.off + t.len);
+              co.rec.push_back(c);
+            }
+          if (n_carried_in || !co.rec.empty())
+          {
+            #pragma omp critical(winlog)
+            writeLogInfo_("[tile] window " + String(win_lo) + "-" + String(win_hi) + " tile " + String(tk + 1) + ": carried in "
+                          + String(n_carried_in) + ", carrying out " + String(co.rec.size()) + " fragments (" + String((co.rec.size() * sizeof(Trace) + co.inten.size() * 4) / 1024) + " KB)");
+          }
+        }
       }
       catch (...)
       {
@@ -4637,6 +4881,32 @@ protected:
       }      // omp task
     }
     if (worker_err) std::rethrow_exception(worker_err);
+    {
+      // [tile] this tile's spectra in the canonical order: written as one block (mzML), or kept for
+      // the bulk writer (mzPeak, one tile). Tiles are RT-disjoint, so the blocks concatenate to the
+      // whole run's order.
+      vector<MSSpectrum> tile_out;
+      { size_t n_tot = 0; for (const auto& bucket : win_out) n_tot += bucket.size(); tile_out.reserve(n_tot); }
+      for (auto& bucket : win_out) { for (auto& s : bucket) tile_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
+      { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
+      if (writer)
+      {
+        for (auto& sp : tile_out) sp.getDataProcessing().push_back(out_dp);   // ONE entry, by pointer, for every spectrum
+        if (tiles.size() == 1) writer->setExpectedSize(tile_out.size(), 0);   // exact count: the bulk writer's bytes
+        { Phase _ph("WRITE(mzML)"); writer->writeBlock(tile_out); }
+        n_out += tile_out.size();
+        writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(tile_out.size()) + " spectra written" + clk_() + rss_() + mem_());
+      }
+      else
+      {
+        all_out.reserve(all_out.size() + tile_out.size());
+        for (auto& sp : tile_out) all_out.push_back(std::move(sp));
+      }
+    }
+    carry_in = std::move(carry_out);
+    carry_out.clear();
+    for (const auto& w : window_list) carry_out[w.first];
+    }   // tiles
     // MEMORY: every MS1 structure is dead once the window loop has joined -- scoring was its only
     // reader (assembleOne_ -> scoreCandidates_ dereferences ms1_traces[pc.trace_idx] and its span).
     // They used to ride to the end of main_, i.e. through the canonical sort, the PeakMap
@@ -4694,118 +4964,16 @@ protected:
                       + String(rp > 0 ? (double)sl / (double)rp : 0.0) + "x scanned per survivor)");
     }
 
-    vector<MSSpectrum> all_out;
-    {
-      size_t n_tot = 0;
-      for (const auto& bucket : win_out) n_tot += bucket.size();
-      all_out.reserve(n_tot); // avoid repeated reallocation of ~1M spectrum objects
-    }
-    for (auto& bucket : win_out) { for (auto& s : bucket) all_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
-
-    // Canonical total-order sort (RT, precursor m/z, charge): thread-count-independent and free of
-    // RT-tie ambiguity (RT-only sortSpectra is NOT canonical). [par-Crit-2]
-    { Phase _ph("SORT(canonical)");
-    // Sort a compact key array and permute once, rather than sorting the spectra themselves:
-    // std::sort moves whatever it is given, and an MSSpectrum object is ~750 bytes against 32 for a
-    // key. The comparator returns exactly what the old one returned for every pair -- the cheap
-    // fields live in the key, the rare full tie defers to the peaks -- and the keys start in the
-    // order the spectra were in, so introsort makes the same decisions and yields the same
-    // permutation, ties included.
-    struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
-    vector<SortKey> keys(all_out.size());
-#pragma omp parallel for schedule(static)
-    for (long i = 0; i < (long)all_out.size(); ++i)
-    {
-      const MSSpectrum& a = all_out[i];
-      keys[i].rt = a.getRT();
-      keys[i].mz = a.getPrecursors().empty() ? 0.0 : a.getPrecursors()[0].getMZ();
-      keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
-      keys[i].n = (uint32_t)a.size();
-      keys[i].idx = (uint32_t)i;
-    }
-    sort(keys.begin(), keys.end(), [&all_out](const SortKey& ka, const SortKey& kb) {
-      if (ka.rt != kb.rt) return ka.rt < kb.rt;
-      if (ka.mz != kb.mz) return ka.mz < kb.mz;
-      if (ka.charge != kb.charge) return ka.charge < kb.charge;
-      // fragment-sequence tiebreaks so equal-precursor spectra have a canonical order
-      if (ka.n != kb.n) return ka.n < kb.n;
-      const MSSpectrum& a = all_out[ka.idx];
-      const MSSpectrum& b = all_out[kb.idx];
-      for (Size i = 0; i < a.size(); ++i)
-      {
-        if (a[i].getMZ() != b[i].getMZ()) return a[i].getMZ() < b[i].getMZ();
-        if (a[i].getIntensity() != b[i].getIntensity()) return a[i].getIntensity() < b[i].getIntensity();
-      }
-      return false;
-    });
-    { vector<MSSpectrum> ord; ord.reserve(all_out.size());
-      for (const SortKey& k : keys) ord.push_back(std::move(all_out[k.idx]));
-      all_out.swap(ord); } }
-
-    PeakMap out_exp;
-    { Phase _ph("ASSEMBLE(PeakMap)");
-      out_exp.setSpectra(std::move(all_out)); }   // vector ownership transfer, not per-spectrum moves
-    const Size n_out = out_exp.size();
-    addDataProcessing_(out_exp, getProcessingInfo_(DataProcessing::DATA_PROCESSING));
-    // [provenance] Record the emitted-intensity reweighting so an identical historical command line is
-    // still reproducible after assembly:corr_power's default changed 0->2 (2026-07-28). Without this,
-    // the same command produces different intensities across tool versions with no trace of why.
-    // [provenance] WHICH m/z calibration produced this file. Without it an archived mzML is not
-    // attributable to a calibration path and a silent fallback would be invisible afterwards.
-    // The value travels ON THE LOADED EXPERIMENT (set by BrukerTimsFile), not through a header
-    // static: an inline static can be duplicated across a shared-library boundary, in which case
-    // the tool would read its own copy and always report "unset".
-#ifdef SPEXTRACTOR_WITH_MZPEAK
-    if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
-      out_exp.setMetaValue("spx:mz_calibration", spx::lastMzPeakCalibration());   // not BrukerTimsFile's state
-    else
-#endif
-    out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
-    out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
-    out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
-    out_exp.setMetaValue("spx:frame_table", frame_table_src);   // the frozen tables' source (loader | mzpeak | slab)
-    out_exp.setMetaValue("spx:pearson_G", "frames");
-    out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
-    out_exp.setMetaValue("spx:corr_power", corr_power_);
-    out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
-    out_exp.setMetaValue("spx:require_isotope_support",
-                         (int)(getStringOption_("assembly:require_isotope_support") == "true"));
-    // Output format. The extension is authoritative, because that is what a user typing
-    // `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
-    FileTypes::Type out_type = FileTypes::MZML;
-    const String out_type_opt = getStringOption_("out_type");
-#ifdef SPEXTRACTOR_WITH_MZPEAK
-    if (!out_type_opt.empty())
-      { String t = out_type_opt; t.toLower(); out_type = (t == "mzml") ? FileTypes::MZML : FileTypes::MZPEAK; }
+    if (writer)
+    { Phase _ph("WRITE(mzML)"); writer.reset(); }   // the count patched, the index and footer written
     else
     {
-      const FileTypes::Type by_name = FileHandler::getTypeByFileName(out);
-      out_type = (by_name == FileTypes::MZML || by_name == FileTypes::MZPEAK) ? by_name
-                                                                             : FileTypes::MZPEAK;
+      // the bulk path (mzPeak output, one tile): as before, whole
+      { Phase _ph("ASSEMBLE(PeakMap)"); out_exp.setSpectra(std::move(all_out)); }
+      n_out = out_exp.size();
+      for (Size i = 0; i < out_exp.size(); ++i) out_exp[i].getDataProcessing().push_back(out_dp);
+      { Phase _ph("WRITE(mzPeak)"); FileHandler().storeExperiment(out, out_exp, {out_type}, log_type_); }
     }
-    if (out_type == FileTypes::MZPEAK)
-      writeLogInfo_("Writing mzPeak. NOTE: DDA search engines read mzML, not mzPeak -- if this file "
-                    "is going straight into a search, write .mzML instead (or -out_type mzML).");
-#else
-    // Built without mzPeak support: mzML is the only container this binary can write. Refuse an
-    // explicit request for mzPeak rather than silently writing something else.
-    String out_type_lc = out_type_opt; out_type_lc.toLower();          // toLower() mutates
-    if (!out_type_lc.empty() && out_type_lc != "mzml")
-      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary "
-            "can only write mzML.");
-#endif
-    { Phase _ph(out_type == FileTypes::MZML ? "WRITE(mzML)" : "WRITE(mzPeak)");
-      if (out_type == FileTypes::MZML)
-      {
-        // [tile-2e] the streaming writer, one block: the same bytes from <spectrumList> on as the
-        // bulk writer (count exact, ids unchanged), the header from the same settings.
-        TileWriter w(out);
-        w.setExperimentalSettings(out_exp);
-        w.setExpectedSize(n_out, 0);
-        w.writeBlock(out_exp.getSpectra());
-      }
-      else FileHandler().storeExperiment(out, out_exp, {out_type}, log_type_); }
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
     report_phases_(phase_clock_());

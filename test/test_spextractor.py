@@ -207,7 +207,9 @@ def digest(mzml):
     """Hash the spectrum data only -- the header carries a wall-clock stamp and parameters."""
     h, on, done = hashlib.sha256(), False, False
     for line in open(mzml, "rb"):
-        if b"<spectrumList" in line: on = True
+        if b"<spectrumList" in line:
+            on = True
+            line = re.sub(rb'count="0+(\d)', rb'count="\1', line, count=1)   # a tiled run's zero-padded count
         if on: h.update(line)
         if b"</spectrumList>" in line: done = True; break
     assert on and done, f"{mzml}: no complete <spectrumList> -- the empty hash would compare equal to another empty hash"
@@ -416,7 +418,44 @@ def main():
             "tile:rt_sec output differs between 1 and 4 threads"
     check("the cell grid is thread-invariant", c15)
 
-    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1
+    # 16: the TILE loop reproduces the one-tile run bit for bit: pitch 10 s cuts the fixture into
+    #     >= 2 cells, one cell per tile runs the window loop tile by tile (precursor ownership by the
+    #     shifted half-open ranges, boundary fragments carried, per-tile sort + streamed write with the
+    #     zero-padded count), at 1 and 4 threads. The fixture's z2 precursor apexes exactly on the
+    #     pitch-10 edge (rt 10.8 = rts[7]), so it straddles a tile boundary and must be emitted once.
+    #     Check 14's invariants hold on the tiled file (its count is the patched placeholder).
+    def c16():
+        import re
+        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
+        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        one = os.path.join(work, "cell1.mzML")   # from check 15: pitch 10, one tile, 1 thread
+        assert os.path.exists(one), "check 15 must run first"
+        outs = []
+        for thr in (1, 4):
+            o = os.path.join(work, f"tiles{thr}.mzML")
+            r = run(binary, inp, o, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=thr, env=env)
+            m = re.search(r"\[tile\] (\d+) tile\(s\) of up to 1 cell", r.stdout + r.stderr)
+            assert m and int(m.group(1)) >= 2, "the fixture did not run as >= 2 tiles:\n" + (r.stdout + r.stderr)[-800:]
+            outs.append(o)
+        hdr = open(outs[0], encoding="utf-8", errors="replace").read(200000)
+        mt = re.search(r'spx:tiles"[^>]*value="(\d+)"', hdr)
+        assert mt and int(mt.group(1)) >= 2, "the header does not record the tile count"
+        d1 = digest(one)
+        for o in outs:
+            assert digest(o) == d1, f"tiled output {os.path.basename(o)} differs from the one-tile run"
+        data = open(outs[1], "rb").read()
+        n_decl = int(re.search(rb'<spectrumList count="(\d+)"', data).group(1))
+        specs = [(m.start(), m.group(1), m.group(2)) for m in re.finditer(rb'<spectrum id="([^"]*)" index="(\d+)"', data)]
+        assert n_decl == len(specs) > 0, f"tiled file: spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
+        for k, (_, sid, idx) in enumerate(specs):
+            assert int(idx) == k and sid == b"spectrum=%d" % k, f"tiled file spectrum {k}: id={sid!r} index={idx!r}"
+        offs = re.findall(rb'<offset idRef="([^"]*)">(\d+)</offset>', data)
+        assert len(offs) == len(specs), f"tiled file: indexList has {len(offs)} offsets for {len(specs)} spectra"
+        for k, (ref, off) in enumerate(offs):
+            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], f"tiled file index entry {k}: {ref!r} at {off!r}, spectrum at {specs[k][0]}"
+    check("the tile loop is tile-count- and thread-invariant", c16)
+
+    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1
     print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 

@@ -10,7 +10,7 @@ now each cost this project a false "determinism FAIL":
 Hashing from <spectrumList onwards compares what the science depends on: the spectra themselves.
 (This also retroactively explains the July r1-vs-imw005 md5 mismatch recorded as unexplained.)
 """
-import hashlib, sys
+import hashlib, re, sys
 MARK = b"<spectrumList"
 END = b"</spectrumList>"
 def digest(path):
@@ -32,6 +32,11 @@ def digest(path):
                     continue
                 started = True
                 c = buf[i:]
+                # a run written tile by tile declares its count through a same-width zero-padded
+                # placeholder (`count="0000611034"`); the number is the same, so normalise it
+                nl = c.find(b"\n")
+                head = c if nl < 0 else c[:nl]
+                c = re.sub(rb'count="0+(\d)', rb'count="\1', head, count=1) + (b"" if nl < 0 else c[nl:])
             # stop at </spectrumList>: the trailing <indexList> holds byte OFFSETS, which shift with any
             # header-length change (a 4-byte longer <software> version stamp moved every offset and
             # falsely flagged two spectrum-identical files as different, 2026-09-02).
