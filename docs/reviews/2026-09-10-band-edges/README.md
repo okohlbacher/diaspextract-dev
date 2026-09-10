@@ -48,6 +48,13 @@ Round 2 (brief2.md, on dde035e):
   temperatures and the SDK fixture's extrema round-trip to the last bin; the clamp vs the
   detector's range test; the one-cell slab assert is tautological in slab mode; provenance and
   concurrency.
-- kimi2.md -- see the file.
+- kimi2.md -- Kimi: "the five claimed fixes all do what the commit message says, and the
+  DigitizerNumSamples - 1 bound is genuinely absolute for vendor-origin peaks" (the 1e-5 Da quantum
+  is ~500x finer than a bin, centroids cannot exceed the last bin's m/z); remaining: an
+  unbounded `mz_hi` magnitude (now refused above 1e5 m/z, and `tofOf` saturates), the preflight's
+  any-vs-first candidate semantics (now the preflight is the selection), the window-file conflict
+  and the mzPeak refusal after the load (now both before), duplicate GlobalMetadata keys (now
+  refused), hex/whitespace strtod nits (accepted), and the help text naming
+  `-trace:detector openms` as the escape (added).
 
 Gate: docs/BASELINE.md "Cell grid, step 3a".

@@ -49,11 +49,14 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
     v = x; return true; };
   if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper','DigitizerNumSamples')", -1, &st, nullptr) != SQLITE_OK)
   { why = "no GlobalMetadata table"; sqlite3_finalize(st); sqlite3_close(db); return false; }
-  bool ok = true;
+  bool ok = true; bool have_lo = false, have_hi = false, have_n = false;
   while (ok && sqlite3_step(st) == SQLITE_ROW)
   {
     const unsigned char* kt = sqlite3_column_text(st, 0); if (!kt) continue;
     const std::string k = reinterpret_cast<const char*>(kt); double v = 0.0;
+    { bool& have = (k == "MzAcqRangeLower") ? have_lo : (k == "MzAcqRangeUpper") ? have_hi : have_n;
+      if (have) { why = k + " appears twice in GlobalMetadata"; ok = false; break; }   // a repeated key would let the later row win silently
+      have = true; }
     if (!num(sqlite3_column_text(st, 1), sqlite3_column_bytes(st, 1), k.c_str(), v)) { ok = false; break; }
     if (k == "MzAcqRangeLower") out.mz_lo = v;
     else if (k == "MzAcqRangeUpper") out.mz_hi = v;
@@ -68,7 +71,9 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
   sqlite3_finalize(st); sqlite3_close(db);
   if (!ok) return false;
   if (seen < 3) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(seen) + " of 3)"; return false; }
-  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || out.n_bins < 2 || out.n_bins > 100000000L)
+  // plausibility: a TIMS acquisition ends far below 1e5 m/z; a corrupt but finite value beyond
+  // that would drive the flight-time conversion past the axis (review 3a, round 2)
+  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= 1.0e5) || out.n_bins < 2 || out.n_bins > 100000000L)
   { why = "GlobalMetadata bounds are not usable: MzAcqRange " + std::to_string(out.mz_lo) + "-" + std::to_string(out.mz_hi) + ", DigitizerNumSamples " + std::to_string(out.n_bins); return false; }
   return true;
 }

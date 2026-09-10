@@ -2043,7 +2043,7 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces. 1.0 = the ms2_noise_threshold_int you set IS the apex threshold; 3.0 would reproduce the old hidden 3x. Lower = more weak fragments recovered.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch of the fixed retention-time CELLS the integer detector traces in, anchored on the run's MS1 frame times (an edge every round(pitch / cycle) MS1 frames; the last cell absorbs a remainder under half a pitch). Detection never sees across a cell edge, so the output is bit-identical however the cells are grouped into tiles and however many threads run (at a fixed perf:trace_bands; the auto setting 0 ties the band count to the thread count): the cut lines are part of the definition and are stamped into the mzML header (spx:tile_boundaries). Mass traces that elute across an edge are cut there -- the price of a reproducible, streamable run. DEFAULT 600 since 2026-09-10: on the 30-minute file Sage +0.8% and MSFragger +1.5% with the entrapment FDR 1.16 -> 1.30% (within its interval), on the 2-hour file Sage +0.8%; 300 gains more Sage (+3.4%) at 1.38% entrapment. -1 = one cell = the whole run (the output before the cells).", false, true);
-    registerStringOption_("trace:band_edges", "<mode>", "slab", "Where the integer detector's per-window flight-time band partition comes from. 'slab': the window's resident peaks' extremes (data-dependent: a reader that holds only some of the frames cannot reproduce them). 'acquisition': tlo = 0 and thi = the digitizer's last bin (GlobalMetadata DigitizerNumSamples - 1, the absolute bound of every bin index; or the acquisition's upper m/z through the calibration at every frame of the window's frozen table, whichever is larger) -- a run-level constant from metadata that a reader holding only a tile's frames can compute. On the two benchmark files the two sets differ by 0-4 bins at the top and 0-3 at the bottom; on an acquisition whose spectra start well above the axis origin, tlo = 0 rescales every interior edge.", false);
+    registerStringOption_("trace:band_edges", "<mode>", "slab", "Where the integer detector's per-window flight-time band partition comes from. 'slab': the window's resident peaks' extremes (data-dependent: a reader that holds only some of the frames cannot reproduce them). 'acquisition': tlo = 0 and thi = the digitizer's last bin (GlobalMetadata DigitizerNumSamples - 1, the absolute bound of every bin index; or the acquisition's upper m/z through the calibration at every frame of the window's frozen table, whichever is larger) -- a run-level constant from metadata that a reader holding only a tile's frames can compute. On the two benchmark files the two sets differ by 0-4 bins at the top and 0-3 at the bottom; on an acquisition whose spectra start well above the axis origin, tlo = 0 rescales every interior edge. With the integer detector, 'acquisition' REFUSES an input without a tdf before loading (the openms fallback cannot provide these edges); -trace:detector openms is the escape.", false);
     setValidStrings_("trace:band_edges", {"slab", "acquisition"});
     registerIntOption_("tile:cells_per_tile", "<n>", 0, "Group the retention-time cells into TILES of n cells each and run the window loop tile by tile: "
                        "detection on the tile's frames only, scoring of the precursors the tile owns (an MS1 frame time in [T_k - gate:delta_rt, T_{k+1} - gate:delta_rt)) "
@@ -3331,6 +3331,9 @@ protected:
     // load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
     // tdf is recovered, below). Milliseconds against minutes of loading.
     const bool band_edges_acq = (getStringOption_("trace:band_edges") == "acquisition");
+    if (band_edges_acq && std::getenv("SPEXTRACTOR_WINDOW_FILE"))   // an option x env conflict: refuse in milliseconds
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "SPEXTRACTOR_WINDOW_FILE overrides the band edges per window (a slab-mode probe); it cannot be combined with trace:band_edges=acquisition.");
     if (band_edges_acq && getStringOption_("trace:detector") == "integer"
 #ifdef SPEXTRACTOR_WITH_MZPEAK
         && FileHandler::getTypeByFileName(in) != FileTypes::MZPEAK
@@ -3355,7 +3358,7 @@ protected:
       }
       if (!selected)
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:band_edges=acquisition: no candidate tdf provides a calibration:" + reasons);
+              "trace:band_edges=acquisition: no candidate tdf provides a calibration:" + reasons + " (the integer detector cannot run on this input; -trace:detector openms is the escape)");
     }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
 
