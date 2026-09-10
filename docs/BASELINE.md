@@ -2973,3 +2973,18 @@ requirement, and an early refusal fired on mzML inputs that have no tdf and are 
 back quietly). All three are fixed (2b1f6e3, 8e2f1c0, 906e758) and re-checked by the `verify`
 chain on the rebuilt binary. **A gate whose failures are all in the gate is not a passing gate:
 it is a gate that has to be re-run, which is what the verify chain is for.**
+
+**Re-run and CLOSED (chain `verify`, ibminode05, f07da66, 09:24-09:36): `VERIFY_RESULT PASS`.**
+All three settle:
+
+- the stamps read `spx:tile_source = stream`, `band_edges = acquisition`, `frame_table = loader`,
+  `tiles = 3`, `tile_rt_sec = 600.0` -- the grep, not the tool, had been wrong (it did not allow
+  for OpenMS's `type="xsd:string"` between `name` and `value`, the second time that has cost a
+  gate a false failure);
+- the chained per-tile slab digests equal the resident whole-window digests over all 24 windows:
+  **the six tiled reads deliver exactly the peaks one whole-window read delivers, frame for
+  frame**, and the two files are SPECTRUM DATA IDENTICAL;
+- e2e **18/18**.
+
+The 3-tile streaming arm on the rebuilt binary reproduces the pin at 3:43 and **32.1 GB**, with
+frames delivered 10,416 / 10,416 / 11,378, 0 padded and 0 absent in every tile.
