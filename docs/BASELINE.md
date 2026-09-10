@@ -2871,3 +2871,46 @@ GlobalMetadata and `acquisition` needs it -- and the failure escaped `check()` a
 a chain grepping for "FAIL" or "checks passed" saw nothing at all. Both halves are fixed (8e2f1c0):
 the fixture writes the bounds a real tdf always has, and a suite that cannot run now prints
 `0/0 checks passed; FAIL ...`. **A silent gate section is a failed gate, not a passed one.**
+
+
+### Where the memory and the time actually go, measured per data structure (2026-09-10)
+
+`SPEXTRACTOR_LEDGER=<file>` samples live bytes per data-structure category every 250 ms next to
+VmRSS, the glibc arena figures and a phase marker; `bench/ledger_report.py` reads the trace.
+Charges are atomic adds at allocation boundaries (never in a per-peak loop) and count TOUCHED
+bytes, so the 2.5x slab over-reservation does not inflate them. Four arms on dataset D, spock,
+100 threads, 1 TB free, every arm digest-identical to its pin (chain `instr2`, binary
+906e758+ledger):
+
+| arm | wall | peak RSS | where the peak is |
+|---|---:|---:|---|
+| resident, 1 tile (the pre-3b shape) | 2:34 | 47.2 GB | the LOAD: MS1 map 13.8 + slabs 12.0 + raw batches 3.8 GB charged, ~17 GB unattributed |
+| streaming, 1 tile | 2:27 | 41.1 GB | the window loop |
+| streaming, 3 tiles | 2:57 | 31.8 GB | **the MS1 pass** |
+| streaming, 6 tiles | 2:48 | 31.8 GB | **the MS1 pass**, t = 9 s, before any MS2 frame is read |
+
+**The peak has moved off the window loop.** In the 6-tile arm the MS2 side never exceeds 23 GB of
+RSS and 3.8 GB of live bytes per tile, while the MS1 pass peaks at 31.0 GB with 13.9 GB charged
+(map 10.5, raw frame batches 3.4) -- 17.1 GB unattributed, of which the glibc free list is 5.6.
+That is why 3 and 6 tiles have the SAME peak: the MS2 side is already under the MS1 floor, and
+tiling it further changes nothing until pass 1 is tiled as well.
+
+**The window loop's structures, 6-tile arm, per tile:** slab 3.5 GB, seed order + liveness + the
+flight-time index 1.5, emitted spectra 1.1, window arena 0.9, trace records 0.8, band arenas 0.5,
+scoring auxiliaries 0.3, the boundary carry 0.17. The slab is live for 34.5% of the run, the MS1
+map for 14.7%; nothing else clears 5% of the peak for any measurable time.
+
+**Allocator retention is the second finding.** Across the six tiles the charged bytes stay between
+0.5 and 3.8 GB, but RSS climbs monotonically 3.3 -> 9.8 -> 16.2 -> 20.7 -> 22.8 -> 21.8 GB and only
+falls at the final write. Freed tile memory is not returned; `perf:malloc_trim` fires at phase
+boundaries, not per tile. On D this is hidden under the MS1 floor; on the 2-hour file the MS2 side
+is ~4x larger and it would not be.
+
+**The tiles are wildly unequal, and the grouping is free.** At pitch 300 the per-tile window loops
+took 0.8, 12.6, 28.4, 25.8, 28.9 and 15.6 s, and at pitch 300 grouped in twos the two tiles held
+3.30e8 and 9.28e8 picked peaks. Peak memory and wall are set by the densest tile, and because the
+output is identical for ANY grouping of cells, cells can be grouped by cumulative peak count --
+which the frame table's `num_peaks` gives before anything is read.
+
+**Reads are small next to compute.** Per tile at 6 tiles: read 1.3-3.6 s, window loop 12.6-28.9 s,
+write 0.5-2.0 s. A prefetch thread can hide the read; it cannot hide much else.
