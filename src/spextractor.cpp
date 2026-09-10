@@ -4649,9 +4649,16 @@ protected:
       for (auto& kv : tile_slabs) indexRt(kv.second);
       { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)(kv.second.bytes() + kv.second.reserved());
         ledSet_(LC_SLAB, sb); }
-      if (detOn_())   // [det] the reader's exactness: per (window, tile), chained over tiles
+      if (detOn_())
+        // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
+        // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
+        // the chain of a window's tiles EQUALS the whole-window digest a resident run prints -- the
+        // check that the tiled reads are the resident peaks, frame for frame. The conversion to
+        // flight-time bins has to happen first (it fills `b` and consumes `frame_id`); it is
+        // idempotent, so the window body's own call becomes a no-op.
         for (auto& kv : tile_slabs)
-        { uint64_t& h = slab_chain[kv.first]; h = slabDigest_(kv.second, h);
+        { toTof(kv.second);
+          uint64_t& h = slab_chain[kv.first]; h = slabDigest_(kv.second, h);
           writeLogInfo_("[det] window " + String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0) + " tile " + String(tk + 1)
                         + " slab n=" + String(kv.second.peaks()) + " digest=" + String(slabDigest_(kv.second)) + " chain=" + String(h)); }
       for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
