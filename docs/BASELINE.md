@@ -3044,3 +3044,21 @@ Tiling cut the scorer's scan 12.016e12 -> 1.120e12 fragment visits (−90.7%) wi
 (13,857,222,667), loop CPU −33.7% (−9.7% on D: the untiled scan grows with run length squared). The
 13-tile loop's RSS climbs 15.5 -> 51.7 GiB tile over tile while charging ~6 GiB, because nothing
 trims between tiles. Details: docs/reviews/2026-09-10-streaming-memory/data4-tnbc.md.
+
+### The composition on D: MS1-only picker batch + in-loop trim, −15.3% peak (2026-09-10, chain `compose`, 531dad4)
+
+| arm | wall | peak |
+|---|---:|---:|
+| control (two, bracket 0.07 GB / 3.0 s) | 2:57.05 / 3:00.05 | 31.83 / 31.91 GB |
+| `SPEXTRACTOR_PICK_BATCH_MS1=128` | 2:59.03 | 30.55 GB |
+| `SPEXTRACTOR_PICK_BATCH_MS1=64` | 3:14.72 | 29.19 GB |
+| **`PICK_BATCH_MS1=64` + `SPEXTRACTOR_LOAD_TRIM=16`** | **3:13.09** | **26.99 GB** |
+| `PICK_BATCH_MS1=64` + `LOAD_TRIM=4` | 3:32.77 | 26.23 GB |
+
+All six reproduce `8c1b047f`. The MS1-only knob removes the shared knob's tile-read cost (16.6 s
+against 23.2 s) and leaves an MS1-pass cost of +1.9 s at 128 and +4.5 s at 64. A trim every 16th
+flush breaks the soft window-loop cap the verifiers identified: **26.99 GB, −15.3%, for +14.5 s
+(+8.1%)**, all of it attributable to the two knobs. The peak moves back to the end of the load
+(13.3 GiB MS1 map + 10.1 GiB free list, ~2.5 GiB live uncharged), which is D's next floor. Trimming
+every 4th flush is dominated. **Untested on TNBC 009**, whose tiled floor is the MS1 partition phase,
+where neither knob acts. Details: data3-batch.md section 8.

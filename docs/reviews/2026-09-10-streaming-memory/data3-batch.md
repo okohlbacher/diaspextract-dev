@@ -207,3 +207,51 @@ applied in place above. The corrections that change a decision:
 
 Full verdicts: `scratchpad/verify2_digest.md` (session artefact), summarised above.
 
+## 8. The composition (chain `compose`, binary `531dad4`, 2026-09-10 11:16-11:36)
+
+The verifiers said the window-loop cap on D is soft and that nobody had composed the levers. This
+chain did, on the build that carries the MS1-only picker batch (`SPEXTRACTOR_PICK_BATCH_MS1`,
+e39df17). Dataset D, streaming, 3 tiles, pitch 600, 100 threads, spock. **Every arm reproduces
+`8c1b047f`, and the two controls agree to 0.07 GB and 3.0 s**, the tightest bracket of the day.
+
+| arm | wall | peak | vs mean control | MS1 pass | tile reads | loop net of tile reads | node load at start |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| control, first | 2:57.05 | 31.83 GB | | 10.3 s | 15.9 s | 123.9 s | 21 |
+| MS1-only batch 128 | 2:59.03 | 30.55 GB | −1.32 GB (−4.1%) | 12.2 s | 15.8 s | 123.4 s | 49 |
+| MS1-only batch 64 | 3:14.72 | 29.19 GB | −2.68 GB (−8.4%) | 15.1 s | 16.6 s | 136.7 s | 40 |
+| **batch 64 + trim every 16th flush** | **3:13.09** | **26.99 GB** | **−4.88 GB (−15.3%)** | 16.8 s | 23.5 s | 127.2 s | 32 |
+| batch 64 + trim every 4th flush | 3:32.77 | 26.23 GB | −5.64 GB (−17.7%) | 19.3 s | 32.0 s | 135.5 s | 57 |
+| control, last | 3:00.05 | 31.91 GB | | 11.0 s | 16.5 s | 126.1 s | 45 |
+
+**The MS1-only knob does what it was built for.** At batch 64 the tile reads take 16.6 s, against
+23.2 s under the shared knob in the `ms1batch` chain (a cross-chain comparison, but 6.6 s against a
+3 s bracket). What remains is the MS1 pass, whose parallel pick starves as the batch shrinks:
++1.9 s at 128 and +4.5 s at 64 against the mean control.
+
+**The batch-64 arm's other 11.7 s is node load, not the knob.** It sits entirely in the loop net of
+tile reads, which the knob never touches, and that arm started at load 40 against 21. The trim-16
+arm, at load 32, has the controls' loop time.
+
+**The composition breaks the window-loop cap.** A trim every 16th flush fires once in pass 1 and
+then inside the tile reads, which is exactly where the loop's free list builds. It takes the peak
+to 26.99 GB for +14.5 s (+8.1%), and this time all of the cost is attributable: +6.2 s in the MS1
+pass and +7.3 s in the tile reads, with the loop unchanged. The tile reads end at 13.4 GB of RSS
+against ~24.7 GB for the controls.
+
+**The peak has moved back into pass 1, and D's next floor is now visible.** The trim-16 arm peaks
+at 26,603 MiB at 16.5 s, the end of the load, with the MS1 map at 13,290 MiB and 10,136 MiB of glibc
+free list; only ~2.5 GiB is live but uncharged, down from ~10.7 at the default. So the next memory
+on D is the MS1 map itself plus the free list the load leaves behind before the boundary trim.
+
+**Trimming every 4th flush is dominated.** It buys 0.76 GB more than every 16th for +19.7 s, of
+which ~9 s is attributable (2.5 s MS1 pass, 8.5 s tile reads) and the rest coincides with load 57.
+Its peak carries the same 10.1 GiB of free list: more frequent trims inside pass 1 do not reach the
+load-end residue.
+
+**What this recommends, and where it does not reach.** On dataset D in tiled mode,
+`SPEXTRACTOR_PICK_BATCH_MS1=64` with `SPEXTRACTOR_LOAD_TRIM=16` is the best measured point:
+−15.3% peak for +8.1% wall, class D. **It is untested on TNBC 009**, where the tiled floor is the MS1
+partition phase (data4-tnbc.md) and neither knob acts on that phase. Measure it there before either
+becomes a default, and read the result against the partition-phase trim that data4 names as the
+lead for the long file.
+
