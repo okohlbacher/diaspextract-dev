@@ -220,12 +220,16 @@ namespace
   // long, and an RSS curve cannot say. The unattributed column is not an error term -- it is the
   // memory a tiled run frees but does not return, which is the next thing to attack.
   enum LedCat { LC_SLAB, LC_MS1MAP, LC_MS1TRACE, LC_PRECURSOR, LC_FROZEN, LC_PREP, LC_BAND,
-                LC_PARENT, LC_WSTORE, LC_FRAG, LC_SPECTRA, LC_CARRY, LC_WRITER, LC_SCRATCH, LC_N };
+                LC_MS1BAND, LC_PARENT, LC_WSTORE, LC_FRAG, LC_SPECTRA, LC_CARRY, LC_WRITER,
+                LC_SCRATCH, LC_N };
   inline const char* ledName_(int c)
   {
+    // band_arena is the MS2 integer path's per-window arenas; ms1_band is detectTraces_'s copy of
+    // the map it is handed. They never coexist -- MS1 tracing finishes before the window loop -- but
+    // one row for both made the largest allocation of the MS1 phase readable only via its phase.
     static const char* const n[LC_N] = {"slab", "ms1_map", "ms1_trace", "precursor", "frozen", "prep",
-                                        "band_arena", "parent", "wstore", "frag_aux", "spectra",
-                                        "carry", "writer", "scratch"};
+                                        "band_arena", "ms1_band", "parent", "wstore", "frag_aux",
+                                        "spectra", "carry", "writer", "scratch"};
     return n[c];
   }
   inline std::array<std::atomic<long long>, LC_N>& ledger_() { static std::array<std::atomic<long long>, LC_N> a{}; return a; }
@@ -2369,7 +2373,8 @@ protected:
                               double snr, double min_len, double min_sample_rate,
                               double split_valleys, String* span_log, int bands,
                               double split_scan_time,   // the run's cycle time for the splitter, 0 = per trace
-                              int in_cat = -1)          // [ledger] the caller's category for `map`, -1 = uncharged
+                              int in_cat = -1,          // [ledger] the caller's category for `map`, -1 = uncharged
+                              int part_cat = LC_BAND)   // [ledger] where this call's band partition belongs
   {
     MassTraceDetection mtd;
     mtd.setLogType(ProgressLogger::NONE); // quiet + thread-safe (called from the parallel window loop)
@@ -2511,7 +2516,7 @@ protected:
       vector<long long> band_b((size_t)bands, 0);
       { long long tb = 0;
         for (int b = 0; b < bands; ++b) { band_b[(size_t)b] = ledMapBytes_(sub[b]); tb += band_b[(size_t)b]; }
-        ledAdd_(LC_BAND, tb); if (in_cat >= 0) ledSet_(in_cat, 0); }
+        ledAdd_(part_cat, tb); if (in_cat >= 0) ledSet_(in_cat, 0); }
       vector<vector<PeakMap>>().swap(csub);
       tt_dist = tt_s(_td0, tt_now());
       auto _tm0 = tt_now();
@@ -2524,9 +2529,9 @@ protected:
         sub[b].sortSpectra();
         // NOTE: MassTraceDetection builds its OWN copy of this band internally; that copy is the
         // one structure of the MS1 phase the tool cannot charge without patching OpenMS.
-        if (sub[b].size() < 3) { sub[b].clear(true); ledAdd_(LC_BAND, -band_b[(size_t)b]); continue; }
+        if (sub[b].size() < 3) { sub[b].clear(true); ledAdd_(part_cat, -band_b[(size_t)b]); continue; }
         m2.run(sub[b], t);
-        sub[b].clear(true); ledAdd_(LC_BAND, -band_b[(size_t)b]);
+        sub[b].clear(true); ledAdd_(part_cat, -band_b[(size_t)b]);
         // keep only traces whose centroid lies in this band's CORE -> no duplicates from the halo
         for (auto& mt : t)
         {
@@ -3922,7 +3927,7 @@ protected:
     #pragma omp single
     ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands,
-                                             split_scan_time, LC_MS1MAP);   // [ledger] the band partition takes the charge over
+                                             split_scan_time, LC_MS1MAP, LC_MS1BAND);   // [ledger] the partition takes the charge over
     { const double cap = max_span;
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
     ledSet_(LC_MS1MAP, 0);   // belt and braces: detectTraces_ has already zeroed it
