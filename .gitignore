@@ -13,3 +13,6 @@ bench/run_open.sh
 
 # Frozen run records: kept locally, not in the repository.
 evidence/
+
+# Adversarial-review dispatch/stderr logs: the .md reviews are the artefact.
+docs/reviews/**/*.log
