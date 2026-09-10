@@ -47,6 +47,22 @@ unchanged.
 - **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span,
   first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
 
+### Added (2026-09-10)
+- **`tile:cells_per_tile` -- the window loop runs tile by tile.** The retention-time cells are
+  grouped into tiles of n cells; each tile traces its isolation windows on the tile's frames only,
+  owns the precursors whose MS1 frame time lies in [T_k - delta_rt, T_{k+1} - delta_rt) (decided
+  with the scorer's own arithmetic, so a precursor never has a candidate at or beyond its tile's
+  upper edge), scores them with the previous tile's boundary fragments carried over (every
+  fragment within 2 delta_rt of the edge, re-carried transitively), and its spectra are sorted
+  and written as one block through the streaming writer before the next tile starts. Output is
+  the same for every n by construction of the cell grid -- measured: dataset D at pitch 300 as
+  1, 2, 3 and 6 tiles at 8 and 100 threads, and TNBC 009 at 600 as 13 tiles, spectrum for
+  spectrum identical to the one-tile runs; Sage reads the tiled file as the same file (13,836 peptides on D at 300 either way); e2e 18/18. 0 (the default) is one tile, today's loop
+  statement for statement; the pins are unchanged. mzPeak output is bulk-only and needs one tile.
+  A tiled file declares its count through a same-width placeholder patched at the end
+  (`count="0000611034"`), which the digest tools normalise. The mzML is written as `<out>.part`
+  and renamed on completion, so a failed run never leaves a plausible partial file behind.
+
 ### Changed (2026-09-10) -- byte-identical on both pinned acquisitions and on the mzPeak archive
 
 - **Every isolation window's frame table is frozen from the reader's metadata.** The window

@@ -2760,3 +2760,44 @@ id) -- a91cfcf. **The fix-up re-gated (chain `step1b2`, 02:15-03:05): the same n
 same results -- `f9e65631` / IDENTICAL / IDENTICAL / `3f8d421d` / probes IDENTICAL / mzPeak
 IDENTICAL / `f0502f33` / 15/15, 0 padded on 24/24 and 28/28.** Step 1 is closed; the dev build on
 ibminode05 is a91cfcf's.
+
+
+### Cell grid, step 2: the tile loop on the resident source (2026-09-10)
+
+Commits 1e7dcb1 (the loop), 5570d25 and ad897d0 (the review fixes; docs/reviews/2026-09-10-tile-loop/),
+c4997d1 (the gate tools ship with every deploy). `tile:cells_per_tile` groups the cells into
+tiles; per tile the window loop's parallel region runs on the tile's frames (a slice of the
+resident slabs; run-level band edges from the whole slab), owns the precursors decided with the
+scorer's own arithmetic (the first tile k with (T_{k+1} - rt) > delta_rt), scores them with the
+previous tile's boundary fragments carried over (rtOf >= T_k - 2 delta_rt - 1e-6 s, over own and
+carried-in, so transitive), sorts the tile's spectra and writes them as one block through the
+streaming writer (exact count with one tile; a same-width placeholder patched at the end
+otherwise, which the digest tools normalise). 0 = one tile = today's loop statement for statement.
+
+**Gate (ibminode05, ad897d0, chain `step2c`, 03:50-05:09; every digest with the current
+`semantic_digest.py`):**
+
+| arm | threads | wall | peak RSS | result |
+|---|---:|---:|---:|---|
+| D default (600), one tile | 100 | 3:19 | 47.1 GB | `f9e65631` **MATCH**, exact count |
+| D `-1`, `frame` / `trace` window | 100 | 3:25 / 3:51 | 47.4 / 46.8 GB | **IDENTICAL** to both pins |
+| D 300, one tile | 100 | 3:16 | 47.0 GB | `3f8d421d` **MATCH** |
+| D 300 as **2 tiles** (3 cells each) | 8 / 100 | 11:59 / 3:46 | 38.8 / 47.6 GB | `3f8d421d` **MATCH** both; 24 windows carried |
+| D 300 as **3 tiles** | 8 / 100 | 11:29 / 3:42 | 36.2 / 47.1 GB | `3f8d421d` **MATCH** both; 48 carry lines |
+| D 300 as **6 tiles** (one cell each) | 8 / 100 | 10:52 / 3:45 | 36.0 / 47.2 GB | `3f8d421d` **MATCH** both; 120 carry lines |
+| Sage on the 6-tile D-300 file | | | | **13,836 peptides** = the whole-run file's (the zero-padded count is accepted) |
+| TNBC 009 at 600 as **13 tiles** | 100 | 11:59 | 125.0 GB | `f0502f33` **MATCH**; 3,285,827 spectra, count/index invariants OK |
+| e2e | | | | **18/18** (16: 4 tiles on a 26-cycle fixture with the two precursors in different tiles, 1 and 4 threads, exact one-tile count, check 14's invariants on the tiled file; 17: `SPEXTRACTOR_TILE_NO_CARRY` changes the output and pitch 5 s < 2 delta_rt reproduces the one-tile run; 18: a window with no frames in a middle tile) |
+
+Diagnostic pair before the chain (`diag2`): whole vs 2 tiles at 300, `bench/mzml_specdiff.py`:
+611,034 of 611,034 spectra identical, 266.4 M fragments 100% matched with identical intensities,
+0 differing at any distance to the boundary. The one `DIFFERS` in the first run of this chain
+was the deployed digest tool (the 09-06 copy on ceph without the count normalisation; memory
+`gate-tools-drift-at-deployment`); `scripts/sync_cluster.sh` ships the bench tools now.
+
+Reading: the tile loop is exact on real data for any tiling of the cells and any thread count,
+on both acquisitions, and a search engine reads the tiled file as the same file. The resident
+source holds the whole run, so memory is not the claim here (the 8-thread arms are lower only
+because fewer windows are in flight); the streaming readers (steps 3b/4) turn the tile into the
+memory unit. Wall at 100 threads: +13-15% for 2-6 tiles on D (per-tile barrier tails and the
+per-tile sort/write), the price the pipeline (step 5) is meant to recover.
