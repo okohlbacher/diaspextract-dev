@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+### Changed (2026-09-11) -- memory default, byte-identical output
+
+- **`tile:cells_per_tile` defaults to 1: one 600-s retention-time cell per tile** (was 0, one tile). The spectra are
+  digest-identical for any tile count, so only memory and wall move. Final build, 100 threads, dnoise and the prune on,
+  each pair back to back on one node:
+  - TNBC 009: 99.70 GB at one tile, 21.07 GB at 13 tiles with the trim between tiles; wall 9:42 → 9:57.
+  - dataset D: 37.44 GB at one tile, 21.99 GB at 3 tiles with the trim between tiles; wall 3:15 → 3:47.
+  - `-tile:cells_per_tile 0` restores one tile. mzPeak output is written in one piece, so a run longer than one cell
+    writes mzPeak only with `-tile:cells_per_tile 0`; the refusal now names that escape.
+- **`perf:malloc_trim` also trims between tiles**, after tile k is written and before tile k+1 is read. This is the
+  `SPEXTRACTOR_TILE_TRIM` probe folded in; the variable is gone. It takes about 4 GB off TNBC 009 and 0.5 GB off D at
+  the defaults. The `[trim] tile k/n` log line is unchanged.
+- **Not adopted: an eager glibc trim threshold** (`M_TRIM_THRESHOLD` 64 MiB with `M_TOP_PAD` 0). On TNBC 009 it went
+  only 0.3 GB below the between-tile trim (20.73 against 21.07 GB) and nearly tripled the MS1 load (34.3 → 96.3 s); on
+  D it cost 11% wall (3:41 → 4:06).
+- e2e checks 16-18 name `-tile:cells_per_tile 0` for their one-tile reference runs.
+
+### Removed (2026-09-11) -- the v3.0.0 cleanup; spectrum digests unchanged on every accepted input
+
+- **Three options with no measured non-default value.** An ini file that sets one must be regenerated
+  (`-write_ini`), and the mzML header no longer lists them:
+  - `trace:ms1_min_sample_rate` and `trace:ms2_min_sample_rate`: the default -1 selected MassTraceDetection's own
+    0.5, and the MS2 option's help recorded that 0.3 and 0.1 lose peptides.
+  - `trace:native_ms2_neighbors`: never benchmarked, and the `.d` streaming reader the tool calls never read it.
+    `trace:native_ms1_neighbors` stays; its help now stands on its own.
+- **Finished probe environment variables**: `SPEXTRACTOR_MS2_RT_RANGE`, `SPEXTRACTOR_WINDOW_FILE` and
+  `SPEXTRACTOR_WINDOW_FILE_OUT` (the tiling plan's step-1 probe, superseded by the cell grid),
+  `SPEXTRACTOR_FRAG_DUMP` and `SPEXTRACTOR_FRAG_DUMP_RT`, `SPEXTRACTOR_PICK_SERIAL`, `SPEXTRACTOR_PICK_STATIC`,
+  `SPEXTRACTOR_PICK_MZ_MODE` ("under test" in v0.3.0; `weighted` stayed), `SPEXTRACTOR_Z1_CHARGE_UNSET` and
+  `SPEXTRACTOR_PRECURSOR_LIST`.
+- **Log lines no tool reads**: the window-loop stage breakdown and its `score gate` line, the `MS1` and `MS2`
+  RT-span lines, `Measured MS1 FWHM`, `[ms2ext]`, `[gstat]`, the per-tile `[tof] window` line, `[probe]`, and the
+  `not-a-frame` and `trimmed-out` fields of `[soa-rt]` (always equal to `off-grid`, and always 0). `[perf]`, `[det]`,
+  `[trim]`, `[tile]`, `[infer]`, `[tstage]`, `[dnoise]`, `[ms1-prune]` and `[ms1-hist]` are unchanged.
+
+### Changed (2026-09-11) -- byte-identical: less code
+
+- Dead code removed: the unreachable envelope-off sort in the envelope scorer, the always-zero monoisotope bin fields
+  of a precursor (MS1 traces carry no flight-time bin), `TofAxis::span`, the `compactify()` copy of `compactifyInto()`,
+  the `_OPENMP` and `_WIN32` branches of a build that requires OpenMP and POSIX, and one-caller layers
+  (`scoreCandidates_`, `weighted_` and `assembleFromList_` are now `assembleOne_`).
+- Option help cut down to the fact, the escape and a pointer to the measurement. Several help texts are corrected:
+  - `assembly:im_weight_sigma` changes which fragments survive the cap;
+  - `assembly:default_charge` does nothing while `require_isotope_support` is on;
+  - `trace:band_edges` falls back to the OpenMS detector, rather than refusing, when there is no tdf;
+  - `perf:ms1_trace_bands` and `perf:trace_bands` are not exact partitions;
+  - a single `%` replaces `%%`, which printed literally.
+- Comments trimmed to their invariants; the measurement history stays in docs/BASELINE.md and git.
+- Boilerplate removed from `CMakeLists.txt` (one `-ffp-contract=off` declaration), the unit tests (a one-line `CHECK`),
+  `scripts/sync_cluster.sh`, and the e2e suite, which now counts the checks it ran instead of keeping a hand-written sum.
+
+### Fixed (2026-09-11)
+
+- The GlobalMetadata axis bounds (the `trace:band_edges=acquisition` preflight) are parsed with the dnoise grammar in
+  the C locale, so a decimal-comma `LC_NUMERIC` no longer refuses `99.990834`. Leading whitespace, hex-float,
+  subnormal and underflowing values are now refused. New unit-test case.
+- An mzPeak frame with peaks but an empty ion-mobility array is refused as a short array; it used to be read out of bounds.
+- `SPEXTRACTOR_TILE_RESIDENT` is parsed once. With it set to `0` or empty, `trace:band_edges=slab` on a `.d` is
+  refused before the load, as with the variable unset, instead of after it.
+
 ### Changed (2026-09-10) -- output changes: MS1 denoising is on by default
 
 - **dnoise's MS1 filter runs inside the tool, on the raw points before picking** (`dnoise:ms1`, default `true`).
@@ -56,7 +116,9 @@
 - **`scripts/sync_cluster.sh` deploys as one transaction on the node.** It uploaded sources and headers before taking
   the lock, and a failed unit test or build restored only the `.cpp`. It now stages every file with checksums, takes
   the lock, runs both unit tests (`test_dnoise_ms1`, `test_tdf_load`) from the stage, promotes by rename, re-checks the hashes after the build, writes the
-  provenance only on commit, and restores every promoted input on any failure.
+  provenance only on commit, and restores every promoted input on any failure. The provenance field `tool_headers_sha256`
+  now also hashes `DnoiseMs1.h` (earlier records hash only `TdfLoad.h` and `MzPeakStreamLoad.h`), and a new field
+  `tdf_load_unit_test` reads `passed`, or `skipped(<why>)` on a node without SQLite.
 - Comments: opentims computes `(uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5)`, the order the recovery
   inverts; the tdf reader no longer claims to share opentims' SQLite library outside an in-tree build.
 - Left as they are, on purpose: no runtime self-test of the gate against third-party compiler flags, no ledger charge
@@ -95,7 +157,7 @@
     MS1 band spectrum and the tracer's input exact.
   - Digests are identical with the prune off and on on both benchmark files, and on dnoise-filtered input.
   - Peak at one cell per tile, with dnoise off: D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB.
-- **A probe for a trim between tiles** (`SPEXTRACTOR_TILE_TRIM=1`). This is an analysis instrument: the tile-count
+- **A probe for a trim between tiles** (`SPEXTRACTOR_TILE_TRIM=1`; folded into `perf:malloc_trim` on 2026-09-11, the variable removed). This is an analysis instrument: the tile-count
   analysis is in docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.
 
 ### Fixed (2026-09-10)

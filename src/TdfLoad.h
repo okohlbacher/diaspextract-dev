@@ -1,8 +1,5 @@
-// Read the calibration a Bruker .d actually uses, straight from analysis.tdf via the sqlite3 C API.
-// Kept OUT of TdfMzCalibration.h on purpose: that header is the pure arithmetic model, is installed
-// into the OpenMS tree by the patch script, and is compiled by the dependency-free golden test on
-// every CI platform -- including Windows, which has no sqlite3.h. Only the tool and its sqlite-gated
-// test (tests/test_tdf_load.cpp) need this file.
+// analysis.tdf readers (sqlite3 C API): the m/z calibration, its axis bounds, and the dnoise port's inputs.
+// Kept out of TdfMzCalibration.h, which is sqlite-free and compiled by the golden test on every CI platform.
 #pragma once
 #include <OpenMS/FORMAT/TdfMzCalibration.h>   // the copy the OpenMS patch installs; same header as src/TdfMzCalibration.h
 #include <sqlite3.h>
@@ -13,52 +10,32 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
-#include <cstdlib>
-#include <limits>
 #include <string>
 #include <vector>
 
 namespace spextractor
 {
 // ---------------------------------------------------------------------------------------------
-// Read the calibration a .d actually uses, straight from analysis.tdf with the sqlite3 C API.
-//
-// This deliberately does NOT use SQLiteCpp. That wrapper is an OpenMS in-tree extern whose headers
-// are not on the include path of an OpenMS *installation*, so the two callers used to sit behind
-// `#if __has_include(<SQLiteCpp/SQLiteCpp.h>)` -- false for the documented public build -- and fell
-// back to "built without SQLiteCpp", which made the integer detector silently revert to `openms`.
-// The stock-OpenMS CI caught it: 9/10 checks passed and the tenth said the shipped detector never
-// ran. sqlite3.h is what OpenMS itself links, so a missing SQLite is now a compile error, never a
-// behaviour switch.
-//
-// The row is the one the FRAMES reference (Frames.MzCalibration), not "the only row": PXD017703
-// acquisitions carry two rows with every frame on Id 1. Refuses when frames reference more than
-// one row (per-frame recalibration, unsupported). t1_by_frame[id] = Frames.T1, T1_ref when NULL;
-// index 0 is never a frame (Ids start at 1) and is left for the caller to treat as a sentinel.
-//
-// Every read here is whole or refused, with sqlite3_errmsg saying why: each prepare is checked, and
-// each row loop must end in SQLITE_DONE. An error merely ends a loop, so a partial T1 read would give
-// the later frames T1_ref, and a partial window table half a gate, silently. Whether an optional
-// table or column exists is read from the schema, never inferred from a failed query.
+// sqlite3 directly, not SQLiteCpp: SQLiteCpp is an OpenMS in-tree extern absent from an installed OpenMS,
+// and a missing SQLite must be a compile error, never a silent detector switch (docs/BASELINE.md).
+// Every read is whole or refused with sqlite3_errmsg: each prepare is checked and each row loop must end in
+// SQLITE_DONE (an error merely ends a loop, so a partial read would look complete). Optional tables and
+// columns are read from the schema, never inferred from a failed query.
 // ---------------------------------------------------------------------------------------------
-/// The run-level bounds of the flight-time axis from GlobalMetadata: the digitizer's sample count
-/// (every bin index is below it -- the absolute bound) and the acquisition's m/z range. Values are
-/// TEXT in the tdf; a NULL, trailing garbage, a non-finite or unordered value refuses with a reason
-/// rather than becoming a bound.
+/// Run-level flight-time axis bounds from GlobalMetadata: DigitizerNumSamples (every bin index is below it)
+/// and the acquisition m/z range. A NULL, trailing garbage, non-finite or unordered value refuses.
 struct TdfAxisBounds { long n_bins = 0; double mz_lo = 0.0, mz_hi = 0.0; };
 inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::string& why)
 {
   sqlite3* db = nullptr;
   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
   { why = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return false; }
-  sqlite3_stmt* st = nullptr; out = TdfAxisBounds{}; int seen = 0; why.clear();
+  sqlite3_stmt* st = nullptr; out = TdfAxisBounds{}; why.clear();
   auto num = [&](const unsigned char* txt, int nbytes, const char* key, double& v) {
     if (!txt) { why = std::string(key) + " is NULL"; return false; }
-    char* end = nullptr; const double x = std::strtod(reinterpret_cast<const char*>(txt), &end);
-    // the parse must consume the WHOLE value (sqlite3_column_bytes: an embedded NUL is not an end)
-    if (end == reinterpret_cast<const char*>(txt) || end != reinterpret_cast<const char*>(txt) + nbytes || !std::isfinite(x))
-    { why = std::string(key) + " is not a finite number: '" + std::string(reinterpret_cast<const char*>(txt), (size_t)nbytes) + "'"; return false; }
-    v = x; return true; };
+    const std::string s(reinterpret_cast<const char*>(txt), (size_t)nbytes);   // the WHOLE value (an embedded NUL is not an end), in the C locale
+    if (!spx::dnoise::detail::parseF64(s, v)) { why = std::string(key) + " is not a finite number: '" + s + "'"; return false; }
+    return true; };
   if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper','DigitizerNumSamples')", -1, &st, nullptr) != SQLITE_OK)
   { why = std::string("cannot read GlobalMetadata: ") + sqlite3_errmsg(db); sqlite3_finalize(st); sqlite3_close(db); return false; }
   bool ok = true; bool have_lo = false, have_hi = false, have_n = false;
@@ -79,19 +56,20 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
       if (!(v >= 2.0 && v <= 100000000.0 && std::trunc(v) == v)) { why = "DigitizerNumSamples is not an integer in [2, 1e8]: " + std::to_string(v); ok = false; break; }
       out.n_bins = (long)v;
     }
-    ++seen;
   }
   if (ok && rc != SQLITE_DONE) { why = std::string("reading GlobalMetadata: ") + sqlite3_errmsg(db); ok = false; }
   sqlite3_finalize(st); sqlite3_close(db);
   if (!ok) return false;
-  if (seen < 3) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(seen) + " of 3)"; return false; }
+  if (!(have_lo && have_hi && have_n)) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(have_lo + have_hi + have_n) + " of 3)"; return false; }
   // plausibility: a TIMS acquisition ends far below 1e5 m/z; a corrupt but finite value beyond
   // that would drive the flight-time conversion past the axis (review 3a, round 2)
-  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= 1.0e5) || out.n_bins < 2 || out.n_bins > 100000000L)
+  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= 1.0e5))
   { why = "GlobalMetadata bounds are not usable: MzAcqRange " + std::to_string(out.mz_lo) + "-" + std::to_string(out.mz_hi) + ", DigitizerNumSamples " + std::to_string(out.n_bins); return false; }
   return true;
 }
 
+/// The MzCalibration row the FRAMES reference (Frames.MzCalibration; PXD017703 files carry two rows), refused
+/// when frames reference more than one. t1_by_frame[id] = Frames.T1 (T1_ref when NULL); index 0 is never a frame.
 inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
                                std::vector<double>& t1_by_frame, std::string& why)
 {
@@ -102,14 +80,10 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
   auto sqlfail = [&](const std::string& what) { return fail(what + ": " + sqlite3_errmsg(db)); };   // errmsg is read before fail() finalizes
   int rc = SQLITE_OK;
-  bool frames_have_cal = false;   // PRAGMA table_info: one row per column, the name in column 1, matched ASCII case-insensitively as sqlite resolves it
-  auto is_cal = [](const unsigned char* c) {
-    const char* w = "mzcalibration";
-    for (; *c && *w; ++c, ++w) if ((*c >= 'A' && *c <= 'Z' ? *c + 32 : *c) != *w) return false;
-    return !*c && !*w; };
-  if (sqlite3_prepare_v2(db, "PRAGMA table_info(Frames)", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read the Frames schema");
+  bool frames_have_cal = false;   // PRAGMA table_xinfo: one row per column, generated ones too (table_info skips them), the name in column 1, matched ASCII case-insensitively as sqlite resolves it
+  if (sqlite3_prepare_v2(db, "PRAGMA table_xinfo(Frames)", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read the Frames schema");
   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
-  { const unsigned char* c = sqlite3_column_text(st, 1); frames_have_cal = frames_have_cal || (c && is_cal(c)); }
+  { const unsigned char* c = sqlite3_column_text(st, 1); frames_have_cal = frames_have_cal || (c && sqlite3_stricmp(reinterpret_cast<const char*>(c), "MzCalibration") == 0); }
   if (rc != SQLITE_DONE) return sqlfail("reading the Frames schema");
   sqlite3_finalize(st); st = nullptr;
   long long cal_id = -1; int ncal = 0;
@@ -138,15 +112,14 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   if (rc == SQLITE_OK) rc = sqlite3_step(st);
   if (rc == SQLITE_DONE) return fail("no MzCalibration row with Id " + std::to_string(cal_id));
   if (rc != SQLITE_ROW) return sqlfail("reading MzCalibration row " + std::to_string(cal_id));
+  if (sqlite3_column_type(st, 5) == SQLITE_NULL) return fail("MzCalibration C2 is NULL (missing, not zero)");
   cal.model_type = sqlite3_column_int(st, 0);
   cal.digitizer_timebase = sqlite3_column_double(st, 1); cal.digitizer_delay = sqlite3_column_double(st, 2);
   cal.C0 = sqlite3_column_double(st, 3); cal.C1 = sqlite3_column_double(st, 4);
-  cal.C2 = (sqlite3_column_type(st, 5) == SQLITE_NULL) ? std::numeric_limits<double>::quiet_NaN()
-                                                       : sqlite3_column_double(st, 5);
+  cal.C2 = sqlite3_column_double(st, 5);
   cal.T1_ref = sqlite3_column_double(st, 6); cal.dC1 = sqlite3_column_double(st, 7); cal.dC2 = sqlite3_column_double(st, 8);
   cal.C3 = sqlite3_column_double(st, 9); cal.C4 = sqlite3_column_double(st, 10);
   sqlite3_finalize(st); st = nullptr;
-  if (std::isnan(cal.C2)) return fail("MzCalibration C2 is NULL (missing, not zero)");
   if (!cal.isSupported()) return fail(cal.unsupportedReason());
   t1_by_frame.clear();
   if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.T1");
@@ -164,22 +137,17 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
 }
 
 // ---------------------------------------------------------------------------------------------
-// [dnoise] What the MS1 port (DnoiseMs1.h) reads besides the m/z calibration. Two kinds, kept apart:
+// [dnoise] What the MS1 port (DnoiseMs1.h) reads besides the m/z calibration:
 //  * the gate's inputs exactly as dnoise v0.1.0 reads them: six GlobalMetadata values as stored TEXT,
-//    MAX(NumScans) over ALL frames, and the DiaFrameMsMsWindows rows (DnoiseMs1.h RunMeta / WindowRow);
-//  * what the Bruker loader made of each raw point, so the tool can invert it: per frame MsMsType,
-//    NumScans, NumPeaks, opentims' intensity correction -- 100 / AccumulationTime from sqlite's text
-//    rendering of the column, converted in the C locale as TimsFrameFromSql's atof is under opentims'
-//    locale guard (recover::opentimsCorrection) -- and the TimsCalibration row of the rational 1/K0 model.
-//    That rendering is the loader's text only where both share one SQLite. In-tree they do (the tool
-//    resolves libOpenMS's bundled sqlite3); a standalone build links its own, and SQLite versions render
-//    a REAL that 15 significant digits do not round-trip differently. The resulting few-ulp change in corr
-//    refused points and never recovered a wrong raw count in a brute force over every raw count below 2^24,
-//    and every AccumulationTime seen (49 .d files) round-trips at 15 digits.
-// Each integer is type- and range-checked before it is narrowed: sqlite3_column_int64 converts a TEXT or
-// REAL cell silently, and a cast wraps -1 into 4294967295.
-// Refuses wherever tryCreateRationalConverter would NOT install that model (no or an empty table, a
-// ModelType other than 2, a frame with no or an unknown row): the loader's 1/K0 is then linear.
+//    MAX(NumScans) over ALL frames, and the DiaFrameMsMsWindows rows (RunMeta / WindowRow);
+//  * what the Bruker loader made of each raw point, so the tool can invert it: per frame MsMsType, NumScans, NumPeaks,
+//    opentims' intensity correction (recover::opentimsCorrection of sqlite's text of AccumulationTime) and the
+//    TimsCalibration row of the rational 1/K0 model. That text is the loader's only where both share one SQLite, as
+//    in-tree; a standalone build links its own, and SQLite versions render a REAL that 15 digits do not round-trip
+//    differently. In a brute force over every raw count below 2^24 the few-ulp corr change refused points but never
+//    recovered a wrong count, and every AccumulationTime seen (49 .d files) round-trips at 15 digits.
+// Integers are type- and range-checked before narrowing: sqlite3_column_int64 converts TEXT/REAL silently, a cast wraps.
+// Refuses wherever tryCreateRationalConverter would NOT install that model: the loader's 1/K0 is then linear.
 // ---------------------------------------------------------------------------------------------
 struct TdfDnoiseInputs
 {

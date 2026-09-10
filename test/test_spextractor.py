@@ -35,7 +35,7 @@ cross-batch sample offsets) is covered only by the cluster gates on real .d inpu
 Usage: test_spextractor.py /path/to/spextractor [workdir]
 Exit status is 0 only if every check passes.
 """
-import base64, hashlib, os, re, struct, subprocess, sys, tempfile
+import base64, hashlib, json, os, re, struct, subprocess, sys, tempfile
 
 ISO = 1.0033548
 PROTON = 1.007276
@@ -147,6 +147,16 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
     return z2_mono, z1_mono
 
 
+def mzcal_table(db):
+    """Write dataset D's MzCalibration row (tests/calibration_golden.json) into db; return the golden entry."""
+    g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests", "calibration_golden.json")))[0]
+    db.execute("CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase REAL,"
+               " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL, C3 REAL, C4 REAL)")
+    db.execute("INSERT INTO MzCalibration VALUES (1,?,?,?,?,?,?,?,?,0,0,0)",
+               (g["model_type"], g["timebase"], g["delay"], g["C0"], g["C1"], g["C2"], g["T1_ref"], g["dC1"]))
+    return g
+
+
 def synth_tdf(path, n_frames):
     """A minimal analysis.tdf: the real dataset D MzCalibration row plus a Frames table.
 
@@ -155,18 +165,11 @@ def synth_tdf(path, n_frames):
     different mass scale. T1 is given a small per-frame spread so the per-frame factor is actually
     exercised rather than collapsing to the reference.
     """
-    import sqlite3, json, os
-    g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests",
-                                    "calibration_golden.json")))[0]
+    import sqlite3
     if os.path.exists(path):
         os.remove(path)
     db = sqlite3.connect(path)
-    db.execute("CREATE TABLE MzCalibration (Id INTEGER, ModelType INTEGER, DigitizerTimebase REAL,"
-               " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL,"
-               " C3 REAL, C4 REAL)")
-    db.execute("INSERT INTO MzCalibration VALUES (1,?,?,?,?,?,?,?,?,0,0,0)",
-               (g["model_type"], g["timebase"], g["delay"], g["C0"], g["C1"], g["C2"],
-                g["T1_ref"], g["dC1"]))
+    g = mzcal_table(db)
     # Real tdfs reference the calibration row per frame (Frames.MzCalibration); mirror that, since
     # the loader selects the row the frames reference rather than "the only row".
     db.execute("CREATE TABLE Frames (Id INTEGER, T1 REAL, MzCalibration INTEGER)")
@@ -192,8 +195,7 @@ def synth_fake_d(d):
     ten Frames (ids 1 and 6 MS1) of 944 scans with integer NumScans/NumPeaks and AccumulationTime 99.958 ms, and 24
     diaPASEF window rows. The shapes are those of the dnoise port's second-review fixtures.
     """
-    import sqlite3, json
-    g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests", "calibration_golden.json")))[0]
+    import sqlite3
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, "analysis.tdf")
     if os.path.exists(path):
@@ -204,10 +206,7 @@ def synth_fake_d(d):
                    [("AcquisitionSoftware", "timsTOF"), ("DigitizerNumSamples", "634073"),
                     ("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
                     ("OneOverK0AcqRangeLower", "0.600000"), ("OneOverK0AcqRangeUpper", "1.400000")])
-    db.execute("CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase REAL,"
-               " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL, C3 REAL, C4 REAL)")
-    db.execute("INSERT INTO MzCalibration VALUES (1,?,?,?,?,?,?,?,?,0,0,0)",
-               (g["model_type"], g["timebase"], g["delay"], g["C0"], g["C1"], g["C2"], g["T1_ref"], g["dC1"]))
+    g = mzcal_table(db)
     db.execute("CREATE TABLE TimsCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER NOT NULL, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9)")
     db.execute("INSERT INTO TimsCalibration VALUES (1, 2, ?,?,?,?,?,?,?,?,?,?)",
                (1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644,
@@ -289,6 +288,12 @@ def digest(mzml):
     return h.hexdigest()
 
 
+def stamp(path, key):
+    """An output's spx:<key> header stamp, or None."""
+    m = re.search(r'spx:%s"[^>]*value="([^"]*)"' % key, open(path, encoding="utf-8", errors="replace").read(200000))
+    return m.group(1) if m else None
+
+
 def main():
     if len(sys.argv) < 2: sys.exit(__doc__)
     binary = sys.argv[1]
@@ -297,13 +302,17 @@ def main():
     inp = os.path.join(work, "synth.mzML")
     z2_mono, z1_mono = synth(inp)
     print(f"synthetic input: {inp}  (z=2 mono {z2_mono}, z=1 mono {z1_mono})")
-    fails = []
+    fails, ran = [], []
 
     def check(name, fn):
+        ran.append(name)
         try:
             fn(); print(f"  PASS  {name}")
         except AssertionError as e:
             print(f"  FAIL  {name}: {e}"); fails.append(name)
+
+    def tdf_env():   # the synthetic analysis.tdf, handed to the tool through the sidecar variable
+        return dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64))
 
     # 1 + 2: the default drops the z=1 envelope and keeps one precursor per envelope
     out_def = os.path.join(work, "default.mzML")
@@ -383,18 +392,11 @@ def main():
     # Until 2026-09-04 every check above ran on spx:detector=openms -- the fallback -- because the
     # synthetic nativeIDs carried no "frame=" key and there was no tdf, so the integer detector
     # (the default since that morning) was never once exercised by the suite.
-    def detector_of(path):
-        import re
-        m = re.search(r'spx:detector"[^>]*value="([a-z]+)"', open(path, encoding="utf-8",
-                                                                  errors="replace").read())
-        return m.group(1) if m else None
-
     def c9():
-        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
         out_i = os.path.join(work, "integer.mzML")
-        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        env = tdf_env()
         run(binary, inp, out_i, env=env)
-        got = detector_of(out_i)
+        got = stamp(out_i, "detector")
         assert got == "integer", (
             f"the SHIPPED default detector did not run: spx:detector={got}. With a parseable "
             f"frame= nativeID and a valid tdf there is nothing left to fall back for.")
@@ -404,14 +406,13 @@ def main():
         # No tdf: the integer detector cannot calibrate, and must SAY so rather than invent one.
         out_f = os.path.join(work, "fallback.mzML")
         r = run(binary, inp, out_f, extra=("-trace:detector", "integer"))
-        assert detector_of(out_f) == "openms", "no calibration available, yet integer still ran"
+        assert stamp(out_f, "detector") == "openms", "no calibration available, yet integer still ran"
         assert "alling back" in (r.stdout + r.stderr), \
             "fell back to the OpenMS detector without warning -- a silent detector switch"
     check("no calibration -> falls back to openms, loudly", c10)
 
     # 11: one isolation m/z acquired in two window groups (ion-mobility slices) is two windows.
     def c11():
-        import re
         n_win = lambda r: int(re.search(r"Split into MS1 \+ (\d+) windows", r.stdout).group(1))
         inp_s = os.path.join(work, "shared.mzML")
         synth(inp_s, groups=(1, 9))
@@ -436,7 +437,6 @@ def main():
     # 13: the concurrency cap is enforced. It used to be computed, logged and never checked: the
     #     only bound was a byte budget that over-booked every window, so nothing ever throttled.
     def c13():
-        import re
         hw = lambda r: int(re.search(r"admission high-water (\d+) of (\d+)", r.stdout).group(1))
         cap = lambda r: int(re.search(r"admission high-water (\d+) of (\d+)", r.stdout).group(2))
         r1 = run(binary, inp, os.path.join(work, "cap1.mzML"), extra=("-perf:max_concurrent_windows", "1"), threads=4)
@@ -451,22 +451,24 @@ def main():
     #     owns the count, the ids and the index, so all three are checked on the default output:
     #     declared count == spectra, id="spectrum=K" and index="K" are the rank from 0, and every
     #     index offset lands on its own <spectrum.
-    def c14():
-        import re
-        data = open(out_def, "rb").read()
+    def invariants(path, label):
+        data = open(path, "rb").read()
         n_decl = int(re.search(rb'<spectrumList count="(\d+)"', data).group(1))
         specs = [(m.start(), m.group(1), m.group(2)) for m in re.finditer(rb'<spectrum id="([^"]*)" index="(\d+)"', data)]
-        assert n_decl == len(specs) > 0, f"spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
+        assert n_decl == len(specs) > 0, f"{label}: spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
         for k, (_, sid, idx) in enumerate(specs):
-            assert int(idx) == k and sid == b"spectrum=%d" % k, f"spectrum {k}: id={sid!r} index={idx!r}"
+            assert int(idx) == k and sid == b"spectrum=%d" % k, f"{label} spectrum {k}: id={sid!r} index={idx!r}"
         offs = re.findall(rb'<offset idRef="([^"]*)">(\d+)</offset>', data)
-        assert len(offs) == len(specs), f"indexList has {len(offs)} offsets for {len(specs)} spectra"
+        assert len(offs) == len(specs), f"{label}: indexList has {len(offs)} offsets for {len(specs)} spectra"
         for k, (ref, off) in enumerate(offs):
-            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], \
-                f"index entry {k}: {ref!r} at {off!r}, spectrum starts at {specs[k][0]}"
+            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], f"{label} index entry {k}: {ref!r} at {off!r}, spectrum at {specs[k][0]}"
         # OpenMS records the offset one byte early (at the newline before the tag); accept that.
         ilo = int(re.search(rb'<indexListOffset>(\d+)</indexListOffset>', data).group(1))
-        assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"indexListOffset {ilo} does not point at <indexList"
+        assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"{label}: indexListOffset {ilo} does not point at <indexList"
+        return len(specs), re.search(rb'<spectrumList count="([^"]*)"', data).group(1)
+
+    def c14():
+        invariants(out_def, "default output")
     check("count, ids, index and indexList agree", c14)
 
     # 15: the cell grid (tile:rt_sec) is thread-invariant: each cell is traced on its own slice with
@@ -474,19 +476,15 @@ def main():
     #     explicit -- so 1 and 4 threads must give byte-identical spectra at a pitch that cuts the
     #     fixture into two cells (14 cycles of 1.4 s; pitch 10 s = 7 frames -> 2 cells).
     def c15():
-        import re
         # the cells exist only on the integer detector: without the tdf the tool falls back to
         # openms and clears the grid AFTER logging it (the first version of this check passed vacuously)
-        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
-        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        env = tdf_env()
         r1 = run(binary, inp, os.path.join(work, "cell1.mzML"), extra=("-tile:rt_sec", "10"), threads=1, env=env)
         r4 = run(binary, inp, os.path.join(work, "cell4.mzML"), extra=("-tile:rt_sec", "10"), threads=4, env=env)
         m = re.search(r"\[cell\] pitch [0-9.]+ s = (\d+) MS1 frames .*?: (\d+) cells", r1.stdout + r1.stderr)
         assert m and int(m.group(2)) >= 2, "the fixture was not cut into >= 2 cells:\n" + (r1.stdout + r1.stderr)[-800:]
-        assert detector_of(os.path.join(work, "cell1.mzML")) == "integer", "cells need the integer detector; it did not run"
-        hdr = open(os.path.join(work, "cell1.mzML"), encoding="utf-8", errors="replace").read(200000)
-        mb = re.search(r'spx:tile_boundaries"[^>]*value="([^"]*)"', hdr)
-        assert mb and mb.group(1) not in ("", "none"), "the header records no cut lines"
+        assert stamp(os.path.join(work, "cell1.mzML"), "detector") == "integer", "cells need the integer detector; it did not run"
+        assert stamp(os.path.join(work, "cell1.mzML"), "tile_boundaries") not in (None, "", "none"), "the header records no cut lines"
         assert digest(os.path.join(work, "cell1.mzML")) == digest(os.path.join(work, "cell4.mzML")), \
             "tile:rt_sec output differs between 1 and 4 threads"
     check("the cell grid is thread-invariant", c15)
@@ -500,31 +498,15 @@ def main():
         path = os.path.join(work, name)
         synth(path, n_cycles=26, z1_shift=-6, **kw)
         return path
-    def invariants(path, label):
-        import re
-        data = open(path, "rb").read()
-        n_decl = int(re.search(rb'<spectrumList count="(\d+)"', data).group(1))
-        specs = [(m.start(), m.group(1), m.group(2)) for m in re.finditer(rb'<spectrum id="([^"]*)" index="(\d+)"', data)]
-        assert n_decl == len(specs) > 0, f"{label}: spectrumList count={n_decl} but {len(specs)} <spectrum> elements"
-        for k, (_, sid, idx) in enumerate(specs):
-            assert int(idx) == k and sid == b"spectrum=%d" % k, f"{label} spectrum {k}: id={sid!r} index={idx!r}"
-        offs = re.findall(rb'<offset idRef="([^"]*)">(\d+)</offset>', data)
-        assert len(offs) == len(specs), f"{label}: indexList has {len(offs)} offsets for {len(specs)} spectra"
-        for k, (ref, off) in enumerate(offs):
-            assert ref == b"spectrum=%d" % k and int(off) == specs[k][0], f"{label} index entry {k}: {ref!r} at {off!r}, spectrum at {specs[k][0]}"
-        ilo = int(re.search(rb'<indexListOffset>(\d+)</indexListOffset>', data).group(1))
-        assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"{label}: indexListOffset {ilo} does not point at <indexList"
-        return len(specs), re.search(rb'<spectrumList count="([^"]*)"', data).group(1)
 
     # 16: tile-count x thread invariance, two non-empty blocks, the count/index invariants on the
     #     tiled file, the exact (unpadded) count on the one-tile file
     def c16():
-        import re
-        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
-        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        env = tdf_env()
         inp_t = tiled_fixture("tiles.mzML")
         one = os.path.join(work, "tiles_one.mzML")
-        run(binary, inp_t, one, extra=("-tile:rt_sec", "10"), threads=4, env=env)
+        # every one-tile reference names 0: the default is one cell per tile since 2026-09-11 (checks 16-18)
+        run(binary, inp_t, one, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "0"), threads=4, env=env)
         n_one, cnt_one = invariants(one, "one-tile file")
         assert cnt_one == str(n_one).encode(), f"one-tile count is not exact: {cnt_one!r}"
         outs = []
@@ -551,9 +533,7 @@ def main():
     # 17: the carry is load-bearing: the same tiled run WITHOUT the carry (a test-only switch)
     #     must differ from the one-tile run, and the normal run must report carried fragments
     def c17():
-        import re
-        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
-        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        env = tdf_env()
         inp_t = os.path.join(work, "tiles.mzML"); one = os.path.join(work, "tiles_one.mzML")
         assert os.path.exists(inp_t) and os.path.exists(one), "check 16 must run first"
         r = run(binary, inp_t, os.path.join(work, "tiles_c.mzML"), extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env)
@@ -566,7 +546,7 @@ def main():
         # the TRANSITIVE carry: pitch 5 s (4 frames) is below 2 x gate:delta_rt (6 s), so a
         # fragment must be re-carried across more than one tile to reach its precursor
         one5 = os.path.join(work, "tiles5_one.mzML"); t5 = os.path.join(work, "tiles5_t.mzML")
-        run(binary, inp_t, one5, extra=("-tile:rt_sec", "5"), threads=2, env=env)
+        run(binary, inp_t, one5, extra=("-tile:rt_sec", "5", "-tile:cells_per_tile", "0"), threads=2, env=env)
         r5 = run(binary, inp_t, t5, extra=("-tile:rt_sec", "5", "-tile:cells_per_tile", "1"), threads=2, env=env)
         m = re.search(r"\[tile\] (\d+) tile\(s\) of up to 1 cell", r5.stdout + r5.stderr)
         assert m and int(m.group(1)) >= 5, "pitch 5 did not give >= 5 tiles"
@@ -578,12 +558,10 @@ def main():
     #     empty-slab branch runs, the tile scores with carried fragments only, and the tiled run
     #     still equals the one-tile run of the same file
     def c18():
-        import re
-        tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
-        env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
+        env = tdf_env()
         inp_e = tiled_fixture("tiles_empty.mzML", drop_ms2=(20.0, 30.0))   # the frames at 20.6 (= 20.599999999999998) .. 29.0
         one = os.path.join(work, "tiles_empty_one.mzML")
-        run(binary, inp_e, one, extra=("-tile:rt_sec", "10"), threads=2, env=env)
+        run(binary, inp_e, one, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "0"), threads=2, env=env)
         t = os.path.join(work, "tiles_empty_t.mzML")
         r = run(binary, inp_e, t, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env)
         assert "no frames in the tile" in (r.stdout + r.stderr), "the empty-slab branch did not run:\n" + (r.stdout + r.stderr)[-800:]
@@ -619,7 +597,6 @@ def main():
         return [(400.2, 100.0, 0.95), (400.24, 50.0, 0.95), (400.28, 50.0, 0.95), (400.38, 50.0, 0.95)]
     def prune_arm(inp_p, tag, bands, prune, env_extra=None):
         """One SPEXTRACTOR_DET run: (output, {key: line or None}, every [det] and [ms1-edges] line, log)."""
-        import re
         out = os.path.join(work, f"{tag}_b{bands}_{prune}.mzML")
         env = dict(os.environ, SPEXTRACTOR_DET="1")
         for v in ("SPEXTRACTOR_MS1_PRUNE_NO_WITNESS", "SPEXTRACTOR_MS1_PRUNE_NO_CHAIN"): env.pop(v, None)
@@ -633,7 +610,6 @@ def main():
         return out, got, re.findall(r"\[(?:det|ms1-edges)\][^\n]*", log), log
     prune_ref = {}   # (bands, prune) -> (digest, every [det]/[ms1-edges] line) of check 19's fixture, for 19c
     def c19():
-        import re
         inp_p = os.path.join(work, "prune.mzML")
         synth(inp_p, n_cycles=21, ms1_extra=prune_extra)
         n_of = lambda line: int(re.search(r"n=(\d+)", line).group(1))
@@ -673,7 +649,6 @@ def main():
     #      (SPEXTRACTOR_MS1_PRUNE_NO_CHAIN=1, anchors kept) they vanish from 26 bands and the trace is 3 of 3. At 1 and 2
     #      bands the outer ranges always hold a frame's first or last peak, so links can never matter there.
     def c19b():
-        import re
         chain = [round(399.70 + 0.05 * k, 2) for k in range(23)]
         def extra(c):
             if c <= 5: return [(399.9, 150.0, 0.80)]
@@ -750,10 +725,6 @@ def main():
     #     can pin is the rest of the contract: an mzML is not filtered but skipped, logged and stamped, and
     #     -dnoise:ms1 false stamps "off" -- both with the spectra of the default run.
     def c20():
-        import re
-        def stamp(path, key):
-            m = re.search(r'spx:%s"[^>]*value="([^"]*)"' % key, open(path, encoding="utf-8", errors="replace").read(200000))
-            return m.group(1) if m else None
         on, off = os.path.join(work, "dnoise_on.mzML"), os.path.join(work, "dnoise_off.mzML")
         r_on, r_off = run(binary, inp, on), run(binary, inp, off, extra=("-dnoise:ms1", "false"))
         log_on, log_off = r_on.stdout + r_on.stderr, r_off.stdout + r_off.stderr
@@ -784,8 +755,7 @@ def main():
         assert "[stream] streaming load failed" in log, "no Bruker SDK path: the run did not fail in the loader (no analysis.tdf_bin):\n" + log[-800:]
     check("dnoise:ms1 refuses a Bruker SDK calibration before the load, and gets past its setup without one", c21)
 
-    total = 6 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2   # + 19b, 19c; + 19d, 21
-    print(f"\n{total - len(fails)}/{total} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
+    print(f"\n{len(ran) - len(fails)}/{len(ran)} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0
 
 

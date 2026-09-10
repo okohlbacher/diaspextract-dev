@@ -59,12 +59,8 @@ struct TofAxis {
   double factor(size_t frame_id) const;
   double mzOf(TofIdx tof, double b) const;      // report time only
   TofIdx tofOf(double mz, double b) const;      // load time only
-  TofIdx span(TofIdx tof, double b, double ppm) const;   // tolerance in BINS, derived not assumed
 };
 ```
-
-`span()` converts both ends of the tolerance through the calibration rather than assuming
-`m ~ tof^2`, so the quadratic term the model carries is respected.
 
 **The extraction never needs a calibrated m/z at all.** Grouping, gating and correlation all work on
 bins; the calibration is applied once per trace, at report time, with the apex frame's own factor --
@@ -84,10 +80,10 @@ exactly. The conversion happens once, when a window's slab is built.
 /// The m/z axis is global, uniform and integer: index i means m/z = i / MZ_Q. Stored nowhere,
 /// because it is an affine function of the index -- unlike the RT axis, which has to be a table.
 using TofIdx = uint32_t;                      // the instrument's flight-time bin
-// mzOf / tofOf / span live on TofAxis (section 2): they need the frame's calibration factor.
+// mzOf / tofOf live on TofAxis (section 2): they need the frame's calibration factor.
 ```
 
-A frame is what `CompactFrame` already is. A **peak** never becomes a `Peak1D` again:
+A frame is a row of `PeakSlab`'s frame table. A **peak** never becomes a `Peak1D` again:
 
 ```cpp
 /// One window's peaks, frame-major, in index space. Replaces the materialised PeakMap.

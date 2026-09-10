@@ -65,7 +65,7 @@ def build_entrapment(target_fa, foreign_fa, out_fa, tag="ENTRAP_"):
     """Concatenate a foreign proteome, prefixing every foreign accession.
 
     Returns (n_target, n_entrap). Any PSM to a tagged protein is a KNOWN false positive: the
-    sample is human liver, so an Arabidopsis peptide cannot be genuinely present.
+    sample is human, so an Arabidopsis peptide cannot be genuinely present.
     """
     n_t = n_e = 0
     with open(out_fa, "w") as out:

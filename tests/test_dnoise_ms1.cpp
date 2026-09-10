@@ -30,24 +30,14 @@ namespace dn = spx::dnoise;
 using u32 = std::uint32_t;
 
 static int g_fail = 0;
-#define CHECK(cond, ...)                              \
-  do                                                  \
-  {                                                   \
-    if (!(cond))                                      \
-    {                                                 \
-      std::fprintf(stderr, "FAIL line %d: ", __LINE__); \
-      std::fprintf(stderr, __VA_ARGS__);              \
-      std::fputc('\n', stderr);                       \
-      ++g_fail;                                       \
-    }                                                 \
-  } while (0)
+#define CHECK(cond, ...) do { if (!(cond)) { std::fprintf(stderr, "FAIL line %d: ", __LINE__); std::fprintf(stderr, __VA_ARGS__); std::fputc('\n', stderr); ++g_fail; } } while (0)
 
 // ---- the gate inputs of two real files, from read-only queries of their analysis.tdf -------------------------------
 // Rows are SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows, as exact
 // doubles. Boxes are {scan_lo, scan_hi, tof_lo, tof_hi}: D's reproduced the dnoise binary on real frames; both sets
 // come from an independent CPython implementation of the spec.
 
-static dn::RunMeta metaD()   // 2026_AGXT_PH1_liver_diaPASEF, FKL4341-S30-A-10 (dataset D)
+static dn::RunMeta metaD()   // dataset D
 {
   dn::RunMeta m;
   m.acquisition_software = "timsTOF";
@@ -731,6 +721,7 @@ static u32 opentimsCorrect(u32 raw, double corr)   // opentims.cpp:225
 #pragma GCC pop_options
 #endif
 
+struct Row { int msms_type; u32 num_peaks; };
 static void testRecover()
 {
   namespace rc = dn::recover;
@@ -868,7 +859,6 @@ static void testRecover()
   CHECK(rc::buildScanTable(d.tims, 1, asc, falls).empty() && asc.size() == 1 && !falls && rc::scanOf(asc, falls, im0) == 0, "one scan");
 
   // frame checks, in order
-  struct Row { int msms_type; u32 num_peaks; };
   const std::vector<Row> rows = {{-1, 0}, {0, 5}, {9, 5}, {0, 0}};
   CHECK(rc::frameCheck(rows, 0, 5, true, 5) == R::frame && rc::frameCheck(rows, 4, 5, true, 5) == R::frame && rc::frameCheck(rows, 2, 5, true, 5) == R::frame,
         "frame 0, a frame past the table and an MS2 frame are refused");
@@ -881,7 +871,6 @@ static void testRecover()
 
 static void testCoverage()
 {
-  struct Row { int msms_type; u32 num_peaks; };
   const std::vector<Row> frames = {{-1, 0}, {0, 5}, {9, 7}, {0, 0}, {0, 2}};   // 1 MS1, 2 MS2, 3 an MS1 frame without points, 4 MS1
   dn::FrameCoverage cov;
   CHECK(cov.firstMissing(frames) == 1, "nothing marked: frame 1 is missing");

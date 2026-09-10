@@ -39,3 +39,10 @@ bench/plan_feat.yaml
 bench/plan_sens.yaml
 bench/plan_strict2.yaml
 bench/plan_xval.yaml
+.export-private
+tests/test_sync_cluster_txn.sh
+bench/dnoise_table.py
+bench/launch.sh
+harness/
+harness/corpus.py
+harness/CORPUS.md

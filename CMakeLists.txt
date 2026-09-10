@@ -18,7 +18,7 @@ endif()
 # contraction: an FMA flips 3 of dataset D's 24 boxes, and Apple clang on arm64 contracts by default.
 # The header guards its own arithmetic; the flag keeps the translation units around it honest too, and
 # matches the cluster's in-tree build, where OpenMS compiles with it but does not export it.
-set(SPX_NO_FP_CONTRACT $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
+add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
 
 # The tool itself cannot be built without a PATCHED OpenMS: it includes
 # <OpenMS/FORMAT/TdfMzCalibration.h>, which scripts/apply_openms_patches.sh installs into the
@@ -31,7 +31,6 @@ option(SPEXTRACTOR_TESTS_ONLY "Build only the OpenMS-independent tests (portabil
 enable_testing()
 add_executable(test_dnoise_ms1 tests/test_dnoise_ms1.cpp)
 target_include_directories(test_dnoise_ms1 PRIVATE src)
-target_compile_options(test_dnoise_ms1 PRIVATE ${SPX_NO_FP_CONTRACT})
 add_test(NAME dnoise_ms1 COMMAND test_dnoise_ms1)
 # src/TdfLoad.h reads analysis.tdf through sqlite3, so its test builds wherever SQLite is found (not on the Windows
 # portability leg). It includes the calibration model as the patched OpenMS installs it; the shim maps that include onto
@@ -41,14 +40,12 @@ if(SQLite3_FOUND)
   configure_file(src/TdfMzCalibration.h ${CMAKE_CURRENT_BINARY_DIR}/shim/OpenMS/FORMAT/TdfMzCalibration.h COPYONLY)
   add_executable(test_tdf_load tests/test_tdf_load.cpp)
   target_include_directories(test_tdf_load PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/shim)
-  target_compile_options(test_tdf_load PRIVATE ${SPX_NO_FP_CONTRACT})
   target_link_libraries(test_tdf_load PRIVATE SQLite::SQLite3)
   add_test(NAME tdf_load COMMAND test_tdf_load)
 endif()
 if(SPEXTRACTOR_TESTS_ONLY)
   add_executable(test_calibration_cpp tests/test_calibration_cpp.cpp)
   target_include_directories(test_calibration_cpp PRIVATE src)
-  target_compile_options(test_calibration_cpp PRIVATE ${SPX_NO_FP_CONTRACT})
   add_test(NAME calibration_golden
            COMMAND test_calibration_cpp ${CMAKE_CURRENT_SOURCE_DIR}/tests/calibration_golden.json)
   return()
@@ -59,8 +56,7 @@ find_package(OpenMP REQUIRED)   # the window loop and the picker call omp_* unco
 find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLite is a build error, not a fallback
 
 add_executable(spextractor src/spextractor.cpp)
-target_link_libraries(spextractor PRIVATE OpenMS SQLite::SQLite3)
-target_compile_options(spextractor PRIVATE ${SPX_NO_FP_CONTRACT})
+target_link_libraries(spextractor PRIVATE OpenMS SQLite::SQLite3 OpenMP::OpenMP_CXX)
 target_compile_definitions(spextractor PRIVATE SPEXTRACTOR_VERSION="${PROJECT_VERSION}")
 # The source carries the same number as a fallback for builds that do not go through this file
 # (the in-tree OpenMS build); refuse to configure if the two have drifted.
@@ -68,8 +64,6 @@ file(STRINGS src/spextractor.cpp _spx_fallback REGEX "^#define SPEXTRACTOR_VERSI
 if(NOT _spx_fallback MATCHES "\"${PROJECT_VERSION}\"")
   message(FATAL_ERROR "src/spextractor.cpp's SPEXTRACTOR_VERSION fallback (${_spx_fallback}) != project VERSION ${PROJECT_VERSION}")
 endif()
-
-target_link_libraries(spextractor PRIVATE OpenMP::OpenMP_CXX)
 
 install(TARGETS spextractor RUNTIME DESTINATION bin)
 

@@ -1,5 +1,3 @@
-#ifndef SPEXTRACTOR_DNOISE_MS1_H
-#define SPEXTRACTOR_DNOISE_MS1_H
 // Copyright (c) 2026, SpeXtractor authors. BSD-3-Clause.
 //
 // PORTED CODE: this file is a C++ port of the default MS1 path of dnoise v0.1.0
@@ -38,10 +36,7 @@
 //      bounds are floor/ceil of values like 542.9999999999999; fusing `intercept + slope * scan` into
 //      one FMA flips 3 of D's 24 boxes (13 points on 8724). The builder keeps that product apart
 //      through a volatile and is compiled with contraction off; CMakeLists.txt passes -ffp-contract=off
-//      as well. Flags that rewrite more than contraction are refused at compile time below wherever the
-//      compiler announces them in a macro: -ffast-math/-Ofast, -ffinite-math-only, /fp:fast, x87 excess
-//      precision; GCC's -funsafe-math-optimizations, -freciprocal-math, -fassociative-math and
-//      -fno-signed-zeros; clang's -funsafe-math-optimizations and -ffp-model=fast on arm64 (__ARM_FP_FAST).
+//      as well. Value-changing flags the compiler announces in a macro are refused by the #error below.
 //      Only clang slips past: -freciprocal-math, -fassociative-math and -fno-signed-zeros on every target,
 //      -funsafe-math-optimizations and -ffp-model=fast on x86-64. Do not use them: -freciprocal-math,
 //      -funsafe-math-optimizations and -ffp-model=fast each move D's boxes. tests/test_dnoise_ms1.cpp pins
@@ -176,14 +171,13 @@ public:
   /// dia_ms1.rs:76-84: inside some window; a scan past the run's last scan is outside.
   bool contains(std::uint32_t scan, std::uint32_t tof) const
   {
-    if (scan >= numScans()) return false;
+    if (scan >= row_.size() - 1) return false;
     const auto b = iv_.begin() + static_cast<std::ptrdiff_t>(row_[scan]);
     const auto e = iv_.begin() + static_cast<std::ptrdiff_t>(row_[scan + 1]);
     const auto it = std::partition_point(b, e, [tof](const std::pair<std::uint32_t, std::uint32_t>& iv) { return iv.second < tof; });
     return it != e && tof >= it->first;
   }
 
-  std::uint32_t numScans() const { return static_cast<std::uint32_t>(row_.size() - 1); }
   /// The padded boxes in window-row order, before the per-scan clamp and merge (for logging and tests).
   const std::vector<GateBox>& boxes() const { return boxes_; }
 
@@ -385,20 +379,19 @@ inline std::string buildScanTable(const std::array<double, 10>& c, std::size_t n
 #if defined(__clang__)
   #pragma clang fp contract(off)
 #endif
-  std::vector<float>& v = asc;
-  v.assign(n_scans, 0.0f);
+  asc.assign(n_scans, 0.0f);
   for (std::size_t s = 0; s < n_scans; ++s)
   {
     double V = c[2] + ((c[3] - c[2]) / c[1]) * ((double)s - c[4] - c[0]);
     if (V == 0.0) V = 1e-10;
     double denom = c[6] + c[7] / V;
     if (denom == 0.0) denom = 1e-10;
-    v[s] = static_cast<float>(1.0 / denom);
+    asc[s] = static_cast<float>(1.0 / denom);
   }
-  falls = n_scans > 1 && v[1] < v[0];
-  if (falls) std::reverse(v.begin(), v.end());
+  falls = n_scans > 1 && asc[1] < asc[0];
+  if (falls) std::reverse(asc.begin(), asc.end());
   for (std::size_t s = 1; s < n_scans; ++s)
-    if (!(v[s] - v[s - 1] > 4.0f * kImTol))   // strictly monotonic, finite, no two scans within reach of one value
+    if (!(asc[s] - asc[s - 1] > 4.0f * kImTol))   // strictly monotonic, finite, no two scans within reach of one value
       return "the TimsCalibration model does not separate every scan by more than " + std::to_string(4.0f * kImTol) + " 1/K0";
   return std::string();
 }
@@ -463,7 +456,7 @@ inline Refusal recoverPoint(const Cal& cal, double b, double mz, float im, float
   if (v >= 16777216.0f) return Refusal::intensity_range;   // a float32 holds every count below 2^24 exactly, and no more
   std::uint32_t found = 0;
   int n = 0;
-  if (v >= 0.0f && v < 16777216.0f && v == std::floor(v))
+  if (v >= 0.0f && v == std::floor(v))
     for (double r = std::max(0.0, std::floor((v - 0.5) / corr) - 1.0), r_end = std::ceil((v + 0.5) / corr) + 1.0; r <= r_end; r += 1.0)
       if ((std::uint32_t)(r * corr + 0.5) == (std::uint32_t)v) { found = (std::uint32_t)r; ++n; }   // opentims.cpp:225: double(raw) * correction + 0.5, into a uint32
   hits = n;
@@ -728,5 +721,3 @@ private:
 };
 
 } // namespace spx::dnoise
-
-#endif // SPEXTRACTOR_DNOISE_MS1_H

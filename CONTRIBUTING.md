@@ -12,7 +12,7 @@ pinned in `patches/openms.lock` (develop, 2026-04-24), patched by that script �
 against exactly that commit. `.github/workflows/build.yml` does exactly this and is the reference
 recipe.
 
-**It needs a large machine.** Peak memory is ~57 GB on a 30-minute acquisition and ~170–190 GB on a 2-hour one at the shipped defaults (docs/BASELINE.md). The test suite runs on
+**It needs a large machine.** At the shipped defaults (100 threads, one 600-s cell per tile) peak memory is about 22 GB on the 30-minute dataset D and about 21–25 GB on the 2-hour TNBC 009; in one tile (`-tile:cells_per_tile 0`) about 37 and 100 GB (docs/BASELINE.md). The test suite runs on
 a synthetic input and needs none of that.
 
 ## The one rule that matters

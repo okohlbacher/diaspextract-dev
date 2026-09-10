@@ -23,12 +23,13 @@ host** — the tool links against an OpenMS installation but lives outside the O
 | Compiler | C++20 — GCC 13+ or Clang 16+ |
 | OpenMP | required |
 | CMake | 3.21+ (OpenMS's own requirement; the tool itself needs 3.16) |
-| **Memory** | **~57 GB peak** on a 30-minute gradient and **~170–190 GB** on a 2-hour acquisition at the shipped defaults (the 30–60 min cohort spanned 68–109 GB before the memory work); it scales with the acquisition |
+| **Memory** | **~22 GB peak** on a 30-minute gradient (dataset D) and **~21–25 GB** on a 2-hour acquisition (TNBC 009) at the shipped defaults, 100 threads, with one 600-s retention-time cell per tile; in one tile (`-tile:cells_per_tile 0`) the same files peak at ~37 and ~100 GB (the 30–60 min cohort spanned 68–109 GB before the memory work). It follows how dense the acquisition is more than how long it runs |
 | Disk | mzML output was 6.2 GB for 656k spectra (30-minute run) and 19–20 GB for a 2-hour run at the previous default; the current default emits 30–70% more spectra. mzPeak is about a third of that |
 
 The memory figure is not a suggestion. A full-depth diaPASEF acquisition holds millions of mass traces
-in flight: a 30-minute in-house acquisition needs ~57 GB and a 2-hour one ~190 GB, while low-load
-public files (PXD017703) ran in 10–26 GB. Peak usage is reported at the end of every run, so you can
+in flight. At the shipped defaults the window loop holds one 600-s tile at a time, so a 30-minute in-house
+acquisition needs ~22 GB and a 2-hour one ~21–25 GB; in one tile they needed ~37 and ~100 GB, and low-load
+public files (PXD017703) ran in 10–26 GB under the earlier one-tile defaults. Peak usage is reported at the end of every run, so you can
 size a node from your own data. Memory figures throughout are peak RSS as `/usr/bin/time` reports
 them (kB ÷ 10⁶).
 
@@ -102,23 +103,23 @@ sage sage.json -o results pseudo.mzML
 | option | default | what it does |
 |---|---|---|
 | `-threads` | all cores | worker threads; an explicit `-threads 1` on the command line is honoured (only the command line is inspected: `threads = 1` in an ini file is treated as unset). Parallelism is isolation windows × flight-time bands, and the window loop reaches ~78× (30-min) to ~89× (2-hour) thread occupancy at 100 threads; window concurrency is bounded by a free-RAM admission gate, not by core count |
-| `-out_type` | follows the extension | `mzML` or `mzpeak`; in a build with mzPeak, `.mzpeak` when the extension says nothing (a plain build writes mzML only). Search engines read mzML, so write `.mzML` whenever a search comes next |
+| `-out_type` | follows the extension | `mzML` or `mzpeak`; in a build with mzPeak, `.mzpeak` when the extension says nothing (a plain build writes mzML only). Search engines read mzML, so write `.mzML` whenever a search comes next. mzPeak is written in one piece, so a run longer than one 600-s cell writes it only with `-tile:cells_per_tile 0` |
 | `-trace:detector` | `integer` | `integer` works on the instrument's flight-time bin; `openms` uses OpenMS `MassTraceDetection`. Different algorithms — see below |
 | `-charge:min_charge` | 1 | lowest precursor charge to emit. Singly charged precursors are genuine on tryptic data (their mobility sits on the 1+ trend line) and are 14–20% of Sage peptides on a 2-hour acquisition, though only ~1.7% on a 30-minute one. Their stratum carries 3–9% entrapment FDR under a pooled 1% cut (file-dependent), so control FDR per charge downstream. `-charge:min_charge 2 -charge:im_charge_veto false` restores the old behaviour (the veto runs first, so `2` alone keeps its re-called 2+) |
 | `-charge:im_charge_veto` | `true` | the 2+ and 3+ ion-mobility trend lines are fitted per run from the run's own confident precursors; a z=1 call on the 2+ line (11–26% of z=1 calls depending on the file: a halved 2+ envelope) is re-called 2+, one on the 3+ line is dropped. Genuine 1+ ions are untouched |
 | `-charge:im_veto_band` | 2.5 | half-width of the veto's mobility band, in MAD-sigma of the fitted residuals |
 | `-assembly:require_isotope_support` | `true` | drop precursor hypotheses with no isotope partner. `false` roughly doubles emission, was ~7× slower (measured 2026-09-04, before the scheduling fixes) and identifies fewer peptides |
-| `-perf:malloc_trim` | `true` | return the allocator's free pages at the two phase boundaries (glibc). Trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition (the loop re-faults the returned pages cold); byte-identical output either way. Off when time, not memory, is the constraint |
+| `-perf:malloc_trim` | `true` | return the allocator's free pages (glibc) at the two phase boundaries and between tiles. At the phase boundaries it trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition in one tile (the loop re-faults the returned pages cold); between tiles it takes about 4 GB off TNBC 009 and 0.5 GB off dataset D at the defaults. Byte-identical output either way. Off when time, not memory, is the constraint |
 | `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output**: measured, it is slightly *more* sensitive on a large file (+2.0% Sage peptides at unchanged entrapment FDR) for 1.75× the memory and ~1.7× the wall |
-| `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (exact partition with a halo). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both gate datasets (set overlap 99.4% on dataset D, 89–99% on dataset A); 1 = off |
+| `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (a halo partition; the band count moves the spectrum list slightly). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both gate datasets (set overlap 99.4% on dataset D, 89–99% on dataset A); 1 = off |
 | `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 13–21% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 13–21%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
 | `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: dataset D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB |
 | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
 | `-trace:band_edges` | `acquisition` | the integer detector's per-window band edges come from the tdf's metadata (the digitizer's last bin) instead of the window's resident peaks, so a streaming reader can reproduce them. Measured neutral on both benchmark files (Sage +1/+1, MSFragger 0/−3, entrapment +0.00/+0.01 points); `slab` reproduces the pre‑2026‑09‑10 output |
-| `-tile:cells_per_tile` | 0 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. Memory becomes one tile's once the streaming readers land (steps 3-5 of the tiling plan); on today's resident source it is a correctness switch |
+| `-tile:cells_per_tile` | 1 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. On a `.d` (the streaming source) **memory is one tile's**: at the defaults TNBC 009 peaks at 21.07 GB in 13 tiles with a trim between tiles against 99.70 GB in one (wall 9:57 against 9:42, same node), dataset D at 21.99 GB in 3 tiles against 37.44 GB (3:47 against 3:15). mzPeak output needs one tile |
 | `-tile:rt_sec` | 600 | the integer detector traces each isolation window in fixed retention-time **cells** of this pitch, cut at the run's MS1 frame times and recorded in the mzML header (`spx:tile_boundaries`). The cut is part of the definition: any grouping of cells into tiles, resident or streamed, reproduces the same spectra bit for bit. Science price measured 2026-09-10 against whole-window tracing (`-1`): Sage +0.8% on both benchmark files, MSFragger +1.5% / flat, entrapment FDR +0.14 / +0.16 points (inside the release rule); ~2.5% of peptides straddle a cut line and lose 9% there against 6–8% elsewhere |
 
-`spextractor --helphelp` lists every option, most with the measurement behind the default.
+`spextractor --helphelp` lists every option, most with a pointer to the measurement behind the default.
 
 ### Reading the output
 
@@ -142,15 +143,18 @@ worth trying both.
 
 ## Performance
 
-Measured at the shipped defaults, 100 threads:
+Measured at the shipped defaults (MS1 denoising and the MS1 prune on, one 600-s cell per tile with a trim between
+tiles), 100 threads, on cluster nodes shared with other users, so the walls are indicative:
 
-| | 30-minute gradient (33,553 frames) | 2-hour acquisition (PXD047793 run 009) |
+| | 30-minute gradient (dataset D) | 2-hour acquisition (PXD047793 run 009) |
 |---|---|---|
-| wall time | 2:54 | 11:18 |
-| peak RSS | 57 GB | 187 GB |
-| pseudo-spectra emitted | 0.85 M | 3.9 M |
+| peak RSS | 22.0 GB (3 tiles) | 21.1 GB (13 tiles) |
+| wall time | 3:47 | 9:57 |
+| in one tile (`-tile:cells_per_tile 0`), same node | 37.4 GB, 3:15 | 99.7 GB, 9:42 |
 
-Both figures are **11.6% and 17.7% faster than v2.0.0** respectively, from four byte-identical
+Before MS1 denoising, the MS1 prune and the tiled default, a 30-minute gradient (33,553 frames) took 2:54 at 57 GB
+and the 2-hour file 11:18 at 187 GB, emitting 0.85 M and 3.9 M pseudo-spectra.
+Those walls were **11.6% and 17.7% faster than v2.0.0** respectively, from four byte-identical
 changes made after that release (see the CHANGELOG): the Savitzky-Golay coefficients are cached,
 mzML spectra are serialised in parallel, the canonical sort sorts keys rather than 750-byte spectrum
 objects, and the assembled PeakMap takes its vector whole. Every one reproduces the pinned digests
@@ -162,8 +166,8 @@ per-charge FDR control (docs/REFERENCE-COMPARISON-2026-09-08.md); the changes ab
 ratio to roughly **0.54×** on the same measurement, and leave every peptide count untouched.
 
 The allocator's retained free pages were the largest single memory item on a 2-hour acquisition;
-`perf:malloc_trim` returns them at the phase boundaries (−30% peak for +8.5% wall) and is on by
-default. Preloading `tcmalloc_minimal` measured −7% peak RSS (wall-neutral, byte-identical) before the
+`perf:malloc_trim` returns them at the phase boundaries (−30% peak for +8.5% wall, measured in one tile) and
+between tiles (about 4 GB on the 2-hour file), and is on by default. Preloading `tcmalloc_minimal` measured −7% peak RSS (wall-neutral, byte-identical) before the
 trim shipped; it has not been re-measured with it, so the two are not known to be additive.
 
 Runtime is dominated by the window loop, which is parallel across isolation windows and, within a

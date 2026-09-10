@@ -2,39 +2,24 @@
 #define SPEXTRACTOR_TDF_MZ_CALIBRATION_H
 // Copyright (c) 2026, SpeXtractor authors. BSD-3-Clause.
 //
-// Exact TOF -> m/z conversion for Bruker TDF (timsTOF) data, ModelType 1.
-//
-// Header-only and dependency-free ON PURPOSE: this is the single source of truth for the
-// calibration, shared by the OpenMS loader patch (patches/openms-brukertims-mz-calibration.patch,
-// which supplies the constants from the file's MzCalibration table) and by the C++ unit test
+// Exact TOF -> m/z conversion for Bruker TDF (timsTOF) data, ModelType 1. Header-only and dependency-free:
+// shared by the OpenMS loader patch (patches/openms-brukertims-mz-calibration.patch) and the C++ golden test
 // (tests/test_calibration_cpp.cpp), so the code that ships is the code that is tested.
 //
-// Model, derived numerically against Bruker's timsdata library used as a local oracle (no vendor
-// code was read, no vendor binary is redistributed; every constant comes from the user's own file):
+// Model, derived numerically against Bruker's timsdata library used as a local oracle (no vendor code was read,
+// no vendor binary is redistributed; every constant comes from the user's own file):
 //
 //     t_ns   = tof * DigitizerTimebase + DigitizerDelay
 //     C1_eff = C1 * (1 + dC1 * (T1_ref - T1_frame) / 1e6)        // digitizer temperature drift
 //     t_ns   = C0 + (1e6 / sqrt(C1_eff)) * sqrt(m) + C2 * m      // solved for sqrt(m) =: u
 //     m      = u^2 - C4                                          // C4: additive mass offset
 //
-// Verified to 2.5e-5 ppm max against the vendor library (tests/calibration_golden.json).
-// The C4 term was identified the same way on a 2019 timsTOF Pro (firmware 6.0.110, C4 = -0.0905):
-// of every candidate correction only an additive offset on the root closes the residual, and with
-// the temperature term it reproduces the vendor library to 0.0000 ppm on the first and last frame
-// (tests/test_calibration_cpp.cpp pins both). Dropping it is -53..-938 ppm, worst at low mass.
-// SCOPE OF THAT CLAIM, stated precisely because it is narrower than the file count suggests: the
-// three files share ONE identical MzCalibration vector (same C0/C1/C2/timebase/delay/T1_ref/dC1),
-// so independent coverage of the parameter space is ONE vector -- 12 frames spanning only 0.034 K,
-// probed at five TOF positions covering m/z 133.7-1573.7. ModelType 1, single-row table, dC2 == 0,
-// one instrument cohort. Everything outside that is REJECTED rather than
-// approximated -- see isSupported(): silently emitting wrong masses is the failure mode this whole
-// file exists to prevent (the previous two-point chord was -5..-11 ppm and nobody noticed for months).
-//
-// Note for implementers: the widely-copied open implementation (timsrust-calibration, adapted then
-// disabled by mzdata as "not consistently better") DROPS the C2*m term, which is worth -11..-40 ppm
-// on this data. That omission -- not translation subtlety -- is why the port underperformed.
+// Verified to 2.5e-5 ppm against the vendor library (tests/calibration_golden.json: three files sharing ONE
+// MzCalibration vector, 12 frames over 0.034 K); the C4 term was pinned the same way on a 2019 timsTOF Pro
+// (tests/test_calibration_cpp.cpp). What the model does not cover (ModelType != 1, dC2 or C3 != 0, frames that
+// reference more than one MzCalibration row) is REJECTED by unsupportedReason() and the loaders, never approximated.
+// The open timsrust-calibration port drops the C2*m term (-11..-40 ppm on this data).
 
-#pragma once
 #include <cmath>
 #include <initializer_list>
 #include <limits>
@@ -70,15 +55,9 @@ struct TdfMzCalibration
     if (!(C1 > 1.0) || !(C1 < 1e12)) return "MzCalibration C1 outside the plausible range (1, 1e12)";
     if (dC2 != 0.0) return "MzCalibration dC2 != 0 (temperature drift of C2 is not modelled)";
     if (C3 != 0.0) return "MzCalibration C3 != 0 (not modelled; never observed non-zero)";
-    // C2 == 0 is NOT a benign degenerate case: the pure-sqrt law it selects is exactly the
-    // known-bad open implementation (2-39 ppm on real vectors). The vendor schema declares
-    // C0..C4 with no type and no NOT NULL, so a NULL or text C2 arrives here as 0.0 through
-    // sqlite3_column_double -- indistinguishable from a real zero. Reject both.
-    // C2 == 0.0 stored in the file is a real calibration: the 2020 timsTOF Pro firmware behind
-    // PXD017703 ships t = C0 + C1_eff*sqrt(m) with no quadratic term, and every frame references
-    // it. What must NOT pass is a NULL C2 (the column has no type and no NOT NULL), which the C API
-    // would hand over as 0.0 -- the loader converts NULL to NaN so it fails the finiteness check
-    // above with its own reason. Negative C2 flips the root branch and is rejected as before.
+    // C2 == 0.0 stored in the file is a real calibration (the 2020 timsTOF Pro firmware behind PXD017703 has no
+    // quadratic term). A NULL C2, which sqlite3_column_double hands over as 0.0, is refused by the loaders
+    // themselves. A negative C2 flips the root branch.
     if (C2 < 0.0) return "MzCalibration C2 < 0 (negative quadratic term is not a supported model)";
     if (!(digitizer_timebase > 0.0)) return "DigitizerTimebase <= 0";
     return std::string();
@@ -96,16 +75,10 @@ struct TdfMzCalibration
   double tofToMz(double tof, double b) const
   {
     const double t = tof * digitizer_timebase + digitizer_delay;
-    // Stable root of C2*u^2 + b*u + (C0 - t) = 0: the textbook form (-b + sqrt(disc))/(2*C2)
-    // subtracts two nearly equal numbers (b ~ 2.5e3, C2 ~ 1e-3), throwing away ~4 digits.
-    // u = 2*(t - C0) / (b + sqrt(disc)) is algebraically identical and cancellation-free.
-    // t < C0 is unphysical (arrival before the calibration zero) and would yield a NEGATIVE u whose
-    // square is a plausible-looking but WRONG mass -- the exact silent-wrongness this file exists to
-    // prevent. Both it and a negative discriminant return 0.0, which callers see as an out-of-range
-    // peak rather than a credible m/z.
+    // Stable root of C2*u^2 + b*u + (C0 - t) = 0: u = 2*(t - C0) / (b + sqrt(disc)) avoids the textbook form's
+    // cancellation (b ~ 2.5e3, C2 ~ 1e-3). Out-of-model inputs (t <= C0, a negative discriminant, m <= 0)
+    // return NaN, never a plausible-looking 0.0 or the wrong mass a negative u would give.
     const double disc = b * b - 4.0 * C2 * (C0 - t);
-    // Out-of-model inputs return NaN, never 0.0: a zero m/z is a plausible-looking number that
-    // sorts first and propagates silently, which is the failure shape this file exists to remove.
     if (!(disc >= 0.0) || !(t > C0)) return std::numeric_limits<double>::quiet_NaN();
     const double denom = b + std::sqrt(disc);
     if (!(denom > 0.0)) return std::numeric_limits<double>::quiet_NaN();

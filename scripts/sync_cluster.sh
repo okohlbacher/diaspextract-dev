@@ -20,23 +20,17 @@ NODE=${1:-ibminode05}
 R=/scratch/kohlbach
 TOOLS=/ceph/ibmi/abi/oliver/spextract/tools
 TESTS=/ceph/ibmi/abi/oliver/spextract/tests
-SRC=src/spextractor.cpp
-INPUTS="$SRC src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
+INPUTS="src/spextractor.cpp src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
 # The e2e suite, its golden file (check 9 reads ../tests/calibration_golden.json), the gate chains'
 # digest/diff tools and the remote launcher: each drifted once when it did not travel with the source.
 SHIP="test/test_spextractor.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
 for f in $INPUTS $SHIP; do [ -f "$f" ] || { echo "REFUSED: $f does not exist - nothing changed" >&2; exit 1; }; done
-DIRT=$(git status --porcelain -- $INPUTS)
+DIRT=$(git status --porcelain -- $INPUTS); DIRTY=""
 if [ -n "$DIRT" ]; then
-  if [ "${2:-}" != "--allow-dirty" ]; then
-    printf 'REFUSED: build inputs have staged or unstaged changes. Commit first, or pass --allow-dirty.\n%s\n' "$DIRT" >&2; exit 1
-  fi
+  [ "${2:-}" = "--allow-dirty" ] || { printf 'REFUSED: build inputs have staged or unstaged changes. Commit first, or pass --allow-dirty.\n%s\n' "$DIRT" >&2; exit 1; }
   DIRTY="+dirty"
-else
-  DIRTY=""
 fi
 GITREV="$(git rev-parse --short HEAD)${DIRTY}"
-[ -z "$(for f in $INPUTS $SHIP; do basename "$f"; done | sort | uniq -d)" ] || { echo "REFUSED: two staged files share a name" >&2; exit 1; }
 TMP=$(mktemp -d); STAGE=""; HANDED=0
 trap 'rm -rf "$TMP"; [ -z "$STAGE" ] || [ "$HANDED" = 1 ] || ssh "$NODE" "rm -rf $STAGE" || true' EXIT
 shasum -a 256 $INPUTS $SHIP | sed 's#  .*/#  #' > "$TMP/SHA256SUMS"
@@ -54,12 +48,22 @@ BUILD_INPUTS="spextractor.cpp TdfMzCalibration.h TdfLoad.h MzPeakStreamLoad.h Dn
 dest() { if [ "$1" = TdfMzCalibration.h ]; then echo "$OMS/src/openms/include/OpenMS/FORMAT/$1"; else echo "$TOPP/$1"; fi; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 finish() {
-  rc=$?; set +e
+  rc=$?; set +e; trap '' HUP INT TERM   # a second signal must not abort the rollback half-way and strand the lock
+  # The rename is the commit point, not the flag: a failed mv, or a signal between the two, leaves $PROV.tmp behind.
+  if [ -e "$PROV.tmp" ]; then COMMITTED=0; rm -f "$PROV.tmp"; fi
   if [ "$COMMITTED" != 1 ]; then
+    UNDONE=""
     for f in $PROMOTED; do
       d=$(dest "$f")
-      if [ -e "$S/bak/$f" ]; then mv -f "$S/bak/$f" "$d" && touch "$d"; else rm -f "$d"; fi
+      if [ -e "$S/bak/$f" ]; then { mv -f "$S/bak/$f" "$d" && touch "$d"; } || UNDONE="$UNDONE $f"; else rm -f "$d" || UNDONE="$UNDONE $f"; fi
     done
+    # every backed-up input must hold its backup's bytes again (a directory in a file's place swallows the mv)
+    if [ -n "$PROMOTED" ] && [ -z "$UNDONE" ] && ! sha256sum -c --quiet "$S/restore.sha256"; then UNDONE=" (restore.sha256)"; fi
+    if [ -n "$UNDONE" ]; then
+      echo "FAIL-CLOSED: rollback incomplete for:$UNDONE; there is NO provenance. Kept the stage $S (bak/, prov.prev)" \
+           "and the lock $LOCK: put the backups back by hand, then rm -rf $S and rmdir $LOCK."
+      exit "$rc"
+    fi
     [ -z "$PROMOTED" ] || echo "ROLLED BACK every promoted build input:$PROMOTED"
     if [ -e "$S/prov.prev" ]; then
       if grep -qx "binary_sha256=$(sha "$BUILD/bin/spextractor")" "$S/prov.prev" &&
@@ -78,7 +82,12 @@ finish() {
   exit "$rc"
 }
 trap 'rm -rf "$S"' EXIT
-mkdir "$LOCK" 2>/dev/null || { echo "REFUSED: another deploy holds $LOCK ($(cat "$LOCK/owner" 2>/dev/null || echo 'owner unknown')) - nothing changed"; exit 1; }
+if ! mkdir "$LOCK" 2>/dev/null; then
+  OWNER=$(cat "$LOCK/owner" 2>/dev/null || echo 'owner unknown'); OPID=$(sed -n 's/^.* pid \([0-9][0-9]*\) .*$/\1/p' "$LOCK/owner" 2>/dev/null || true)
+  # a SIGKILLed, OOM-killed or rebooted transaction leaves the lock, and its stage holds what a recovery needs (bak/, prov.prev)
+  if [ -n "$OPID" ] && ! kill -0 "$OPID" 2>/dev/null; then OWNER="$OWNER; that pid is NOT running: a killed deploy left the lock and its stage"; fi
+  echo "REFUSED: another deploy holds $LOCK ($OWNER) - nothing changed"; exit 1
+fi
 COMMITTED=0; PROMOTED=""
 trap finish EXIT
 # Without these, a signal runs finish at once, while make is still writing bin/spextractor and libOpenMS.so, so
@@ -131,7 +140,7 @@ else
 fi
 if [ "$TDF_UT" != passed ]; then echo "tdf_load unit test SKIPPED: $TDF_UT" | tee "$U/test_tdf_load.log"; fi
 mkdir "$S/bak"
-for f in $BUILD_INPUTS; do d=$(dest "$f"); if [ -e "$d" ]; then cp -p "$d" "$S/bak/$f"; fi; done
+for f in $BUILD_INPUTS; do d=$(dest "$f"); if [ -e "$d" ]; then cp -p "$d" "$S/bak/$f"; printf '%s  %s\n' "$(sha "$S/bak/$f")" "$d"; fi; done > "$S/restore.sha256"
 for f in $BUILD_INPUTS; do printf '%s  %s\n' "$(awk -v f="$f" '$2 == f {print $1}' SHA256SUMS)" "$(dest "$f")"; done > promoted.sha256
 # No provenance while the tree is in flux: a hard kill from here on leaves none rather than a stale one.
 if [ -e "$PROV" ]; then mv -f "$PROV" "$S/prov.prev"; fi
@@ -147,8 +156,6 @@ fi
 # A writer outside the lock (a hand copy, a patch script) during the build would make the provenance a lie.
 sha256sum -c --quiet promoted.sha256 || { echo "REFUSED: a build input changed during the build"; exit 2; }
 cd "$BUILD"
-# tool_headers_sha256 covers DnoiseMs1.h since 2026-09-10 (the dnoise MS1 port): earlier deploys hashed two files.
-# tdf_load_unit_test since 2026-09-10 (fix pass G): passed, or skipped(<why>) on a node without SQLite.
 HDRS_SHA=$(cat "$TOPP/TdfLoad.h" "$TOPP/MzPeakStreamLoad.h" "$TOPP/DnoiseMs1.h" | sha256sum | cut -d' ' -f1)
 OMSVER=$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
 EPD=$OMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp

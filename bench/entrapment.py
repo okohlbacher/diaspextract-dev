@@ -8,7 +8,7 @@ SCORE THRESHOLD sliding down as decoys were deleted, not new signal. A nominal F
 that, because the thing that moved IS the nominal FDR's own calibration.
 
 Entrapment measures the ERROR RATE DIRECTLY. A foreign proteome is concatenated to the human
-target database; the sample is human liver, so ANY peptide identified from the foreign proteome is
+target database; the sample is human, so ANY peptide identified from the foreign proteome is
 a known false positive, counted rather than modelled. This is the accepted validation when the
 search space or the scoring changes (Wen, Freestone, Noble, Kall, Nesvizhskii, Nat Methods 2025).
 

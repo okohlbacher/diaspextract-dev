@@ -17,17 +17,7 @@ namespace dn = spx::dnoise;
 using spextractor::TdfDnoiseInputs;
 
 static int g_fail = 0;
-#define CHECK(cond, ...)                              \
-  do                                                  \
-  {                                                   \
-    if (!(cond))                                      \
-    {                                                 \
-      std::fprintf(stderr, "FAIL line %d: ", __LINE__); \
-      std::fprintf(stderr, __VA_ARGS__);              \
-      std::fputc('\n', stderr);                       \
-      ++g_fail;                                       \
-    }                                                 \
-  } while (0)
+#define CHECK(cond, ...) do { if (!(cond)) { std::fprintf(stderr, "FAIL line %d: ", __LINE__); std::fprintf(stderr, __VA_ARGS__); std::fputc('\n', stderr); ++g_fail; } } while (0)
 
 static std::filesystem::path g_dir;
 static constexpr long kPageSize = 4096;
@@ -61,6 +51,13 @@ static std::string dShaped(int n_frames = 10, int n_windows = 24, const char* wi
          "WITH RECURSIVE k(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM k WHERE i < " + std::to_string(n_windows - 1) + ")"
          "  INSERT INTO " + windows + " SELECT 1 + i % 12, 34 + (i * 7) % 400, 500 + (i * 13) % 400, 400.0 + 0.5 * i, 25.0, 30.0 FROM k;";
   return s;
+}
+
+/// @p table rebuilt with only the columns @p keep: a column dropped without ALTER TABLE DROP COLUMN, which needs SQLite 3.35.
+static std::string keepColumns(const std::string& table, const char* keep)
+{
+  return "CREATE TABLE " + table + "_kept AS SELECT " + keep + " FROM " + table + "; DROP TABLE " + table + "; ALTER TABLE " + table +
+         "_kept RENAME TO " + table + ";";
 }
 
 static std::string makeTdf(const std::string& name, const std::string& sql)
@@ -153,7 +150,7 @@ static void testWindows()
         "absent: no DiaFrameMsMsWindows table is no gate, not a refusal (%s)", why.c_str());
   CHECK(loads(makeTdf("lower.tdf", dShaped(10, 24, "diaframemsmswindows")), in, why) && in.windows.size() == 24,
         "the table name resolves case-insensitively: %s, %zu windows", why.c_str(), in.windows.size());
-  refused("nocol", dShaped() + "ALTER TABLE DiaFrameMsMsWindows DROP COLUMN IsolationWidth;", "IsolationWidth");
+  refused("nocol", dShaped() + keepColumns("DiaFrameMsMsWindows", "WindowGroup, ScanNumBegin, ScanNumEnd, IsolationMz, CollisionEnergy"), "IsolationWidth");
   refused("null_begin", dShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumBegin = NULL WHERE rowid = 3;", "NULL ScanNumBegin");
   refused("null_end", dShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumEnd = NULL WHERE rowid = 3;", "ScanNumEnd");
 
@@ -204,7 +201,7 @@ static void testFrames()
   refused("no_frames", dShaped() + "DELETE FROM Frames;", "no Frames rows");
   refused("no_metadata", dShaped() + "DROP TABLE GlobalMetadata;", "GlobalMetadata");
   refused("no_timscal", dShaped() + "DROP TABLE TimsCalibration;", "linear");
-  refused("no_timscal_col", dShaped() + "ALTER TABLE Frames DROP COLUMN TimsCalibration;", "TimsCalibration");
+  refused("no_timscal_col", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, MzCalibration, T1"), "TimsCalibration");
   refused("modeltype", dShaped() + "UPDATE TimsCalibration SET ModelType = 1;", "ModelType 1");
   {
     std::string w;
@@ -253,7 +250,6 @@ static void testAccumulationTime()
   for (const char* text : {"99,953", "abc", "0", "-99.958", " 99.958", "99.958ms", ""})
     refused(("acc_bad" + std::to_string(k++)).c_str(), dShaped() + "UPDATE Frames SET AccumulationTime = '" + text + "' WHERE Id = 6;", "AccumulationTime");
   refused("acc_null", dShaped() + "UPDATE Frames SET AccumulationTime = NULL WHERE Id = 6;", "AccumulationTime");
-  double corr = 0.0;
   CHECK(loads(makeTdf("acc_text.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
           in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "AccumulationTime as TEXT and as REAL: %s", why.c_str());
   // above 100 ms the correction loads, and the setup refusal names it
@@ -273,10 +269,12 @@ static void testAccumulationTime()
       CHECK(loads(makeTdf("acc_de.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
               in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "under de_DE: %s", why.c_str());
       refused("acc_de_comma", dShaped() + "UPDATE Frames SET AccumulationTime = '99,953' WHERE Id = 6;", "AccumulationTime");
+      spextractor::TdfAxisBounds bd;   // the preflight's GlobalMetadata bounds parse in the C locale too
+      CHECK(spextractor::loadTdfAxisBounds(makeTdf("bounds_de.tdf", dShaped()), bd, why) && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0 && bd.n_bins == 634073,
+            "loadTdfAxisBounds under de_DE: %s", why.c_str());
     }
     std::setlocale(LC_NUMERIC, saved.c_str());
   }
-  (void)corr;
   if (!comma) std::printf("    (no de_DE locale here: the LC_NUMERIC case is skipped)\n");
 }
 
@@ -288,11 +286,21 @@ static void testCalibrationAndBounds()
   const std::string ok = makeTdf("cal_ok.tdf", dShaped());
   CHECK(spextractor::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
         "loadTdfCalibration: %s", why.c_str());
-  CHECK(spextractor::loadTdfCalibration(makeTdf("cal_nocol.tdf", dShaped() + "ALTER TABLE Frames DROP COLUMN MzCalibration;"), cal, t1, why),
+  CHECK(spextractor::loadTdfCalibration(makeTdf("cal_nocol.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1")), cal, t1, why),
         "no Frames.MzCalibration column and one MzCalibration row: %s", why.c_str());
-  CHECK(!spextractor::loadTdfCalibration(makeTdf("cal_nocol2.tdf", dShaped() + "ALTER TABLE Frames DROP COLUMN MzCalibration;"
+  CHECK(!spextractor::loadTdfCalibration(makeTdf("cal_nocol2.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1") +
                                                  "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"),
                                          cal, t1, why) && has(why, "need exactly 1"), "no column and two rows: %s", why.c_str());
+  // a generated Frames.MzCalibration column (SQLite 3.31+) is the frames' reference like a stored one: PRAGMA table_info skips it
+  if (sqlite3_libversion_number() >= 3031000)
+    CHECK(spextractor::loadTdfCalibration(makeTdf("cal_generated.tdf", dShaped() +
+                                                   "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, 2 * C1, C2, dC2, C3, C4 FROM MzCalibration;"
+                                                   "ALTER TABLE Frames RENAME TO F0;"
+                                                   "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1,"
+                                                   "  MzCalibration GENERATED ALWAYS AS (1));"
+                                                   "INSERT INTO Frames SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1 FROM F0; DROP TABLE F0;"),
+                                           cal, t1, why) && cal.C1 == 155279.13067653627 && t1.size() == 11,
+          "a generated MzCalibration column and two rows: %s", why.c_str());
   CHECK(!spextractor::loadTdfCalibration(makeTdf("cal_two.tdf", dShaped() + "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"
                                                  "UPDATE Frames SET MzCalibration = 2 WHERE Id = 4;"), cal, t1, why) && has(why, "2 distinct"),
         "frames on two MzCalibration rows: %s", why.c_str());

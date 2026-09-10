@@ -227,6 +227,47 @@ ok "S12 uncommitted build input: rc 1, REFUSED naming the file, node unchanged" 
 rc=$(deploy $V/repoA $V/s12b.out --allow-dirty)
 ok "S12b node argument + --allow-dirty: commits the working-tree bytes as <rev>+dirty (rc $rc)" '[ $rc = 0 ] && same $V/repoA/src/TdfLoad.h $O/src/topp/TdfLoad.h && [ "$(pv git $PROV)" = "$(cat $V/ver/v14/REV)+dirty" ] && prov_truthful && ut_is passed && clean'
 
+# Stage-3 review (deploy-1) F1/F2/F9: the commit point, a verified rollback, a stale or interrupted lock.
+reset_node() {  # drop whatever the previous scenario left (lock, stage, provenance debris), then commit version $1 (calibration $2)
+  chmod u+w $O/src/topp; rm -rf $R/.deploy.lock $PROV.tmp $PROV.stale; [ -f $PROV ] || rm -rf $PROV
+  find $R -maxdepth 1 -type d -name '.deploy.stage.*' -exec rm -rf {} +
+  set_version $V/repoA $1 $2 1 1; local rc; rc=$(deploy $V/repoA $V/reset_$1.out); [ $rc = 0 ] && tree_is $1 && prov_truthful && clean; }
+ok "S4b setup: a clean committed v15" 'reset_node v15 c15'
+sh -c 'exit 0' & DEAD=$!; wait $DEAD
+mkdir $R/.deploy.lock && echo "$R/.deploy.stage.dead00 pid $DEAD 2026-09-10T00:00:00+0200" > $R/.deploy.lock/owner
+S=$(snap); set_version $V/repoA v16 c16 1 1; rc=$(deploy $V/repoA $V/s4b.out)
+ok "S4b lock left by a dead pid: rc 1, node unchanged, the refusal says the owner is not running" '[ $rc = 1 ] && [ "$S" = "$(snap)" ] && grep -q "is NOT running" $V/s4b.out'
+rm -rf $R/.deploy.lock
+# a touch that stalls once the flag exists: the flag goes up mid-build, so only the rollback's touch stalls
+REAL_TOUCH=$(command -v touch)
+printf '#!/usr/bin/env bash\nif [ -e %s/slow_touch ]; then : > %s/slow_touch.hit; sleep 1; fi\nexec %s "$@"\n' "$V" "$V" "$REAL_TOUCH" > $V/shim/touch; chmod +x $V/shim/touch
+printf '3\n' > $O/slow; set_version $V/repoA v17 c15 1 1 BREAK_BUILD
+( deploy $V/repoA $V/s9b.out > $V/s9b.rc ) &
+wait_for $O/building; PID=$(sed -n 's/^.* pid \([0-9][0-9]*\) .*$/\1/p' $R/.deploy.lock/owner); : > $V/slow_touch
+wait_for $V/slow_touch.hit && kill -TERM "$PID"
+wait; rc=$(cat $V/s9b.rc); rm -f $V/shim/touch $V/slow_touch $V/slow_touch.hit; printf '0\n' > $O/slow
+ok "S9b a TERM during the rollback: every input restored, provenance truthful, lock released (rc $rc)" 'tree_is v15 && prov_is v15 && prov_truthful && grep -q "ROLLED BACK" $V/s9b.out && clean'
+
+ok "S13 setup: a clean committed v18" 'reset_node v18 c18'
+cp $PROV $V/prov_v18
+printf '3\n' > $O/slow; set_version $V/repoA v19 c19 1 1
+( deploy $V/repoA $V/s13.out > $V/s13.rc ) &
+wait_for $O/building && mkdir -p $PROV/spextractor.provenance.tmp   # the old provenance is parked: a directory in its place fails the rename
+wait; rc=$(cat $V/s13.rc); printf '0\n' > $O/slow
+ok "S13 a failed provenance rename is never reported as a commit (rc $rc)" '[ $rc != 0 ] && ! grep -q "^COMMITTED (binary + provenance)" $V/s13.out'
+ok "S13 it rolls back like a failed build: inputs v18, no provenance.tmp, old provenance parked, clean" 'tree_is v18 && grep -q "ROLLED BACK" $V/s13.out && [ ! -e $PROV.tmp ] && same $PROV.stale $V/prov_v18 && clean'
+
+ok "S14 setup: a clean committed v20" 'reset_node v20 c20'
+cp $PROV $V/prov_v20
+printf '3\n' > $O/slow; set_version $V/repoA v21 c20 1 1 BREAK_BUILD   # calibration unchanged: the failed build leaves lib and binary as they were
+( deploy $V/repoA $V/s14.out > $V/s14.rc ) &
+wait_for $O/building && chmod a-w $O/src/topp   # four of the five restores now fail with EACCES
+wait; rc=$(cat $V/s14.rc); chmod u+w $O/src/topp; printf '0\n' > $O/slow
+ST=$(find $R -maxdepth 1 -type d -name '.deploy.stage.*' | head -1)
+ok "S14 a failed rollback rename is not reported as a complete rollback (rc $rc)" '[ $rc = 2 ] && ! grep -q "ROLLED BACK every" $V/s14.out && grep -q "rollback incomplete" $V/s14.out'
+ok "S14 the unrestored backups, the parked provenance and the lock are kept" '[ -e $R/.deploy.lock ] && [ -n "$ST" ] && same $ST/bak/spextractor.cpp $V/ver/v20/src/spextractor.cpp && same $ST/prov.prev $V/prov_v20'
+ok "S14 no provenance is put back over a tree that still holds the failed deploy's source" '[ ! -e $PROV ] || [ "$(pv src_sha256 $PROV)" = "$(shaf $O/src/topp/spextractor.cpp)" ]'
+
 echo "== $PASS passed, $FAIL failed"
 if [ "$FAIL" = 0 ]; then rm -rf "$V"; else echo "   fixture kept for inspection: $V"; fi
 [ "$FAIL" = 0 ]

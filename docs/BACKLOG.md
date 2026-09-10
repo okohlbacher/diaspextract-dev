@@ -14,7 +14,7 @@ docs/BASELINE.md:457-463, C7), and NNLS was cut on that result (CHANGELOG.md v0.
 apportion run: -3.9% peptides (falsified again; NNLS cut)"; docs/BACKLOG-ANALYSIS-2026-09-02.md). The
 reasoning below is kept as written; do not re-propose without a new prerequisite.
 
-**The idea.** Today `scoreCandidates_` asks a *pairwise* question, one precursor at a time:
+**The idea.** Today the scorer in `assembleOne_` asks a *pairwise* question, one precursor at a time:
 does fragment `f`'s elution profile correlate with precursor `p`'s? Every co-eluting precursor
 asks independently, so under share-all a fragment is emitted into all of them at full intensity
 (measured mean fan-out 6.45). Nothing ever asks the *joint* question.
@@ -589,8 +589,6 @@ identification deficit. S-class: both engines and entrapment on both acquisition
   frozen frame count per window (judged plan item 12; Kimi 9b).
 - **Band edges from the acquisition range (3a)** so that a reader that never sees the whole slab
   can compute `wbands`; a G-class re-pin (`tlo = 0`, `thi` from `MzAcqRangeUpper`).
-- **Log semantics at K > 1**: `[gstat]` is per (window, tile) with `G_live` tile-local; the
-  window-file row is written once per tile; `w_tlo/w_thi` are 0 on the empty-slab branch (Kimi 9).
 
 ### mzML input keeps the slab as its frame table (2026-09-10, deliberate)
 
@@ -952,23 +950,26 @@ as after the last rename. Do the cluster part only when no chain is running.
 
 ### After the dnoise port and the MS1 prune: open items and default decisions (2026-09-10)
 
-**Decisions for the user**, each measured with identical output. Final-build numbers (arm `dnoise_s2b`, dnoise and
-prune on) are in docs/reviews/2026-09-10-dnoise-port/final-matrix.md.
-- **The tile default.** The shipped default is one tile (`tile:cells_per_tile 0`). With dnoise and the prune on, the
-  tile count is the largest memory lever:
+**Decisions for the user: DECIDED 2026-09-11**, each measured with identical output. Final-build numbers (arm
+`dnoise_s2b`, dnoise and prune on) are in docs/reviews/2026-09-10-dnoise-port/final-matrix.md.
+- **The tile default: adopted.** `tile:cells_per_tile` defaults to 1 (one 600-s cell per tile) since 2026-09-11; it
+  was 0 (one tile). With dnoise and the prune on, the tile count is the largest memory lever:
   - TNBC 009 (`data`, back to back): 99.70 GB at one tile against 21.07 GB at 13 tiles with a trim between tiles;
     wall 9:42 against 9:57.
-  - D (ibminode05): 37.44 GB at one tile against 22.48 GB at 3 tiles; wall 3:15 against 3:41.
+  - D (ibminode05): 37.44 GB at one tile against 22.48 GB at 3 tiles (21.99 GB with the trim between tiles); wall
+    3:15 against 3:41 (3:47 with the trim).
   - data6-tile-count.md has the curves.
-- **A trim between tiles** (`SPEXTRACTOR_TILE_TRIM`). It takes about 4 GB off TNBC 009 with or without dnoise, where
-  retention builds up across tiles, and 0.5 GB off D, where the growth is inside a tile.
-- **An eager glibc trim threshold as a default.** Either `mallopt(M_TRIM_THRESHOLD, 64 MiB)` plus `M_TOP_PAD 0` at
-  startup, or the `MALLOC_TRIM_THRESHOLD_` / `MALLOC_TOP_PAD_` environment variables.
+- **A trim between tiles: adopted**, folded into `perf:malloc_trim` (the `SPEXTRACTOR_TILE_TRIM` probe is gone). It
+  takes about 4 GB off TNBC 009 with or without dnoise, where retention builds up across tiles, and 0.5 GB off D,
+  where the growth is inside a tile.
+- **An eager glibc trim threshold as a default: not adopted.** It goes only 0.3 GB below the between-tile trim on
+  TNBC 009, nearly triples its MS1 load, and costs 11% wall on D. Either `mallopt(M_TRIM_THRESHOLD, 64 MiB)` plus
+  `M_TOP_PAD 0` at startup, or the `MALLOC_TRIM_THRESHOLD_` / `MALLOC_TOP_PAD_` environment variables.
   - On the final build it takes 4.3 GB off D (22.48 → 18.14 GB, wall 3:41 → 4:06).
   - On TNBC 009 at 13 tiles it reaches 20.73 GB, against 21.07 GB with the between-tile trim, but it nearly triples
     the MS1 load (34.3 → 96.3 s).
   - On earlier builds it cut 14-22% of the peak on every input tried.
-  - Measure the wall on a quiet node first.
+  - If it is revisited, measure the wall on a quiet node first.
 
 **TNBC 009's wall change with dnoise depends on the node and the run.**
 - Faster on `data`: 10:48 → 9:42 at one tile.

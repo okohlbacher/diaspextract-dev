@@ -65,8 +65,9 @@ jobs:
 
       # scripts/sync_cluster.sh's deploy transaction (stage, lock, unit tests from the stage, rollback, fail-closed
       # provenance) against a fake node; it never contacts a host. One leg is enough: it tests a bash script.
+      # Skipped where scripts/sync_cluster.sh is absent (the public repository).
       - name: Deploy transaction harness (scripts/sync_cluster.sh against a fake node)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && hashFiles('scripts/sync_cluster.sh') != ''
         run: bash tests/test_sync_cluster_txn.sh
 
       - name: Calibration golden test (Python reference implementation)

@@ -21,15 +21,9 @@
 #include <mzpeak/spectrum.h>
 #include <mzpeak/spectrum_metadata.h>
 
-// [D1 exact m/z] the archive stores raw TOF behind a two-point transform; the exact ModelType-1 calibration
-// lives only in the embedded vendor/analysis.tdf.gz. Recover tof = round((sqrt(mz) - c0) / c1) and re-apply
-// TdfMzCalibration per frame. ON BY DEFAULT and fail-closed; SPEXTRACTOR_MZPEAK_EXACT=0 disables it and
-// falls back to the archive's two-point transform, which costs ~12% of identified peptides.
-#include <OpenMS/FORMAT/TdfMzCalibration.h>   // installed by the OpenMS patch (same header as src/TdfMzCalibration.h)
 #include <zip.h>
 #include <zlib.h>
 #include <arrow/api.h>
-#include <arrow/io/memory.h>
 #include <parquet/file_reader.h>
 #include <parquet/arrow/schema.h>
 #include <cstdio>
@@ -51,16 +45,13 @@
 #include <vector>
 #include <cstring>
 #include <stdexcept>
-#ifdef _OPENMP
 #include <omp.h>
-#endif
 
 namespace spx
 {
   struct MzPeakWin { double lo, hi, im_lo, im_hi; };
 
-  /// Calibration provenance of the last mzPeak load (the archive's two-point tof transform, applied by the
-  /// library; NOT the TDF table model). Stamped into the output instead of BrukerTimsFile's state.
+  /// Calibration provenance of the last mzPeak load (the exact TDF model, or the archive's two-point transform), stamped as spx:mz_calibration.
   inline std::string& lastMzPeakCalibration() { static std::string s = "unset"; return s; }
 
 
@@ -71,7 +62,6 @@ namespace spx
     double c0 = 0, c1 = 0;
     spextractor::TdfMzCalibration cal;
     std::vector<double> t1_by_frame;          // index = Frames.Id
-    bool enabled = false;
     double acq_lo = std::numeric_limits<double>::quiet_NaN(), acq_hi = std::numeric_limits<double>::quiet_NaN();   // GlobalMetadata MzAcqRange
     long n_bins = 0; std::string bounds_why;                                                                        // DigitizerNumSamples, or why not
 
@@ -141,7 +131,6 @@ namespace spx
           std::string w2; spextractor::TdfAxisBounds bd;
           if (spextractor::loadTdfAxisBounds(std::string(tmpl), bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
         std::remove(tmpl);
-        enabled = true;
       }
       catch (...) { zip_close(z); throw; }
       zip_close(z);
@@ -172,19 +161,15 @@ namespace spx
     }
   };
 
-  /// The exact calibration of the last streamed archive, kept so the tool can build its flight-time
-  /// axis from the embedded tdf instead of demanding a sidecar (null when the archive had none).
-  inline std::shared_ptr<const MzPeakExactMz>& lastMzPeakExact() { static std::shared_ptr<const MzPeakExactMz> p; return p; }
-
   /// One decoded frame split per window (index-aligned with `wins` of that frame).
   inline void frameToSpectra_(const MzPeak::Spectrum& sp, double rt, std::size_t frame_idx,
                               const std::vector<MzPeakWin>& wins, std::vector<OpenMS::MSSpectrum>& out,
-                              const MzPeakExactMz* exact = nullptr, long frame_id = -1)
+                              const MzPeakExactMz* exact, long frame_id)
   {
     using namespace OpenMS;
     std::vector<double> mz_exact;
-    if (exact && exact->enabled) { mz_exact = sp.mz(); exact->exact(mz_exact, frame_id); }
-    const std::vector<double>& mz = (exact && exact->enabled) ? mz_exact : sp.mz();
+    if (exact) { mz_exact = sp.mz(); exact->exact(mz_exact, frame_id); }
+    const std::vector<double>& mz = exact ? mz_exact : sp.mz();
     const std::vector<float>& in = sp.intensity();
     const std::vector<double>& im = sp.ion_mobility_array();
     // Array lengths must agree. Truncating to the shorter one turns a malformed archive into a
@@ -194,8 +179,7 @@ namespace spx
             "mzPeak frame has mismatched m/z and intensity array lengths",
             std::to_string(mz.size()) + " vs " + std::to_string(in.size()));
     const std::size_t n = mz.size();
-    const bool have_im = im.empty() || im.size() >= n;
-    if (!im.empty() && im.size() < n)
+    if (im.size() < n)
       throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "mzPeak frame has a short ion-mobility array", std::to_string(im.size()));
     out.assign(wins.size(), MSSpectrum());
@@ -206,9 +190,7 @@ namespace spx
       spec.setRT(rt);
       spec.setMSLevel(wins.size() == 1 && !(win.lo < win.hi) ? 1 : 2);
       spec.setDriftTimeUnit(DriftTimeUnit::VSSC);
-      // "frame=<Id>" is the vendor frame id the per-frame calibration factor is keyed on; without it
-      // frameIdOf() returned 0 and the integer detector never ran on mzPeak input (fell back to
-      // openms with a warning). "mzpeak=" stays the archive index.
+      // "frame=<Id>" keys the per-frame calibration (without it the integer detector falls back); "mzpeak=" is the archive index.
       spec.setNativeID("mzpeak=" + std::to_string(frame_idx) + (frame_id >= 0 ? " frame=" + std::to_string(frame_id) : std::string())
                        + " window=" + std::to_string(w));
       if (spec.getMSLevel() == 2)
@@ -226,8 +208,8 @@ namespace spx
       spec.reserve(n / wins.size() + 64); im_array.reserve(n / wins.size() + 64);
       for (std::size_t k = 0; k < n; ++k)
       {
-        const double k0 = have_im ? im[k] : 0.0;
-        if (have_im && (k0 < win.im_lo || k0 > win.im_hi)) continue;
+        const double k0 = im[k];
+        if (k0 < win.im_lo || k0 > win.im_hi) continue;
         if (!(in[k] > 0)) continue;
         spec.emplace_back(mz[k], in[k]);
         im_array.push_back(static_cast<float>(k0));
@@ -270,9 +252,8 @@ namespace spx
   {
     if (lastMzPeakMeta() && lastMzPeakMeta()->path == path)
     {
-      // a cache hit republishes the "last" accessors: a failed sweep of another archive in
-      // between may have reset them (Codex, frame-tables review)
-      lastMzPeakExact() = lastMzPeakMeta()->exact; lastMzPeakCalibration() = lastMzPeakMeta()->calibration;
+      // a failed sweep of another archive in between may have reset it (frame-tables review)
+      lastMzPeakCalibration() = lastMzPeakMeta()->calibration;
       return lastMzPeakMeta();
     }
     auto meta = std::make_shared<MzPeakRunMeta>();
@@ -287,15 +268,11 @@ namespace spx
     std::vector<std::size_t>& ms1 = meta->ms1; std::vector<std::size_t>& ms2 = meta->ms2;
     meta->n_peaks.assign(n, -1);
     std::shared_ptr<MzPeakExactMz>& exact = meta->exact;
-    lastMzPeakExact().reset();
-    // DEFAULT ON (2026-09-02 18:58): with the exact model recovered from the tdf, mzPeak input gives 12,082 Sage
-    // peptides vs 10,785 with the archive's two-point transform (and 12,217 from .d): the transform was 91% of the
-    // loss. Fail closed like the .d path: no tdf (embedded or SPEXTRACTOR_MZPEAK_TDF sidecar) -> error, unless
-    // SPEXTRACTOR_MZPEAK_EXACT=0 explicitly accepts the two-point m/z.
+    // Exact TDF model by default, fail closed like the .d path; the refusal below names the cost and both escapes.
     const char* ex = std::getenv("SPEXTRACTOR_MZPEAK_EXACT");
     if (!(ex && std::string(ex) == "0"))
     {
-      try { exact = std::make_shared<MzPeakExactMz>(path); lastMzPeakExact() = exact; }
+      try { exact = std::make_shared<MzPeakExactMz>(path); }
       catch (const std::exception& e)
       {
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
@@ -351,23 +328,14 @@ namespace spx
   }
 
   /// Stream an .mzpeak run into `consumer` (MS1 first, then MS2 per (frame, window), frame order).
-  /// Returns the number of frames seen.
-  inline std::size_t loadMzPeakStreaming(const std::string& path, OpenMS::FullSwathFileConsumer& consumer, int threads)
+  inline void loadMzPeakStreaming(const std::string& path, OpenMS::FullSwathFileConsumer& consumer, int threads)
   {
     // 1) the run metadata (cached sweep)
     const std::shared_ptr<const MzPeakRunMeta> meta = mzPeakRunMeta(path);
-    const std::vector<double>& rt = meta->rt;
-    const std::vector<long>& frame_id = meta->frame_id;
-    const std::vector<std::vector<MzPeakWin>>& wins = meta->wins;
-    const std::vector<std::size_t>& ms1 = meta->ms1;
-    const std::vector<std::size_t>& ms2 = meta->ms2;
-    const std::shared_ptr<MzPeakExactMz>& exact = meta->exact;
+    const MzPeakRunMeta& m = *meta;
 
     // 2) decode in parallel over contiguous ranges (row-group locality), hand off serially in order
-    int nthr = std::max(1, threads);
-#ifdef _OPENMP
-    nthr = std::min(nthr, std::max(1, omp_get_max_threads()));
-#endif
+    const int nthr = std::min(std::max(1, threads), std::max(1, omp_get_max_threads()));
     auto run = [&](const std::vector<std::size_t>& ids)
     {
       const std::size_t per = 12;                                  // frames per thread per batch (~1 row group)
@@ -384,23 +352,21 @@ namespace spx
           try
           {
             const std::size_t c0 = b0 + (std::size_t)c * per, c1 = std::min(b1, c0 + per);
-            // one reader per THREAD (not per work item): MzPeak::open re-reads the zip directory and
-            // every parquet footer; ~1,450 opens cost ~1 h of system time on dataset D (measured 13:55).
+            // one reader per THREAD: MzPeak::open re-reads the zip directory and every parquet footer
             static thread_local std::unique_ptr<MzPeak::Index> tidx;   // Index is neither movable nor copyable:
             static thread_local std::string tidx_path;                  // construct it from the prvalue (elided)
             if (!tidx || tidx_path != path) { tidx.reset(new MzPeak::Index(MzPeak::open(path))); tidx_path = path; }
             MzPeak::Spectra tsp = tidx->spectra();
             std::vector<std::size_t> want(ids.begin() + (std::ptrdiff_t)c0, ids.begin() + (std::ptrdiff_t)c1);
             std::vector<MzPeak::Spectrum> got = tsp.get_spectra_batch(want);
-            // A short batch result used to be clamped away with min(), leaving the tail frames as
-            // empty spectra: fewer peaks, no warning, and a run that still reports success.
+            // A short batch is an error, never silently fewer frames.
             if (got.size() != want.size())
               throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                     "mzPeak reader returned fewer frames than requested",
                     std::to_string(got.size()) + " of " + std::to_string(want.size()));
             auto& slot = out[(std::size_t)c]; slot.resize(want.size());
             for (std::size_t k = 0; k < want.size(); ++k)
-              frameToSpectra_(got[k], rt[want[k]], want[k], wins[want[k]], slot[k], exact.get(), frame_id[want[k]]);
+              frameToSpectra_(got[k], m.rt[want[k]], want[k], m.wins[want[k]], slot[k], m.exact.get(), m.frame_id[want[k]]);
           }
           catch (...)
           {
@@ -413,9 +379,8 @@ namespace spx
           if (!spec.empty()) consumer.consumeSpectrum(spec);
       }
     };
-    run(ms1);
-    run(ms2);
-    return ms1.size() + ms2.size();
+    run(m.ms1);
+    run(m.ms2);
   }
 } // namespace spx
 #endif // SPEXTRACTOR_WITH_MZPEAK
