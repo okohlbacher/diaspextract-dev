@@ -2936,3 +2936,40 @@ tile k+1 depends only on window w of tile k: 24 independent chains, not a barrie
 ready flag over a global (window, tile) work list removes the edge for zero redundant work, which
 is what makes the redundant-boundary-cell idea (56% extra peaks re-read) unnecessary on one
 machine.
+
+
+### Cell grid, step 3b: the .d streaming source, gated (2026-09-10)
+
+Commits 933bba5 (the two-pass source) and dbcfa9c (the review fixes; docs/reviews/2026-09-10-tiled-reader/).
+Pass 1 reads MS1 only and the loader exports the whole DIA frame table anyway; pass 2 calls the
+patched loader once per tile over `Config::dia_ms2_rt_lo/hi`, into a fresh consumer lockstep-padded
+against the tile's slice of the frozen tables. `SPEXTRACTOR_TILE_RESIDENT=1` keeps the resident
+source for a same-build control.
+
+**Gate (ibminode05, 54a7721, chain `step3b`, 07:40-09:23): 14 arms, every one SPECTRUM DATA
+IDENTICAL to its pin, none differing.** G0 one tile on D at 600 / 300 / -1 `trace` and on TNBC at
+600; G1 D at 300 as 2, 3 and 6 tiles at 8 and 100 threads; the resident control on the same build;
+TNBC at 600 as 13 tiles. Every arm reported its frames: 32,210 window frames delivered on D and
+134,312 on TNBC, 0 padded, 0 absent, and `[tile] coverage` accounted every precursor-window pair
+exactly once (710,356 on D at one tile; 4,206,205 on TNBC over 13 tiles).
+
+**What it costs and what it saves:**
+
+| | resident | streaming, 1 tile | streaming, tiled |
+|---|---:|---:|---:|
+| D at 600, wall / peak | 2:34 / 47.2 GB | 2:27 / 41.1 GB | 2:57 / 31.8 GB (3 tiles) |
+| **TNBC 009 at 600, wall / peak** | 13:12 / **124.1 GB** | 13:49 / **109.9 GB** | 11:33 / **70.9 GB** (13 tiles) |
+
+On the two-hour file the streaming source alone takes 14 GB off the peak (the MS1 map and the MS2
+slabs no longer coexist) and tiling takes another 39 GB: **124.1 -> 70.9 GB, -43%, at -12% wall**.
+The remaining 70.9 GB is the MS1 pass, which pass 2 never touches.
+
+**Every failure the chain reported was in its own instrumentation, not the tool:** eleven arms
+failed a stamp assertion whose grep did not allow for OpenMS's `type="xsd:string"` attribute
+between `name` and `value`; the chained slab digest was seeded from a zero-initialised map entry
+instead of the FNV offset basis it must share with the whole-window digest; and the e2e suite
+could not run at all (the synthetic tdf fixture predated the band-edge default's metadata
+requirement, and an early refusal fired on mzML inputs that have no tdf and are supposed to fall
+back quietly). All three are fixed (2b1f6e3, 8e2f1c0, 906e758) and re-checked by the `verify`
+chain on the rebuilt binary. **A gate whose failures are all in the gate is not a passing gate:
+it is a gate that has to be re-run, which is what the verify chain is for.**
