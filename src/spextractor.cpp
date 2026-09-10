@@ -926,9 +926,9 @@ namespace
   /// every (tof, intensity bits, imq) tuple in frame order. Unlike detDigest_ it is NOT sorted, so a
   /// reordered equal-intensity peak or a tuple swapped between frames changes it -- which is what a
   /// representation change of the store must not do. [det]
-  static uint64_t slabDigest_(const PeakSlab& sl)
+  static uint64_t slabDigest_(const PeakSlab& sl, uint64_t seed = 1469598103934665603ULL)
   {
-    uint64_t h = 1469598103934665603ULL;
+    uint64_t h = seed;
     auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
     for (size_t f = 0; f < sl.frames(); ++f)
     {
@@ -3332,6 +3332,10 @@ protected:
     // load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
     // tdf is recovered, below). Milliseconds against minutes of loading.
     const bool band_edges_acq = (getStringOption_("trace:band_edges") == "acquisition");
+    if (!band_edges_acq && getStringOption_("trace:detector") == "integer" && getStringOption_("perf:stream_load") == "true"
+        && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF && !std::getenv("SPEXTRACTOR_TILE_RESIDENT"))
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or SPEXTRACTOR_TILE_RESIDENT=1 for the resident source.");
     if (band_edges_acq && std::getenv("SPEXTRACTOR_WINDOW_FILE"))   // an option x env conflict: refuse in milliseconds
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "SPEXTRACTOR_WINDOW_FILE overrides the band edges per window (a slab-mode probe); it cannot be combined with trace:band_edges=acquisition.");
@@ -3390,7 +3394,12 @@ protected:
 #else
       const bool in_mzpeak = false;
 #endif
-      tile_source = !in_mzpeak && std::getenv("SPEXTRACTOR_TILE_RESIDENT") == nullptr;
+      // [3b] the streaming source needs the Bruker loader: a .d only, never an mzML or an mzPeak
+      // archive (the resident path reads those whole). SPEXTRACTOR_TILE_RESIDENT=1 forces the
+      // resident source for a same-build A/B; any other value leaves the default.
+      { const char* r = std::getenv("SPEXTRACTOR_TILE_RESIDENT");
+        const bool force_resident = r && String(r) != "0" && String(r) != "";
+        tile_source = !in_mzpeak && !force_resident && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF; }
       if (tile_source)
       {
         // pass 1: MS1 only; lo > hi selects no MS2 frame, the loader exports the table anyway
@@ -3471,7 +3480,9 @@ protected:
         phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
         if (phase_stats_()["LOAD(stream)"].n++ == 0) phase_order_().push_back("LOAD(stream)");
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-        if (std::getenv("SPEXTRACTOR_LOAD_ONLY")) { report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
+        if (std::getenv("SPEXTRACTOR_LOAD_ONLY"))
+        { if (tile_source) writeLogInfo_("[perf-load] SPEXTRACTOR_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
+          report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
         if (TileProbe::get().on)
           writeLogInfo_("[probe] MS2 RT range " + String(TileProbe::get().lo) + "-" + String(TileProbe::get().hi)
                         + " halo " + String(TileProbe::get().halo) + " s: dropped " + String(consumer.frames_probe_dropped)
@@ -3487,6 +3498,10 @@ protected:
         writeLogWarn_(String("[stream] streaming load failed (") + e.getName()
                       + "); falling back to loadExperiment. " + e.getMessage());
       }
+      // [3b] the source is COMMITTED only by a successful pass 1: a fallback to the resident load
+      // reads the whole run, so the tile loop must slice it rather than call the loader again
+      if (!streamed && tile_source)
+      { tile_source = false; writeLogWarn_("[3b] the streaming source did not read pass 1; the resident source takes over (the whole run is loaded)."); }
       // [frames] the invariant the frozen tables rest on, checked OUTSIDE the recoverable catch: a
       // delivered window's slab is its table (rt and id, frame for frame) after padding
       if (streamed && tile_source && consumer.tables().empty())
@@ -4183,7 +4198,7 @@ protected:
     if (n_bands > 1) omp_set_max_active_levels(2);
 #endif
     writeLogInfo_("Parallelism: " + String(n_win) + " windows x " + String(n_bands)
-                  + " m/z bands = " + String((int)window_list.size() * n_bands) + " trace units; "
+                  + " m/z bands = " + String((int)n_win * n_bands) + " trace units; "
                   + String(n_threads) + " worker threads over one task pool; up to "
                   + String(n_conc) + " windows in flight (memory-bounded)");
     // [dyn-mem] Thread count is the UPPER bound; free RAM is the real one. A static cap either
@@ -4288,6 +4303,9 @@ protected:
     if (cell_pitch > 0.0 && getIntOption_("perf:trace_bands") <= 0)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "tile:rt_sec needs a fixed perf:trace_bands: the auto setting (0) ties the band count to the thread count, and each band has its own `visited`, so the output would depend on the threads.");
+    if (tile_source && integer_detector && getIntOption_("perf:trace_bands") <= 0)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "the .d streaming source needs a fixed perf:trace_bands: the auto setting derives the band count from the WINDOW COUNT, and the streaming source counts every window of the acquisition while the resident source counts only the windows that delivered a frame -- the two would band differently (review 3b).");
     // [tile] The cells grouped into TILES. A tile owns the precursors whose MS1 frame time lies in
     // [lo - delta_rt, hi - delta_rt) -- the half-open ranges partition RT (lo = -inf for the first,
     // hi = +inf for the last) -- and traces its windows on the tile's frames only; a precursor's
@@ -4322,9 +4340,9 @@ protected:
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "SPEXTRACTOR_WINDOW_FILE overrides the band edges per window (a slab-mode probe); it cannot be combined with trace:band_edges=acquisition.");
       if (!(tofAxis().n_bins > 1)) writeLogInfo_("[tof] no run-level axis bounds from the tdf (" + tofAxis().bounds_why + "); the acquisition edge set is not on record for this run");
-      if (tile_source && !band_edges_acq)
+      if (tile_source && !band_edges_acq)   // unreachable: refused before the load
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or SPEXTRACTOR_TILE_RESIDENT=1 for the resident source.");
+              "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile.");
       for (const WinKey& k : fkeys) wbands[k] = {0xFFFFFFFFu, 0};
       #pragma omp parallel for schedule(dynamic, 1)
       for (long i = 0; i < (long)fkeys.size(); ++i)
@@ -4369,6 +4387,7 @@ protected:
     // the once-only ownership check per precursor (a window's m/z range is tile-independent)
     struct Carry { vector<Trace> rec; vector<float> inten; };
     map<WinKey, Carry> carry_in, carry_out;
+    map<WinKey, uint64_t> slab_chain;   // [det] the per-window slab digest, chained across tiles
     map<WinKey, vector<uint8_t>> visited;
     for (const WinKey& k : fkeys)
     {
@@ -4401,6 +4420,7 @@ protected:
     out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
     out_exp.setMetaValue("spx:tile_cells_per_tile", getIntOption_("tile:cells_per_tile"));
     out_exp.setMetaValue("spx:band_edges", integer_detector ? getStringOption_("trace:band_edges") : String("none"));   // what was applied
+    out_exp.setMetaValue("spx:tile_source", tile_source ? "stream" : "resident");
     out_exp.setMetaValue("spx:tiles", (int)tiles.size());
     out_exp.setMetaValue("spx:frame_table", frame_table_src);   // the frozen tables' source (loader | mzpeak | slab)
     out_exp.setMetaValue("spx:pearson_G", "frames");
@@ -4444,7 +4464,6 @@ protected:
     if (out_type == FileTypes::MZML) { writer.reset(new TileWriter(out_part)); writer->setExperimentalSettings(out_exp); }
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
-    out_exp.setMetaValue("spx:tile_source", tile_source ? "stream" : "resident");
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
@@ -4504,13 +4523,26 @@ protected:
       size_t n_del = 0, n_pad = 0, n_absent = 0, n_peaks = 0;
       for (const auto& kv : tc.tables())
       {
-        auto w = tile_slabs.find(kv.first);
-        if (w == tile_slabs.end()) { ++n_absent; tile_slabs[kv.first]; continue; }   // no frame in this tile: an empty slab
-        if (w->second.rt != kv.second.rt || w->second.frame_id != kv.second.id)
+        PeakSlab& sl = tile_slabs[kv.first];   // a window that delivered nothing still owns its table's frames
+        if (sl.frames() == 0 && !kv.second.rt.empty())
+        {
+          // every frame of the slice was skipped (an empty ion-mobility slice in each): pad them
+          // all, exactly as the resident path does, so the frame sequence is the table's
+          ++n_absent;
+          for (size_t f = 0; f < kv.second.rt.size(); ++f) sl.append(kv.second.rt[f], kv.second.id[f], nullptr, nullptr, nullptr, 0, kv.second.rt.size());
+          n_pad += kv.second.rt.size();
+        }
+        else { n_del += kv.second.delivered; n_pad += kv.second.padded; }
+        if (sl.rt != kv.second.rt || sl.frame_id != kv.second.id)
           throw FrameTableError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[3b] a tile's slab is not the frozen table's frames for the tile", String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0));
-        n_del += kv.second.delivered; n_pad += kv.second.padded; n_peaks += w->second.peaks();
+        n_peaks += sl.peaks();
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
+      if (detOn_())   // [det] the reader's exactness: per (window, tile), chained over tiles
+        for (auto& kv : tile_slabs)
+        { uint64_t& h = slab_chain[kv.first]; h = slabDigest_(kv.second, h);
+          writeLogInfo_("[det] window " + String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0) + " tile " + String(tk + 1)
+                        + " slab n=" + String(kv.second.peaks()) + " digest=" + String(slabDigest_(kv.second)) + " chain=" + String(h)); }
       for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
       std::stable_sort(wl.begin(), wl.end(), [](const auto& a, const auto& b) { return a.second->bytes() > b.second->bytes(); });
       writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + ") read: "
@@ -5110,6 +5142,17 @@ protected:
         }
       }
       writeLogInfo_("[tile] coverage: " + String(n_cov) + " precursor-window pairs owned exactly once over " + String(tiles.size()) + " tile(s)");
+      if (tile_source)
+      {
+        // the tile reads share `cstat` with pass 1; the pre-pass-2 report could not see them
+        const size_t lost2 = cstat.no_im_array + cstat.size_mismatch + cstat.bad_mz + cstat.bad_im;
+        if (lost2) writeLogWarn_("[compact] DROPPED " + String(lost2) + " peaks over the whole run (pass 1 + every tile): no_im_array="
+                                 + String(cstat.no_im_array) + " size_mismatch=" + String(cstat.size_mismatch) + " bad_mz=" + String(cstat.bad_mz)
+                                 + " bad_im=" + String(cstat.bad_im) + " (kept " + String(cstat.kept) + ")");
+        else writeLogInfo_("[compact] no peak dropped over the whole run (kept " + String(cstat.kept) + ")");
+        if (detOn_()) for (const auto& kv : slab_chain)
+          writeLogInfo_("[det] window " + String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0) + " slab chain=" + String(kv.second));
+      }
       // MEMORY: every MS1 structure is dead once the last tile's window loop has joined -- scoring
       // was its only reader (assembleOne_ -> scoreCandidates_ dereferences ms1_traces[pc.trace_idx]
       // and its span). Released BEFORE this tile's output is assembled and written. [mem]
