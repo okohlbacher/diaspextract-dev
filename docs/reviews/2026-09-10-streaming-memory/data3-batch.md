@@ -13,10 +13,12 @@ spock, 100 threads, node load 34-51 across the run.
 | 32 | 28.29 GB | 3:26.49 | load, t=23.4 s | 30.5x | 1,624 s |
 | 16 | 28.48 GB | 3:50.26 | **window loop, t=112 s** | — | — |
 | 512 | 30.66 GB | 3:05.16 | load, t=8.4 s | — | — |
-| 256 (bracket, last) | 31.83 GB | 2:58.67 | load, t=9.1 s | — | — |
+| 256 (bracket, last) | 32.11 GB | 2:58.67 | load, t=9.1 s | — | — |
 
-The two 256 controls bracket at 31.68 / 31.83 GB and 3:02.12 / 2:58.67, so run-to-run spread on
-this node is ~0.15 GB and ~3.5 s. Every arm reproduced the pin. 512 doubles the `scratch` row
+The two 256 controls bracket at 31.68 / 32.11 GB and 3:02.12 / 2:58.67, so run-to-run spread on
+this node is ~0.43 GB and ~3.5 s. (An earlier version of this line said 31.83 GB and a 0.15 GB
+spread; 31.83 GB is the load-trim chain's last control, copied into the wrong row.) Every
+difference quoted below should be read against that 0.43 GB. Every arm reproduced the pin. 512 doubles the `scratch` row
 (9,211 MiB) without raising the peak: the peak instant is not the staging maximum at that size.
 
 **The knee is 64: −9.6% peak for +2.9% wall.** Below it the curve turns. 32 buys another 1.3% of
