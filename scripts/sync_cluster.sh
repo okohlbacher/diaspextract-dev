@@ -37,6 +37,10 @@ scp -q test/test_spextractor.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
 # suite silently runs against whatever copy was there before.
 ssh "$NODE" "mkdir -p /ceph/ibmi/abi/oliver/spextract/tests"
 scp -q tests/calibration_golden.json "$NODE":/ceph/ibmi/abi/oliver/spextract/tests/
+# The gate chains digest and diff outputs with the bench tools at the deployment point. They drifted
+# once (2026-09-10): a stale semantic_digest.py without the zero-padded-count normalisation reported a
+# tile-identical file as DIFFERS. Ship them with every deploy.
+scp -q bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/
 # The remote launcher. Every long job is started through it, so it must not exist only on ceph with
 # no history -- and a stale copy would silently reintroduce the ssh-channel hang it exists to avoid.
 scp -q bench/launch.sh "$NODE":/ceph/ibmi/abi/oliver/spextract/tools/

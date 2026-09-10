@@ -507,14 +507,15 @@ def main():
         assert digest(t5) == digest(one5), "the transitive carry (pitch < 2 delta_rt) does not reproduce the one-tile run"
     check("the boundary carry is load-bearing", c17)
 
-    # 18: a window with NO frames in a middle tile (its MS2 frames in [20.6, 30.4) dropped): the
+    # 18: a window with NO frames in a middle tile (its MS2 frames in [20.6, 30.4) dropped -- the
+    #     range is given with a margin, 1.0 + 14 * 1.4 is 20.599999999999998): the
     #     empty-slab branch runs, the tile scores with carried fragments only, and the tiled run
     #     still equals the one-tile run of the same file
     def c18():
         import re
         tdf = synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64)
         env = dict(os.environ, SPEXTRACTOR_MZPEAK_TDF=tdf)
-        inp_e = tiled_fixture("tiles_empty.mzML", drop_ms2=(20.6, 30.4))
+        inp_e = tiled_fixture("tiles_empty.mzML", drop_ms2=(20.0, 30.0))   # the frames at 20.6 (= 20.599999999999998) .. 29.0
         one = os.path.join(work, "tiles_empty_one.mzML")
         run(binary, inp_e, one, extra=("-tile:rt_sec", "10"), threads=2, env=env)
         t = os.path.join(work, "tiles_empty_t.mzML")
