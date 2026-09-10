@@ -40,10 +40,12 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
   { why = std::string("cannot open ") + tdf; sqlite3_close(db); return false; }
   sqlite3_stmt* st = nullptr; out = TdfAxisBounds{}; int seen = 0; why.clear();
-  auto num = [&](const unsigned char* txt, const char* key, double& v) {
+  auto num = [&](const unsigned char* txt, int nbytes, const char* key, double& v) {
     if (!txt) { why = std::string(key) + " is NULL"; return false; }
     char* end = nullptr; const double x = std::strtod(reinterpret_cast<const char*>(txt), &end);
-    if (end == reinterpret_cast<const char*>(txt) || *end != '\0' || !std::isfinite(x)) { why = std::string(key) + " is not a finite number: '" + reinterpret_cast<const char*>(txt) + "'"; return false; }
+    // the parse must consume the WHOLE value (sqlite3_column_bytes: an embedded NUL is not an end)
+    if (end == reinterpret_cast<const char*>(txt) || end != reinterpret_cast<const char*>(txt) + nbytes || !std::isfinite(x))
+    { why = std::string(key) + " is not a finite number: '" + std::string(reinterpret_cast<const char*>(txt), (size_t)nbytes) + "'"; return false; }
     v = x; return true; };
   if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper','DigitizerNumSamples')", -1, &st, nullptr) != SQLITE_OK)
   { why = "no GlobalMetadata table"; sqlite3_finalize(st); sqlite3_close(db); return false; }
@@ -52,8 +54,15 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
   {
     const unsigned char* kt = sqlite3_column_text(st, 0); if (!kt) continue;
     const std::string k = reinterpret_cast<const char*>(kt); double v = 0.0;
-    if (!num(sqlite3_column_text(st, 1), k.c_str(), v)) { ok = false; break; }
-    if (k == "MzAcqRangeLower") out.mz_lo = v; else if (k == "MzAcqRangeUpper") out.mz_hi = v; else out.n_bins = (long)v;
+    if (!num(sqlite3_column_text(st, 1), sqlite3_column_bytes(st, 1), k.c_str(), v)) { ok = false; break; }
+    if (k == "MzAcqRangeLower") out.mz_lo = v;
+    else if (k == "MzAcqRangeUpper") out.mz_hi = v;
+    else
+    {
+      // an integral count in [2, 1e8], checked BEFORE the narrowing cast (1e100 -> long is UB)
+      if (!(v >= 2.0 && v <= 100000000.0 && std::trunc(v) == v)) { why = "DigitizerNumSamples is not an integer in [2, 1e8]: " + std::to_string(v); ok = false; break; }
+      out.n_bins = (long)v;
+    }
     ++seen;
   }
   sqlite3_finalize(st); sqlite3_close(db);

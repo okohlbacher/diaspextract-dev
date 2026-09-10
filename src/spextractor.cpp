@@ -650,7 +650,8 @@ namespace
     TofIdx tofOf(double mz, double b) const
     {
       const double t = cal.mzToTof(mz, b);
-      return t > 0.0 ? (TofIdx)llround(t) : 0u;
+      if (!(t > 0.0)) return 0u;
+      return t >= 4294967294.0 ? 4294967294u : (TofIdx)llround(t);   // saturate: a wrap here would collapse a band partition silently
     }
     /// A relative m/z tolerance as a bin count, derived rather than assumed: convert both ends.
     TofIdx span(TofIdx tof, double b, double ppm) const
@@ -3336,14 +3337,25 @@ protected:
 #endif
        )
     {
+      // the same candidate order the axis is loaded in below (the first whose calibration loads
+      // is THE source), so the bounds checked are the selected tdf's
       std::vector<std::string> cand{in + "/analysis.tdf"};
       if (const char* sc = std::getenv("SPEXTRACTOR_MZPEAK_TDF")) cand.push_back(sc);
-      String reasons; bool found = false;
+      String reasons; bool selected = false;
       for (const std::string& c : cand)
-      { std::string w2; spextractor::TdfAxisBounds bd; if (spextractor::loadTdfAxisBounds(c, bd, w2)) { found = true; break; } reasons += " [" + c + ": " + w2 + "]"; }
-      if (!found)
+      {
+        String w_axis;
+        if (!loadTofAxis(c, w_axis)) { reasons += " [" + c + ": no calibration: " + w_axis + "]"; continue; }
+        selected = true;
+        if (!(tofAxis().n_bins > 1))
+          throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                "trace:band_edges=acquisition needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + ").");
+        writeLogInfo_("flight-time axis from " + c + " (preflight): " + String(tofAxis().b_by_frame.size()) + " frame factors; digitizer bins " + String(tofAxis().n_bins) + ", acquisition m/z " + String(tofAxis().acq_lo) + "-" + String(tofAxis().acq_hi));
+        break;
+      }
+      if (!selected)
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:band_edges=acquisition needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; no candidate tdf provides them:" + reasons);
+              "trace:band_edges=acquisition: no candidate tdf provides a calibration:" + reasons);
     }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
 
@@ -3377,6 +3389,15 @@ protected:
       {
 #ifdef SPEXTRACTOR_WITH_MZPEAK
         table_src_if_ok = "mzpeak";
+        if (band_edges_acq && getStringOption_("trace:detector") == "integer")
+        {
+          // [3a] the sweep recovers the embedded tdf's calibration and bounds; it is cached, so
+          // the load below reuses it -- the refusal comes before any peak is decoded
+          const auto m = spx::mzPeakRunMeta(in);
+          if (!m->exact || !(m->exact->n_bins > 1))
+            throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                  "trace:band_edges=acquisition needs DigitizerNumSamples and MzAcqRangeLower/Upper from the archive's (or sidecar) analysis.tdf; not provided (" + String(m->exact ? m->exact->bounds_why : "no exact calibration") + ").");
+        }
         consumer.tablefn = [&]() {
           PickCompactConsumer::FrameTables t;
           const auto m = spx::lastMzPeakMeta();
@@ -4288,8 +4309,18 @@ protected:
         TofIdx thi_mz = 0, thi_acq = 0;
         if (tofAxis().n_bins > 1)
         {
-          if (tofAxis().acq_hi > 0.0) for (double b : frozen.at(k).b) thi_mz = std::max(thi_mz, tofAxis().tofOf(tofAxis().acq_hi, b));
-          thi_acq = std::max((TofIdx)(tofAxis().n_bins - 1), thi_mz);
+          const TofIdx last = (TofIdx)(tofAxis().n_bins - 1);
+          TofIdx thi_q = last;
+          for (double b : frozen.at(k).b)
+          {
+            if (tofAxis().acq_hi > 0.0) thi_mz = std::max(thi_mz, tofAxis().tofOf(tofAxis().acq_hi, b));
+            // the last bin's m/z, through the store's 1e-5 quantum, back to a bin: on a coarse
+            // calibration the round trip can land one bin higher (review 3a, round 2)
+            thi_q = std::max(thi_q, tofAxis().tofOf(tofAxis().mzOf(last, b) + 1.0e-5, b));
+          }
+          thi_acq = std::max(thi_q, thi_mz);
+          if (thi_acq >= 4294967294u)
+            throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tof] the acquisition's upper bin is not representable (the partition would wrap)", String(thi_acq));
         }
         #pragma omp critical(winlog)
         writeLogInfo_("[tof] window " + String(k[0] / 100.0) + "-" + String(k[1] / 100.0) + " slab tlo=" + String(tlo) + " thi=" + String(thi)
