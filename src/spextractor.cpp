@@ -1831,7 +1831,7 @@ namespace
       // LOAD, measured 2026-09-02). Buffer and pick in parallel like MS2; order is kept by index.
       ms1_buf_.push_back(std::move(s));
       ++frames_seen;
-      if (ms1_buf_.size() >= kBatch_()) flushMS1_();
+      if (ms1_buf_.size() >= kBatchMS1_()) flushMS1_();
     }
 
     void flushMS1_()
@@ -1934,6 +1934,15 @@ namespace
     }
     static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
+    /// [batch 2026-09-10] ONE knob drove both flushes, and the A/B showed that is the wrong shape.
+    /// Shrinking it to 64 takes 9.6% off the process peak for 2.9% of wall, because the peak is the
+    /// MS1 staging; but it also re-batches the MS2 TILE reads, whose CPU rose 845 -> 1,192 -> 1,624 s
+    /// at 256 -> 64 -> 32 while buying no memory at all -- the MS2 slabs are not what peaks. Splitting
+    /// the knob buys the memory on the side that has it and leaves the other side alone. Batch
+    /// composition is output-invariant (step 0b), so both are D-class.
+    static size_t kBatchMS1_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH_MS1");
+      const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)0; }();
+      return v ? v : kBatch_(); }
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
     FrameTables tables_; bool tables_init_ = false;   ///< [frames] the reader's frozen tables + cursors
