@@ -27,7 +27,7 @@ On TNBC 009 at 13 tiles, times in seconds:
 **Why TNBC's floor is MS1 tracing and D's is the load.** The partition-phase peak is about 1.5 times the
 MS1 map. The load peak is about 0.8 times the map plus a run-length-independent 20-24 GiB of staging.
 The two curves cross at a map of about 31 GiB, roughly an 80-minute gradient at TNBC's density
-(estimate). D (13.8 GiB map) sits below the crossing and TNBC (45.6 GiB) above it.
+(estimate). D (13.8 GiB map) sits below the crossing and TNBC (44.5 GiB) above it.
 
 **The model's two unknowns are now measured, and it passes.** `SPEXTRACTOR_MS1_HIST` on TNBC counts
 358,460,745 picked MS1 peaks at or above 100 (15.0%; model estimate 17%) and 59,908,030 at or above 300

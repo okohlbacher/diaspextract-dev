@@ -56,8 +56,8 @@ Two corrections to the verdict's arithmetic:
 - **A unit slip.** 201.9 M centroids × 20 B is 3,851 MiB, not 4,038.
 
 Raw-point removal does not map one-to-one to picked centroids, because the picker merges points. The
-surviving TNBC MS1 map is estimated at 2.5-17.9 GiB against today's 45.6, uncertain by about 5x until
-centroids are counted.
+surviving TNBC MS1 map is estimated at 2.5-17.9 GiB against today's 44.5 GiB (45,617 MiB), uncertain by
+about 5x until centroids are counted. *(This line first said "45.6", a unit slip.)*
 
 ## The MS1 map is mostly below the tracer's own threshold
 
@@ -78,7 +78,7 @@ automatically output-identical: the MS1 band edges are drawn from the whole map,
 kept if any peak, sub-threshold included, falls in the band, which sets the scan sequence the tracer
 steps through. A version that preserves both would be class D.
 
-## The real dnoise v0.1.0, dry run on dataset D
+## The real dnoise v0.1.0, dry runs on dataset D (and TNBC 009 for the MS2 split)
 
 `dnoise-linux-x86_64.tar.gz` from github.com/pgarrett-scripps/dnoise, release v0.1.0, sha256
 `0f476992…5857d92`, verified. Its shipped defaults are NOT what the verdict assumed: ±3 TOF indices, two
@@ -89,6 +89,28 @@ iterations, the halo filter ON, and both MS1 gates (isolation-window union and s
 | defaults (MS1 only) | 12.73% of 927,158,066 | 67.3% of 2.47e9 | 38 s |
 | `--denoise-msms` | 12.73% | 25.3% | 8 s |
 
-On diaPASEF, `--denoise-msms` does not run the MS/MS streak filter, which is ddaPASEF-only. It turns on
-isolation-window gating of MS2 frames, which removes about 67% of MS2 points. The full runs, SpeXtractor
-on the output, and both search engines with entrapment are chain `dnoise_d` / `dnoise_tnbc`.
+The 38 s was the first read of the input, not the filter: full runs with the input in the page cache take
+about 17 s on D in either mode (`real-dnoise-evaluation.md`).
+
+On diaPASEF, `--denoise-msms` runs dnoise's MS/MS streak filter inside each isolation window, and that
+filter does almost all of the removal. *(Corrected the same day: this paragraph first said the reverse, that
+the filter was ddaPASEF-only and the window gate did the removing.)* Dry runs, all on `ms1_off.toml` so the
+MS1 streak filter and both MS1 gates are off:
+
+| MS2 points kept | dataset D | TNBC 009 |
+|---|---:|---:|
+| `--denoise-msms` | 33.22% | 45.96% |
+| scan gate only (`--denoise-msms --msms-min-feature-length 1 --msms-max-internal-gap 0 --msms-iterations 1`) | **100.00%** | **99.91%** |
+| MS/MS filter only (`--denoise-msms --no-dia-window`) | 33.22% | 45.96% |
+| filter over the whole frame (`--denoise-msms --no-dia-per-window`) | 33.22% | not run |
+| `--denoise-msms` with the halo filter on | 32.81% | 41.43% |
+| halo filter on, no `--denoise-msms` | 100.00% | 100.00% |
+
+dnoise's JSON report does not record the MS/MS filter's parameters, so the neutralised run's report looks
+like the unneutralised one. The halo reaches MS2 only when the MS/MS filter runs, and then removes 0.4
+points more of D's MS2 and 4.5 points more of TNBC's; that is exactly the MS2 difference between the
+MS1 + MS2 and MS2-only configurations in the searched runs. On its own the halo removes 2.4% of D's MS1
+points and 19.2% of TNBC's.
+
+The full runs, SpeXtractor on the output, and both search engines with entrapment are chains `dnoise_d`,
+`dnoise_tnbc`, `dnoise2_d` and `dnoise2_tnbc`, written up in `real-dnoise-evaluation.md`.

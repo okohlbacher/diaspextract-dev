@@ -489,7 +489,7 @@ FDR-thresholded peptide set, which flips 0.2-20% under perturbations of any size
 **What would falsify it.** A tile-vs-whole per-spectrum diff (`bench/mzml_specdiff.py`) whose
 differences are confined to within the smoother's edge of a boundary after the fix.
 
-### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; ANALYSED, stage 1 MEASURED, real dnoise under test)
+### Reimplement dnoise-style mobility-coherence denoising (2026-09-10, user request; ANALYSED, stage 1 MEASURED, real dnoise SEARCHED)
 
 **The paper.** Garrett, Diedrich and Yates III, *dnoise: Fast Native Data Reduction for Bruker
 timsTOF*, bioRxiv 2026.08.27.747603; open source (Rust, MIT, github.com/pgarrett-scripps/dnoise).
@@ -528,8 +528,16 @@ Sage 29,067 / MSFragger 27,949 / entrapment 1.09%.
 **Measured (docs/reviews/2026-09-10-dnoise/stage1-measurement.md):** stage 1 removes 70.4% of TNBC's
 and 86.9% of D's raw MS1 points, as a monotone staircase in intensity; the verdict's streak-clustering
 design removes strictly more than the paper's definition, and its map bound fails on TNBC. 85.0% of TNBC's
-picked MS1 map is below the tracer's own 100-count threshold and is never traced. The real dnoise v0.1.0
-is running on both files with SpeXtractor and both search engines (chains dnoise_d, dnoise_tnbc).
+picked MS1 map is below the tracer's own 100-count threshold and is never traced.
+
+**The real dnoise v0.1.0 as a preprocessor, searched (docs/reviews/2026-09-10-dnoise/real-dnoise-evaluation.md):**
+the no-op reproduces both pins, so its rewrite changes nothing SpeXtractor reads. Its default, MS1 only, cuts
+SpeXtractor's tiled peak (`-tile:cells_per_tile 1`) by 33% on D and 63% on TNBC 009 against same-node
+controls; the shipped single tile was not measured. Entrapment stays inside the gate: 1.36% against 1.30% on
+D, 0.93% against 1.09% on TNBC, just below the control's interval. The peptide cost is D −4.3% on Sage and
+−4.0% on MSFragger, TNBC +1.5% and −0.5%: on D that fails the S gate. Anything that filters MS2 costs 13-21% of MSFragger
+peptides on both files. On diaPASEF, dnoise's MS2 mode is its MS/MS streak filter inside each window; the
+scan gate removes almost nothing.
 
 **Verdict (docs/reviews/2026-09-10-dnoise/verdict.md): ship the PREDICATE as instrumentation
 first, not a filter.** One count-only pass that changes no byte of output and prices the whole
@@ -545,10 +553,12 @@ the picker transient or a `PeakMap` slot.
 What is genuinely new is run length on the SCAN axis. The tool has no contiguity concept anywhere:
 `pickIMCluster` has no minimum member count, no run and no gap rule, and a single-scan hit becomes a
 first-class centroid indistinguishable from a 40-scan streak's. Occupancy is destroyed at emission,
-so the criterion CANNOT live downstream of the picker. The MS2 half of dnoise's geometric gate is
-already a no-op here (the loader slices each MS2 frame to its window's 1/K0 band).
+so the criterion CANNOT live downstream of the picker. The MS2 half of dnoise's geometric gate removes
+almost nothing on diaPASEF: no MS2 points on D and 0.09% on TNBC 009, measured by dry run. dnoise's MS2
+mode is its MS/MS streak filter, which removes 66.8% and 54.0% (stage1-measurement.md).
 
-**Worth, and why it is not urgent.** The MS1 map would fall 13,830 -> <= 4,038 MiB, but that is
+**Worth, and why it is not urgent.** The MS1 map would fall 13,830 -> <= 3,851 MiB by the verdict's bound
+(4,038 was a unit slip; the real dnoise default left 43.5 M picked MS1 peaks, 831 MiB), but that is
 **0 GB at the shipped default**, whose peak is in the window loop with the MS1 map already
 released. It converts the 6-tile arm by -24% and only then makes tiling a real memory lever. Time:
 -5 to -9% of the run, and NEGATIVE if emission rises -- the two closest prior experiments raised

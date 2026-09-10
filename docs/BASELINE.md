@@ -3079,3 +3079,30 @@ from the MS1 partition phase to the end of the load, where the MS1 map (44.2 GiB
 **Smaller tiles do not lower the peak** at either lever setting, because the peak is in pass 1. Pitch 300
 halves the scorer's fragment visits (−47%) and trims loop CPU ~10%, but it changes the output and is a
 science knob. Details: docs/reviews/2026-09-10-streaming-memory/data5-tnbc-levers.md.
+
+### dnoise v0.1.0 as a preprocessor: every MS1/MS2 combination, both files (2026-09-10, chains `dnoise_d`, `dnoise2_d`, `dnoise_tnbc`, `dnoise2_tnbc`, d7cc14d, `-tile:cells_per_tile 1`)
+
+| configuration | D Sage | D MSFragger | D peak | TNBC Sage | TNBC MSFragger | TNBC peak |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 13,491 | 12,918 | 31.84 GB | 29,067 | 27,949 | 68.82 GB (spock), 68.41 (data) |
+| no-op, every stage off | identical | identical | 32.17 (12.91) | identical | identical | 69.73 (27.53) |
+| MS1 only, dnoise's default | −4.3% | −4.0% | 21.41 (12.90) | +1.5% | −0.5% | 25.08 (25.24) |
+| MS2 only | −5.4% | −13.0% | 32.13 (10.51) | −10.0% | −20.9% | 67.80 (26.97) |
+| MS1 + MS2 | −7.2% | −15.3% | 8.13 (10.29) | −7.8% | −15.3% | 19.87 (26.32) |
+
+Peak is SpeXtractor's tiled peak, with dnoise's own run in brackets; the pipeline peak is the larger of the
+two. TNBC's MS1-only and MS1 + MS2 arms ran on data, the rest on spock, each against a control on its own
+node. The no-op reproduces both pins, so dnoise's rewrite changes nothing SpeXtractor reads. Entrapment
+never rises above the control's 95% interval: D's arms stay inside it (at most +0.16 points), and TNBC's
+all fall just below it (0.92-0.93% against 1.09%).
+
+**MS1 filtering unlocks the memory.** Pass 1 sets the tiled peak, so MS2 filtering alone changes nothing.
+With MS1 filtered, dnoise's own run sets the pipeline peak on TNBC; on D it does so once both are filtered.
+**MS2 filtering buys the time and costs MSFragger** 13-21% of its peptides on both files. On diaPASEF,
+dnoise's MS2 mode is its MS/MS streak filter inside each window. Sage's lost peptides are the faint,
+low-scoring ones: 23-56% of the control's faintest intensity quintile, at most 2.5% of the brightest. Only
+TNBC's MS1-only arm gains net peptides, and only on Sage. None of this was measured at the shipped single
+tile, where the window loop sets the peak.
+
+Not adoptable as a default: MS1 only fails the S gate on D. Details:
+docs/reviews/2026-09-10-dnoise/real-dnoise-evaluation.md.
