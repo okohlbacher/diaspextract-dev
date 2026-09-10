@@ -265,6 +265,13 @@ namespace
     for (const auto& sp : m) b += (long long)sp.size() * 20;
     return b;
   }
+  /// [ms1-hist probe 2026-09-10] Picked MS1 peak intensities against MS1 tracing's own thresholds:
+  /// MassTraceDetection copies only peaks above trace:noise_threshold_int (100) into its work map and
+  /// seeds above 300, and the share of the map above those has never been measured. That share decides
+  /// how much of MS1 tracing's uncharged working copy a smaller map would remove. Bands: <100, 100-300,
+  /// 300-1000, 1000-10000, >=10000. SPEXTRACTOR_MS1_HIST=1 enables it; counting only, no output change.
+  inline bool ms1HistOn_() { static const bool on = []{ const char* e = std::getenv("SPEXTRACTOR_MS1_HIST"); return e && *e && *e != '0'; }(); return on; }
+  inline std::array<std::atomic<long long>, 5>& ms1Hist_() { static std::array<std::atomic<long long>, 5> h{}; return h; }
   inline std::atomic<bool>& ledStop_() { static std::atomic<bool> s{false}; return s; }
   inline std::thread& ledThread_() { static std::thread t; return t; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
@@ -1865,6 +1872,13 @@ namespace
         }
       }
       if (pick_err) std::rethrow_exception(pick_err);
+      if (ms1HistOn_())
+        for (const auto& sp : ms1_buf_)
+        {
+          long long c[5] = {0, 0, 0, 0, 0};
+          for (const auto& pk : sp) { const float v = pk.getIntensity(); ++c[v < 100 ? 0 : v < 300 ? 1 : v < 1000 ? 2 : v < 10000 ? 3 : 4]; }
+          for (int k = 0; k < 5; ++k) ms1Hist_()[(size_t)k].fetch_add(c[k], std::memory_order_relaxed);
+        }
       { long long mb = 0; for (const auto& s : ms1_buf_) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
       for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
       ms1_buf_.clear();
@@ -2528,6 +2542,21 @@ protected:
         ledAdd_(part_cat, tb); if (in_cat >= 0) ledSet_(in_cat, 0); }
       vector<vector<PeakMap>>().swap(csub);
       tt_dist = tt_s(_td0, tt_now());
+      // [ms1-trim probe 2026-09-10] On TNBC 009 at 13 tiles the process peak IS this phase: 68,666 MiB,
+      // of which 28,605 MiB is glibc free list -- the MS1 map, released spectrum by spectrum by the
+      // distribution above and not reused by the band copies. One full-arena walk here, before the
+      // bands are detected, returns it. SPEXTRACTOR_MS1_TRIM=1 enables it (MS1 call only: in_cat >= 0);
+      // unset is exactly today's behaviour. Output-identical by construction.
+      static const bool ms1_trim = []{ const char* e = std::getenv("SPEXTRACTOR_MS1_TRIM"); return e && *e && *e != '0'; }();
+      if (ms1_trim && in_cat >= 0)
+      {
+#ifdef __GLIBC__
+        const double _tt = phase_clock_(); const long _r0 = rss_mb_();
+        malloc_trim(0);
+        writeLogInfo_("[trim] MS1 band distribution -> detection: " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
+                      + String(phase_clock_() - _tt) + " s");
+#endif
+      }
       auto _tm0 = tt_now();
       vector<vector<MassTrace>> per(bands);
       #pragma omp taskloop grainsize(1) default(shared)
@@ -3651,6 +3680,12 @@ protected:
         else BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
         consumer.finish();                                          // the last partial batch
         streamed = true;
+        if (ms1HistOn_())
+        { const auto& h = ms1Hist_(); long long tot = 0; for (const auto& v : h) tot += v.load();
+          auto pc = [&](long long v) { return String(tot > 0 ? 100.0 * (double)v / (double)tot : 0.0); };
+          writeLogInfo_("[ms1-hist] picked MS1 peaks " + String(tot) + " by intensity: <100 " + String(h[0].load()) + " (" + pc(h[0].load()) + "%), 100-300 "
+                        + String(h[1].load()) + " (" + pc(h[1].load()) + "%), 300-1000 " + String(h[2].load()) + " (" + pc(h[2].load()) + "%), 1000-10000 "
+                        + String(h[3].load()) + " (" + pc(h[3].load()) + "%), >=10000 " + String(h[4].load()) + " (" + pc(h[4].load()) + "%)"); }
         phase_stats_()["LOAD(stream)"].wall = phase_clock_();      // [perf-instr] start-to-here
         phase_stats_()["LOAD(stream)"].cpu  = cpu_seconds_();
         phase_stats_()["LOAD(stream)"].rss_end_mb = rss_mb_();
