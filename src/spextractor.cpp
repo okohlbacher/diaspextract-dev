@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <fstream>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <map>
 #include <string>
@@ -193,6 +194,95 @@ namespace
     return "";
 #endif
   }
+
+  //---------------------------------------------------------------------------------------------
+  // [ledger] Live bytes per DATA STRUCTURE, sampled alongside the process RSS.
+  //
+  // `SPEXTRACTOR_LEDGER=<file>` starts a sampler thread that appends one TSV row every 250 ms:
+  // wall clock, VmRSS, the glibc arena/free figures, one column per category of live bytes, the
+  // unattributed remainder (RSS minus the sum -- allocator retention plus whatever is not charged)
+  // and the phase marker in force. Charges are atomic adds at allocation BOUNDARIES, never inside
+  // a per-peak loop, so an instrumented run is the shipped run plus a few dozen atomics per
+  // window; with the variable unset every call below is one predictable branch.
+  //
+  // Why it exists: a streaming design is judged by WHICH structure holds the peak and for how
+  // long, and an RSS curve cannot say. The unattributed column is not an error term -- it is the
+  // memory a tiled run frees but does not return, which is the next thing to attack.
+  enum LedCat { LC_SLAB, LC_MS1MAP, LC_MS1TRACE, LC_PRECURSOR, LC_FROZEN, LC_PREP, LC_BAND,
+                LC_PARENT, LC_WSTORE, LC_FRAG, LC_SPECTRA, LC_CARRY, LC_WRITER, LC_SCRATCH, LC_N };
+  inline const char* ledName_(int c)
+  {
+    static const char* const n[LC_N] = {"slab", "ms1_map", "ms1_trace", "precursor", "frozen", "prep",
+                                        "band_arena", "parent", "wstore", "frag_aux", "spectra",
+                                        "carry", "writer", "scratch"};
+    return n[c];
+  }
+  inline std::array<std::atomic<long long>, LC_N>& ledger_() { static std::array<std::atomic<long long>, LC_N> a{}; return a; }
+  inline const char* ledFile_() { static const char* f = std::getenv("SPEXTRACTOR_LEDGER"); return f; }
+  inline std::atomic<const char*>& ledPhaseName_() { static std::atomic<const char*> p{"start"}; return p; }
+  inline void ledAdd_(int c, long long b) { if (ledFile_()) ledger_()[(size_t)c].fetch_add(b, std::memory_order_relaxed); }
+  inline void ledSet_(int c, long long b) { if (ledFile_()) ledger_()[(size_t)c].store(b, std::memory_order_relaxed); }
+  /// The phase marker must have static lifetime: the sampler reads the pointer from another thread.
+  inline void ledPhase_(const char* p) { if (ledFile_()) ledPhaseName_().store(p, std::memory_order_relaxed); }
+  inline void ledPhaseTile_(const char* what, size_t k)
+  {
+    if (!ledFile_()) return;
+    static std::mutex m; static std::string buf;
+    std::lock_guard<std::mutex> g(m);
+    buf = std::string(what) + std::to_string(k);
+    ledPhaseName_().store(buf.c_str(), std::memory_order_relaxed);
+  }
+  /// A scoped charge: the subtract cannot be skipped by an early return or an exception.
+  struct LedCharge
+  {
+    int c; long long b;
+    LedCharge(int cat, long long bytes) : c(cat), b(bytes) { ledAdd_(c, b); }
+    void change(long long nb) { ledAdd_(c, nb - b); b = nb; }
+    ~LedCharge() { ledAdd_(c, -b); }
+    LedCharge(const LedCharge&) = delete;
+    LedCharge& operator=(const LedCharge&) = delete;
+  };
+  inline std::atomic<bool>& ledStop_() { static std::atomic<bool> s{false}; return s; }
+  inline std::thread& ledThread_() { static std::thread t; return t; }
+  /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
+  struct LedRun
+  {
+    LedRun()
+    {
+      if (!ledFile_()) return;
+      ledThread_() = std::thread([]() {
+        std::ofstream f(ledFile_());
+        f << "t_s\trss_mb\tarena_mb\tfree_mb\tsum_mb\tunattributed_mb";
+        for (int c = 0; c < LC_N; ++c) f << '\t' << ledName_(c) << "_mb";
+        f << "\tphase\n";
+        while (true)
+        {
+          const bool last = ledStop_().load(std::memory_order_relaxed);
+          long long arena = 0, freeb = 0;
+#ifdef __GLIBC__
+          { const struct mallinfo2 mi = mallinfo2(); arena = (long long)(mi.arena >> 20); freeb = (long long)(mi.fordblks >> 20); }
+#endif
+          const long rss = rss_mb_();
+          long long sum = 0, v[LC_N];
+          for (int c = 0; c < LC_N; ++c) { v[c] = ledger_()[(size_t)c].load(std::memory_order_relaxed); sum += v[c]; }
+          const long long sum_mb = sum >> 20;
+          char buf[64];
+          std::snprintf(buf, sizeof buf, "%.2f", phase_clock_());
+          f << buf << '\t' << rss << '\t' << arena << '\t' << freeb << '\t' << sum_mb << '\t' << (rss - sum_mb);
+          for (int c = 0; c < LC_N; ++c) f << '\t' << (v[c] >> 20);
+          f << '\t' << ledPhaseName_().load(std::memory_order_relaxed) << '\n';
+          f.flush();
+          if (last) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+      });
+    }
+    ~LedRun()
+    {
+      if (!ledFile_() || !ledThread_().joinable()) return;
+      ledPhase_("end"); ledStop_().store(true, std::memory_order_relaxed); ledThread_().join();
+    }
+  };
   static std::string rss_()
   {
     std::ifstream st("/proc/self/status");
@@ -1611,7 +1701,8 @@ namespace
       // per-frame regions of one reusable scratch, sized by the RAW peak counts
       scratch_off_.resize((size_t)n + 1);
       { size_t total = 0; for (int i = 0; i < n; ++i) { scratch_off_[(size_t)i] = total; total += buf_[(size_t)i].size(); } scratch_off_[(size_t)n] = total;
-        if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); } }
+        if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); }
+        ledSet_(LC_SCRATCH, (long long)(scratch_mzq_.capacity() * 4 + scratch_inten_.capacity() * 4 + scratch_imq_.capacity() * 2)); }
       std::vector<size_t> kept((size_t)n);
       std::vector<double> frt((size_t)n);
       std::vector<uint32_t> fid((size_t)n);
@@ -3280,6 +3371,7 @@ protected:
     phase_clock_();   // [perf-instr] fix the epoch HERE: it is a first-call static, and the
                       // streaming path first touched it only AFTER loading, so load time was
                       // invisible and every [t=..] was relative to post-load.
+    LedRun _ledger;   // [ledger] SPEXTRACTOR_LEDGER=<file>: the per-structure memory profile
 
     // -threads defaults to 1 in TOPPBase, a poor default for a tool whose window loop IS the
     // runtime. Default to every core. The command line is scanned rather than the value tested,
@@ -3633,6 +3725,8 @@ protected:
                       + " nonzero the compact store is NOT lossless and results differ from the old path.");
       }
       size_t ms1_pk = 0; for (const auto& sp : ms1_map) ms1_pk += sp.size();
+      { long long sb = 0; for (const auto& kv : ms2_by_window) sb += (long long)(kv.second.bytes() + kv.second.reserved());
+        ledSet_(LC_SLAB, sb); ledSet_(LC_MS1MAP, (long long)ms1_pk * 20); }
       writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
                     + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
@@ -3761,6 +3855,11 @@ protected:
                                              split_scan_time);
     { const double cap = max_span;
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
+    ledSet_(LC_MS1MAP, 0);   // detectTraces_ consumed the map
+    { const long long tb = (long long)(ms1_traces.capacity() * sizeof(Trace) + ms1_store.inten.capacity() * 4
+                                       + ms1_store.bins.capacity() * 2 + ms1_store.rt_index.capacity() * 4
+                                       + ms1_store.frame_rt.capacity() * 8);
+      ledSet_(LC_MS1TRACE, tb); }
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
     { auto& st = phase_stats_()["MS1_TRACE"]; if (st.n++ == 0) phase_order_().push_back("MS1_TRACE");
       st.wall += phase_clock_() - _t_ms1; st.cpu += cpu_seconds_() - _c_ms1; st.rss_end_mb = rss_mb_(); }
@@ -4079,6 +4178,7 @@ protected:
                                       [](const Precursor_& pc) { return !TileProbe::get().core(pc.rt); }), precursors.end());
       writeLogInfo_("[probe] core precursors: " + String(precursors.size()) + " of " + String(n0));
     }
+    ledSet_(LC_PRECURSOR, (long long)(precursors.capacity() * sizeof(Precursor_) + precursors.size() * 8));
     vector<double> prec_mz(precursors.size());
     for (size_t i = 0; i < precursors.size(); ++i) prec_mz[i] = precursors[i].mono_mz;
     // NOTE: ms1_map is already empty here. detectTraces_ takes it by non-const reference and
@@ -4097,6 +4197,9 @@ protected:
       // would double the MS1 arena at exactly the moment it is largest) and in OFFSET order -- see
       // compactUnreferenced() for why container order corrupted ~1% of the kept spans.
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
+      ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace) + ms1_store.inten.capacity() * 4
+                                       + ms1_store.bins.capacity() * 2 + ms1_store.rt_index.capacity() * 4
+                                       + ms1_store.frame_rt.capacity() * 8));
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
 #ifdef __GLIBC__
     if (trim_on)
@@ -4295,6 +4398,11 @@ protected:
       for (size_t f = 0; f < fw.frames(); ++f) fw.b[f] = tofAxis().factor(fw.frame_id[f]);   // the value toTof() gives the slab
       fw.nearest_local = nearestLocal(fw.frame_rt, ms1_store.frame_rt, delta_rt);
     }
+    { long long fb = 0;
+      for (const auto& kv : frozen)
+        fb += (long long)(kv.second.frame_rt.capacity() * 8 + kv.second.frame_id.capacity() * 4
+                          + kv.second.rt_index.capacity() * 4 + kv.second.b.capacity() * 8 + kv.second.nearest_local.capacity() * 4);
+      ledSet_(LC_FROZEN, fb); }
     if (cell_pitch > 0.0 && !integer_detector)
     {
       writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells) -- the header records no grid.");
@@ -4493,6 +4601,7 @@ protected:
     for (size_t tk = 0; tk < tiles.size(); ++tk)
     {
     const Tile& tile = tiles[tk];
+    ledPhaseTile_("tile", tk + 1);
     // [tile] the tile's slabs: one tile = the resident slabs themselves (moved out by the body, as
     // today); several = a slice of each window's frames in [lo, hi) (the resident source keeps the
     // whole run: this arm is the exactness gate, not the memory configuration)
@@ -4538,6 +4647,8 @@ protected:
         n_peaks += sl.peaks();
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
+      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)(kv.second.bytes() + kv.second.reserved());
+        ledSet_(LC_SLAB, sb); }
       if (detOn_())   // [det] the reader's exactness: per (window, tile), chained over tiles
         for (auto& kv : tile_slabs)
         { uint64_t& h = slab_chain[kv.first]; h = slabDigest_(kv.second, h);
@@ -4545,6 +4656,7 @@ protected:
                         + " slab n=" + String(kv.second.peaks()) + " digest=" + String(slabDigest_(kv.second)) + " chain=" + String(h)); }
       for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
       std::stable_sort(wl.begin(), wl.end(), [](const auto& a, const auto& b) { return a.second->bytes() > b.second->bytes(); });
+      ledPhaseTile_("loop", tk + 1);
       writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + ") read: "
                     + String(wl.size()) + " windows, frames delivered " + String(n_del) + " padded " + String(n_pad) + " absent-windows " + String(n_absent)
                     + ", " + String(n_peaks) + " peaks, " + String(phase_clock_() - _tr0, 1) + " s" + rss_() + mem_());
@@ -4566,6 +4678,7 @@ protected:
       }
       for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
       std::stable_sort(wl.begin(), wl.end(), [](const auto& a, const auto& b) { return a.second->bytes() > b.second->bytes(); });
+      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)(kv.second.bytes() + kv.second.reserved()); ledAdd_(LC_SLAB, sb); }
       writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + "): "
                     + String(wl.size()) + " windows, " + String(tile_peaks) + " peaks resident" + rss_() + mem_());
     }
@@ -4683,6 +4796,12 @@ protected:
         const int w_bands = n_bands;
         vector<Trace> frag_traces;
         TraceStore wst;                                   // this window's frame table + arenas; outlives scoring
+        // [ledger] the two structures that dominate a window: the store's arena and the trace
+        // records. Scoped, so every exit path returns them to the counter.
+        LedCharge _wst(LC_WSTORE, 0), _recs(LC_PARENT, 0);
+        auto ledStore = [&]() { _wst.change((long long)(wst.inten.capacity() * 4 + wst.bins.capacity() * 2
+                                                        + wst.rt_index.capacity() * 4 + wst.b.capacity() * 8 + wst.frame_rt.capacity() * 8));
+                                _recs.change((long long)(frag_traces.capacity() * sizeof(Trace))); };
         const FrozenWin& fwin = frozen.at(wl[wi].first);
         size_t w_live = 0;                                // [tile-0d] G_live, carried out of the tracing block
         TofIdx w_tlo = 0, w_thi = 0;                      // the window's band edges, for the window-file row
@@ -4747,6 +4866,7 @@ protected:
           // of the window -- it reserves the whole merged arena while every band arena is still
           // live -- so the slab used to be resident across exactly the worst moment. [2026-09-06]
           auto release_input = [&]() {
+            ledAdd_(LC_SLAB, -(long long)(wslab.bytes() + wslab.reserved()));
             vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
             vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
             vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
@@ -4755,6 +4875,7 @@ protected:
           // window store absorbs them in (cell, band) order and every offset is rebased (R4 sequencing).
           vector<vector<TraceStore>> bst(n_cells, vector<TraceStore>(std::max(1, nb)));
           vector<vector<vector<Trace>>> per(n_cells, vector<vector<Trace>>(std::max(1, nb)));
+          long long band_bytes = 0, parent_bytes = 0;   // [ledger] returned to the counter at the merge
           for (size_t ci = 0; ci < n_cells; ++ci)
           {
             const size_t f0 = cut[ci], f1 = cut[ci + 1];
@@ -4772,6 +4893,8 @@ protected:
             }
             auto _tp = std::chrono::steady_clock::now();
             TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per cell
+            LedCharge _prep(LC_PREP, (long long)(tprep.order.capacity() * 4 + tprep.frame_live.capacity()
+                                                 + tprep.seg.capacity() * sizeof(size_t) + tprep.fidx.capacity() * 4));
             w_prep += secs(std::chrono::steady_clock::now() - _tp);
             n_seeds += tprep.order.size(); w_live += tprep.n_live;
             auto _td0 = std::chrono::steady_clock::now();
@@ -4786,6 +4909,9 @@ protected:
                                              bnd[b], bnd[b + 1], b);
             }
             w_detect += secs(std::chrono::steady_clock::now() - _td0);
+            { long long ab = 0, pb = 0;
+              for (int b = 0; b < nb; ++b) { ab += (long long)(bst[ci][b].inten.capacity() * 4 + bst[ci][b].bins.capacity() * 2); pb += (long long)(per[ci][b].capacity() * sizeof(Trace)); }
+              ledAdd_(LC_BAND, ab); ledAdd_(LC_PARENT, pb); band_bytes += ab; parent_bytes += pb; }
           }
           // Each cell's first frame in the FROZEN table, by value (the slab-local cut is an index
           // into the resident slab, which may hold only some of the table's frames later); the
@@ -4821,6 +4947,7 @@ protected:
             }
           }
           w_merge = secs(std::chrono::steady_clock::now() - _tm0);
+          ledAdd_(LC_BAND, -band_bytes); ledAdd_(LC_PARENT, -parent_bytes); ledStore();
           }                                                  // the band stores die here
           // (the slab and the seed order were released above, before the band-arena merge)
           // The same valley-splitting step the OpenMS path runs; skipping it was one of the
@@ -4846,7 +4973,7 @@ protected:
                  << '\t' << wst.frame_rt[t.frame0] << '\t' << wst.frame_rt[t.frame0 + t.len - 1] << '\n';
             }
           }
-          w_split = secs(std::chrono::steady_clock::now() - _ts);
+          w_split = secs(std::chrono::steady_clock::now() - _ts); ledStore();
           // [tile-0d] RT extent of fragment traces on the INTEGER path, which `ms2_span` never
           // reports (it is only filled by the OpenMS detector). Two figures per trace: the total
           // span, and the ONE-SIDED extent from the reported RT (rtOf) -- the quantity a tile halo
@@ -4874,7 +5001,7 @@ protected:
           if (detOn_()) extents("pre-trim");
           if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
           if (detOn_()) extents("post-trim");
-          vector<int16_t>().swap(wst.bins);
+          vector<int16_t>().swap(wst.bins); ledStore();
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
                         + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
                         + " -> " + String(frag_traces.size()) + " (cap " + String(frag_traces.capacity()) + ", "
@@ -4982,6 +5109,9 @@ protected:
         t_trace += std::chrono::duration_cast<std::chrono::nanoseconds>(_t3 - _t2).count();
         w_trace = secs(_t3 - _t2) - w_prep - w_split;
         FragStats fg = buildFragStats(frag_traces, wst, fwin);
+        ledStore();   // the finiteness filter and the content sort have run
+        LedCharge _frag(LC_FRAG, (long long)(frag_im.capacity() * 8 + frag_rt.rt.capacity() * 8 + frag_rt.q.capacity() * 2
+                                             + fg.mean.capacity() * 8 + fg.invnorm.capacity() * 8 + fg.nearest_local.capacity() * 4));
         if (const char* wf = std::getenv("SPEXTRACTOR_WINDOW_FILE_OUT"))   // [tile-1] this window's frozen row, for a later probe
         {
           #pragma omp critical(window_file_out)
@@ -5081,6 +5211,8 @@ protected:
           t_score += std::chrono::duration_cast<std::chrono::nanoseconds>(_t6 - _t5).count();
           w_score = secs(_t6 - _t5);
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
+          { long long sb = 0; for (const auto& sp : bucket) sb += (long long)(sizeof(MSSpectrum) + sp.size() * 12);
+            ledAdd_(LC_SPECTRA, sb); }
           const auto _t7 = std::chrono::steady_clock::now();
           t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(_t7 - _t6).count();
           w_emit = secs(_t7 - _t6);
@@ -5160,6 +5292,7 @@ protected:
       ms1_store = TraceStore();
       vector<Precursor_>().swap(precursors);
       vector<double>().swap(prec_mz);
+      ledSet_(LC_MS1TRACE, 0); ledSet_(LC_PRECURSOR, 0);
       writeLogInfo_("[mem] MS1 traces, spans, precursors released after the window loop." + rss_() + mem_());
     }
     {
@@ -5169,22 +5302,28 @@ protected:
       vector<MSSpectrum> tile_out;
       { size_t n_tot = 0; for (const auto& bucket : win_out) n_tot += bucket.size(); tile_out.reserve(n_tot); }
       for (auto& bucket : win_out) { for (auto& s : bucket) tile_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
+      long long tile_spec_bytes = 0;
+      for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * 12);
       { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
       if (writer)
       {
         for (auto& sp : tile_out) sp.getDataProcessing().push_back(out_dp);   // ONE entry, by pointer, for every spectrum
         if (tiles.size() == 1) writer->setExpectedSize(tile_out.size(), 0);   // exact count: the bulk writer's bytes
+        ledPhaseTile_("write", tk + 1);
         { Phase _ph("WRITE(mzML)"); writer->writeBlock(tile_out); }
         n_out += tile_out.size();
+        ledAdd_(LC_SPECTRA, -tile_spec_bytes); ledSet_(LC_WRITER, (long long)n_out * 40);
         writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(tile_out.size()) + " spectra written" + clk_() + rss_() + mem_());
       }
       else
       {
         all_out.reserve(all_out.size() + tile_out.size());
-        for (auto& sp : tile_out) all_out.push_back(std::move(sp));
+        for (auto& sp : tile_out) all_out.push_back(std::move(sp));   // [ledger] the same bytes, still charged
       }
     }
     carry_in = std::move(carry_out);
+    { long long cb = 0; for (const auto& kv : carry_in) cb += (long long)(kv.second.rec.capacity() * sizeof(Trace) + kv.second.inten.capacity() * 4);
+      ledSet_(LC_CARRY, cb); }
     carry_out.clear();
     for (const WinKey& k : fkeys) carry_out[k];
     }   // tiles
