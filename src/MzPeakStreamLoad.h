@@ -73,6 +73,7 @@ namespace spx
     std::vector<double> t1_by_frame;          // index = Frames.Id
     bool enabled = false;
     double acq_lo = std::numeric_limits<double>::quiet_NaN(), acq_hi = std::numeric_limits<double>::quiet_NaN();   // GlobalMetadata MzAcqRange
+    long n_bins = 0; std::string bounds_why;                                                                        // DigitizerNumSamples, or why not
 
     static std::vector<char> readMember_(zip_t* z, const char* name, zip_int64_t from = 0, zip_int64_t len = -1)
     {
@@ -137,7 +138,8 @@ namespace spx
         { std::string why;
           if (!spextractor::loadTdfCalibration(std::string(tmpl), cal, t1_by_frame, why))
             throw std::runtime_error("mzpeak: " + why);
-          std::string w2; double lo, hi; if (spextractor::loadTdfAcqRange(std::string(tmpl), lo, hi, w2)) { acq_lo = lo; acq_hi = hi; } }
+          std::string w2; spextractor::TdfAxisBounds bd;
+          if (spextractor::loadTdfAxisBounds(std::string(tmpl), bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
         std::remove(tmpl);
         enabled = true;
       }

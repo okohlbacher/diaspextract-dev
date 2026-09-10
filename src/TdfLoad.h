@@ -6,6 +6,7 @@
 #include <OpenMS/FORMAT/TdfMzCalibration.h>   // the copy the OpenMS patch installs; same header as src/TdfMzCalibration.h
 #include <sqlite3.h>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
@@ -28,23 +29,38 @@ namespace spextractor
 // one row (per-frame recalibration, unsupported). t1_by_frame[id] = Frames.T1, T1_ref when NULL;
 // index 0 is never a frame (Ids start at 1) and is left for the caller to treat as a sentinel.
 // ---------------------------------------------------------------------------------------------
-/// The acquisition's m/z range from GlobalMetadata (MzAcqRangeLower/Upper): the run-level bound the
-/// integer detector's band partition rests on when it must not depend on which frames are resident.
-inline bool loadTdfAcqRange(const std::string& tdf, double& lo, double& hi, std::string& why)
+/// The run-level bounds of the flight-time axis from GlobalMetadata: the digitizer's sample count
+/// (every bin index is below it -- the absolute bound) and the acquisition's m/z range. Values are
+/// TEXT in the tdf; a NULL, trailing garbage, a non-finite or unordered value refuses with a reason
+/// rather than becoming a bound.
+struct TdfAxisBounds { long n_bins = 0; double mz_lo = 0.0, mz_hi = 0.0; };
+inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::string& why)
 {
   sqlite3* db = nullptr;
   if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
   { why = std::string("cannot open ") + tdf; sqlite3_close(db); return false; }
-  sqlite3_stmt* st = nullptr; lo = hi = std::numeric_limits<double>::quiet_NaN();
-  if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper')", -1, &st, nullptr) == SQLITE_OK)
-    while (sqlite3_step(st) == SQLITE_ROW)
-    {
-      const std::string k = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-      const double v = std::atof(reinterpret_cast<const char*>(sqlite3_column_text(st, 1)));   // stored as text
-      if (k == "MzAcqRangeLower") lo = v; else hi = v;
-    }
+  sqlite3_stmt* st = nullptr; out = TdfAxisBounds{}; int seen = 0; why.clear();
+  auto num = [&](const unsigned char* txt, const char* key, double& v) {
+    if (!txt) { why = std::string(key) + " is NULL"; return false; }
+    char* end = nullptr; const double x = std::strtod(reinterpret_cast<const char*>(txt), &end);
+    if (end == reinterpret_cast<const char*>(txt) || *end != '\0' || !std::isfinite(x)) { why = std::string(key) + " is not a finite number: '" + reinterpret_cast<const char*>(txt) + "'"; return false; }
+    v = x; return true; };
+  if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata WHERE Key IN ('MzAcqRangeLower','MzAcqRangeUpper','DigitizerNumSamples')", -1, &st, nullptr) != SQLITE_OK)
+  { why = "no GlobalMetadata table"; sqlite3_finalize(st); sqlite3_close(db); return false; }
+  bool ok = true;
+  while (ok && sqlite3_step(st) == SQLITE_ROW)
+  {
+    const unsigned char* kt = sqlite3_column_text(st, 0); if (!kt) continue;
+    const std::string k = reinterpret_cast<const char*>(kt); double v = 0.0;
+    if (!num(sqlite3_column_text(st, 1), k.c_str(), v)) { ok = false; break; }
+    if (k == "MzAcqRangeLower") out.mz_lo = v; else if (k == "MzAcqRangeUpper") out.mz_hi = v; else out.n_bins = (long)v;
+    ++seen;
+  }
   sqlite3_finalize(st); sqlite3_close(db);
-  if (!(lo > 0.0) || !(hi > lo)) { why = "GlobalMetadata has no MzAcqRangeLower/Upper"; return false; }
+  if (!ok) return false;
+  if (seen < 3) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(seen) + " of 3)"; return false; }
+  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || out.n_bins < 2 || out.n_bins > 100000000L)
+  { why = "GlobalMetadata bounds are not usable: MzAcqRange " + std::to_string(out.mz_lo) + "-" + std::to_string(out.mz_hi) + ", DigitizerNumSamples " + std::to_string(out.n_bins); return false; }
   return true;
 }
 
