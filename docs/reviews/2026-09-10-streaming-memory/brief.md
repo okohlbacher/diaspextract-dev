@@ -16,9 +16,9 @@ commit.
 The physical shape of the problem, measured on the two benchmark acquisitions:
 
 * Dataset **D**: 30 minutes, 24 isolation windows, 32,210 MS2 window frames (1,342 per window),
-  ~7.7e8 picked MS2 peaks, ~612k emitted spectra.
+  **1.258e9 picked MS2 peaks** (measured by the tile reader, 2026-09-10), ~612k emitted spectra.
 * Dataset **TNBC 009** (PXD047793 run 009): 2 hours, 28 windows, 134,312 MS2 window frames
-  (4,797 per window), 4.3e9 raw MS2 peaks, ~3.29 M emitted spectra.
+  (4,797 per window), 4.319e9 raw MS2 peaks (picked ~0.8x), ~3.29 M emitted spectra.
 * One isolation window is an m/z slice sampled once per 1.626 s cycle for the whole gradient. A
   chromatographic feature is ~4 s wide; `trace:max_span_sec` trims traces at 120 s.
 
