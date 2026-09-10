@@ -34,26 +34,30 @@ def main(paths):
     for path in paths:
         hdr, rows = load(path)
         if not rows: print(f"{path}: empty"); continue
-        cats = [h for h in hdr if h.endswith("_mb") and h not in ("rss_mb", "arena_mb", "free_mb", "sum_mb", "unattributed_mb")]
+        # the tool wrote "_mb" until 2026-09-10 and "_mib" after it; the values were always MiB
+        suf = "_mib" if any(h.endswith("_mib") for h in hdr) else "_mb"
+        fixed = {"rss", "arena", "free", "sum", "unattributed"}
+        cats = [h for h in hdr if h.endswith(suf) and h[: -len(suf)] not in fixed]
+        R, S, U, F = "rss" + suf, "sum" + suf, "unattributed" + suf, "free" + suf
         t0, t1 = rows[0]["t_s"], rows[-1]["t_s"]
         print(f"\n=== {path}  ({t1 - t0:.0f} s sampled, {len(rows)} rows)")
-        peak_rss = max(rows, key=lambda r: r["rss_mb"])
-        peak_sum = max(rows, key=lambda r: r["sum_mb"])
-        print(f"peak RSS      {peak_rss['rss_mb']:9.0f} MB at t={peak_rss['t_s']:7.1f} s  phase={peak_rss['phase']}"
-              f"   (charged {peak_rss['sum_mb']:.0f} MB, unattributed {peak_rss['unattributed_mb']:.0f} MB,"
-              f" glibc free {peak_rss['free_mb']:.0f} MB)")
-        print(f"peak charged  {peak_sum['sum_mb']:9.0f} MB at t={peak_sum['t_s']:7.1f} s  phase={peak_sum['phase']}"
-              f"   (RSS {peak_sum['rss_mb']:.0f} MB)")
+        peak_rss = max(rows, key=lambda r: r[R])
+        peak_sum = max(rows, key=lambda r: r[S])
+        print(f"peak RSS      {peak_rss[R]:9.0f} MiB at t={peak_rss['t_s']:7.1f} s  phase={peak_rss['phase']}"
+              f"   (charged {peak_rss[S]:.0f} MiB, unattributed {peak_rss[U]:.0f} MiB,"
+              f" glibc free {peak_rss[F]:.0f} MiB)")
+        print(f"peak charged  {peak_sum[S]:9.0f} MiB at t={peak_sum['t_s']:7.1f} s  phase={peak_sum['phase']}"
+              f"   (RSS {peak_sum[R]:.0f} MiB)")
         print("\nper structure: peak, when, and how long it is above 5% of the peak RSS")
-        thr = 0.05 * peak_rss["rss_mb"]
+        thr = 0.05 * peak_rss[R]
         span = max(t1 - t0, 1e-9)
         for c in sorted(cats, key=lambda c: -max(r[c] for r in rows)):
             pk = max(rows, key=lambda r: r[c])
             if pk[c] <= 0: continue
             live = span * sum(1 for r in rows if r[c] > thr) / len(rows)
             at_peak = peak_rss[c]
-            print(f"  {c[:-3]:<12} peak {pk[c]:8.0f} MB at t={pk['t_s']:7.1f} ({pk['phase']:<10})"
-                  f"  {at_peak:8.0f} MB at the RSS peak   above 5% of peak RSS for {live:6.1f} s ({100.0 * live / span:4.1f}%)")
+            print(f"  {c[: -len(suf)]:<12} peak {pk[c]:8.0f} MiB at t={pk['t_s']:7.1f} ({pk['phase']:<10})"
+                  f"  {at_peak:8.0f} MiB at the RSS peak   above 5% of peak RSS for {live:6.1f} s ({100.0 * live / span:4.1f}%)")
         print("\nphases")
         seq, cur = [], None
         for r in rows:
@@ -64,11 +68,11 @@ def main(paths):
                 cur["t1"] = r["t_s"]; cur["rows"].append(r)
         for p in seq:
             rs = p["rows"]
-            pk = max(rs, key=lambda r: r["rss_mb"])
+            pk = max(rs, key=lambda r: r[R])
             dom = sorted(((max(r[c] for r in rs), c) for c in cats), reverse=True)[:3]
-            dom_s = ", ".join(f"{c[:-3]} {v:.0f}" for v, c in dom if v > 0)
-            print(f"  {p['phase']:<12} {p['t1'] - p['t0']:7.1f} s   RSS {rs[0]['rss_mb']:7.0f} -> {rs[-1]['rss_mb']:7.0f} MB"
-                  f"  (peak {pk['rss_mb']:7.0f})   top: {dom_s}")
+            dom_s = ", ".join(f"{c[: -len(suf)]} {v:.0f}" for v, c in dom if v > 0)
+            print(f"  {p['phase']:<12} {p['t1'] - p['t0']:7.1f} s   RSS {rs[0][R]:7.0f} -> {rs[-1][R]:7.0f} MiB"
+                  f"  (peak {pk[R]:7.0f})   top: {dom_s}")
         tiles = [p for p in seq if p["phase"].startswith(("tile", "loop", "write"))]
         if tiles:
             print("\nper tile (read | loop | write), RSS peak and the charged peak")
@@ -82,9 +86,9 @@ def main(paths):
                 for kind in ("read", "loop", "writ"):
                     p = byk[k].get(kind)
                     if not p: continue
-                    pk = max(p["rows"], key=lambda r: r["rss_mb"])
-                    ps = max(p["rows"], key=lambda r: r["sum_mb"])
-                    parts.append(f"{kind} {p['t1'] - p['t0']:6.1f}s rss<={pk['rss_mb']:7.0f} charged<={ps['sum_mb']:7.0f}")
+                    pk = max(p["rows"], key=lambda r: r[R])
+                    ps = max(p["rows"], key=lambda r: r[S])
+                    parts.append(f"{kind} {p['t1'] - p['t0']:6.1f}s rss<={pk[R]:7.0f} charged<={ps[S]:7.0f}")
                 print(f"  tile {k:>3}: " + " | ".join(parts))
 
 if __name__ == "__main__":

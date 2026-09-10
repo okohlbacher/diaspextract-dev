@@ -120,7 +120,14 @@ namespace
   /// [perf-instr] Per-phase wall/CPU/RSS accounting. Sparse [t=..] markers left ~53% of wall time
   /// unattributed, which is how you optimise the wrong thing. Every phase is timed; the table is
   /// printed unconditionally at the end so a benchmark log always says where the time went.
-  struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; };
+  struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; bool nested = false; };
+  /// [perf-instr] A phase entered while another is open is ENCLOSED by it -- the tile loop's
+  /// read/sort/write all run inside WINDOW_LOOP -- so its wall time is ALREADY in the outer row.
+  /// Summing every row therefore gave 105-109% of the run and a negative "unattributed"; enclosed
+  /// rows are marked and left out of the sum. Phases are opened only on the master thread.
+  inline int& phase_depth_() { static int d = 0; return d; }
+  struct PhaseNest { PhaseNest() { ++phase_depth_(); } ~PhaseNest() { --phase_depth_(); }
+                     PhaseNest(const PhaseNest&) = delete; PhaseNest& operator=(const PhaseNest&) = delete; };
   inline double& flush_wall_() { static double v = 0; return v; }   // [perf-load] pick inside LOAD
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
@@ -141,13 +148,15 @@ namespace
   }
   struct Phase
   {
-    std::string name; double w0, c0;
-    explicit Phase(std::string n) : name(std::move(n)), w0(phase_clock_()), c0(cpu_seconds_()) {}
+    std::string name; double w0, c0; int d;
+    explicit Phase(std::string n) : name(std::move(n)), w0(phase_clock_()), c0(cpu_seconds_()), d(phase_depth_()++) {}
     ~Phase()
     {
+      --phase_depth_();
       auto& st = phase_stats_()[name];
       if (st.n == 0) phase_order_().push_back(name);
       st.wall += phase_clock_() - w0; st.cpu += cpu_seconds_() - c0;
+      if (d > 0) st.nested = true;
       st.rss_end_mb = rss_mb_(); ++st.n;
     }
   };
@@ -159,11 +168,13 @@ namespace
     for (const auto& n : phase_order_())
     {
       const auto& p = phase_stats_()[n];
-      acc += p.wall;
+      if (!p.nested) acc += p.wall;   // enclosed rows are already inside their parent's wall
       char b[220];
+      const char* tag = p.nested ? (p.n > 1 ? "  (summed, enclosed)" : "  (enclosed)")
+                                 : (p.n > 1 ? "  (summed)" : "");
       snprintf(b, sizeof b, "[perf] %-22s %8.1f  %5.1f%%  %9.1f  %5.1fx  %8ld%s\n", n.c_str(), p.wall,
                total_wall > 0 ? 100.0 * p.wall / total_wall : 0.0, p.cpu,
-               p.wall > 0 ? p.cpu / p.wall : 0.0, p.rss_end_mb, p.n > 1 ? "  (summed)" : "");
+               p.wall > 0 ? p.cpu / p.wall : 0.0, p.rss_end_mb, tag);
       OPENMS_LOG_INFO << b;
     }
     char b[160];
@@ -242,6 +253,14 @@ namespace
     LedCharge(const LedCharge&) = delete;
     LedCharge& operator=(const LedCharge&) = delete;
   };
+  /// [ledger] live bytes of a PeakMap: peaks at the padded 20 B (Peak1D 16 + the IM float) plus
+  /// the per-spectrum header and its settings tail. O(spectra), never O(peaks).
+  inline long long ledMapBytes_(const MSExperiment& m)
+  {
+    long long b = (long long)m.size() * 700;
+    for (const auto& sp : m) b += (long long)sp.size() * 20;
+    return b;
+  }
   inline std::atomic<bool>& ledStop_() { static std::atomic<bool> s{false}; return s; }
   inline std::thread& ledThread_() { static std::thread t; return t; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
@@ -252,8 +271,10 @@ namespace
       if (!ledFile_()) return;
       ledThread_() = std::thread([]() {
         std::ofstream f(ledFile_());
-        f << "t_s\trss_mb\tarena_mb\tfree_mb\tsum_mb\tunattributed_mb";
-        for (int c = 0; c < LC_N; ++c) f << '\t' << ledName_(c) << "_mb";
+        // MiB, not MB: every value below is a >>20 of a byte count. The column names said "mb"
+        // and a review priced allocator reclamation off them as decimal MB.
+        f << "t_s\trss_mib\tarena_mib\tfree_mib\tsum_mib\tunattributed_mib";
+        for (int c = 0; c < LC_N; ++c) f << '\t' << ledName_(c) << "_mib";
         f << "\tphase\n";
         while (true)
         {
@@ -2324,7 +2345,8 @@ protected:
   vector<Trace> detectTraces_(PeakMap& map, TraceStore& store, double delta_im, double noise,
                               double snr, double min_len, double min_sample_rate,
                               double split_valleys, String* span_log, int bands,
-                              double split_scan_time)   // the run's cycle time for the splitter, 0 = per trace
+                              double split_scan_time,   // the run's cycle time for the splitter, 0 = per trace
+                              int in_cat = -1)          // [ledger] the caller's category for `map`, -1 = uncharged
   {
     MassTraceDetection mtd;
     mtd.setLogType(ProgressLogger::NONE); // quiet + thread-safe (called from the parallel window loop)
@@ -2460,6 +2482,13 @@ protected:
         for (int ci = 0; ci < nchunk; ++ci)
         { for (auto& sp : csub[ci][b]) sub[b].addSpectrum(std::move(sp)); csub[ci][b].clear(true); }
       }
+      // [ledger] the partition is a COPY of the whole map (plus a 1-5% halo) and lives from here
+      // until each band is detected -- charged as ms1_map until now, which named the wrong
+      // structure for the largest allocation of the MS1 phase. Hand the charge over at the swap.
+      vector<long long> band_b((size_t)bands, 0);
+      { long long tb = 0;
+        for (int b = 0; b < bands; ++b) { band_b[(size_t)b] = ledMapBytes_(sub[b]); tb += band_b[(size_t)b]; }
+        ledAdd_(LC_BAND, tb); if (in_cat >= 0) ledSet_(in_cat, 0); }
       vector<vector<PeakMap>>().swap(csub);
       tt_dist = tt_s(_td0, tt_now());
       auto _tm0 = tt_now();
@@ -2470,9 +2499,11 @@ protected:
         MassTraceDetection m2; m2.setLogType(ProgressLogger::NONE); m2.setParameters(p);
         vector<MassTrace> t;
         sub[b].sortSpectra();
-        if (sub[b].size() < 3) { sub[b].clear(true); continue; }   // MTD aborts below 3 spectra
+        // NOTE: MassTraceDetection builds its OWN copy of this band internally; that copy is the
+        // one structure of the MS1 phase the tool cannot charge without patching OpenMS.
+        if (sub[b].size() < 3) { sub[b].clear(true); ledAdd_(LC_BAND, -band_b[(size_t)b]); continue; }
         m2.run(sub[b], t);
-        sub[b].clear(true);
+        sub[b].clear(true); ledAdd_(LC_BAND, -band_b[(size_t)b]);
         // keep only traces whose centroid lies in this band's CORE -> no duplicates from the halo
         for (auto& mt : t)
         {
@@ -2491,6 +2522,7 @@ protected:
     {
       if (map.size() >= 3) mtd.run(map, mts);   // MTD aborts below 3 spectra; a tiny input is not an error
       map.clear(true); // [compact] dead from here; ~1.1 GB/window freed before the EPD peak
+      if (in_cat >= 0) ledSet_(in_cat, 0);
     }
 
     // [way-2] SPLIT MASS TRACES AT CHROMATOGRAPHIC VALLEYS.
@@ -3867,10 +3899,10 @@ protected:
     #pragma omp single
     ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                              ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_min_sample_rate"), getDoubleOption_("trace:ms1_split_valleys"), &ms1_span, ms1_bands,
-                                             split_scan_time);
+                                             split_scan_time, LC_MS1MAP);   // [ledger] the band partition takes the charge over
     { const double cap = max_span;
       if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
-    ledSet_(LC_MS1MAP, 0);   // detectTraces_ consumed the map
+    ledSet_(LC_MS1MAP, 0);   // belt and braces: detectTraces_ has already zeroed it
     { const long long tb = (long long)(ms1_traces.capacity() * sizeof(Trace) + ms1_store.inten.capacity() * 4
                                        + ms1_store.bins.capacity() * 2 + ms1_store.rt_index.capacity() * 4
                                        + ms1_store.frame_rt.capacity() * 8);
@@ -4613,6 +4645,10 @@ protected:
     // use. `perf:max_concurrent_windows` was computed and logged but never actually checked --
     // the only bound was the byte gate, which over-booked by 3.6x, so nothing ever throttled.
     std::atomic<int> active{0};
+    // [perf-instr] everything the tile loop times is INSIDE WINDOW_LOOP; mark it so the table adds
+    // up. Scoped to the loop alone -- the writer's final flush after it is a phase of its own.
+    {
+    PhaseNest _tile_nest;
     for (size_t tk = 0; tk < tiles.size(); ++tk)
     {
     const Tile& tile = tiles[tk];
@@ -5180,6 +5216,10 @@ protected:
           // Divide the budget instead of multiplying it.
           auto _t5 = std::chrono::steady_clock::now();
           vector<MSSpectrum> pslot(pidx.size());   // [tile] the owned precursors, in index order as before
+          // [ledger] ~700 B of empty header per OWNED precursor, most of which never emit, plus the
+          // payloads as they are produced -- charged HERE and not at the end of the stage, so the
+          // scoring stage's real footprint is visible instead of appearing all at once after it.
+          LedCharge _pslot(LC_SPECTRA, (long long)pidx.size() * (long long)sizeof(MSSpectrum));
           // grainsize, not num_threads: the pool decides how many threads land here, so a window
           // that outlives its neighbours gets the whole machine instead of a fixed team of 12.
           //
@@ -5227,7 +5267,8 @@ protected:
                 MSSpectrum ms2;
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
                              delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
-                if (!ms2.empty()) pslot[(size_t)j] = std::move(ms2);
+                if (!ms2.empty())
+                { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * 12)); pslot[(size_t)j] = std::move(ms2); }
               }
             }
           }
@@ -5235,8 +5276,7 @@ protected:
           t_score += std::chrono::duration_cast<std::chrono::nanoseconds>(_t6 - _t5).count();
           w_score = secs(_t6 - _t5);
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
-          { long long sb = 0; for (const auto& sp : bucket) sb += (long long)(sizeof(MSSpectrum) + sp.size() * 12);
-            ledAdd_(LC_SPECTRA, sb); }
+          // (the payloads were charged at emission; moving them into the bucket changes no bytes)
           const auto _t7 = std::chrono::steady_clock::now();
           t_emit += std::chrono::duration_cast<std::chrono::nanoseconds>(_t7 - _t6).count();
           w_emit = secs(_t7 - _t6);
@@ -5351,6 +5391,7 @@ protected:
     carry_out.clear();
     for (const WinKey& k : fkeys) carry_out[k];
     }   // tiles
+    }   // the enclosed-phase scope
 
     { auto& st = phase_stats_()["WINDOW_LOOP"]; if (st.n++ == 0) phase_order_().push_back("WINDOW_LOOP");
       st.wall += phase_clock_() - _t_win; st.cpu += cpu_seconds_() - _c_win; st.rss_end_mb = rss_mb_(); }
