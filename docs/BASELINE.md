@@ -2756,4 +2756,7 @@ first build on which "only some of a window's frames are resident" gives the who
 -- the property the tiled reader is built on. Review (Codex, Kimi; docs/reviews/2026-09-10-frame-tables/):
 sound at P = 0; the structural throws had to be made fatal (the loader's fallback catch would
 have appended a second full load onto the partial slabs) and the lockstep now matches (rt, frame
-id) -- a91cfcf.
+id) -- a91cfcf. **The fix-up re-gated (chain `step1b2`, 02:15-03:05): the same nine arms, the
+same results -- `f9e65631` / IDENTICAL / IDENTICAL / `3f8d421d` / probes IDENTICAL / mzPeak
+IDENTICAL / `f0502f33` / 15/15, 0 padded on 24/24 and 28/28.** Step 1 is closed; the dev build on
+ibminode05 is a91cfcf's.
