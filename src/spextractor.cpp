@@ -1698,11 +1698,19 @@ namespace
       const int n = (int)buf_.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
+      // [ledger] the batch's RAW frames: ~16 B per raw peak (m/z double + intensity float + the
+      // ion-mobility float array), freed one by one inside the pick loop below. This is the load's
+      // largest transient and the reason its peak is not the sum of what survives it.
+      long long raw_b = 0;
+      for (const auto& sp : buf_) raw_b += (long long)sp.size() * 16;
+      LedCharge _raw(LC_SCRATCH, raw_b);
       // per-frame regions of one reusable scratch, sized by the RAW peak counts
       scratch_off_.resize((size_t)n + 1);
       { size_t total = 0; for (int i = 0; i < n; ++i) { scratch_off_[(size_t)i] = total; total += buf_[(size_t)i].size(); } scratch_off_[(size_t)n] = total;
-        if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); }
-        ledSet_(LC_SCRATCH, (long long)(scratch_mzq_.capacity() * 4 + scratch_inten_.capacity() * 4 + scratch_imq_.capacity() * 2)); }
+        if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); } }
+      static std::atomic<long long> scratch_charged{0};   // [ledger] the reusable compaction scratch, once
+      { const long long want = (long long)(scratch_mzq_.capacity() * 4 + scratch_inten_.capacity() * 4 + scratch_imq_.capacity() * 2);
+        ledAdd_(LC_SCRATCH, want - scratch_charged.exchange(want)); }
       std::vector<size_t> kept((size_t)n);
       std::vector<double> frt((size_t)n);
       std::vector<uint32_t> fid((size_t)n);
@@ -1759,6 +1767,7 @@ namespace
           per_win[it->second].idx.push_back(i);
         } }
       const size_t n_ms1 = ms1_.size();
+      std::atomic<long long> slab_b{0};   // [ledger] what this batch actually touched
       std::exception_ptr pad_err;
       #pragma omp parallel for schedule(dynamic, 1)
       for (long w = 0; w < (long)per_win.size(); ++w)
@@ -1767,6 +1776,7 @@ namespace
         for (int i : bw.idx)
         {
           const size_t exp_f = bw.tab ? bw.tab->rt.size() : n_ms1;   // the window's frame count: exact when a table exists
+          (void)exp_f;
           if (bw.tab && !bw.tab->step(*bw.slab, frt[(size_t)i], fid[(size_t)i], exp_f))   // [frames] lockstep with the frozen table
           {
             #pragma omp critical(pad_err)
@@ -1777,8 +1787,10 @@ namespace
           }
           const size_t o = scratch_off_[(size_t)i];
           bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
+          slab_b += (long long)kept[(size_t)i] * 10 + 24;   // [ledger] touched bytes: 10 B/peak + the frame's table row
         }
       }
+      ledAdd_(LC_SLAB, slab_b);
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
@@ -1800,6 +1812,12 @@ namespace
       const int n = (int)ms1_buf_.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
+      // [ledger] the buffered RAW MS1 frames: ~16 B per raw peak, held until each is picked in
+      // place below. MS1 is 37% of the run's peaks, so this batch is the largest single transient
+      // of pass 1 -- the reason the MS1 phase peaks far above the map it produces.
+      long long raw_b = 0;
+      for (const auto& sp : ms1_buf_) raw_b += (long long)sp.size() * 16;
+      LedCharge _raw(LC_SCRATCH, raw_b);
       PeakPickerIM picker = picker_;
       std::exception_ptr pick_err;
       #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
@@ -1819,6 +1837,7 @@ namespace
         }
       }
       if (pick_err) std::rethrow_exception(pick_err);
+      { long long mb = 0; for (const auto& s : ms1_buf_) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
       for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
       ms1_buf_.clear();
       flush_wall_() += phase_clock_() - _tf0;
@@ -3719,8 +3738,8 @@ protected:
                       + " nonzero the compact store is NOT lossless and results differ from the old path.");
       }
       size_t ms1_pk = 0; for (const auto& sp : ms1_map) ms1_pk += sp.size();
-      { long long sb = 0; for (const auto& kv : ms2_by_window) sb += (long long)(kv.second.bytes() + kv.second.reserved());
-        ledSet_(LC_SLAB, sb); ledSet_(LC_MS1MAP, (long long)ms1_pk * 20); }
+      { long long sb = 0; for (const auto& kv : ms2_by_window) sb += (long long)kv.second.bytes();
+        ledSet_(LC_SLAB, sb); ledSet_(LC_MS1MAP, (long long)ms1_pk * 20); }   // touched bytes; the 2.5x reserve is untouched pages
       writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
                     + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
@@ -4641,8 +4660,7 @@ protected:
         n_peaks += sl.peaks();
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
-      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)(kv.second.bytes() + kv.second.reserved());
-        ledSet_(LC_SLAB, sb); }
+      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledSet_(LC_SLAB, sb); }
       if (detOn_())
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
@@ -4652,7 +4670,10 @@ protected:
         // idempotent, so the window body's own call becomes a no-op.
         for (auto& kv : tile_slabs)
         { toTof(kv.second);
-          uint64_t& h = slab_chain[kv.first]; h = slabDigest_(kv.second, h);
+          // the chain must START from the same FNV offset basis the whole-window digest starts
+          // from, or it cannot equal it (a zero-initialised map entry would seed the fold with 0)
+          uint64_t& h = slab_chain.try_emplace(kv.first, 1469598103934665603ULL).first->second;
+          h = slabDigest_(kv.second, h);
           writeLogInfo_("[det] window " + String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0) + " tile " + String(tk + 1)
                         + " slab n=" + String(kv.second.peaks()) + " digest=" + String(slabDigest_(kv.second)) + " chain=" + String(h)); }
       for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
@@ -4679,7 +4700,7 @@ protected:
       }
       for (auto& kv : tile_slabs) wl.emplace_back(kv.first, &kv.second);
       std::stable_sort(wl.begin(), wl.end(), [](const auto& a, const auto& b) { return a.second->bytes() > b.second->bytes(); });
-      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)(kv.second.bytes() + kv.second.reserved()); ledAdd_(LC_SLAB, sb); }
+      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledAdd_(LC_SLAB, sb); }
       writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + "): "
                     + String(wl.size()) + " windows, " + String(tile_peaks) + " peaks resident" + rss_() + mem_());
     }
@@ -4867,7 +4888,7 @@ protected:
           // of the window -- it reserves the whole merged arena while every band arena is still
           // live -- so the slab used to be resident across exactly the worst moment. [2026-09-06]
           auto release_input = [&]() {
-            ledAdd_(LC_SLAB, -(long long)(wslab.bytes() + wslab.reserved()));
+            ledAdd_(LC_SLAB, -(long long)wslab.bytes());
             vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
             vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
             vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
