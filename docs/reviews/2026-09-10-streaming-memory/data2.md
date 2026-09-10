@@ -49,14 +49,40 @@ pitch is irrelevant to the peak. So `tile:rt_sec` is a science knob, not a memor
   end-of-load `malloc_trim`.
 - The **streaming** arm's peak is 30,974 MiB at t=8.8 s inside the loader, and there glibc free is
   only 5,495 MiB. So **~10.7 GiB is LIVE and uncharged** at the exact peak instant, and no trim can
-  touch it. It is the two staging buffers of the load: `ms1_buf_` (charged, the `scratch` row at
-  4,235 MiB) and, behind it, the calibration patch's own 256-frame decode batch plus the opentims
-  raw uint32 buffers, neither of which the tool allocates and neither of which it can charge.
+  touch it.
 
-That distinction sets the two experiments that follow: a trim during the load can only help the
-resident shape, while the batch sizes are the only knobs on the streaming shape. They are separate
-knobs -- `SPEXTRACTOR_PICK_BATCH` moves `ms1_buf_`, `SPEXTRACTOR_LOAD_BATCH` moves the loader's
-decode batch -- which is why the follow-up is a 2x2 and not a sweep.
+  **CORRECTION (2026-09-10, from the synthesis's verification of codex-1, checked against the
+  OpenMS source).** The first version of this file attributed that 10.7 GiB to the loader's own
+  decode batch. That is wrong twice over. The loader's MS1 decode batch is **64 frames, hard-coded**
+  (`patches/openms-brukertims-mz-calibration.patch:340`, `const size_t mb = 64`) and is NOT what
+  `SPEXTRACTOR_LOAD_BATCH` controls -- that env var is the MS2 block at `:445`, which does not run
+  during the MS1 pass at all. Sixty-four frames is ~0.85 GiB, not 3.7.
+
+  The dominant uncharged term is **`PeakPickerIM::pickIMCluster`'s own per-spectrum temporaries**,
+  and they are live 100 at a time because the flush picks its batch under
+  `#pragma omp parallel for` at the run's full thread count. Per RAW peak of the spectrum, all
+  simultaneously live (`PeakPickerIM.cpp:1019-1069`):
+
+  | array | bytes/peak |
+  |---|---:|
+  | `points` (`Point` = double mz + double im + float + pad + `Size` index) | 32 |
+  | `mz_sorted_indices` (`Size`) | 8 |
+  | `original_to_sorted_pos` (`Size`) | 8 |
+  | `intensity_sorted_indices` (`Size`) | 8 |
+  | `used` (`vector<bool>`) | 0.125 |
+  | `averaged_points`, reserved at `points.size()` | 32 |
+  | **total** | **88.125** |
+
+  At D's ~693,600 raw MS1 peaks per frame and 100 concurrent picks that is **~6.1 GB**, against the
+  20 B/peak the ledger charges for the frame itself. It is the single largest live allocation the
+  tool never sees, it sits at the exact peak instant, and it explains most of the gap.
+
+That distinction sets the experiments that follow. A trim during the load can only help the
+resident shape. On the streaming shape the picker's flush batch is the lever, and it is a lever on
+TWO terms at once: it sets the raw backlog in `ms1_buf_` linearly, and it caps the picker's
+concurrency, so below the thread count it also divides the 88 B/peak of temporaries above.
+`SPEXTRACTOR_LOAD_BATCH` is not a lever on this peak at all -- the MS1 decode batch it would move
+is hard-coded at 64.
 
 ## What the repair changed in the numbers
 
