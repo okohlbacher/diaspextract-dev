@@ -2988,3 +2988,36 @@ All three settle:
 
 The 3-tile streaming arm on the rebuilt binary reproduces the pin at 3:43 and **32.1 GB**, with
 frames delivered 10,416 / 10,416 / 11,378, 0 padded and 0 absent in every tile.
+
+### Tiling has hit its floor on D: the MS1 pass (2026-09-10, chain `instr3`, 4258d16)
+
+Five arms, every one reproducing its pinned digest, on spock at 100 threads with the repaired
+ledger. Two controlled pairs, one per cell pitch, so grouping is the only variable inside a pair.
+
+| arm | wall | peak RSS |
+|---|---:|---:|
+| resident, 1 tile | 2:29.83 | 46.77 GB |
+| stream, 1 tile, pitch 600 | 2:30.71 | 41.71 GB |
+| stream, 3 tiles, pitch 600 | 2:55.30 | **31.76 GB** |
+| stream, 1 tile, pitch 300 | 2:36.90 | 38.02 GB |
+| stream, 6 tiles, pitch 300 | 2:55.49 | **31.76 GB** |
+
+**The 3-tile and 6-tile arms peak within 1 MB of each other** (31,757,788 vs 31,758,716 kB) and
+finish within 0.2 s, at two different pitches and two different digests, because both are pinned by
+the same event: the MS1 pass at t≈9 s. Inside the window loop the six-tile arm is much smaller
+(slab 3,548 MiB against 5,779 at three tiles) and none of that reaches the process peak. **More
+tiles is now free and worth nothing on this file; the next memory gain must come out of the MS1
+pass.** Grouping is worth −23.9% peak for +16.3% wall at pitch 600, and −16.5% for +18.5% at 300.
+
+The cell pitch moves the ONE-TILE peak (41.71 -> 38.02 GB, −8.8%, because a smaller cell is a
+smaller detection working set) and stops mattering once tiled. So `tile:rt_sec` is a science knob,
+not a memory knob, wherever `tile:cells_per_tile` is set.
+
+**The resident and streaming peaks are made of different things.** The resident arm's 45,884 MiB at
+t=28.0 s falls to 28,052 two seconds later with the charged total UNCHANGED: 17.3 GiB of it was one
+load's worth of allocator free list, not live data. The streaming arm's 30,974 MiB at t=8.8 s has
+only 5,495 MiB of glibc free, so **~10.7 GiB there is live and uncharged** -- the load's two staging
+buffers, `ms1_buf_` (charged as `scratch`, 4,235 MiB) and behind it the calibration patch's own
+256-frame decode batch plus the opentims raw buffers, which the tool does not allocate. A trim can
+only help the resident shape; the batch sizes are the only knobs on the streaming shape, and they
+are two separate knobs (`SPEXTRACTOR_PICK_BATCH`, `SPEXTRACTOR_LOAD_BATCH`).
