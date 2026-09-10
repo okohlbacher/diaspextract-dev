@@ -1816,6 +1816,7 @@ namespace
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
+      loadTrim_();
     }
 
   protected:
@@ -1864,6 +1865,7 @@ namespace
       for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
       ms1_buf_.clear();
       flush_wall_() += phase_clock_() - _tf0;
+      loadTrim_();
     }
 
     void consumeSwathSpectrum_(MapType::SpectrumType& s, size_t /*swath_nr*/) override
@@ -1905,6 +1907,27 @@ namespace
     /// [tile-0b] Overridable for the picker-purity measurement (SPEXTRACTOR_PICK_BATCH). With the
     /// tail flushed (finish()) the batch size must not change the output; 256 stays the default
     /// for the raw-buffer footprint.
+    /// [ledger 2026-09-10] The load ends by returning ~17 GiB on dataset D: RSS falls 45,279 ->
+    /// 28,052 MiB at the end of LOAD with the charged total unchanged, so the process peak of the
+    /// resident arm is one load's worth of allocator free list, not live data. `MALLOC_TRIM_THRESHOLD_`
+    /// cannot reach it -- free() only trims the top of the MAIN arena, and with ~100 threads the
+    /// retention sits in per-thread arenas (`malloc arena=92188 MB` in the load log). Only an
+    /// explicit malloc_trim(0), which walks every arena, returns it. This trims every Nth flush so
+    /// the A/B can price the walk; 0 (the default) is exactly today's behaviour.
+    static int loadTrimEvery_() { static const int v = []{ const char* e = std::getenv("SPEXTRACTOR_LOAD_TRIM");
+                                                           return e ? std::atoi(e) : 0; }(); return v; }
+    static void loadTrim_()
+    {
+      const int n = loadTrimEvery_();
+      if (n <= 0) return;
+      static std::atomic<long long> k{0};
+      const bool due = (k.fetch_add(1, std::memory_order_relaxed) % n == n - 1);
+#ifdef __GLIBC__
+      if (due) malloc_trim(0);
+#else
+      (void)due;   // every other trim site in this file is glibc-only for the same reason
+#endif
+    }
     static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("SPEXTRACTOR_PICK_BATCH");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
     std::vector<MapType::SpectrumType> buf_;
