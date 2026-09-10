@@ -503,3 +503,35 @@ INSTR2_RESULT PASS
 INSTR2_DONE 08:18
 ```
 
+
+## Late addition: what density-balanced cell grouping is actually worth (measured, 2026-09-10)
+
+The brief suggests grouping cells by cumulative peak count instead of by time, since any grouping
+reproduces the same output. Measured directly from the acquisition's own frame table
+(`Frames.NumPeaks`, 16,105 MS2 frames, 1.545e9 raw MS2 peaks on dataset D), the raw peaks per cell
+are:
+
+| pitch | cells | share of the run's peaks, cell by cell |
+|---|---:|---|
+| 600 s | 3 | 7%, 50%, 43% |
+| 300 s | 6 | 1%, 6%, 19%, 30%, 29%, 14% |
+
+and the best adjacent grouping against the equal-time one:
+
+| tiles | equal-time densest tile | balanced densest tile | gain |
+|---:|---:|---:|---:|
+| 3 (from 6 cells) | 50% of the run | 43% | **13%** |
+| 2 (from 6 cells) | 74% | 57% | **23%** |
+| 6 (from 6 cells) | 30% | 30% | 0 (one cell each: nothing to group) |
+
+**So the balancing idea is real but small, and the measurement says why: the imbalance is WITHIN
+the cells, not between the groups.** At pitch 300 one cell alone carries 30% of the run's peaks,
+so no grouping of those cells can put less than 30% in the densest tile. Cutting finer cells would
+help the memory but changes the science (it is the cut-line set; pitch 300 vs 600 was measured at
+Sage 13,836 vs 13,490 with entrapment 1.38% vs 1.30%).
+
+That leaves the memory question pointing somewhere else: at a fixed cell grid, the only ways below
+"one cell's peaks resident" are to shard the WINDOW dimension (re-reading the tile per shard: the
+loader decodes each frame once and slices it to every window of its group, so a shard costs a full
+re-decode), to spill slabs, or to reduce the bytes per peak. Reviewers should weigh those against
+each other rather than assuming the grouping fixes it.
