@@ -154,6 +154,14 @@ def synth_tdf(path, n_frames):
     db.execute("CREATE TABLE Frames (Id INTEGER, T1 REAL, MzCalibration INTEGER)")
     db.executemany("INSERT INTO Frames VALUES (?,?,1)",
                    [(i + 1, g["T1_ref"] + 0.03 * (i % 3)) for i in range(n_frames)])
+    # GlobalMetadata: the run-level bounds of the flight-time axis. A real tdf always has them and
+    # trace:band_edges=acquisition (the default since 2026-09-10) REFUSES a run without them, so a
+    # fixture that omits them cannot exercise the integer detector at all. Values are TEXT, as the
+    # vendor writes them; the digitizer sample count is dataset D's.
+    db.execute("CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT)")
+    db.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
+                   [("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
+                    ("DigitizerNumSamples", "634073")])
     db.commit(); db.close()
     return path
 
@@ -531,4 +539,17 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A suite that CANNOT RUN must not look like a suite that ran: a failure outside a check() --
+    # a fixture that no longer matches the tool's requirements, a binary that refuses an option --
+    # used to escape as a traceback, and a gate chain grepping for "checks passed" or "FAIL" saw
+    # nothing at all (2026-09-10: the band-edge default started requiring tdf metadata the
+    # synthetic fixture did not write, and three chains reported an empty e2e section).
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as e:
+        import traceback
+        traceback.print_exc()
+        print(f"\n0/0 checks passed; FAIL the suite could not run: {type(e).__name__}: {e}")
+        sys.exit(2)
