@@ -20,7 +20,8 @@ Ported code, used under its own licence (full text in LICENSES/):
   MIT License, Copyright (c) 2026 Patrick Garrett -- LICENSES/dnoise-MIT.txt
   src/DnoiseMs1.h is a C++ port of its default MS1 denoising: the streak filter,
   the halo filter and the diaPASEF MS1 window gate, including the timsrust 0.4.2
-  (Apache-2.0) two-point calibration formulas dnoise builds that gate with.
+  (Apache-2.0) two-point calibration formulas dnoise builds that gate with --
+  LICENSES/timsrust-Apache-2.0.txt.
 
 Algorithmic ideas were reviewed against, but no code was taken from:
 

@@ -70,6 +70,16 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && hashFiles('scripts/sync_cluster.sh') != ''
         run: bash tests/test_sync_cluster_txn.sh
 
+      # An option removed from the tool but left in a shipped example is not a wart: the tool refuses
+      # an unknown option and aborts before doing any work, so the example is dead. 1.2.0 shipped a
+      # release commit that edited bench/run_open.sh.example without noticing it still passed
+      # -assembly:open_search_safe, removed in the same release. This reads the registrations out of
+      # the source, so it needs no OpenMS; build.yml runs the same check against the binary's own
+      # -write_ini inventory.
+      - name: Option tokens in the shipped examples and README are registered options
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/check_option_tokens.py
+
       - name: Calibration golden test (Python reference implementation)
         run: python3 tests/test_calibration.py
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.2.0] - 2026-09-11
+## v1.2.0 — 2026-09-11
 
 **Why 1.2.** This release succeeds the public v1.1.0 (2026-09-04). Two things in it are not backwards
 compatible, and both are deliberate. **The tool is renamed DIAspeXtractor and the executable is
@@ -10,15 +10,20 @@ the CMake option names and the repository URLs move with it, and there is no com
 **The output is not digest-comparable with 1.1.0**: MS1 denoising is on by default, the integer
 detector's band partition comes from the acquisition's metadata, detection runs in fixed
 600-second retention-time cells, the valley splitter's smoothing window is run-wide, and the
-streaming loader no longer drops the tail of every run. "Migrating from 1.1.0" below is the complete
-list of what changed under you. Everything else in this release is memory, speed, less code and
+streaming loader no longer drops the tail of every run; and three corrections carried over from the
+unpublished v2.0.0 tree change spectra as well -- the MS1 arena-compaction fix (it overwrote ~1% of
+precursor XICs), the `C4` calibration term (an additive mass offset on ModelType 1 acquisitions that
+store a non-zero `C4`, so measured masses move for those files; bit-identical where `C4 == 0`) and
+the window key now carrying the vendor `WindowGroup`. "Migrating from 1.1.0" below, together with
+those three, is the complete list of what changed under you. Everything else in this release is memory, speed, less code and
 corrections that leave the spectra alone -- and where an entry says *digest-identical*, that is a
 measured property of the shipped digests, not a design intent.
 
 **Where it stands.** At the shipped defaults, 100 threads, each pair back to back on one node: a
 30-minute in-house acquisition (dataset D) runs in **3:47 at 21.99 GB peak RSS** and a 2-hour public
 diaPASEF acquisition (PXD047793, run 009) in **9:57 at 21.07 GB** -- against 37.44 GB and 99.70 GB for
-the same output before this cycle's memory work. The reference digests are `e43672a0` (dataset D) and
+the identical output at one tile (`-tile:cells_per_tile 0`) on the same build, and against 57 GB / 2:54
+and 187 GB / 11:18 before this cycle's memory work. The reference digests are `e43672a0` (dataset D) and
 `3aafd0b5` (run 009) at the defaults, `8c1b047f` and `bff54a1f` with `-dnoise:ms1 false`. The record is
 docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
 
@@ -29,12 +34,13 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
 | executable and CMake target | `spextract` | `diaspextractor` |
 | TOPP tool name: ini section, mzML software entry | `SpeXtract` | `DIAspeXtractor`; regenerate 1.x ini files with `-write_ini` |
 | environment variables | `SPEXTRACT_*` | `DIASPEXTRACTOR_*`, including the three the patched libOpenMS reads (`DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK`, `DIASPEXTRACTOR_SDK_PARALLEL`, `DIASPEXTRACTOR_LOAD_BATCH`) |
-| CMake | `project(SpeXtract)`, `SPEXTRACT_WITH_MZPEAK` | `project(DIAspeXtractor)`, `DIASPEXTRACTOR_WITH_MZPEAK`, and the new `DIASPEXTRACTOR_TESTS_ONLY` and `DIASPEXTRACTOR_VERSION` |
+| CMake | `project(SpeXtract)`; mzPeak enabled with `-DMZPEAK_ROOT=<checkout>`, which defines `SPEXTRACT_WITH_MZPEAK` internally | `project(DIAspeXtractor)`; mzPeak still enabled with `-DMZPEAK_ROOT=<checkout>`, now defining `DIASPEXTRACTOR_WITH_MZPEAK`; plus the new option `DIASPEXTRACTOR_TESTS_ONLY` and the `DIASPEXTRACTOR_VERSION` compile definition |
 | C++ namespace | anonymous | `diaspextractor::` (`spx::` unchanged) |
 | sources | `src/spextract.cpp`, `test/test_spextract.py` | `src/diaspextractor.cpp`, `test/test_diaspextractor.py` |
 | repository | `okohlbacher/speXtract` | `okohlbacher/diaspextractor` |
 | OpenMS patches | two | four, all applied by `scripts/apply_openms_patches.sh`; the third and fourth are new since 1.1.0 and a tree without the third does not build the tool |
-| reported version | OpenMS' | its own (`--help`, the ini `version` parameter, the output's software entry) |
+| reported version | OpenMS' | its own, with the OpenMS build alongside it (`--help` prints `Version: 1.2.0 (OpenMS ...)`), plus the ini `version` parameter and the output's software entry |
+| the output file during a run | written straight to `-out` | written to `<out>.part` and renamed on completion; a failed run leaves no partial file |
 
 - **`SPEXTRACTOR_*` variables are refused, not ignored.** An old name would now do nothing without a
   word, so the tool refuses to start while any `SPEXTRACTOR_*` variable is set, and names the variable
@@ -43,6 +49,10 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   `find_package(OpenMS)`. **The guard covers only `SPEXTRACTOR_*`, not 1.1.0's own `SPEXTRACT_*`
   prefix**, which is still silently ignored -- so if you carried a `SPEXTRACT_...` export over from
   1.1.0, rename it by hand: the tool will not tell you.
+- **Only `SPEXTRACTOR_TESTS_ONLY` is refused at configure time.** Every other old `-D` name --
+  `SPEXTRACT_TESTS_ONLY`, `SPEXTRACT_WITH_MZPEAK`, `SPEXTRACTOR_WITH_MZPEAK` -- is an unused cache entry
+  that CMake accepts in silence, so a 1.1.0 build script that passed `-DSPEXTRACT_WITH_MZPEAK=ON`
+  configures a build *without* mzPeak and says nothing. Use `-DMZPEAK_ROOT=<checkout>`.
 - **No compatibility alias.** No `spextract` or `spextractor` executable is installed: both names are
   taken by other tools, which is why the tool was renamed in the first place. Anyone who needs the old
   command locally can link it (`ln -s diaspextractor spextract`).
@@ -58,9 +68,9 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   `trace:band_edges` (new, `acquisition`) and `trace:split_scan_time` (new, `frame`). Recorded under
   v2.0.0 below, which was an internal tag but whose changes reach a 1.1.0 user here for the first time:
   `charge:min_charge` 2 -> 1 with the new `charge:im_charge_veto` (report FDR per charge -- the z=1
-  stratum carries ~3% entrapment FDR under one pooled 1% cut), `perf:ms1_trace_bands` 12 -> 48,
-  `perf:malloc_trim` (new, on, and now trimming between tiles), `-threads` defaulting to every core and
-  the output format following the `-out` extension.
+  stratum carries 3-9% entrapment FDR under one pooled 1% cut, depending on the file), `perf:ms1_trace_bands` 12 -> 48,
+  `perf:malloc_trim` (new, on, and now trimming between tiles). Already in 1.1.0, so unchanged for you:
+  `-threads` defaults to every core and the output format follows the `-out` extension.
 - **Options and probe environment variables that no longer exist** are listed under "Removed". An ini
   file that sets one must be regenerated.
 
@@ -155,6 +165,16 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
 - **`-ffp-contract=off` stays on for the whole tool.** Builds for FMA-capable targets such as arm64 or
   `-march=haswell` are now contraction-free like the cluster reference; default x86-64 builds and all
   pins are unchanged.
+- **The tool no longer phones home.** OpenMS builds with `ENABLE_UPDATE_CHECK=ON` by default, and
+  TOPPBase then made a REST request on *every* invocation, carrying this tool's name and version; on an
+  offline node or behind a proxy it printed `QIODevice::read (QNetworkReplyHttpImpl): device not open`
+  to stderr -- the stream this project's own harness parses -- and users reported it as ours. `main()`
+  now sets `OPENMS_DISABLE_UPDATE_CHECK` before TOPPBase runs, with `setenv(..., 0)` so an explicit
+  setting of your own still wins, and `.github/workflows/build.yml` asserts on every full build that
+  `--help` from a clean environment carries no `QIODevice`/`QNetwork` line. This is what SECURITY.md's
+  "does not phone home, collect telemetry, or transmit anything" now rests on. The same change gives
+  `--help` a `Version:` line carrying both numbers -- the tool's own and the OpenMS build it was
+  compiled against -- because a bug report needs both.
 - **The cluster deploy script (development repository) deploys as one transaction on the node.** It
   uploaded sources and headers before taking the lock, and a failed unit test or build restored only
   the `.cpp`. It now stages every file with checksums, takes the lock, runs both unit tests
@@ -200,7 +220,7 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   peak is one load's worth of allocator free list. `MALLOC_TRIM_THRESHOLD_` cannot reach it, because
   `free()` trims only the top of the main arena and with ~100 threads the retention sits in per-thread
   arenas.
-- **The end-to-end suite is 25 checks, 26 in a build that writes mzPeak** (13 before this cycle). New:
+- **The end-to-end suite is 25 checks, 26 in a build that writes mzPeak** (13 before this cycle). New, among them:
   **14** the declared spectrum count, `id="spectrum=K"`, `index="K"` and every `<indexList>` offset
   agree; **15** thread invariance at a pitch that cuts the fixture in two, and that a one-tile run
   traces two or more cells; **19d** a NaN or infinite MS1 m/z is refused before the prune, at 1 and 48
@@ -221,6 +241,10 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   leg also runs the cluster deploy script against a fake node behind ssh/scp shims (the public
   repository skips that step). CI syntax-checks every tracked Python file rather than an arbitrary
   fifth of them, and `apply_openms_patches.sh` checks the OpenMS pin it documents.
+  `scripts/check_option_tokens.py`, new, asserts that every `-<group>:<option>` token in the shipped
+  examples and README is an option the tool registers -- from the source on every push, and from the
+  built binary's own `-write_ini` inventory in the full build. A removed option left inside an example
+  makes the tool abort before it does any work, and this release shipped one that far.
 
 ### Fixed
 
@@ -284,7 +308,11 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
 The spectrum digests are unchanged on every accepted input by all of the following: each removed option
 defaulted to its no-op value and each removed variable was a probe.
 
-- **Twenty-four falsified options** (from 71 to 47; 21 fewer in the plain `--help`). Each either carried
+- **Twenty-four falsified options**, the count at the simplification pass (commit `9a6c2d4`: 71 registered
+  options to 47, 21 fewer in the plain `--help`). Across the whole release 27 options go and 19 arrive
+  (`trace:split_scan_time`, `tile:rt_sec`, `tile:cells_per_tile`, `trace:band_edges`, `perf:ms1_prune`
+  and the 14 `dnoise:` options), so **the shipped tool registers 63 options** -- 70 items in `-write_ini`
+  with TOPPBase's seven common parameters. Each removed option either carried
   a falsification verdict in its own help text or had no measurement on record: the `merge:` and
   `consolidate:` groups, the cross-precursor redistribution family (`rp_max`, `competitive`,
   `apportion`), the wavelet smoother and its selftest, post-centroiding frame aggregation,
@@ -316,8 +344,10 @@ defaulted to its no-op value and each removed variable was a probe.
   a build that requires OpenMP and POSIX, and one-caller layers (`scoreCandidates_`, `weighted_` and
   `assembleFromList_` are now `assembleOne_`). Boilerplate goes too, from `CMakeLists.txt` (one
   `-ffp-contract=off` declaration), the unit tests and the e2e suite.
-  **Together with the options and the probes, `src/` is 1,357 lines shorter** (2,050 removed, 693
-  added).
+  **The simplification pass alone took 1,357 lines out of `src/`** (2,050 removed, 693 added, commit
+  `d200db4`). Across the release `src/` is 994 lines *longer* than at v2.0.0 (5,335 -> 6,329), because
+  the new `src/DnoiseMs1.h` is 723 of them and the cell grid, the tiled writer and the MS1 prune are
+  the rest: the simplification paid for the features, it did not shrink the tool.
 - Option help is cut to the fact, the escape and a pointer to the measurement, and several help texts
   are corrected: `assembly:im_weight_sigma` changes which fragments survive the cap;
   `assembly:default_charge` does nothing while `require_isotope_support` is on; `trace:band_edges` falls
@@ -343,12 +373,23 @@ otherwise, so the peptide sets are unchanged by construction and no search was n
   - **mzML spectra are encoded in parallel and written in order (fourth OpenMS patch).** Writing was the
     largest serial block left, 10.7% of the run at 1.0x, and it is CPU-bound rather than I/O-bound: it
     sustained ~400 MB/s against a filesystem measured at 4.0 GB/s. Serialising one spectrum is
-    independent of every other; only the concatenation is ordered. **WRITE 90.0 s -> 21.1 s,
+    independent of every other; only the concatenation is ordered. **WRITE 90.0 s -> 21.1 s; the phase's parallel scaling goes
     1.0x -> 49x.** Each thread needs its own handler and validator -- OpenMS' writer memoises CV-term
     validation in mutable state, and sharing one handler corrupts the heap.
   - **The canonical sort sorts keys, not spectra**, and the assembled PeakMap takes the vector whole.
     `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
     **SORT -61%; the ASSEMBLE phase is gone.**
+- **The `Trace` record is 40 bytes, down from 48, at byte-identical output.** The retention time is an
+  index into the run's frozen frame table rather than a cached `double` (a child trace's RT really is a
+  frame time: the `off-grid` counter is 0 once the frame offset is signed, so `frame0 + rt_at` is
+  invariant under trimming), and `TraceStore::bins` stores the flight-time bin as an `int16` offset from
+  the trace's own bin instead of a `uint32`. Interleaved A/B, arms alternating on one node: **peak RSS
+  -5.50 GB (-2.96%) on the 2-hour acquisition and -1.90 GB (-3.29%) on dataset D**, total CPU flat at
+  -0.06% and the window loop -- where all 2.14e9 records live -- within 0.14%; every arm
+  `SPECTRUM DATA IDENTICAL`. Adopted on memory at CPU parity, not on wall. It also prices what is left:
+  parents are freed at the split, so ~49 GiB of records are resident at the peak rather than the naive
+  95.8, and **every further per-record byte is worth ~0.7 GB at the peak, not ~2 GB** -- the coefficient
+  to price the remaining field removals with.
 - **The drained compact store is returned when the last window has materialised.** The window loop's
   peak held ~40 GB of dead per-frame vectors in the allocator's free list for its whole life; one
   `malloc_trim` at the moment the last window's slab exists returns it. Interleaved A/B on a 2-hour
@@ -532,10 +573,11 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   mzPeak reference is guarded; `-out_type mzpeak` refuses without a mzPeak build);
   the sqlite3 tdf reader is its own header (`src/TdfLoad.h`) with an include guard; the weekly CI job
   builds OpenMS from source at that pin, applies the patches and runs the end-to-end suite.
-- **Cluster tooling**: `bench/launch.sh` starts a long job detached so the ssh channel is released,
+- **Cluster tooling** (development repository, not part of the public tree): the remote launcher starts
+  a long job detached so the ssh channel is released,
   reserves its tag atomically, refuses a missing work directory and reports started / exited /
   failed distinctly; the benchmark drivers refuse to overwrite a measured arm and the publish step
-  refuses to publish a binary that failed its own suite. `the deploy script` ships the
+  refuses to publish a binary that failed its own suite. The deploy script ships the
   launcher, the tool's headers, the end-to-end suite and its golden calibration file with every
   deploy and records the
   MassTrace-patch marker and the OpenMS library hash in the provenance.

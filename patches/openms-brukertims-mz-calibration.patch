@@ -85,7 +85,7 @@
  
 +// [DIAspeXtractor table-mz] License-free EXACT TOF->m/z from the TDF MzCalibration table.
 +// The MODEL lives in DIAspeXtractor's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
-+// scripts/sync_cluster.sh) so the shipped code is the code the C++ unit test exercises.
++// scripts/apply_openms_patches.sh) so the shipped code is the code the C++ unit test exercises.
 +// Fails CLOSED: an unsupported calibration (ModelType != 1, dC2 != 0, multi-row table) throws
 +// rather than silently using the -5..-11 ppm chord. DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK=1 opts back in.
 +#include <sqlite3.h>

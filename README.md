@@ -27,13 +27,14 @@ host** — the tool links against an OpenMS installation but lives outside the O
 | Compiler | C++20 — GCC 13+ or Clang 16+ |
 | OpenMP | required |
 | CMake | 3.21+ (OpenMS's own requirement; the tool itself needs 3.16) |
-| **Memory** | **~22 GB peak** on a 30-minute gradient (dataset D) and **~21–25 GB** on a 2-hour acquisition (TNBC 009) at the shipped defaults, 100 threads, with one 600-s retention-time cell per tile; in one tile (`-tile:cells_per_tile 0`) the same files peak at ~37 and ~100 GB (the 30–60 min cohort spanned 68–109 GB before the memory work). It follows how dense the acquisition is more than how long it runs |
-| Disk | mzML output was 6.2 GB for 656k spectra (30-minute run) and 19–20 GB for a 2-hour run at the previous default; the current default emits 30–70% more spectra. mzPeak is about a third of that |
+| **Memory** | **~22 GB peak** on a 30-minute gradient (dataset D) and **~21 GB** on a 2-hour acquisition (TNBC 009) at the shipped defaults, 100 threads, with one 600-s retention-time cell per tile (25 GB on the 2-hour file with `-perf:malloc_trim false`); in one tile (`-tile:cells_per_tile 0`) the same files peak at ~37 and ~100 GB (the 30–60 min cohort spanned 68–109 GB at the 2026-09-04 defaults). It follows how dense the acquisition is more than how long it runs |
+| Disk | at the shipped defaults a 30-minute run (dataset D) emits **496,722** spectra and a 2-hour run (TNBC 009) **3,010,923** — about a quarter *fewer* than the 656k and ~3.9 M of the pre-1.2.0 default, whose mzML was 6.2 GB and 19–20 GB. Budget from the spectrum count. mzPeak is about a third of the mzML: dataset D's 496,722 spectra are 1.76 GB as mzPeak |
 
 The memory figure is not a suggestion. A full-depth diaPASEF acquisition holds millions of mass traces
 in flight. At the shipped defaults the window loop holds one 600-s tile at a time, so a 30-minute in-house
-acquisition needs ~22 GB and a 2-hour one ~21–25 GB; in one tile they needed ~37 and ~100 GB, and low-load
-public files (PXD017703) ran in 10–26 GB under the earlier one-tile defaults. Peak usage is reported at the end of every run, so you can
+acquisition needs ~22 GB and a 2-hour one ~21 GB (25 GB with `-perf:malloc_trim false`); in one tile they
+needed ~37 and ~100 GB, and low-load public files (PXD017703) ran in 10–25 GB under the earlier one-tile
+defaults. Peak usage is reported at the end of every run, so you can
 size a node from your own data. Memory figures throughout are peak RSS as `/usr/bin/time` reports
 them (kB ÷ 10⁶).
 
@@ -42,6 +43,13 @@ them (kB ÷ 10⁶).
 ```bash
 git clone https://github.com/okohlbacher/diaspextractor.git
 cd diaspextractor
+
+# OpenMS first: the pinned development commit, patched, built. No released package works.
+git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
+git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
+cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
+      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF   # plus OpenMS's own dependencies
+
 scripts/apply_openms_patches.sh /path/to/OpenMS    # see "OpenMS patches" below
 cmake --build /path/to/OpenMS/build -j             # rebuild OpenMS: the patches change its headers and libOpenMS
 cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
@@ -115,21 +123,26 @@ sage sage.json -o results pseudo.mzML
 | `-assembly:require_isotope_support` | `true` | drop precursor hypotheses with no isotope partner. `false` roughly doubles emission, was ~7× slower (measured 2026-09-04, before the scheduling fixes) and identifies fewer peptides |
 | `-perf:malloc_trim` | `true` | return the allocator's free pages (glibc) at the two phase boundaries and between tiles. At the phase boundaries it trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition in one tile (the loop re-faults the returned pages cold); between tiles it takes about 4 GB off TNBC 009 and 0.5 GB off dataset D at the defaults. Byte-identical output either way. Off when time, not memory, is the constraint |
 | `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output**: measured, it is slightly *more* sensitive on a large file (+2.0% Sage peptides at unchanged entrapment FDR) for 1.75× the memory and ~1.7× the wall |
-| `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (a halo partition; the band count moves the spectrum list slightly). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both gate datasets (set overlap 99.4% on dataset D, 89–99% on dataset A); 1 = off |
-| `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 13–21% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 13–21%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
+| `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (a halo partition; the band count moves the spectrum list slightly). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both benchmark acquisitions; 1 = off |
+| `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 12.7–20.5% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 13–21%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
 | `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: dataset D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB |
 | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
 | `-trace:band_edges` | `acquisition` | the integer detector's per-window band edges come from the tdf's metadata (the digitizer's last bin) instead of the window's resident peaks, so a streaming reader can reproduce them. Measured neutral on both benchmark files (Sage +1/+1, MSFragger 0/−3, entrapment +0.00/+0.01 points); `slab` reproduces the pre‑2026‑09‑10 output |
 | `-tile:cells_per_tile` | 1 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. On a `.d` (the streaming source) **memory is one tile's**: at the defaults TNBC 009 peaks at 21.07 GB in 13 tiles with a trim between tiles against 99.70 GB in one (wall 9:57 against 9:42, same node), dataset D at 21.99 GB in 3 tiles against 37.44 GB (3:47 against 3:15). mzPeak output always runs as one tile |
-| `-tile:rt_sec` | 600 | the integer detector traces each isolation window in fixed retention-time **cells** of this pitch, cut at the run's MS1 frame times and recorded in the mzML header (`spx:tile_boundaries`). The cut is part of the definition: any grouping of cells into tiles, resident or streamed, reproduces the same spectra bit for bit. Science price measured 2026-09-10 against whole-window tracing (`-1`): Sage +0.8% on both benchmark files, MSFragger +1.5% / flat, entrapment FDR +0.14 / +0.16 points (inside the release rule); ~2.5% of peptides straddle a cut line and lose 9% there against 6–8% elsewhere |
+| `-tile:rt_sec` | 600 | the integer detector traces each isolation window in fixed retention-time **cells** of this pitch, cut at the run's MS1 frame times and recorded in the mzML header (`spx:tile_boundaries`). The cut is part of the definition: any grouping of cells into tiles, resident or streamed, reproduces the same spectra bit for bit. Science price measured 2026-09-10 against whole-window tracing (`-1`): Sage +0.8% on both benchmark files, MSFragger +1.5% / flat, entrapment FDR +0.14 / +0.16 points (inside the release rule); peptides within 15 s of a cut line — 5% of the set on TNBC 009 — are lost at 9.3–9.4% against 6.0–7.9% elsewhere |
 
 `diaspextractor --helphelp` lists every option, most with a pointer to the measurement behind the default.
 
 ### Reading the output
 
-Emitted spectra are MS2 with a synthetic precursor. Provenance is recorded as userParams on the
-run — `spx:detector`, `spx:require_isotope_support`, `spx:mz_calibration` — so a file can always be
-attributed to the configuration that produced it.
+Emitted spectra are MS2 with a synthetic precursor. Provenance is recorded as userParams on the run,
+and the header is authoritative. A 1.2.0 run at the defaults stamps sixteen: the detector and
+calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
+`spx:pearson_G`, `spx:im_weight_sigma`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
+`spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`,
+`spx:tiles`, `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the
+frozen frame table (`spx:frame_table`) — so a file can always be attributed to the configuration
+that produced it.
 
 ## Two detectors
 
@@ -182,11 +195,15 @@ windows can be in flight: an admission gate re-decides concurrency from free RAM
 
 ## Determinism
 
-The spectrum data is **byte-identical across thread counts** for a fixed binary at the default loader
-batch: 8 vs 100 threads on two real-data pairs (measured at v0.3.0, before the compaction fix; no
-real-data pair has been re-taken since), and 1 vs 4 threads in the end-to-end suite, which exercises
-the fallback detector on synthetic input. The loader batch size is *not* free: 1024 and 4096 change
-the digest, and 4096 loses 7% of peptides, so it is not a knob.
+The spectrum data is **byte-identical across thread counts** for a fixed binary: on real data, dataset D
+at the shipped defaults digests `e43672a0` at both 8 and 100 threads (2026-09-10), and at a 300-s cell
+pitch the same spectra come out at 1, 2, 3 and 6 tiles at both thread counts; run 009 at 600 s matches
+its one-tile run in 13 tiles. The end-to-end suite checks 1 vs 4 threads on synthetic input, which
+exercises the fallback detector. The loader batch size is **output-neutral**: batches 256 and 4096
+produce the identical digest once the picker's tail is flushed (the 2026-09-09 fix in this release),
+so it is a resource knob, not an output knob. The pre-fix verdict — that 4096 changed the digest and
+lost 7% of peptides — was the dropped tail, not the batch size; the 1024 arm has not been re-taken
+since.
 `bench/semantic_digest.py` hashes `<spectrumList>`..`</spectrumList>`, excluding the wall-clock
 stamp, the recorded parameters and the trailing byte-offset index — none of which can match across
 invocations.
@@ -227,10 +244,10 @@ scoring used for the benchmark record.
 src/        the tool (one translation unit) plus four headers: the calibration model, the tdf reader,
             the MS1 denoiser and the mzPeak streaming loader
 patches/    the four OpenMS patches and the pinned OpenMS commit (openms.lock)
-scripts/    build helpers, OpenMS patch application, cluster deployment
+scripts/    build helpers, OpenMS patch application, the shipped-option-token check
 test/       the end-to-end suite
 tests/      calibration and entrapment tests, golden calibration values
-bench/      benchmark drivers, the semantic digest and the cluster launcher
+bench/      benchmark drivers and the semantic digest
 docs/       measurements and design notes
 ```
 

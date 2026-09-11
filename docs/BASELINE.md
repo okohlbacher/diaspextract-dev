@@ -4,6 +4,13 @@
 > Commands, variables and paths quoted from earlier runs keep the names they ran under: SpeXtractor (speXtract before
 > 2026-09-06), binary `spextractor` (earlier `spextract`), and `SPEXTRACTOR_*` variables, now `DIASPEXTRACTOR_*`.
 > CHANGELOG.md maps the old names to the new ones.
+>
+> **Not all of this is reproducible on the shipped binary.** Many measurements below were driven by
+> `SPEXTRACTOR_*` probe environment variables (`FRAG_DUMP`, `WINDOW_FILE`, `PRECURSOR_LIST`,
+> `MS2_RT_RANGE`, `PICK_SERIAL`, `PICK_STATIC`, `PICK_MZ_MODE`, `Z1_CHARGE_UNSET`, `TILE_TRIM`) and by
+> options that 1.2.0 removed. The probes are gone, and the `SPEXTRACTOR_*` prefix itself is now
+> **refused**: a leftover variable stops the run rather than being ignored. Those entries stand as the
+> dated record of what was measured and decided, not as recipes to re-run.
 
 **All progress/regression decisions are made on dataset D alone.** Other samples are for confirmation
 once something has already won here — cross-sample comparison has produced three wrong

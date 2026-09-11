@@ -3,7 +3,8 @@
 ## Reporting a vulnerability
 
 Please report security issues privately via GitHub's "Report a vulnerability" button on the
-Security tab, rather than opening a public issue.
+Security tab, rather than opening a public issue. If that button is not available, open an issue
+titled "security contact request" with no details in it, and we will arrange a private channel.
 
 ## Scope
 

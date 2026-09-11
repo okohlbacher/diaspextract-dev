@@ -131,6 +131,17 @@ jobs:
           ! grep -qi 'QIODevice\|QNetwork' help.txt \
             || { echo "::error::the OpenMS update check is live -- see main()"; cat help.txt; exit 1; }
 
+      # Same check tests.yml runs from the source, but against the inventory the binary actually
+      # registers -- the only authority on what the shipped tool accepts.
+      - name: Option tokens in the shipped examples and README are options the binary registers
+        run: |
+          set -o pipefail
+          env -i HOME="$HOME" \
+                 OPENMS_DATA_PATH="$GITHUB_WORKSPACE/OpenMS/share/OpenMS" \
+                 LD_LIBRARY_PATH="$GITHUB_WORKSPACE/OpenMS/build/lib" \
+                 diaspextractor/build/diaspextractor -write_ini "$RUNNER_TEMP/ini.xml"
+          python3 diaspextractor/scripts/check_option_tokens.py --ini "$RUNNER_TEMP/ini.xml"
+
       - name: End-to-end suite against the freshly built binary
         env:
           OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS

@@ -1,13 +1,19 @@
 # READ THIS FIRST (2026-09-05): the confusion table below points the OTHER WAY
 
+> **Note (2026-09-11, release 1.2.0).** Two options this document argues about --
+> `assembly:open_search_safe` and `charge:ambiguity_margin` -- were **removed in 1.2.0**; the shipped
+> binary refuses either on the command line or in an ini file. The sections below are kept as the
+> falsification record that removed them, and the help strings and comments they quote are gone with
+> the options. Everything said about them is history, not the current tool.
+
 Re-verified against the code 2026-09-05, every claim below checked by hand:
 **most of this document argues against the wrong failure.**
 
 **1. `4->2` means WE said 4 and the truth was 2 -- an OVERCALL, not an undercall.**
 The benchmark collation keys the counter `zc[(z, best["Precursor.Charge"])]` with `z` read off OUR
 mzML, and prints it `f"{a}->{t}"`. So the key is (ours, truth). The delta-mass a search
-engine sees is ours minus truth = **+1198 Da** at m/z 600, not the -1198 quoted in the
-`assembly:open_search_safe` help string and repeated below. The repository does not agree with
+engine sees is ours minus truth = **+1198 Da** at m/z 600, not the -1198 that was quoted in the
+`assembly:open_search_safe` help string (removed in 1.2.0) and repeated below. The repository does not agree with
 itself on this.
 
 **2. That table belongs to a retired algorithm whose tie-break is the OPPOSITE of the shipped one.**
@@ -36,20 +42,21 @@ that seed.** This is an ownership defect and it is one line. It is dormant at th
 (`charge:min_charge=1` emits the z=1 call rather than erasing it) and live whenever `min_charge` is
 raised above 1.
 
-**5. `assembly:open_search_safe` is now a strict no-op, and the 2026-09-04 default made it worse.**
-It sets `pc.charge = 0` only where `pc.charge == 0` already, and marks exactly that set
-`guessed`; the emission path then erases every `guessed` precursor whenever
+**5. `assembly:open_search_safe` was a strict no-op, and the 2026-09-04 default made it worse.**
+It set `pc.charge = 0` only where `pc.charge == 0` already, and marked exactly that set
+`guessed`; the emission path then erased every `guessed` precursor whenever
 `assembly:require_isotope_support == "true"` -- the default since 2026-09-04. The precursors the
-flag exists to protect are deleted before it can act. Its comment still reads "OFF by default".
+flag existed to protect were deleted before it could act, and its comment still read "OFF by
+default". **This is what removed it in 1.2.0.**
 
 **6. Charge errors cost CLOSED-search identifications today, in the published numbers.**
 `msfragger.params` has `override_charge = 0`, so MSFragger TRUSTS our annotation. Measured
 2026-09-02 (the charge-corruption test in `docs/BENCHMARK-MATRIX-2026-09-01.md`): forcing the engine to re-derive charge
 instead (`override_charge=1, z=1..5`) moved DIAspeXtractor 10,750 -> **11,238 (+4.5%)** against the
 reference tool's 13,004 -> 13,276 (+2.1%), narrowing the gap 2,254 -> 2,038. So roughly 10% of the
-MSFragger deficit is our charge labels, and it is recoverable. The counter-claim in the
+MSFragger deficit is our charge labels, and it is recoverable. The counter-claim that stood in the
 `assembly:open_search_safe` help string -- "Closed search barely notices (charge unset cost only
-1.3%: 8,123->8,019)" -- has no provenance anywhere in the repository.
+1.3%: 8,123->8,019)" -- had no provenance anywhere in the repository.
 
 **7. Every published charge number describes a tool that no longer exists.** 74.6% and the arm table
 predate `charge:min_charge=2`, `assembly:require_isotope_support=true`, the apex m/z estimator, the
@@ -204,7 +211,7 @@ m/z 600 -- invisible to closed search (the engine enumerates charge) and fatal t
 Shipping `trace:ms1_split_valleys` without `charge:scoring count` would have been actively
 harmful for this tool's actual purpose.
 
-### `charge:ambiguity_margin` -- falsified, four tests
+### `charge:ambiguity_margin` -- falsified, four tests (option removed in 1.2.0)
 
 | margin | peptide_q | vs `split_count` 8,411 |
 |---|---|---|

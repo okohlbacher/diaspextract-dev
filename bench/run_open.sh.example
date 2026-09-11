@@ -49,8 +49,7 @@ if [ ! -s "$SC/pseudo.mzML" ]; then
   LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 \
   LD_LIBRARY_PATH=/path/to/scratch/OpenMS/build/lib \
     $TOOL -in "$DD" -out "$SC/pseudo.mzML" -threads 120 $COMMON \
-      -trace:ms1_split_valleys 7.0 -charge:scoring count \
-      -assembly:open_search_safe > "$SC/run.log" 2>&1
+      -trace:ms1_split_valleys 7.0 -charge:scoring count > "$SC/run.log" 2>&1
   echo "  extraction done $(date)" >> $L
 fi
 
