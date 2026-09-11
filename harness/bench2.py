@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SpeXtractor benchmark harness v2 -- run identity, plan binding, artifact production.
+"""DIAspeXtractor benchmark harness v2 -- run identity, plan binding, artifact production.
 
 This file produces ARTIFACTS and PROVENANCE. It computes no measurements; every number lives in
 collate2.py. The separation is deliberate: the failure class this rewrite exists to kill is
@@ -592,9 +592,9 @@ def load_registry():
         import yaml
     except ImportError:
         die("G-B00", "need pyyaml: python3 -m pip install --user pyyaml")
-    # $SPEXTRACTOR_REGISTRY exists so --selftest can stand up a synthetic registry. It is NOT a
+    # $DIASPEXTRACTOR_REGISTRY exists so --selftest can stand up a synthetic registry. It is NOT a
     # general escape hatch: the runset records which registry projection every cell used.
-    path = Path(os.environ.get("SPEXTRACTOR_REGISTRY") or (HERE / "samples.yaml"))
+    path = Path(os.environ.get("DIASPEXTRACTOR_REGISTRY") or (HERE / "samples.yaml"))
     if not path.exists():
         die("G-B00", "registry not found: %s" % path)
     reg = yaml.safe_load(path.read_text())
@@ -1368,9 +1368,9 @@ def ledger_count(bench, plan_normalized_sha256):
 
 # ------------------------------------------------------------------------------------- stages
 def bench_root_from(reg, override=None):
-    root = override or os.environ.get("SPEXTRACTOR_BENCH_ROOT") or reg.get("bench_root")
+    root = override or os.environ.get("DIASPEXTRACTOR_BENCH_ROOT") or reg.get("bench_root")
     if not root:
-        die("G-B00", "no bench root: set `bench_root:` in samples.yaml or $SPEXTRACTOR_BENCH_ROOT")
+        die("G-B00", "no bench root: set `bench_root:` in samples.yaml or $DIASPEXTRACTOR_BENCH_ROOT")
     return Path(root)
 
 
@@ -1457,7 +1457,7 @@ def do_adopt(bench, plan, reg, sample, arm, refs, entry, pinned):
     """An external mzML (the reference implementation) becomes a first-class arm.
 
     v1 registered reference_mzml, printed its existence in preflight, and never read it -- so
-    every published SpeXtractor-vs-the reference implementation ratio entered through an unguarded external procedure.
+    every published DIAspeXtractor-vs-the reference implementation ratio entered through an unguarded external procedure.
     An adopt stage gives the external file a sealed identity so the SAME search, scoring and
     truth stages run against it.
     """
@@ -1930,7 +1930,7 @@ def st_make_fake_d(path, mz_centers=(500.0, 600.0), width=25.0, serial="SER-1",
 
 
 FAKETOOL_SRC = r'''#!/usr/bin/env python3
-"""Stand-in for spextractor, driven by $FAKETOOL_MODE. Used only by --selftest."""
+"""Stand-in for diaspextractor, driven by $FAKETOOL_MODE. Used only by --selftest."""
 import os, sys, xml.etree.ElementTree as ET
 sys.path.insert(0, %(harness)r)
 import bench2
@@ -2721,7 +2721,7 @@ def _selftest_end_to_end(st, env):
 
 
 def cmd_selftest(args):
-    tmp = Path(tempfile.mkdtemp(prefix="spextractor-selftest-"))
+    tmp = Path(tempfile.mkdtemp(prefix="diaspextractor-selftest-"))
     keep = bool(args.keep)
     try:
         env = _selftest_env(tmp)

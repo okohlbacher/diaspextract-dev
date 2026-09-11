@@ -1,0 +1,844 @@
+kimi version 0.42.0
+• The user wants an adversarial review of harness/corpus.py. Everything is inline; I must not run tools. Let me carefully analyze the code for bugs in the 11 categories.
+
+  Let me work through the source carefully.
+
+  Key areas:
+
+  1. **Busy patterns / pgrep self-match**: `busy()` runs `pgrep -f p`. The patterns are bracketed. `BUSY_FIXED = [r"diaTracer-2\.2\.[1]\.jar", r"MSFragger-4\.4\.[1]\.jar", r"/sag[e] ", r"spextracto[r] -in"]`. The `busy_patterns` adds basename bracket pattern + " -in". OK. But note: `pgrep -f` run from the runner process — the runner's own command line contains... the runner is `python3 corpus-<sha>.py node-run --queue <json>`; no match. The pgrep process itself: `pgrep -f 'diaTracer-2\.2\.[1]\.jar'` — its command line contains the bracketed pattern, not the literal, so no self-match. But wait — the *parent* chain: the runner command line includes the queue JSON path, fine. However — the `busy()` call excludes `os.getpid()` only; pgrep's own pid differs from the python pid... pgrep excludes itself by default (pgrep never matches itself). Actually pgrep does not list itself. But it can match the *parent shell* if the shell command line contains the pattern. In the queue, run via setsid nohup python3 ... — no patterns. OK.
+
+  But: `busy()` is called in `load_gate` with patterns including `spextracto[r] -in` — but what about the queue's *own* arms during... the gate runs before pairs, no arms running. Fine. However, during phase 2 searches, MSFragger and Sage run on the node — the gate isn't used then. OK.
+
+  But here's a real one: **load gate only checks once before the pair, not between arms** — that's per decision. Fine.
+
+  2. **`hms` parsing of GNU time**: `parse_time_log` parses "Elapsed (wall clock) time (h:mm:ss or m:ss): (\S+)" then splits on ":" and does `sum(v * 60**i for i, v in enumerate(reversed(parts)))`. For "1:02.50" → parts [1, 2.50] → 1*60 + 2.5 = 62.5. Good. For "1:02:03.5" → 3600+120+3.5. Good.
+
+  3. **RSS units**: kB/1e6 labelled GB — decision D9 says GB = kB/1e6, labelled as such. The table says "RSS in GB = kB / 1e6". But `time -v` reports **KiB** (kbytes = 1024 bytes). So "GB = kB/1e6" is actually GiB-ish/... wait: 41,807,312 kB (KiB) / 1e6 = 41.8 "GB". True bytes = 41807312*1024 = 42.8e9 bytes = 42.8 GB (SI) or 39.9 GiB. So kB/1e6 = 41.8 — which is neither SI GB (42.8) nor GiB (39.9). But the decision explicitly says "RSS in GB = kB/1e6, labelled as such". The table labels it. So per the decision it's implemented exactly. Not a finding... although arguably the label is wrong, but the user decided. Skip — but maybe note as low? The decision says label as such; it's documented. Skip.
+
+  4. **Sage peptide counting vs historical**: Historical awk: `awk '$8==1 && $38<=0.01'` — column 8 = rank, column 38 = peptide_q (per the numbered header: 7 rank? Let's check: header numbered: 1 psm_id, 2 peptide, 3 proteins, 4 num_proteins, 5 filename, 6 scannr, 7 rank, 8 label, ... 37 spectrum_q, 38 peptide_q. So awk `$8==1` is **label == 1** (target), and `$38<=0.01` is peptide_q! Wait: `$8==1` — column 8 is "label". So the historical awk filters **label == 1** (targets only!) and peptide_q <= 0.01, then prints $2 (peptide). Hmm, but the planning notes say "`tnbc_ref.sh` / `final_bench.sh` use hard-coded column numbers: `awk '$8==1 && $38<=0.01'`" — and they interpret it as rank==1? Let's recount the header:
+
+  ```
+  1 psm_id
+  2 peptide
+  3 proteins
+  4 num_proteins
+  5 filename
+  6 scannr
+  7 rank
+  8 label
+  9 expmass
+  ...
+  37 spectrum_q
+  38 peptide_q
+  39 protein_q
+  40 ms2_intensity
+  ```
+
+  So `$8==1` → label==1 (target rows, decoys excluded!), `$38<=0.01` → peptide_q. So the historical awk counts unique peptides among **target** rank-agnostic?? Wait, it doesn't filter rank at all! $7 is rank. The awk filters label==1 and peptide_q<=0.01 — no rank filter. Hmm interesting.
+
+  But bench_table.py's sage_peps: `row[ir] == "1"` where ir = index of "rank", and peptide_q <= 0.01 — no label filter, decoys not removed.
+
+  So there are actually two different historical rules:
+  - tnbc_ref.sh awk: label==1 (targets) & peptide_q<=0.01, any rank → unique peptides.
+  - bench_table.py sage_peps: rank==1 & peptide_q<=0.01, decoys included.
+
+  The builder claims the counts use bench_table.py's rule, which produced TNBC-TABLE.md. The decision says "unique peptides at 1% FDR as in the most recent TNBC/HeLa tables (use the scorer that produced them)". So the ported rule = bench_table.py. The port: `row[ir] == "1" and float(row[iq]) <= 0.01` — matches. Decoy rows not removed, as in source — matches (bench_table.py doesn't check label). And they add diag_decoy_peptides_in_set.
+
+  Is there a discrepancy that makes a reported number wrong? The real Sage TSV header has rank at col 7 and label at col 8. bench_table resolves by name → rank. Port resolves by name → rank. OK consistent with bench_table.py. The brief asks: "peptide counting that differs from the stated source rule, or a stated rule that differs from what the historical tables and drivers actually counted (compare the Sage TSV header and the historical awk with the ported code)". The historical drivers (tnbc_ref.sh) counted with `$8==1` = label==1, NOT rank==1! And no rank filter. So the historical *drivers* counted something different from bench_table.py. But TNBC-TABLE was produced by bench_table.py from the TSVs. The stated source rule is bench_table.py; the port matches it. The discrepancy between the driver awk and bench_table exists historically but the port follows the stated source. However — a subtle bug: in the port, decoy rows not removed means a decoy peptide could be counted as a "peptide at 1% FDR". diag shows 68 decoy peptides in set for dt, 62 for spx. So the reported 7,391 includes 68 decoys. That matches bench_table.py behavior, so the historical tables did the same. It's "as in the source". Not a finding per the decisions, though worth flagging as a caveat? The builder already documents it (4.2). Not a finding.
+
+  But wait — one real difference: bench_table.py `sage_peps` returns `len(s)` where s accumulates row[ip] for rank=="1" and q<=0.01. Port: same. OK.
+
+  MSFragger: bench_table msf_peps: key=(peptide, modification_info or assigned_modifications), decoy = all proteins start with rev_, hs=float. `ranked = sorted(best.values(), reverse=True)` — tuples (hs, decoy); ties on hs put decoy=True first (True > False). Port: `sorted(best.values(), reverse=True)` same. Walk: `if t and d/t <= 0.01: acc = t` — same. Equal. OK.
+
+  One subtle difference: bench_table: `prots = [p for p in re.split(...) if p]` then `decoy = all(...)` — empty prots → all([]) = True → decoy. Port: same. OK.
+
+  5. **First MSFragger alone**: `first = next((u for u in units if pending(u[0], u[1], "msfragger")), None)`; `failed += unit(first)`; then `ex.map(unit, [u for u in units if u is not first])`. But `unit(first)` runs BOTH engines (sage and msfragger) for that unit, sequentially within unit. Fine. But the pepindex race: the first MSFragger *search* on the node builds .pepindex next to human_decoy.fasta. `unit(first)` runs sage first then msfragger — during that time no other units run. Then the rest run with search_workers. OK.
+
+  But: **the pepindex is shared across nodes?** No — node-local /scratch. But wait: the .pepindex files are built next to `human_decoy.fasta` at `/scratch/kohlbach/bench/`. On a node where another process (another user's? no, kohlbach's other chains) also runs MSFragger... out of scope.
+
+  However: **G-V05 launch check happens once at launch; the "first MSFragger alone" is per queue launch**. On resume, if the first launch built pepindex, fine.
+
+  Real issue: the "first" unit runs both engines; but `pending(u[0],u[1],"msfragger")` picks the first unit with pending msfragger — OK.
+
+  6. **Search workers concurrency vs. the timed pair decision**: "Searches never run on a node while it runs a timed pair" — phase 2 starts after PHASE1_DONE. OK. But: **searches run with search_workers=2 while the load gate... no gate for searches. Fine, searches aren't timed for the report... actually search walls ARE reported ("search wall per engine"). The table marks them indicative. OK.
+
+  7. **`unit()` deletion of mzML**: after both engines ok, `Path(...).unlink(missing_ok=True)`. Note the dt mzML was moved to runs dir. OK.
+
+  8. **Stale search records adopted**: `search_done` checks status ok, pair_run match, tools_sha256 match, peptides > 0. But it does NOT check that the *pair record's identity* matches — pair_done checks identity. In phase 2, `pairs` dict read after phase 1; units built from pair_done(...). If pair record is ok but identity differs (old binary)... pair_done returns False if identity != ident0, so no units. OK.
+
+  9. **`pair_done` output check**: for each tool, if both searches done → continue (output may be deleted). Else require output file exists with same size and mtime. OK. But note: `pair_done` doesn't verify search records' `result_tsv` still exists — if a search is "done" but its TSV was deleted (e.g., by cleanup of *.mzML? no, TSVs kept). collect copies TSVs. Table uses records only. OK.
+
+  10. **Resume with failed pair re-runs whole pair** — but `run_pair` at the start: `for old in (root/"runs"/s["id"]).glob("*/*/*.mzML"): old.unlink()`. Path: runs/<id>/<pair_run>/<tool>/*.mzML → glob "*/*/*.mzML" relative to runs/<id> → <pair_run>/<tool>/*.mzML. That deletes outputs of superseded attempts. But it also deletes the mzML of a **previous ok pair whose searches are still pending**! Wait — if pair is ok and searches pending, pair_done returns... let's see: pair_done checks: rec ok, identity match, pin match; then for each tool: output exists fresh OR both searches done. If searches pending and output exists → True → pair skipped. So run_pair isn't called. If output was deleted but searches not done → pair_done False → pair re-runs. Fine.
+
+  But the glob also deletes search dirs' mzML? search dirs: runs/<id>/<pair_run>/search/<tool>_<engine>/*.mzML → that's 4 levels deep (pair_run/search/dir/file) → glob "*/*/*.mzML" is 3 levels → doesn't match search dirs. But patched.mzML/fixed.mzML are deleted in run_search's finally anyway. OK.
+
+  However, there's a subtle one: run_pair deletes old mzMLs *before* staging. If the previous attempt's pair failed but its mzML is needed... no, re-run whole pair. OK.
+
+  11. **Neighbour check**: `nb = rec["neighbour_before"] = neighbour(s["raw"])` recorded *after* staging and prewarm, before arms. In run_arm for dt: after the arm, `if tool == "dt" and neighbour(raw) != nb: die_queue(...)`. Note: nb is taken once before both arms. If order is spx-first, the dt arm runs second; neighbour checked after dt arm against pre-pair value. OK. But: `neighbour()` returns [path, size, mtime_ns]. If the neighbour file doesn't exist, [path, None, None]. If another process (the historical 44 stale files exist) — fine, unchanged.
+
+  BUT: there's a real issue — the staged copy is inside the stage dir, and diaTracer writes `<staged>_diatracer.mzML` next to the staged input. The neighbour check monitors the ceph neighbour. Fine.
+
+  12. **`os.replace(out, moved)`** — dt output moved from stage to runs dir. Then staged dir deleted in finally. OK. But note the move happens *after* `verify_mzml(out, t0)` and count check... Actually order: parse_time_log, check_exit, verify_mzml, then move, then log_count compare. Fine.
+
+  13. **Pre-warm**: `cat analysis.tdf analysis.tdf_bin > /dev/null` — subprocess.run(["cat", ...], stdout=DEVNULL, check=True). Wait — `cat` with two file args, no shell redirect; stdout=DEVNULL. OK. But the decision says pre-warm `cat analysis.tdf analysis.tdf_bin > /dev/null`. This warms page cache for those two files only. The .d also contains other files (e.g., *.m). Fine, matches decision.
+
+  14. **Order alternation by queue index**: `order = list(TOOLS) if idx % 2 == 0 else reversed`. idx = i in enumerate(q["samples"]) — includes skipped (done) samples in the index! If a queue is resumed after some pairs done, the index parity is by position in queue, consistent across launches since it's enumerate over full sample list. OK — consistent.
+
+  But: **"alternating order by sample index"** — per decision, yes by queue index. OK.
+
+  15. **The load gate `busy` check in gate**: patterns include sage and MSFragger — during phase 1 no searches run on the node (per decision), but another node's... no, per-node. But another *session's* gates (fix pass G) might run our tools — gate flags. OK.
+
+  16. **`run_search` deletes `*.mzML` in sdir in finally** — including patched.mzML/fixed.mzML. But it globs `sdir.glob("*.mzML")` — the symlink in.mzML → fixed.mzML; unlink of symlink and target both matched. OK.
+
+  But wait: **`junk.unlink()` on `*.mzBIN*`** — in_uncalibrated.mzBIN (7.7 GB for TNBC!) deleted. But MSFragger also writes `in.mzBIN_calibrated`? The engine.log mentions "001. in.mzBIN_calibrated". Glob `*.mzBIN*` covers `in_uncalibrated.mzBIN` and... `in.mzBIN_calibrated`? The name is "in.mzBIN_calibrated" — glob "*.mzBIN*" matches (contains .mzBIN). OK.
+
+  17. **G-V12 FASTA check**: `check_fasta` compares sha of sage_fasta and msfragger_db at each search. The FASTAs are node-local /scratch/kohlbach/bench/ — shared across nodes? No, node-local copies; sha256 prefixes identical on data and spock; **ibminode05 not verified**! 5.6: "sha256 prefixes of the node-local FASTAs are identical on data and spock... ibminode05 was not queried (it runs other gates)." The plan P4 says "Byte sizes match on all three nodes; sha256 is unverified. Verify, or use run-local configs pointing at the ceph copies." The harness records the fasta sha in tools_sha256 and G-V13 refuses a table with different tools_sha256 across records! `if len({json.dumps(r["tools_sha256"]...)}) > 1: die G-V13`. So if ibminode05's human_decoy.fasta differs from spock's, **the table aborts** — that's visible, not silent. But worse: if it differs, the whole table refuses at the END of a 20h run. That's a "guards pass where must abort"... no, it aborts. It's a run-blocker but visible. Hmm — actually is it a wrong number? No. But it's a concrete failure: the run completes and the table cannot be produced. The builder lists FASTA sha unverified on ibminode05? Not in 4.4 open issues explicitly (P4 in planning notes). The harness DOES catch it via G-V13 — but only at table time, after 20h. Severity medium: recommend verifying fasta sha equality across nodes before launch (a preflight). Actually wait — is it even caught correctly? tools_sha256 includes sage_fasta and msfragger_db shas per node. Records from ibminode05 would have different tools_sha256 → G-V13 aborts the table. Visible signal, but the run is wasted (must re-run searches on ibminode05 with a fixed fasta; pairs unaffected). Medium.
+
+  But hold on — is there a scenario where it's NOT caught? If the user renders the table per-node... `table` collects all queues. OK caught. Fine, medium/low.
+
+  18. **`node_busy` / launch check uses `arm_env(q)`** — which aborts if env.sh missing etc. Good.
+
+  19. **`ssh()` timeout=180 for node-status etc.** fine.
+
+  20. **`remote()` runs `python3 - cmd arg` with input=SELF.read_bytes()** — node python version: 3.12.3 on data/spock. **ibminode05's python3 version unknown!** corpus.py uses `str | None` type hints (fine, from __future__ annotations), `missing_ok=True` (3.8+), `fcntl`, `Path.is_relative_to`? not used. `os.getloadavg` fine. Walrus? Not used. `match`? No. Probably fine on 3.8+. But `int | None` in function signature `def log_count(...) -> int | None` — with `from __future__ import annotations`, fine. `remove_tree`... fine. ibminode05 is Ubuntu with python3 presumably 3.12? Unknown — if it were 3.7, `missing_ok` fails. Low.
+
+  21. **`launch_detached` scp of SELF to content-named script** — `mv -n` then rm -f part. If two launches of different harness versions — content-named, fine.
+
+  22. **Runner pid file**: `(root/("runner-%s.pid" % nonce)).write_text` — status reads pid from file; if the runner died, pid file remains, status shows pid (stale). Launch confirm: `if s["pid"] and s["lock_held"] and nonce in lock_info`. OK.
+
+  23. **`node_status` reads all records including other plans' records?** root is per plan+node: scratch_root/<node>. corpus_v3 and corpus_v3_selftest have different scratch_roots. OK. But **the node lock is shared**: lock_path = parent of scratch_root → /scratch/kohlbach/.corpus-queue.lock for BOTH plans. So a selftest queue and a real queue can't run concurrently on a node. Intended ("node-wide: one queue per node").
+
+  BUT: `node_status` for table --source scratch reads records from `<scratch_root>/<node>/records` — fine.
+
+  24. **Table row sample order/ids**: `ids = [sid for sid in reg["samples"] if any(sid in qd["samples"] ...)]` — iterates registry order. OK.
+
+  25. **`render_table` ratio lambda**: `ratio = lambda a, b: "%.2f" % (b[0]["peptides"] / a[0]["peptides"]) if a[0] and b[0] else "-"` — ours/dt: called ratio(S["dt","sage"], S["spx","sage"]) → b/a = spx/dt. OK.
+
+  26. **`arm()` when pair ok but an arm missing?** If status ok, both arms ran. OK.
+
+  27. **Median wall ratio**: `med = lambda a,b: statistics.median(f[b]/f[a] for f in fs)` — med("dw","xw") = median(xw/dw) = ours/dt. Label "median wall ratio (ours/dT)". OK.
+
+  28. **`fmt = lambda x, f: f(x[0]) if x[0] else x[1]`** — x is (record, verdict) or (None, str). OK.
+
+  29. **Zero-division**: ratio of totals `tot("spx_sage")/tot("dt_sage")` — dt total > 0 guaranteed (G-V13 peptides>0). OK.
+
+  30. **hms for negative?** No.
+
+  31. **`parse_time_log` wall regex on GNU time with days?** GNU time can print "1-02:03:04" for >24h? Actually GNU time prints h:mm:ss, can exceed 24h as e.g. "25:00:00". Split on ":" handles. With days format "1-02:03:04"? GNU time uses h:mm:ss where h can be arbitrary (no days). OK.
+
+  32. **Peak RSS of `time -v` for java -Xmx400G** — measures the `time` process's child = java. OK. For spx, measures SPX_BIN. OK.
+
+  33. **RSS mis-attribution: work inside the timed window** — diaTracer arm: the timed command includes everything. The dt mzML move happens after. OK. But note: **diaTracer's time.log is written by `time -v -o` — the `-w` dir gets dt.log (stdout). Wait: run_logged redirects stdout+stderr to `log` (dt.log), and time writes to -o tl. Historically: `> dt.log 2> time.log` — time's output went to time.log via stderr. Here `time -v -o tl` writes to tl, and its stderr... time -v -o writes report to file; child's stderr goes to log. Equivalent. OK.
+
+  34. **Page-cache/writeback bias between arm orders**: alternating order handles; dt writes a big mzML into stage (node-local), then spx runs while writeback of dt's mzML flushes → spx wall inflated on dt-first pairs; alternating mitigates across the corpus but with n=1 per cell, within-row comparison stands. The dirty ratios: vm.dirty_ratio 20% of 2.2TB = huge; writeback to local disk. Not flagged per-row. This is a bias that alternation + within-row comparison caveat handles partially. Also the mzML deletion after searches → page cache. Probably acceptable; could mention as low: dt-first rows' spx wall includes writeback of up to ~25GB dt mzML (node-local scratch, fast). Eh — order alternation is the decided mitigation. Low/none.
+
+  35. **Cold cache for the SECOND arm?** Both arms read the same staged .d, pre-warmed once. First arm also warms. OK.
+
+  36. **`stage()` copies data-only via os.walk** — copies symlinks as files (shutil.copyfile follows symlinks). .d may contain symlinks? Probably not. OK.
+
+  37. **Patient data**: staged raw deleted in finally. run dirs contain mzML from patient data — deleted after searches succeed. If a search fails, mzML kept (re-runnable) — on node-local 0700 root. /scratch/kohlbach is drwx------. OK. Records/logs contain sample ids — in-house ids are INH_A..F with label A..F. The pair record contains `sample` with `raw` path = `<INHOUSE_COHORT_DIR>/raw_d/<inhouse-specimen-A>.d` — **the specimen id is in the record, in logs (cmd arrays), and collect copies records AND logs to ceph** `/ceph/ibmi/abi/oliver/spextract/corpus_v3/` — readable by? ceph dir perms unknown; other ABI staff could read. The export scrub rules say tables leaving dev use A-F labels; but the ceph results dir contains specimen paths in records and cmd lines. Is that "patient-derived data copied where other users can read it"? The records contain paths (identifiers), not data. The mzML/TSVs: TSVs are search results (peptide sequences — patient-derived? proteomics of patient tissue; TSVs retained by decision). Decision says keep TSVs and copy to ceph. So per decision. The specimen path in records — the registry itself is private/untracked but records on ceph carry it. Hmm, /ceph/ibmi/abi/oliver/spextract/ is group abistaff readable presumably. R12 says "Any table leaving dev uses dataset A-F labels, no specimen IDs" — the table uses `e.get("label", sid)` → "A". Good. But **the search records' `result_tsv` paths include pair_run dirs, and cmd arrays include the staged path which includes the raw basename `<inhouse-specimen-A>.d`** — staged path: `<root>/stage/<id>-<pair_run>/<rawname>.d` — contains specimen name! These cmd arrays are in records copied to ceph. Also `sample.raw` in the pair record. So specimen identifiers land on ceph in records. Whether that's a violation depends on ceph perms — same place where the historical reference outputs and benchmarks live; the mzml_diatracer reference paths in samples.yaml also contain specimen names, on ceph already (`<INHOUSE_COHORT_DIR>/mzml_diatracer/...` — the data directory itself). The cohort dir is on ceph already. So specimen names already on ceph in the data directory. The records adding them to another ceph dir — same access domain (abi). Probably acceptable; low. But the *table* is the reported artifact — clean.
+
+  Hmm wait, actually more important: **table `p["node"]` column and sample label** — fine.
+
+  38. **G-V13 mixed identity check only across ok pairs**: `len({json.dumps(p["identity"]...)}) > 1` — good. But `label` check too. OK.
+
+  39. **`search_done` doesn't check node**: a search record from a *different node*? Records are per-node roots; table merges records from three nodes but keys by sample id; samples are in one queue only (G-V01). OK.
+
+  40. **`cmd_table` remote(node, "node-status", root=results_ceph/<node>)** — reads records over ssh from ceph. If collect wasn't run for one node, records empty → rows pending → incomplete → exit 3. Visible. OK.
+
+  41. **`node_collect` ignore_patterns("stage","tools","*.mzML","*.mzBIN*","*.tmp*")` — copies records, runs logs, TSVs, runner.log, queue json, harness copy, QUEUE_DONE markers, pid files. Fine.
+
+  But: **`node_collect` also copies `guardtest/`?** For selftest plan, guardtest dir is under root — collect would copy guardtest records/logs (with real raw paths — public HeLa, fine).
+
+  42. **Deletion before use**: mzML deleted after both searches succeed. If the queue is re-launched later and searches done, pair_done skips re-run. OK. But: searches run in phase 2 of the SAME launch that ran pairs. If phase 1 takes 15h and someone... fine.
+
+  43. **`_node_run` phase 2 `pairs` snapshot**: `pairs = {s["id"]: read_json(...)}` read once after phase 1. If a pair record is "running" (SIGKILLed earlier launch)? read_json returns the running record; pair_done → status != ok → False → not in units. But phase 1 already re-ran it (pair_done False → run_pair). So after phase 1 all pairs are fresh. OK.
+
+  44. **`unit()` uses `pairs[s["id"]]` snapshot — but `run_search` writes record; `pending` reads fresh from disk each call. In `ex.map`, units computed before. OK.
+
+  45. **The `first` unit and ThreadPoolExecutor: `ex.map(unit, [u for u in units if u is not first])`** — if first is None (no pending msfragger but pending sage?), `[u for u in units if u is not None]` — wait, if `first` is None, then `u is not first` → `u is not None` → all units included. OK. Edge: units non-empty but all msfragger done (only sage pending) → first None → all in pool. OK.
+
+  46. **BUG candidate — `unit()` deletes mzML even when the pair record... fine.**
+
+  47. **BUG candidate — `run_search` step() `check_exit` for patch/fix steps**: uses G-V10. The patch step: `if not log_count(patch.log, rb"patched (\d+) precursor")` — dies if 0 or missing. But patch.log regex: "patched 117388 precursor(s)". OK. Note `log_count` takes LAST match. Fine.
+
+  48. **Sage "finished in" check**: `if b"finished in" not in step(...)`. step returns log bytes. OK. But the sage log's last line "finished in Ns" — check bytes contain. OK.
+
+  49. **MSFragger "TOTAL TIME" check**: engine.log contains TOTAL TIME. OK.
+
+  50. **MSFragger writes in.tsv in cwd = sdir**. `cmd_msf` args: params, "./in.mzML"; cwd=sdir via run_logged(argv, sdir, env, log). Symlink created: `os.symlink("fixed.mzML", sdir/"in.mzML")`. OK.
+
+  51. **MSFragger params `database_name` is node-local; MSFragger writes .pepindex next to the fasta** — /scratch/kohlbach/bench/. First search alone. But note: **the params file is copied run-local; the `database_name` inside still points to /scratch/kohlbach/bench/human_decoy.fasta** — fine.
+
+  52. **Sage config fasta node-local** — same.
+
+  53. **G-V04 identity check hashes lib/* and jar and binary before and after each arm — via ceph reads; expensive but fine. `identity()` globs `lib/*` sorted, files only. The arm lib dir on ceph. OK.
+
+  54. **`check_identity` compares dict equality including "binary" path string — stable. OK.
+
+  55. **`arm_meta` label parse**: `^(\S+) -- ` and `^Version: (\S+)` on --help output. Real output: "SpeXtractor -- Extracts..." and "Version: 2.0.0 (OpenMS ...)". Label "SpeXtractor 2.0.0". For renamed binary "DIAspeXtractor" presumably. OK.
+
+  But: `--help` run with `timeout=300` and env=env (includes LD_LIBRARY_PATH of arm). Also stdin DEVNULL. The real binary printed "stty: 'standard input': Inappropriate ioctl" to stderr — handled since they search stdout+stderr. OK.
+
+  56. **`install_tools` sage dest**: tool_dest: {"sage": d/"sage"/"sage", others: d/name}. So sage copied to tools/sage/sage; config to tools/sage_deiso.json etc. The **sage config's fasta path** points to /scratch/kohlbach/bench/human.fasta — node-local, NOT copied. check_fasta verifies sha during run. But cross-node equality only caught at table (G-V13). Covered in #17.
+
+  57. **G-V12: tools copied run-local; if source changed between launches, abort.** OK.
+
+  58. **Time source**: `t0 = time.time()`; verify_mzml mtime > start_epoch. Node clock fine.
+
+  59. **`parse_time_log` on `time -v` output written with -o: if the command is killed by OOM, time still writes. OK.
+
+  60. **`run_logged` — the dt arm env**: `dict(env, LD_LIBRARY_PATH="./ext/bruker")` — **this REPLACES the arm's LD_LIBRARY_PATH entirely** with ./ext/bruker. Historical: `LD_LIBRARY_PATH=./ext/bruker java ...` — also replaced. OK same as historical. But wait: cwd = diatracer_dir, so ./ext/bruker resolves. OK.
+
+  But hmm: env includes TMPDIR=jnatmp, LC_ALL=C. Historical exported TMPDIR? Decision says export TMPDIR. OK.
+
+  61. **spx arm env**: full arm env with LD_LIBRARY_PATH arm lib. cwd=adir. OK.
+
+  62. **G-V08 `log_count != spectrumList count`**: for dt, pattern `Writing mzML file\.\.\.(\d+) scans` on dt.log. dt.log contains the line twice? Evidence shows head/tail — the log tail repeats (the "dt.log head/tail" shows the file content then repeated — probably head and tail of the same file, overlapping). log_count takes last match. OK. But note: -w dir gets logs only; the dt.log is the harness's capture of stdout, plus diaTracer writes its own logs into -w dir? Actually run_logged captures stdout to adir/dt.log, and -w adir — diaTracer might write its own files into adir. Fine.
+
+  Wait, one thing: `-w str(wdir)` = adir — diaTracer writes logs there; and time.log via -o also in adir. Fine.
+
+  63. **The count equality check `if n != o["count"]`** — n None if line missing → dies. Good.
+
+  64. **Pre-warm `check=True` — if cat fails → Exception → CRASH record, stage deleted. OK.
+
+  65. **`load_gate` records only final load; `busy` final. OK.
+
+  66. **`node_run` writes QUEUE_DONE marker with failed count; returns 1 if failed. Launch confirmation... re-invocation waiting. OK.
+
+  67. **`cmd_status` shows "stale" if search pair_run != pair pair_run. OK.
+
+  68. **Table incomplete rows still rendered with FAILED/pending — decision: "failed cell renders FAILED never a number". OK. Exit code 3 if incomplete. Visible.
+
+  69. **Now the BIG one — searches run after "every pair of the queue"**: phase 2 starts after phase 1 of THIS queue. The decision: "Searches never run on a node while it runs a timed pair." One queue per node, so OK on this node. But **searches on node A (phase 2) run while node B still does timed pairs — different nodes, fine. But all three nodes mount the same ceph; searches read mzML from node-local scratch. Fasta local. OK.
+
+  70. **Hmm — `search_workers: 2` on spock/data with `-Xmx200G` MSFragger ×2 + Sage**: memory 2.2TB fine.
+
+  71. **MSFragger first-alone logic is per-launch**: on a RESUME launch where all msfragger searches are done, fine. But consider: launch 1 completes pairs, starts phase 2, first MSFragger builds pepindex. Runner SIGKILLed mid-phase-2. Launch 2: units = pending; first = first unit with pending msfragger → runs alone. OK.
+
+  72. **But: TWO queues on DIFFERENT nodes both run "first MSFragger alone" — pepindex is node-local. OK.
+
+  73. **`busy()` during load gate also matches the OTHER node's processes? No, pgrep is local.
+
+  74. **The dt arm `time_rc` — run_logged returns the returncode of `time` itself; time exits with child's status... GNU time exits with the child's exit status, or 128+signal. check_exit covers.
+
+  75. **Selftest fake time writes "Exit status: $st" where st=0 for signals — matches GNU. OK.
+
+  76. **`hms(68.13)` → "1:08". Table shows 1:08. OK.
+
+  77. **`gb = peak_rss_kb/1e6`** — decision-mandated. OK per decision.
+
+  78. **`mem_available_kb` recorded but unused in table. Fine.
+
+  79. **`ps_top` uses `comm` (truncated to 15 chars) — diamond shown. Fine.
+
+  80. **`stage()` — `shutil.copyfile` doesn't copy xattrs/ACLs — data only. Pin check on copy re-reads sqlite. OK.
+
+  81. **The pin check uses `immutable=1` sqlite — on the ceph raw while another process writes? Raws are static. OK.
+
+  82. **`fingerprint` with_acq only used by pin cmd. `acq_min` in registry is trusted for the table; if registry acq_min is wrong (typo), table shows wrong acq_min — G-V01 checks presence, not correctness. The pin doesn't cover acq_min. A transposed acq_min (e.g. HeLa_31 120.0 vs actual) would silently report wrong "acq min". Medium-low: `corpus.py pin` prints acq_min for pasting; human paste error possible. The fingerprint's acq_min (with_acq=True) is computed but not compared at run time! stage() calls fingerprint(raw) without with_acq. So acq_min is never verified against the tdf at run time. A wrong acq_min in samples.yaml → wrong table column, no signal. Hmm — severity low-medium. The pin cmd prints it; the builder "pinned from the tdf". But a paste/transcription error wouldn't be caught. Low.
+
+  83. **Wrong pairing via records keyed by sample id only**: if two queues... G-V01 prevents sample in two queues. Records keyed <id>.pair.json in per-node root. If a sample is MOVED from one node queue to another between launches (the documented fallback: "move its samples to the data queue (edit, relaunch)") — the old node's records remain in old node root; the table reads records per node root filtered by `r["id"] in qd["samples"]` — old node's records for the moved sample are excluded (it's no longer in that node's queue). New node re-runs. OK good.
+
+  But wait — there's a subtle one: the table filter `r["id"] in qd["samples"]` uses the CURRENT plan. If collect was done from the old node before the edit... records on ceph under old node root remain but filtered out. OK.
+
+  84. **`render_table` uses `reg["samples"][sid]` pin check vs record: `if (reg["samples"].get(p["id"]) or {}).get("pin") != p["sample"]["pin"]` — catches registry edited after run. Good.
+
+  85. **`arm()` returns arm dict from pair record even if `p["status"]=="ok"` — but what if the pair record is ok but from a DIFFERENT binary than other rows? G-V13 mixed-identity aborts. OK.
+
+  86. **What about `p["status"]=="ok"` but searches from an OLD pair_run adopted in table? `search()` checks `r["pair_run"] != p["pair_run"]` → pending. Good. But does it check tools_sha256 consistency across the table? G-V13 checks oks tools_sha256 uniformity. Good.
+
+  87. **What if a search record is ok with pair_run match but the PAIR record's identity differs from the search's implicit build? Not possible: search ran on that pair's outputs.
+
+  88. **Missing: G-V13 doesn't verify search record node == pair node.** A search record carries "node". If a sample moved nodes and old search records... filtered by queue membership. Within one node root, fine. Low.
+
+  89. **`node_collect` dest check: `dest.parent.name.startswith("corpus_v3")` — dest = results_ceph/<node>, parent = corpus_v3. OK. And refuses if (dest.parent/"env.sh").exists() — protects arm dirs. OK.
+
+  90. **`launch` scp uses `scp -q` — no `-p`; fine.
+
+  91. **`ssh()` for launch: `setsid nohup python3 ... &` — the ssh command: `ssh node "setsid nohup python3 %s %s --queue %s </dev/null >>%s/runner.log 2>&1 &"` — the trailing & backgrounds it on the remote; ssh exits. One simple redirected command. OK. But `runner.log` append — fine.
+
+  92. **`qpath = root/queue-<nonce>.json`** — under root 0700. OK.
+
+  93. **The runner reads queue JSON: `json.loads(Path(argv[2]).read_text())` — node_main for node-run: `argv[2]` = path. argv = ["node-run", "--queue", path]? cmd_launch... launch_detached: `python3 %s %s --queue %s` with entry="node-run" → argv = ["node-run", "--queue", qpath]. node_main: `cmd = argv[0]`; `if cmd in ("node-run","node-guardtest"): ... (json.loads(Path(argv[2]).read_text()))` — argv[2] = qpath. OK.
+
+  94. **Selftest `_queue` roots — fine.
+
+  95. **Now, a genuinely suspicious one: `run_pair` `finally` writes the record; then `if sd.exists(): die_queue(G-V14)`. But `err` re-raise: `if err is not None and (not isinstance(err, Abort) or err.queue): raise err` — non-queue Abort (cell-level) → return False, queue continues. Queue aborts propagate. OK.
+
+  96. **`_node_run` — after a queue-level Abort from run_pair (e.g. G-V04), the Abort propagates out of `_node_run`, through with_node_lock (lock released), node_main catches Abort → says QUEUE_ABORTED, exit 2. The remaining samples never run — no QUEUE_DONE marker. Status shows lock free, no done marker. A waiter greps "lock free" then reads log tail — sees QUEUE_ABORTED. Visible. But **the remaining cells are silently missing unless someone relaunches** — that's the design (abort = human intervention). OK.
+
+  97. **`remove_tree(root/"stage")` at runner start deletes staged copies of a killed runner — but ALSO of a *concurrently running*... no, lock prevents. OK.
+
+  98. **`node_status` `records` reads every *.json in records — including partially-written? write_json atomic. OK.
+
+  99. **`cmd_table` doesn't check record node vs queue node**: records from node root — a record with host != node? G-V13 checks arms host == record node... `p["node"]` is hostname() written by the runner on that node. If the whole root was copied... fine.
+
+  100. **Ratio direction documented ours/diaTracer. OK.
+
+  101. **Potential issue — `search_done` requires `rec.get("tools_sha256") == tools_sha` where tools_sha from CURRENT install_tools. If tools change on ceph between launches, G-V12 aborts install_tools. OK.
+
+  102. **`_node_run` calls `install_tools(q)` once; `run_search` receives `tools`. check_fasta per search. OK.
+
+  103. **Concurrency: two searches in ThreadPoolExecutor both call run_search → both write DIFFERENT record files; both call check_fasta; both step() — fine. Both unlink their own mzML after both engines — per unit (s,tool). OK.
+
+  104. **`unit()` returns oks.count(False) — failed engine cells. QUEUE_DONE counts failed pairs + failed search cells. Wait: `failed` accumulates phase-1 pair failures, then `failed += unit(first)` and `failed += sum(ex.map(...))`. unit returns count of failed engines. OK matches doc.
+
+  Hmm, but the guardtest log says "GT PASS G-V10 GT6 queue reports 4 failed cells 1" — r6==1 (exit code) and marker "failed 4". OK.
+
+  105. **A failed pair whose sample... in phase 2, units exclude failed pairs (pair_done False). Their search cells stay absent → table "-". OK.
+
+  106. **Resume: failed pair re-runs; old search records from old pair_run become stale; table marks pending→ new searches run. OK.
+
+  107. **A subtle stale-adoption in `pair_done`: it accepts a pair as done when output file has same size+mtime — but the file could have been REPLACED by a different file with identical size and mtime (e.g., re-created by another process)? Far-fetched. The search_done path skips file check entirely when both searches done — fine.
+
+  108. **`verify_mzml` reads tail 4096 bytes for termination and first 64MB for spectrumList count. OpenMS indexedmzML — OK. diaTracer mzML ends with </mzML>? Evidence: fix/patch worked; dt mzML — does it end with `</mzML>` or `</indexedmzML>`? The proof run passed, so fine.
+
+  109. **Zero-padded count: `int(m.group(1))` handles. Proof: 75026 matched Wrote. OK.
+
+  110. **`log_count` rb"Wrote (\d+) pseudo" on e.log — "Wrote 75026 pseudo-MS2 spectra" matches. OK.
+
+  111. **MSFragger TSV `in.tsv` — the historical driver took `ls $M/*.tsv | head -1`. Here fixed name in.tsv. OK.
+
+  112. **Now unit errors in table: `acq_min` from registry. `acq_min` for TNBC 130.0 — plan says 130. OK.
+
+  113. **`fingerprint` acq_min: (max-min Time)/60 — Frames.Time in seconds. Selftest: (1860.5-0.5)/60 = 31.0. OK.
+
+  114. **`render_table` — `p["node"] if p else "-"` — node from record (written by runner's hostname()). G-V13 checks arms' host == p["node"]. But **the table's node column should be "from the record's hostname" — p["node"] is record node; arms' hosts verified equal. OK.
+
+  115. **The dt arm's `load_before` is taken in run_arm — but the GATE ran before prewarm; for the second arm no gate. Decision: record 1-min load before and after each arm. Done.
+
+  116. **Now — searches timed with `time -v` but search wall in table = engine step only. Decision says "Time both (/usr/bin/time -v)". Search wall per engine reported; engine-only, documented "indicative". OK.
+
+  117. **`step()` records wall including... engine only. Patch/fix excluded from search wall. Historical didn't time them at all. OK.
+
+  118. **Load contamination flags reach table? gate.contended → flag column. But **contention DURING the arms** (load_after spikes, e.g. diamond at 5400% CPU) is recorded (load_after, ps_top) but NOT flagged in the table! The gate checks load before the pair; a load spike starting mid-pair (very likely on these nodes — diamond runs for hours, but other jobs start anytime) leaves gate.contended=False and the row renders "load flags: -" while the arms ran contended. The record has load_after and ps_top per arm, but render_table only shows gate flag. Category 7: "load contamination that is not flagged, or flags that never reach the table". This is REAL: the proof run itself — gate load 73.8 contended; arms' load_before 69.5/84.1, load_after 84.1/78.4 — flagged because gate caught it. But scenario: gate passes at load 5 (spock quiet), then another user's job starts during the 30-min dt arm → wall inflated, row shows "-". The ps_top in the record shows it, but the table doesn't. Fix: flag rows where load_after (or arm load_before) > load_max. Severity: high-ish — a reported wall could be silently contended with the row showing no flag. The decision says "Record per arm: ... 1-min load and MemAvailable before and after" and gate flags before each pair. The table decision says "load flags". I'd rate high/medium: reported wall wrong-looking with no visible signal in the table. Let me mark high? The numbers are "wrong" in the sense of contended but the table is the reported artifact and the flag column says "-". Category 7 explicitly. I'll say high (contended number presented as clean). Actually severity definitions: critical = wrong/missing with NO visible signal. Here the record contains ps_top/load_after — but the *table* (reported artifact) shows no signal. Hmm, "no visible signal in the table" — that fits critical by their definition! The load_after is in the record JSON but not the table. I'll call it high, since discovery is possible from records but the table misleads. Actually let me re-read: "critical = a reported number is wrong or missing with no visible signal in the table". A contended wall isn't strictly "wrong" — it's a real measurement under load; the flag is missing. I'd say high.
+
+  119. **Similarly, searches with search_workers=2 — search walls contended by the sibling search; documented indicative. OK.
+
+  120. **RSS attribution: `/usr/bin/time -v` on the spx arm measures only the extractor. OK. diaTracer: java process. But note **diaTracer spawns JNA native lib — same process. OK.
+
+  121. **Patient data on ceph after collect: records contain stage paths with specimen basename (cmd arrays) — see #37. Also `sample.raw`. The decision says copy records to ceph. The cohort dir itself is on ceph (same filesystem, presumably same access group). Not a new exposure class. Low — but actually is /ceph/ibmi/abi/oliver/spextract readable by all abi users while the cohort dir is restricted? Unknown. The builder's open issue #1 covers export-private. R12 covers tables leaving dev. I'd flag low-medium: records carry specimen paths to a ceph dir whose perms are unknown; fix: store only sample id in records... but cmd arrays inherently include the staged path (which embeds raw.name). Could stage as `<id>.d` renamed copy! Actually stage could rename the copy to a neutral name — but diaTracer output name derives from input name; and pin check uses content. Renaming the staged copy to `<sid>.d` would keep specimen names out of node-local paths/records. But sample.raw in the record still carries it. Medium-low, mention.
+
+  122. **Now a potentially critical resume bug: `pair_done` line 583: `if all(search_done(...) for e in ENGINES): continue` — note this uses the CURRENT pair record `rec` for pair_run comparison — search records must match rec's pair_run. Good. And tools_sha current. Good.
+
+  123. **`_node_run` phase 1 skip message; fine.
+
+  124. **What about `harness_sha256` in records but G-V11 doesn't compare it** — a record written by an older harness version is adopted if identity matches. If the harness scoring rule changed between versions (e.g., bug fix in sage_peptides), old search records would be adopted (tools_sha256 covers search *tools*, not the harness scorer). The scorer lives IN corpus.py! `search_done` doesn't check harness_sha256. Scenario: builder fixes a counting bug in corpus.py tomorrow, relaunches; old search records (counted with the buggy rule) are adopted → table mixes two scoring rules silently. G-V13 can't see it (tools_sha256 identical). Hmm — but the run starts fresh in a few hours; mid-run harness edits: launch copies corpus-<sha12>.py content-named; the RUNNER keeps running the old copy. But a RELAUNCH after editing corpus.py on the laptop scp's the NEW file; records from old harness adopted. The record stores harness_sha256, and QUEUE_START logs it — but nothing compares. Category 3/11: stale records adopted as fresh / mixed rules. Severity medium-high: concrete scenario — harness bug discovered mid-run (e.g. the very fixes in 4.5 happened between proof runs; records from f24d0a69 harness were trusted by 7ab160cd harness — indeed the proof relaunch "skipped the verified pair" across harness versions!). Evidence: 5.2 final relaunch with harness 7ab160cd adopted records written by harness f24d0a69 ("pair HeLa_2740 already done (record verified): skipped"). So it's PROVEN behavior. For the real run: if corpus.py is patched mid-run (plausible given history — 11 bookkeeping failures before), old-rule cells are silently adopted. Fix: include harness_sha256 in pair_done/search_done comparison, or at least in G-V13 table check (records must share one harness_sha256). I'd rate high.
+
+  125. **The `_diatracer.mzML` neighbor check: only during dt arm. If a stale neighbor exists (44 do), untouched. OK.
+
+  126. **Dry-run `import shlex` duplicate at top of dry_run (already imported globally) — style, ignore.
+
+  127. **`busy_patterns`: base[:-1] + "[" + base[-1] + "] -in" — for "spextractor" → "spextracto[r] -in" — duplicate of fixed pattern, harmless. For "diaspextractor" → "diaspextracto[r] -in". But the renamed binary run is `<bin> -in ...` — matches. But what about OUR extractor run by ANOTHER session with different args order? `-in` always present per invocation. OK. Note the pattern could match `pgrep`'s own... no.
+
+  But: **busy() patterns match OTHER users' processes too — a co-user legitimately running their own MSFragger (the academic copy at dont-backup) on the same node would make every gate wait 60 min then flag contended — visible flag, fine.
+
+  128. **`load_gate` waits load_wait_min*60 then runs flagged. ibminode05 threshold 12 with load 57-86 → every pair waits 60 min → 14 pairs × up to 60 min = 14 h of gate waiting + run time > 20 h budget on that node. Builder's open issue #2 covers this. Skip (listed).
+
+  129. **`hms` for totals: tot("dw") could exceed 24h — "%d:%02d:%02d" hours unbounded. OK.
+
+  130. **The table "search walls ... up to 1 concurrent searches per node"** — proof text says workers from records. In real run workers=2 on spock/data. The header uses actual. OK.
+
+  131. **`render_table` `contended` count only ok pairs. Fine.
+
+  132. **G-V06 in proof: `waited_s: 62` but POLL_S=60 and load_wait_min=1 for selftest plan. Real plan 60. OK.
+
+  133. **`ssh()` in `remote()` has NO timeout! `subprocess.run(SSH + [...], input=..., capture_output=True)` — no timeout → a hung node (ssh established but node stalled, e.g. ceph hang) hangs status/launch forever on the laptop. ssh() has timeout=180 but remote() doesn't. Waiting is by re-invocation; a hung remote() blocks that invocation indefinitely. Minor operational, not a wrong number. Low. Actually ConnectTimeout=20 covers connect; established-but-hung session: ServerAliveInterval=15 but no ServerAliveCountMax → default 3 → ~45s+20? ServerAliveInterval without CountMax: after 3 unanswered (default 3) ssh disconnects. So it self-heals ~45-60s. OK, negligible.
+
+  134. **`cmd_pin` — fine.
+
+  135. **The `TIME` binary: `/usr/bin/time` — verified GNU on data/spock; ibminode05 NOT verified (5.6 lists data and spock only)! If ibminode05's /usr/bin/time is not GNU (or absent → run_logged rc=127 → time log missing → G-V08 unparseable → every pair on ibminode05 fails visibly). Visible, aborts cells. But 14 samples all failing = the table shows FAILED G-V08 for 14 rows — visible, not silent. But it wastes hours? No — fails fast on first pair. Actually pair 1 fails immediately; queue continues to pair 2... all fail fast. Visible. G-V15 doesn't check /usr/bin/time exists at launch. Minor: add to preflight. Low-medium (14 rows of a 49-row table FAILED until fixed; visible though). Hmm — but each failed pair still stages the raw first (copies GBs) then fails → wasted but harmless. Low.
+
+  Also python3 on ibminode05 for the runner: unverified (see #20). If python3 too old → runner crashes at start → LAUNCH_NOT_RUNNING. Visible. Low.
+
+  Also `java` on ibminode05: java-21 present per notes. OK.
+
+  136. **`nproc`/cores: `os.cpu_count()` on ibminode05 = 128 → threshold 12. Correct per decision.
+
+  137. **`env_keys` recorded — includes OPENMS_DATA_PATH, RAWD etc. The arm env for spx includes LD_LIBRARY_PATH with OpenDIAlyzer env lib (from root env.sh) — inherited library paths could differ across nodes? env.sh is on ceph, same everywhere. But **LD_LIBRARY_PATH includes `/ceph/ibmi/abi/oliver/AI/OpenDIAlyzer/opt/env/lib`** — if that dir's contents change mid-run (another session's conda env!), the binary picks different .so versions — G-V04 only hashes the ARM's lib/*, not LD_LIBRARY_PATH dirs. Also the trailing ":" means cwd is in LD_LIBRARY_PATH. Also **a silent env difference: the OpenDIAlyzer lib dir is outside the arm and unhashed** — a republish/update there mid-run changes the measured build with no guard firing. Hmm: would it change *results*? libtimsdata or OpenMS libs from that env could shadow. LD_LIBRARY_PATH order: arm lib first (dnoise_s2c/env.sh prepends), then $SPX/lib, then OpenDIAlyzer env lib. So arm lib wins. Root env.sh puts $SPX/lib first then OpenDIAlyzer. Arm env prepends arm lib. So resolution: arm/lib → spextract/lib → OpenDIAlyzer → (cwd). A library NOT in arm/lib or spextract/lib (e.g., libtimsdata? OPENMS_BRUKER_SDK_PATH unset; SDK maybe from OpenDIAlyzer env!) could load from the OpenDIAlyzer env — unhashed, unrecorded (only ld_library_path string recorded, not the resolved libs). If that env changes mid-run, some pairs run with different Bruker SDK → counts could differ silently across rows (n=1, ~2% across builds). G-V04 doesn't cover. This is real: the identity covers SPX_BIN + arm lib/* + jar only. Category 1 (mixed builds) / 10 (inherited library paths). The record does store ld_library_path, but not hashes of libs outside the arm. Failure scenario: the OpenDIAlyzer conda env (another user's? it's under /ceph/ibmi/abi/oliver/AI — same group) updates libtimsdata or a dependency between two pairs → row-level silent build mix, table renders fine. How likely is a dep to resolve there? If the arm is fully self-contained (rpath), no. The v3 arm presumably has rpath to its own lib + $SPX/lib. Given OPENMS_BRUKER_SDK_PATH is unset and the SDK is loaded how? The extractor reads .d via Bruker SDK — libtimsdata must come from somewhere: probably arm/lib (hashed). Then residual risk is smaller. I'd rate medium, confidence low-medium. Worth listing: hash all libs actually loaded (e.g., record /proc/self/maps of a `--help` run, or ldd of SPX_BIN with hashes) — concrete fix: at identity(), run `ldd $SPX_BIN` in the arm env and hash every resolved path.
+
+  138. **`arm_env` strips MALLOC_* but NOT GLIBC_TUNABLES** (malloc tunables can also come via GLIBC_TUNABLES, e.g. glibc.malloc.arena_max). 5.6 checked spock only (count 0), ibminode05 not checked. The decision said "unset every SPEXTRACTOR_*/DIASPEXTRACTOR_* and MALLOC_* variable" — GLIBC_TUNABLES not in the decision. But "glibc malloc: NO tcmalloc preload" — LD_PRELOAD stripped. _JAVA_OPTIONS/JAVA_TOOL_OPTIONS not stripped: **if _JAVA_OPTIONS is set in the SSH environment on a node, java (diaTracer AND MSFragger) would inherit extra JVM flags (e.g. -Xmx override is appended AFTER? Actually _JAVA_OPTIONS is prepended; command-line -Xmx400G later wins? For _JAVA_OPTIONS, later command-line options take precedence... JAVA_TOOL_OPTIONS similar). JVM picks last -Xmx? Actually hotspot uses the LAST occurrence? No — hotspot: later options override earlier for -Xmx. _JAVA_OPTIONS is processed BEFORE command line, so cmdline -Xmx400G wins. Risk low. But environment differences between nodes (5.6: not checked on ibminode05) — G-V15 doesn't verify a clean env; env_keys recorded only. Category 10: "environment differences between nodes that silently change results (inherited library paths, JVM options, malloc tunables, OpenMP variables)". OMP_NUM_THREADS: extractor uses OpenMP over windows with -threads 100; does it honor OMP_NUM_THREADS? If OMP_NUM_THREADS set on one node, could change thread count → "counts are not digest-reproducible across thread counts" (R8) → peptide counts differ per node silently! env_keys would show it in the record but nothing guards. spock checked clean; ibminode05 NOT checked (it runs other gates — another session might export OMP_* in shared scripts? env comes from ssh non-interactive — likely clean). Guard idea: G-V03 should refuse/strip OMP_*, GLIBC_TUNABLES, _JAVA_OPTIONS, JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS. Concrete finding: strip/abort on these; record shows but no guard. Severity medium (silent cross-node count differences possible; counts are the portable numbers). Confidence medium that it's a hole (it IS a hole — nothing strips/checks them; whether any are set is unverified on ibminode05). The selftest QUEUE_START logs `removed [...]` only for the four prefixes. Yes — finding.
+
+  139. **Table label: `label = okp[0]["label"]` — from --help. Decision: label from arm. OK.
+
+  140. **`render_table` — `ids` from reg order; row uses `e.get("label", sid)` — in-house shows "A".. good.
+
+  141. **What about `acq_min` formatting `%.1f`. OK.
+
+  142. **Search record "workers" — table header lists workers. OK.
+
+  143. **`node-status` for table with source=ceph reads records via ssh from ceph paths — if collect never ran for ibminode05, its 14 rows pending → exit 3. Visible.
+
+  144. **Potential wrong pairing: `srch` keyed (id, tool, engine) — across nodes records merged; sample in one queue. OK.
+
+  145. **The pair record's `arms[tool]["output"]["count"]` shown as spectra. OK.
+
+  146. **Ratio `%.2f` — 6652/7391 = 0.90. OK.
+
+  147. **Summary: `med("dw","xw")` median of per-file ratios — label says median wall ratio (ours/dT) — xw/dw = ours/dt. OK.
+
+  148. **`hms(tot)` for per-scheme wall totals — sums of walls on different nodes; "compare walls within a row only" caveat exists; totals across nodes questionable but documented? The caveat says compare within a row only, yet the summary prints corpus wall totals and median wall ratios across nodes/schemes — cross-node timing invalid per memory. The summary's wall totals mix nodes silently-ish (documented "complete rows only"). Eh — the historical tables did similar; the header caveat covers rows. Adding a caveat to summary would be nice. Low.
+
+  149. **G-V10: "result TSV is header-only" check reads two lines. OK.
+
+  150. **`sage_peptides` — `float(row[iq])` — a row with short length → IndexError → CRASH guard, cell failed, visible. OK.
+
+  151. **Empty `proteins` in MSFragger → decoy=True — matches bench_table. OK documented.
+
+  152. **The `in.tsv` rows include `hit_rank` — msf_peptides doesn't filter hit_rank==1!** bench_table's msf_peps also doesn't (params output_report_topN=1 ensures only rank 1). OK.
+
+  153. **`modification_info` — key includes it; matches.
+
+  154. **dt mzML moved with os.replace — same fs (stage and runs both under root). OK.
+
+  155. **The staged raw deletion happens in finally of run_pair — BUT the dt mzML was moved OUT of stage before deletion. And spx output is in runs. OK.
+
+  156. **Wait — a real deletion bug candidate: `run_pair` line 522: `for old in (root/"runs"/s["id"]).glob("*/*/*.mzML"): old.unlink()` — this runs when a pair is re-run. But consider a pair whose PREVIOUS attempt is ok with searches pending... can't happen (pair_done would be True only if outputs exist; if outputs exist → skipped). If outputs were deleted by... the `unit()` unlink happens only after both engines succeed → then searches done → pair stays done. OK. What about a *concurrent* collect? collect doesn't delete. OK.
+
+  157. **`remove_tree` chmods dirs 0700 then rmtree(ignore_errors=True) — if deletion fails (nfs/ceph handles), leftovers detected (sd.exists() → G-V14 queue abort). For stage. OK.
+
+  158. **Guardtest leftovers: "Proof leftovers (public HeLa only) kept as evidence" — builder-listed. Skip.
+
+  159. **`_node_run` — `(root/("runner-%s.pid" % nonce)).write_text` before jnatmp check — fine.
+
+  160. **`with_node_lock` writes pid/plan/nonce into lock file; probes read. OK.
+
+  161. **`launch_detached` — `mkdir -p root/harness && chmod 700 root root/harness` — chmod 700 on EXISTING root too — fine (private).
+
+  Hmm wait: `ssh(n, "mkdir -p %s/harness && chmod 700 %s %s/harness")` — if root exists as 0755 with another user's... kohlbach's own. fine.
+
+  162. **scp of queue JSON contains the full sample list with pins and raw paths — stored under root (0700) — and collect copies queue-*.json to ceph (not ignored!). Patient paths to ceph — same as #121.
+
+  163. **Time to also examine `parse_time_log` "Exit status" when time itself fails to exec (127) — e.g. SPX_BIN deleted between identity check and exec: time rc=127, log has Exit status: 127 → check_exit dies. OK.
+
+  164. **`check_exit` requires rc==0 AND exit_status==0 AND no signal. GNU time rc: if child signalled, time exits 128+sig. Covered.
+
+  165. **Category 6: page-cache effects — prewarm both files; dt writes mzML (925MB-25GB) to local scratch; spx runs next — writeback of dt mzML to local disk (fast NVMe?) concurrent with spx compute; alternating order mitigates systematically. Note vm.dirty_ratio 20% of 2.2TB = 453GB — the ENTIRE dt mzML stays in page cache as dirty pages during spx arm; writeback trickles. Both orders symmetric? In dt-first: spx arm runs during dt-mzML writeback. In spx-first: dt arm runs during spx-mzML writeback (smaller file). So dt-first rows bias spx walls upward slightly; spx-first rows bias dt walls slightly less (smaller file). Since order alternates by queue index and walls compared within row only, and each row has its own order — half the rows favor dt, half favor spx — systematic small bias in median ratios? The ratio ours/dt would be biased UP on dt-first rows (spx slowed) and... on spx-first rows dt runs during writeback of the smaller spx file → dt slightly slowed → ratio biased DOWN less. Net: slight upward bias of ours/dt wall ratio. But effect small (local disk fast, dirty_expire 30s, writeback mostly done within 30s; spx arm on TNBC is ~minutes). Also deletion of mzMLs later. I'd call it low — mention as a note under RSS/wall category examined with a low finding? The brief wants concrete wrong numbers. Given within-row comparison is the headline (speedup per row), a systematic asymmetry is worth a low finding: flush (sync) or delete the dt mzML... can't delete (needed for searches). Could `sync` the stage dir between arms — cheap fix suggestion: run `sync` after each arm (few seconds at 30s expire... sync forces writeback ~seconds at GB/s). Low.
+
+  166. **More important — #118 extended: the gate runs before the PAIR, but the decision says gate "before each pair" — matches. Mid-arm load spikes unflagged (finding).
+
+  167. **Category 2: "a failed cell that is never re-run" — failed cells re-run on relaunch. But: if the queue completes with failed cells and NOBODY relaunches, table shows FAILED — visible. OK. "a failed arm that re-runs its partner" — G-V09 structural. Verified GT. OK.
+
+  168. **Duplicated arms: pair_run unique per attempt; runs/<id>/<pair_run>. If two pair_runs for same id complete (old ok + new ok after binary change), records hold only latest. Table uses records. OK.
+
+  169. **`status` "stale" marker. OK.
+
+  170. **Now, the `first` MSFragger alone — but what if the first unit's MSFragger is already done and its SAGE pending: `first` = first unit with pending msfragger → could be a LATER unit; `unit(first)` runs it alone — but earlier units' sage... wait, `ex.map` on `[u for u in units if u is not first]` — those units include ones whose msfragger is pending?? If first is unit #3 (first with pending msf), units #1,#2 have pending sage only (their msf done). Pool runs them concurrently — only sage. MSFragger concurrency: only `first` ran before pool, and pool units have no pending msfragger? NO — units #4+ may ALSO have pending msfragger! They run in the pool concurrently with search_workers=2 → TWO MSFraggers concurrently. But pepindex was already built by `first` alone. That's the only race reason. OK — fine.
+
+  But subtle: on a RESUME where pepindex exists, fine. On fresh node, first msf unit alone builds pepindex. But what if the first unit's msfragger FAILS before building pepindex (e.g. fix error) and pool then starts two msfragger units concurrently → pepindex build RACE → possible corrupted index → wrong search results or failures. Failures visible (G-V10). Corrupted-but-succeeding index? MSFragger pepindex race historically: "Run the first search on each node alone so the .pepindex files are built once and not raced." The harness: `first = next((u for u in units if pending msf))`; `failed += unit(first)` — unit runs sage THEN msfragger; if msfragger fails early (before/during pepindex build), the pool proceeds with remaining units — two concurrent MSFraggers both building pepindex → race. Concrete scenario: first unit's fix step OOMs or its mzML is bad → msfragger cell fails; pool launches units 2,3 concurrently, both start pepindex build → one index corrupt → a peptide count that is silently wrong (search succeeds on corrupt index?). Historically the race was a crash risk? "pepindex build race" — what actually happens: two java processes write .pepindex simultaneously → one reads partial → likely exception (visible) — or silent wrong index? Unknown; the caution in P7 suggests they believed it matters. Given searches would likely fail loudly, medium-low. Also note: even on success path, the first unit runs alone — fine. I'll fold this into a medium finding: "first MSFragger alone only if it succeeds far enough; after its failure the pool can still race the pepindex build". Fix: if `unit(first)` had a failed msfragger, run the next pending-msfragger unit alone too (loop until one msfragger succeeds or none pending).
+
+  171. **Another: `_node_run` computes `units` ONCE before running first/pool — pending() evaluated at units build. unit() re-checks pending inside. OK.
+
+  172. **`ThreadPoolExecutor.map` — exceptions in unit? run_search catches everything incl BaseException → returns False. But queue-level Abort from run_search (e.g. check_fasta die_queue G-V12) → re-raised (`if err is not None and (not isinstance(err, Abort) or err.queue): raise err`) → propagates out of ex.map → queue aborts. OK.
+
+  173. **`say` prints to runner.log. OK.
+
+  174. **ibminode05 queue `search_workers: 1` — fine.
+
+  175. **The registry acq_min for in-house = 31.0 all — plausible.
+
+  176. **`node_busy` is called pre-launch from laptop via remote — it calls arm_env on the node: sources env.sh — fine.
+
+  177. **check_launch busy aborts launch if our tools run — including a guardtest? Guardtest holds the lock → lock_held → abort. OK.
+
+  178. **What if TWO of the three launches happen simultaneously from the laptop (one command each)? Each does check_launch then launch_detached; race: both see lock free, both scp and start runners; runner flock serializes — second runner fails G-V05 after retry (queue abort exit 2) — but its launch already printed... launch_detached waits up to 40s for pid+lock; second runner writes pid file then dies on lock? Order in node_run: node_root_checked → with_node_lock (fails → QUEUE_ABORTED, exit 2). pid file written inside _node_run — which is INSIDE the lock? `node_run` → `with_node_lock(q, "queue", lambda: _node_run(q, root))` — pid written in _node_run, inside lock. So second runner never writes pid. launch_detached sees no pid → LAUNCH_NOT_RUNNING (7). Visible. OK.
+
+  179. **`q["nonce"]` generated at resolve_queue on the laptop; queue JSON scp'd. Two launches → different nonces. OK.
+
+  180. **Category 11 — "report done while cells missing": `cmd_table` exit 3 if incomplete. But the SUMMARY section computes over complete rows only — a table with 48/49 rows complete renders full summary rows that a reader could quote as "corpus totals" while one TNBC file missing. The header says "48 of 49 rows complete". Visible. OK-ish. But per-scheme totals for the scheme with missing rows are partial — labelled "complete rows only". Visible. OK.
+
+  181. **`render_table` — `if len({...identity...}) > 1 or len({p["label"]...}) > 1: die` — but only over okp; a FAILED pair from an old binary + ok pairs from new binary → table renders (failed row shows FAILED). Fine.
+
+  182. **Search `tools_sha256` uniformity check across ALL ok search records — includes `sage_fasta` sha which is NODE-LOCAL — if the three node-local fastas legitimately differ in bytes but same content... they don't (sha prefixes match on data/spock; ibminode05 unverified → #17). OK.
+
+  183. **Now the peak RSS of SEARCHES isn't in the table — decision asks peak RSS per extractor only. OK.
+
+  184. **`memavail_before_kb` etc recorded. OK.
+
+  185. **Time zone in timestamps — fine.
+
+  186. **`urllib.parse.quote(str(tdf))` for sqlite URI — spaces handled. OK.
+
+  187. **`fingerprint` uses immutable=1 — on ceph fine.
+
+  188. **Category 8 — "deletion of the wrong file": `for old in ...glob("*/*/*.mzML"): old.unlink()` — pattern under runs/<id>/: <pair_run>/<tool>/<file>.mzML. Could it match search dirs? runs/<id>/<pair_run>/search/<dir>/fixed.mzML is depth 4 — glob "*/*/*.mzML" is exactly 3 components → no. dt mzML at runs/<id>/<pr>/dt/xxx.mzML → depth 3 → yes. patched.mzML at depth 4 → no (deleted in run_search finally). OK. But `unit()` unlinks `pairs[..]["arms"][tool]["output"]["path"]` — from the snapshot pair record — correct file. missing_ok. OK. `remove_tree(sd)` — sd = stage/<id>-<pair_run> — correct.
+
+  Hmm — one more: in run_pair, `sd = root/"stage"/("%s-%s" % (s["id"], pair_run))` — matches stage()'s d. OK.
+
+  189. **`stage()` — if staging copy fails midway (disk full), die G-V07 → finally remove_tree(sd) cleans partial copy. OK.
+
+  190. **Disk full during mzML write → output unterminated → G-V08. OK.
+
+  191. **`results_ceph` quota unknown (P5) — collect could fail mid-copy → partial ceph records → table --source ceph shows some rows pending → exit 3. Visible. OK.
+
+  192. **`node_collect` copytree dirs_exist_ok — merges; old files from superseded pair_runs remain on ceph (runs/<id>/<old_pair_run> dirs persist locally too — run_pair deletes only *.mzML, not logs of old attempts). Table reads records only. OK.
+
+  193. **A wrong-number candidate in the dt invocation vs historical: historical ran `> dt.log 2> time.log` with time's report to STDERR; harness uses `-o`. Historical did NOT use -o... equivalent. Params identical: `-t 100 -mC 0.3 -dI 0.01 -dR 3 -rM 500 -mF 1 -mO 0.1 -r 0`. cmd_dt: ["-t", threads, "-w", wdir] + DT_PARAMS where DT_PARAMS = -mC 0.3 -dI 0.01 -dR 3 -rM 500 -mF 1 -mO 0.1 -r 0. Historical order: -d RAW -t 100 -w W -mC... — harness: -d staged -t threads -w adir + params. Same. -Xmx400G same. jna flags same. LC_ALL=C set via env. TMPDIR set (historical also exported TMPDIR per memory). OK.
+
+  194. **spx invocation: `-in -out -threads 100` defaults only. OK.
+
+  195. **Env for spx: full arm env — includes OPENMS_DATA_PATH from root env.sh. OK.
+
+  196. **G-V03 checks env.sh doesn't export probe vars — but arm env.sh could `export LD_PRELOAD=` empty — strip_var catches (== "LD_PRELOAD"). OK. But it sources env.sh with base env that includes caller's LD_LIBRARY_PATH? base = environ minus stripped — LD_LIBRARY_PATH is NOT stripped (it's not in STRIP_PREFIX and != LD_PRELOAD)! So the caller's (ssh non-interactive) LD_LIBRARY_PATH persists into env, then env.sh prepends. On nodes, non-interactive ssh LD_LIBRARY_PATH empty typically. env_keys/ld_library_path recorded. Low.
+
+  Hmm wait — should LD_LIBRARY_PATH be stripped? Decision says unset SPEXTRACTOR_*/DIASPEXTRACTOR_*/MALLOC_* — not LD_LIBRARY_PATH (needed). The arm env.sh sets it. Inheriting a caller LD_LIBRARY_PATH could inject paths AFTER arm's prepends — arm lib still first. Low.
+
+  197. **Category 4 double-check: port vs bench_table for Sage: bench_table counts unique peptides with rank=="1" AND peptide_q<=0.01. Port identical. But the FAKE_SAGE selftest header lacks "label"?? No — it includes label. And port requires label column — real Sage TSV has label (col 8). OK.
+
+  Wait, actually — the historical awk `$8==1` is label==1 — meaning the DRIVERS counted targets only, but bench_table (which made the TABLES) used rank==1 without label filter — and the DECISION says "use the scorer that produced them" (the tables) — so port correct per decision. The decoy inclusion inflates both arms equally-ish (68/62). Ratios slightly biased? Decoys at peptide_q<=0.01: ~68 of 7391 ≈ 0.9% — historical tables had the same. Consistent. Not a finding (documented).
+
+  198. **MSFragger decoy rule — "every protein starts with rev_" — real proteins field like "rev_sp|Q8IXZ2|ZC3H3_HUMAN decoy" — split on [,;@] → one entry starts with rev_ → decoy. Target: "sp|Q9H0P7|..." → not. Multi-protein: "sp|A, rev_B"?? A target PSM mapping to target+decoy → not all rev_ → target. Same as bench_table. OK.
+
+  199. **`sorted(best.values(), reverse=True)` — tuples (hs, dec) — ties: dec=True sorts before False — same as bench_table. Port identical. OK.
+
+  200. **Category 5 re-check totals/medians: summary median wall ratio per scheme over complete rows; corpus row over ALL complete rows (mixing schemes) — labelled. OK.
+
+  201. **`contended` count: `sum(1 for p in okp if gate.contended)` — header "N pairs ran contended". OK.
+
+  202. **One more potential critical: `pair_done` is called in phase 1 with `tools["sha256"]` — install_tools ran THIS launch; if tools unchanged, fine. Suppose search records exist from a PREVIOUS plan (corpus_v3_selftest) — different root. No.
+
+  203. **`q["harness_sha256"]` computed on laptop (SELF = laptop file); runner runs the scp'd copy — same content. The runner's q comes from JSON. OK. But guardtest runs `node-guardtest` with harness copy — fine.
+
+  204. **Selftest-only-guard concern (category 10): "guards that fire in the selftest only because of the fake world" — e.g., G-V06 busy detection: real pgrep on node — the busy() pattern `/sag[e] ` requires "/sage " with trailing space in cmdline — sage invoked as `/scratch/.../tools/sage/sage sage_deiso.json ...` → cmdline contains "/sage/sage sage_deiso.json" — does "/sage " (slash-sage-space) appear? ".../tools/sage/sage sage_deiso.json" — the substring "/sage " appears at "sage/sage sage"? Let's see: path "/scratch/kohlbach/corpus_v3/data/tools/sage/sage" then space then "sage_deiso.json". Substring "/sage " — looking for slash,s,a,g,e,space: ".../sage/sage sage_deiso.json" — after the last "sage" comes a space → "/sage " matches at "/sage<space>"? The final binary name is "/sage" followed by space → yes "…tools/sage/sage sage_deiso.json" contains "/sage " (the second "/sage" followed by space). Yes matches. And memory says `/sag[e] ` once matched "mes**sage** " — "message " contains "sage " but not "/sage " (no slash before). "…/message " has no "/sage". OK. But a co-user running anything under a path like "/home/x/sage tool" → match → flag only. Fine.
+
+  205. **diaTracer busy pattern "diaTracer-2\.2\.[1]\.jar" — the harness's OWN dt arm cmdline contains "diaTracer-2.2.1.jar" → during phase 1 pairs, a concurrent launch's node-busy from laptop would see it → refuses. Good. But the gate's busy() is called BEFORE arms start; during arm, no gate. OK.
+
+  206. **`busy()` excludes only os.getpid() — pgrep's own pid != python pid, but pgrep doesn't list itself anyway. However the SH spawned by subprocess? None (list form). OK.
+
+  207. **Guardtest scenario fixtures run real diaTracer on the real ceph raw — during guardtest, the REAL queue... lock prevents. OK.
+
+  208. **Patient data in guardtest? Only public HeLa used. OK.
+
+  209. **OK — also `# category 9`: logs on node: dt.log/e.log/sage.log/engine.log may contain specimen-derived paths (they contain staged paths with raw basename). Retained on node until collect, then ceph. /scratch/kohlbach drwx------. Root 0700. OK-ish. Covered in #121.
+
+  210. **`collect` ignores "*.tmp*" — write_json tmp files. OK.
+
+  211. **Big remaining candidate — `search_done` requires peptides>0; ok.
+
+  212. **`_node_run` `failed` int; QUEUE_DONE exit 1 if failed — the runner's exit code isn't propagated to launch (detached) — status/log used. OK.
+
+  213. **What about `load_wait_min` in selftest plan = 1 min; real = 60. OK.
+
+  214. **`node_root(plan, node)` for results_ceph: "results_ceph/<node>" — collect dest. Table --source ceph reads records from there via ssh — ceph-mounted path on each node — fine, reads own node's dir. But any node can read others' — table loops per queue node. OK.
+
+  215. **Table `source` default scratch — after run, docs say use ceph. Fine.
+
+  Now let me also scrutinize the FAKE_TIME/selftest-only-pass guards (category 10): "guards that fire in the selftest only because of the fake world":
+  - G-V08 "log count != spectrumList count" — real dt writes "Writing mzML file...N scans" — proof run verified on real node. OK.
+  - `parse_time_log` requires all three lines — GNU time 1.9 format verified on real node (proof). OK.
+  - The **`--help` label parse on the renamed binary** — builder open issue 3/4 covers smoke. Skip.
+  - **`verify_mzml` termination check on the REAL v3 tiled output** — v3 writes indexedmzML? The proof used dnoise_s2c (older). If v3 writes plain `</mzML>` without index — handled both. OK.
+
+  One more: **`verify_mzml` reads only first 64MB for spectrumList — mzML header could exceed? spectrumList element comes before spectra — within first MBs. OK.
+
+  **dt output name**: `staged.name[:-2] + "_diatracer.mzML"` — staged.name = "<...>_1_2740.d" → [:-2] strips ".d". OK. But `neighbour()`: `raw[:-2] + "_diatracer.mzML"` — raw ends ".d" → strips. OK.
+
+  **stage(): raw.name used as dst dir name — if raw name doesn't end ".d"? G-V01 enforces .d. OK.
+
+  Now the acq_min table check — `e["acq_min"]` formatted %.1f — registry. OK.
+
+  **Another pairing check: `render_table` uses `p["sample"]["pin"]` vs registry — catches registry drift. And `p["sample"]["raw"]`. pair_done checks raw equality too. Good.
+
+  **status cmd**: `cells.append("ok %s" % r["peptides"] if pair and r["pair_run"] == pair["pair_run"] else "stale")` — operator precedence: `"ok %s" % r["peptides"] if cond else "stale"` → parses as `("ok %s" % r["peptides"]) if cond else "stale"` — correct.
+
+  **Potential wrong node attribution in table when queue moved** — filtered. OK.
+
+  Now severity ranking. Let me finalize findings:
+
+  **Finding A (high→critical?): mid-pair load contention not flagged.** Table flag column only reflects the pre-pair gate. load_after/ps_top per arm recorded but never surfaced. On nodes with observed loads swinging 4→112 within hours, a pair gated at load 5 then hit by another user's job reports inflated walls with flag "-". The reported wall number is contended with no visible signal in the table. By the brief's definition (a reported number wrong/misleading with no visible signal in the table) — I'd say high (the number is a real measurement, but presented as uncontended). Actually re-read: "critical = a reported number is wrong or missing with no visible signal in the table". A contended wall presented as clean = a misleading reported number, no signal in table. The data to detect it EXISTS in the record (load_after) but not the table. I'll rank high, maybe #1 or #2. Let me weigh against others.
+
+  **Finding B (high): harness_sha256 not part of G-V11/G-V13 — records from an older harness scorer adopted silently.** The scorer (sage_peptides/msf_peptides) lives in corpus.py; a mid-run harness fix changes the rule; old records adopted; table mixes two scoring rules with no signal. Proven to happen across harness versions in the proof (f24d0a69 records adopted by 7ab160cd). Fix: include harness_sha256 in search_done/pair_done (or at least G-V13 uniformity check). High.
+
+  **Finding C (medium-high): first-MSFragger-alone doesn't guarantee pepindex built before the pool** — if the first unit's MSFragger cell fails, pool may run 2 MSFraggers concurrently racing pepindex build. Medium.
+
+  **Finding D (medium): environment strip list misses GLIBC_TUNABLES, OMP_*/GOMP_*/KMP_*, _JAVA_OPTIONS/JAVA_TOOL_OPTIONS/JDK_JAVA_OPTIONS, MALLOC_CHECK_?** (MALLOC_ covers), and LD_LIBRARY_PATH inherited from caller. No guard checks them; ibminode05 unverified. If set on one node, thread counts / JVM flags differ → counts (portable numbers!) and walls silently differ per node. env_keys records names only, table never shows. Medium-high. The decisions explicitly said unset SPEXTRACTOR_*/DIASPEXTRACTOR_*/MALLOC_* — the harness implements exactly that; but the review brief's category 10 explicitly names "OpenMP variables, JVM options, malloc tunables" as things to check. Given OMP threads could alter the extractor's effective thread count (OpenMP over windows; -threads 100 may still honor OMP_NUM_THREADS? OpenMS TOPP tools use their own thread pool; OMP_NUM_THREADS could cap inner OpenMP loops → changed wall, and per R8 counts differ across thread counts). Medium.
+
+  **Finding E (medium): ibminode05 prerequisites unverified — /usr/bin/time GNU, python3 version, FASTA sha equality.** FASTA sha difference → G-V13 table abort AFTER 20h (visible but run wasted for searches; and partial: actually if ibminode05 fasta differs, EVERY search record from ibminode05 has different tools_sha256 → table aborts entirely — the whole table is blocked, and re-running requires redoing 14×4 searches with a corrected fasta; also — wait, worse: if the fix is "use run-local configs pointing at ceph copies", the OTHER nodes' searches must ALSO be redone to unify. Visible at table time only. The guard that exists (G-V13) fires late. Concrete fix: preflight in `launch`/`table`... better: at launch, fetch the fasta shas of the other nodes (or the plan could pin expected shas in samples.yaml and G-V12 checks against the pin). Medium-high? It's a "guard fires too late" — the failure is visible (table aborts) but costs the full run. Medium.
+
+  Also /usr/bin/time missing on ibminode05 → all 14 pairs fail G-V08 visibly but each stages GBs first; cheap preflight. Fold into E.
+
+  **Finding F (medium-low): LD_LIBRARY_PATH dirs outside the arm unhashed (G-V04 gap)** — libs resolved from $SPX/lib or the OpenDIAlyzer conda env can change mid-run (sync_cluster.sh overwrites $SPX/tools; a republish of $SPX/lib under a running arm SIGBUSes it — wait, that's worse: the arm's rpath... the arm lib is hashed, but $SPX/lib (spextract/lib) is in LD_LIBRARY_PATH and NOT hashed. If sync_cluster overwrites spextract/lib/libOpenMS.so while an spx arm runs and the binary loads it (rpath $ORIGIN/../lib first?), SIGBUS → G-V04 wouldn't fire (identity only covers arm lib) but G-V08 catches the signal (exit=0 signal=7 handled!). If the lib is swapped between arms (not during), and the binary resolves it, the build changes silently → G-V13 doesn't see it (identity unchanged). Concrete: arm env.sh: LD_LIBRARY_PATH=arm/lib:$LD_LIBRARY_PATH where root env.sh = spextract/lib:OpenDIAlyzer... — if the v3 binary needs a lib present only in spextract/lib (e.g. libtimsdata? or libstdc++?), identity misses it. Fix: hash the resolved library set (ldd output paths) in identity(). Medium, confidence medium.
+
+  **Finding G (low-medium): writeback/page-cache asymmetry between arm orders** — dt-first pairs: spx wall measured while kernel writes back dt's up-to-25GB mzML; spx-first: dt wall measured during writeback of smaller spx mzML. Systematic small bias, and with n=1 within-row ratios are the headline. Fix: `sync` (or `sync -f` the run dir) between arms; cheap. Low-medium. Evidence: vm.dirty_ratio 20 → dirty pages can linger; dirty_expire 30s. On TNBC, spx arm ~ minutes, dt mzML 18-25GB — writeback at, say, 1GB/s takes ~20-30s of the following arm. Actually both arms following... in dt-first order, spx arm (ours) absorbs the writeback → ours looks slower on dt-first rows. Order alternates, so across 49 rows the bias partially cancels in medians but corrupts within-row ratios by a few %. Low.
+
+  **Finding H (low): acq_min never verified at run time** — wrong registry value → wrong table column, no signal. Fix: compare with_acq fingerprint during stage (cheap: sqlite already opened) and abort on mismatch with samples.yaml. Low.
+
+  **Finding I (low): specimen identifiers in records/logs copied to ceph** — cmd arrays embed staged path containing the raw basename; sample.raw in records; queue-*.json collected. If /ceph/ibmi/abi/oliver/spextract is readable beyond the data owners, patient identifiers leak. Fix: stage the copy under a neutral name (e.g. <id>.d) — then dt output name derives from it — and/or drop `sample.raw`/cmd from collected records, or chmod the ceph results dir 0700... collect to ceph with restrictive perms (copytree preserves? set umask/chmod). Also dt output name would become "<id>_diatracer.mzML" — fine. But records still carry sample dict with raw. Could scrub raw from the record (keep pin). Medium-low. The historical mzml_diatracer paths already live next to the cohort dir — same domain. I'll rate low-medium, mention.
+
+  **Finding J (low): `sage` busy pattern & gate busy checks during phase 2** — searches run without any gate; fine per decision (search walls indicative). Not a finding.
+
+  **Finding K: `hms` rounding of wall totals...** fine.
+
+  **Finding L: `parse_time_log` regex for wall on localized output? LC_ALL=C set. GNU time in C locale. OK.
+
+  **Finding M: `render_table` — failed SEARCH cell renders `FAILED G-V10` in the peptides column, but ratio "-" and engine wall "-" — fine. Pair failed → arm cells show FAILED. OK.
+
+  **Finding N: table mixes pair records across harnesses? covered by B.
+
+  **Finding O: `node_collect` copies `guardtest/` dirs (selftest) — for the real plan there's no guardtest under corpus_v3 root... guardtest only for selftest plans (different scratch_root). But wait — guardtest refuses non-selftest plans, and selftest plan root is corpus_v3_selftest — separate. OK. But GT0 reads main run records on the selftest plan. fine.
+
+  **Finding P: QUEUE_ABORTED mid-queue — remaining samples have no records; status shows "-"; table pending. Visible. OK.
+
+  **Finding Q — the gate's `busy` check at load gate excludes the queue's own soon-to-run processes; fine.
+
+  **Finding R — `identity()` globs lib/* — if the arm's lib dir has SUBDIRECTORIES with libs, they're skipped (files only, non-recursive). If v3 arm ships libs in lib/subdir, they escape G-V04. Minor. Also `lib.glob("*")` misses hidden files. Low. Fold into F.
+
+  **Finding S — `install_tools` copies but doesn't verify the copy's sha after copy** — copy2 could silently truncate on disk-full? copy2 raises on write error; partial file left → sha mismatch on NEXT launch (G-V12 abort), but THIS launch uses the possibly-truncated copy without verifying! `if d.exists() and sha256(d) != sha256(src): die` — checked only when d already exists; after copying, no re-hash. A truncated sage binary copy → sage fails (visible, G-V10/G-V08). A truncated CONFIG or params copy → MSFragger runs with truncated params → defaults for missing keys → silently different search rules! e.g. params truncated after `num_threads` → labile_fragment_ion_series missing → different results, tools_sha256 records the TRUNCATED file's sha (paths hashed at install: `{"sha256": {k: sha256(v) for k,v in paths.items()}}` — hashes the run-local copies, so consistent within the run) → G-V13 passes (uniform), counts wrong vs intended rules with no signal. How likely is a silent truncate? copy2 → copyfileobj raises on ENOSPC write failure. shutil.copyfile raises on error. So truncation → exception → crash → visible. Partial-but-consistent? Unlikely. Low. Skip or fold. Actually there IS a subtler one: the copy happens once; `tools["sha256"]` hashed from the run-local copies. If the FIRST launch's copy was fine, subsequent launches verify source vs copy — catches upstream tool edits. OK. Skip.
+
+  **Finding T — `check_fasta` hashes fasta per search — reads 100+MB fasta per search — fine.
+
+  **Finding U — MSFragger `in.tsv` vs `in_calibrated.tsv`? write_calibrated_mzml=0, so only in.tsv. OK.
+
+  **Finding V — `msf_peptides` on `in.tsv` includes ALL rows; params output_report_topN=1. OK.
+
+  **Finding W — The table's "spectra" columns: dt 117,388 vs spx 75,026 — fine.
+
+  **Finding X — search records store `result_tsv` path on scratch; after collect, table --source ceph uses records (which reference scratch paths) — fine, counts are in records.
+
+  **Finding Y — G-V14 collect refuses while lock held; but after QUEUE_DONE the lock is FREE — collect can run while... nothing runs. OK. But: collect while a DIFFERENT plan's queue holds the same lock (selftest vs real share the lock path!) — lock_path uses scratch_root parent: /scratch/kohlbach/.corpus-queue.lock for BOTH plans (corpus_v3 → /scratch/kohlbach/.corpus-queue.lock; corpus_v3_selftest → same parent). So collect of corpus_v3 is refused while a selftest queue runs — good (conservative).
+
+  BUT — **the shared lock means the REAL queue and a leftover selftest/guardtest can't overlap — good. And per decision "one timed pair at a time per node" — enforced across plans. Good.
+
+  **Finding Z — phase 2 searches of the REAL queue and... the lock is held for the WHOLE _node_run including phase 2. Good.
+
+  One more careful look at **`unit()` and mzML deletion with `missing_ok=True`**: if output already deleted (shouldn't be), fine.
+
+  And **`search_done` in `pair_done` uses `read_json` per call — fine.
+
+  **`pending()` uses pairs snapshot — after phase 1 all records fresh. OK.
+
+  **Resume mid-phase-2**: relaunch → phase 1 skips all pairs (done), phase 2 rebuilds pairs from records, units recomputed — pending searches re-run. first-MSFragger logic re-applies. OK.
+
+  **Killed search (SIGKILL) leaves "running" search record + sdir with junk; relaunch: pending → run_search → rmtree(sdir) fresh. OK. SIGKILLed RUNNER during a search: the engine java process keeps running! (kill -9 runner; children survive.) Relaunch: gate/launch busy check... launch check `check_launch` busy: MSFragger-4.4.1.jar running → launch REFUSED (G-V05) until it finishes — good. But if the orphan is diaTracer/spx from phase 1: same, busy. Good — the pgrep busy check at launch covers orphans. But WAIT: `busy()` patterns match the orphan; launch refuses — but the docs say stop with kill -TERM which doesn't kill the child ("The running tool child is not killed")! CORPUS.md: "Stop a queue with kill -TERM <pid>: the runner cleans its stage and writes the record. The running tool child is not killed" — so after TERM, the child (say a 30-min diaTracer) keeps running with its STAGED INPUT DELETED (stage removed in finally!). diaTracer reading a deleted staged .d — open fds keep working on Linux (deleted but open) — output written to deleted stage dir → lost; arm fails anyway when... actually the child keeps running to completion, writing into the deleted stage (nameless) — wasted but harmless. Meanwhile relaunch is refused (busy) until child exits. Then relaunch re-runs the pair. Correct, just slow. OK, documented.
+
+  Hmm but one REAL issue: **after kill -TERM mid-dt-arm, diaTracer keeps running and may still be writing its mzML into the (deleted) stage path; the record says failed KILLED; on relaunch a NEW pair_run stages a NEW copy — fine. And the ceph neighbour check? untouched. OK.
+
+  **SIGKILL mid-dt-arm**: orphan diaTracer writes mzML BESIDE THE STAGED INPUT — stage dir NOT deleted (SIGKILL → no finally!). Relaunch: `remove_tree(root/"stage")` at runner start — but launch is REFUSED while orphan runs (busy) — good; after orphan exits, relaunch removes stale stage. But if the orphan finishes writing the mzML into the stage and exits, then relaunch deletes stage incl. that mzML. Fine.
+
+  Now — **the `node-busy` check at launch uses patterns from arm_env — if env.sh is broken, node-busy returns error → check_launch dies. OK.
+
+  **A subtle G-V05 gap: the busy check happens at LAUNCH (laptop) and at the GATE (before each pair) — but NOT before phase-2 searches; another session's timed chain could start on the node during phase 2 — searches contend — indicative walls only. Fine.
+
+  Also — **the GATE checks busy BEFORE the pair, but between gate and arm start there's staging... no wait, order: stage → gate → prewarm → arms. Good (gate after staging, right before arms).
+
+  Let me also check **`run_arm` records `load_before` AFTER the gate — good, per-arm.
+
+  **`pair_done` doesn't check `harness_sha256` — Finding B. Also `search_done` doesn't. Right.
+
+  **`render_table` identity uniformity uses okp — if only ONE ok pair, no check. Fine.
+
+  **The table's ratio uses peptides ints. OK.
+
+  **`flag` format: "contended (load %.1f > %.0f%s)" — fine.
+
+  **`status` command — records glob *.json includes queue-*.json? No — queue JSON is at root, not records/. OK.
+
+  Now **category 3 deep-check (resume):**
+  - Pair record ok + identity match + searches done → skip forever. If the search TSVs were later deleted on scratch but records remain → table still renders counts (records are truth) — fine; collect should have copied them.
+  - **A pair record ok, identity match, but the search records were written by a DIFFERENT harness scorer version — Finding B.**
+
+  **Category 8 retention: "delete mzMLs after both searches of that output succeeded" — implemented. "delete the staged raw copy after its pair" — implemented in finally. "keep logs, time outputs, TSVs, records under scratch and copy to ceph at end" — collect manual. If the operator forgets collect and the node scratch is wiped... process issue. OK.
+
+  **Category 9: logs/TSVs with patient data on node until collected — root 0700, /scratch/kohlbach 700. OK. Ceph copy — Finding I.
+
+  **One more possible critical: `arm()` in render_table for a FAILED pair returns verdict for BOTH arm cells — the dt wall cell shows "FAILED G-V08" even if dt arm succeeded and spx failed — correct (no half-numbers). Good: prevents reporting a lone dt wall without its partner? Hmm — actually the dt arm's number EXISTS and might be legit; but the decision says pairs. Showing it would break pairing. OK.
+
+  **Search cells when pair ok but one search failed → that cell FAILED, others show numbers. Ratio "-". OK.
+
+  **Now the `first` unit runs BOTH engines alone — during which the pool hasn't started — searches serialize a bit — fine.
+
+  **G-V13 "ok record with count <=0" checks arms output count and peak_rss > 0. Good.
+
+  **What about `wall_s <= 0`? A 0.00 wall (rounded) — not checked! `wall_s: round(wall,2)` — a sub-5ms arm (fake) → 0.0 — real arms never. Skip.
+
+  **`parse_time_log` RSS regex `(\d+)` — GNU prints plain integer. OK.
+
+  Now, **the dt log_count regex `Writing mzML file\.\.\.(\d+) scans`** — real dt.log line: "2026-09-11 00:04:03 [INFO] - Writing mzML file...117388 scans" — matches. OK.
+
+  **spx: "Wrote 75026 pseudo-MS2 spectra" — regex `Wrote (\d+) pseudo` matches. For the RENAMED binary the line might change? R10: "the smoke test must prove every parser line on the release binary" — builder open issue #4 covers smoke. Skip.
+
+  **Table `search wall per engine` — engine wall only, documented. OK.
+
+  **Median RSS: `statistics.median(f["dr"])/1e6` — GB. Labelled. OK.
+
+  Let me reconsider **Finding E severity**: ibminode05 fasta sha256 unverified — 5.6 says only data and spock checked. The plan (P4) flags it. The harness catches at table time (G-V13 abort = the ENTIRE table fails to render; exit 2). That means: 20h run completes, table command aborts, no table at all until fixed. To fix: align fastas, then RE-RUN all searches on... wait — if they fix by copying the ceph fasta to all nodes, tools_sha256 changes on ALL nodes → all 98 search cells re-run (searches only, pairs fine) — hours, not 20h. Painful but recoverable. And it's VISIBLE (abort). Severity medium. But also: is it possible the shas differ but searches already done produce VALID counts, just different database? human.fasta differences would change counts silently per node — G-V13 aborts the table, so no silent wrong table. OK medium. The fix: verify at LAUNCH against a pin in the plan (expected sha256 for sage_fasta/msfragger_db in samples.yaml plan section — but PLAN_KEYS is fixed... could add a preflight command comparing all three nodes before T0).
+
+  Also ibminode05's **python3**: runner needs >=3.8ish; `str.removeprefix`? Not used. `Path.unlink(missing_ok=True)` 3.8+. `os.getloadavg` unix. `concurrent.futures` cancel_futures (3.9+!). `ex.shutdown(wait=True, cancel_futures=True)` — cancel_futures added 3.9. `int | None` annotation with __future__ fine any 3.7+. `statistics` fine. If ibminode05 has 3.8 → TypeError at shutdown → crash at END of queue (after all work!) → runner crashes after QUEUE_DONE written? shutdown in finally — crash in finally → QUEUE_DONE already... order: `say("QUEUE_DONE")` AFTER ex.shutdown? Lines 768-775: ex = ThreadPoolExecutor; try: failed += sum(ex.map(...)); finally: ex.shutdown(wait=True, cancel_futures=True); then say QUEUE_DONE; write marker. If shutdown raises TypeError (unexpected kwarg on 3.8) → exception propagates → node_main catches Abort only → uncaught → traceback, exit non-zero, NO QUEUE_DONE marker, NO QUEUE_ABORTED line (only Abort prints that). Status: lock free, no done marker, log tail shows traceback. Visible-ish but messy; also `node_main` only catches Abort → a generic crash exits with traceback — the `launch` waiting loop... re-invocation waiting sees lock free + traceback. Visible. But the python on ibminode05 was NOT verified (5.6: "Not checked on ibminode05" for env vars; python version also not listed for ibminode05). Fold into E: preflight node checks (GNU time, python>=3.9, java-21 default? — java on ibminode05: "ibminode05 also has java-11" — **which java is default on ibminode05?!** cmd_dt invokes bare `java` from PATH! If ibminode05's default `java` is java-11, diaTracer 2.2.1 (built for 21? it ran on 21 elsewhere) and MSFragger 4.4.1 (needs 11+? MSFragger 4.x requires Java 11+... 4.4.1 might need 17+?) run under a DIFFERENT JVM on one node — dt.log would show "Java Info: 11..." — counts could differ silently! The historical runs on ibminode05 (09-05 TNBC diaTracer walls 22-30 min ON ibminode05) — dt.log there showed 21.0.12 per the plan notes ("Java: OpenJDK 21.0.12 (dt.log)" — that was from 003's dt.log, node? "Phase profile from 003's dt.log ... on 128 cores" — 128 cores = ibminode05! So ibminode05's default java WAS 21 then). But notes also say "ibminode05 also has java-11" — default likely 21. Unverified NOW. The record stores cmd but NOT `java -version`! env_keys recorded; java version not. G-V15 doesn't check. A JVM difference (e.g., _JAVA_OPTIONS, or update-alternatives changed to 11) silently changes diaTracer/MSFragger behavior/performance on one node. Medium. Evidence: 5.6 "OpenJDK 21.0.12" verified only for data (and spock?). "data and spock: ... OpenJDK 21.0.12 at /usr/lib/jvm/..." — ibminode05 not queried. Fix: preflight `java -version` per node, record it in the pair/search records, G-V13 uniformity... JVM version differences wouldn't change peptide counts (deterministic?) but could change diaTracer output? diaTracer results could vary by JVM? Unlikely counts; walls differ (cross-node invalid anyway). Low-medium. Fold into E as preflight.
+
+  Now **category 1 wrong pairing final sweep**: records carry sample dict from queue JSON (from registry); table cross-checks pin vs registry (G-V13) and id membership. Node from record host verified vs arms. Label from arm --help. pair_run links searches. Scoring rule per record (tools_sha256) uniform-checked. Build identity uniform-checked. Looks solid EXCEPT harness version (B).
+
+  **Category 2**: skipped/duplicated — G-V01 duplicate detection; resume logic; G-V09. The failed-cell-never-rerun case: queue aborts (G-V04/G-V12/G-V14/G-V15) → remaining cells pending until manual relaunch — visible in status/table (pending). OK.
+
+  **Category 6 RSS/wall**: time -v measures the direct child = the tool. diaTracer may fork? It's a JVM + JNA in-process. OK. Work inside timed window: the arm command is only the tool. OK. One more: **the prewarm `cat` and staging are OUTSIDE the timed window — correct. But `check_identity` (sha256 of binary+libs+jar, GBs?) — libOpenMS.so ~1-2GB? hashing before/after each arm — outside timed window. OK.
+
+  **Category 11**: "render a complete-looking table while cells are missing" — exit 3 + "N of M rows complete" header + pending/FAILED cells. Good. "mixed builds or rules" — G-V13 (build, tools) + Finding B (harness).
+
+  I think I should also double-check **`load_gate` busy patterns include the SPX_BIN basename bracketed — for "spextractor": `spextracto[r] -in` — requires " -in" — the guardtest wrapper invocation `python3 ... -in ...`? The wrapper's cmdline contains the real path? Wrapper execs REAL with -in — cmdline of REAL = "/ceph/.../spextractor -in ..." matches. OK.
+
+  **One more on G-V06: gate.busy uses patterns incl. `MSFragger-4.4.[1].jar` — during phase 1, no searches on THIS node — but what about a search orphaned from a killed earlier phase-2 of a PREVIOUS launch? covered — gate waits/flags. Good.
+
+  **`q["search_workers"]` recorded per search record; table shows set. OK.
+
+  **Table "up to 1 concurrent searches per node" in proof text from workers — real run shows "2". OK.
+
+  Now **write the findings**, ranked:
+
+  1. **High — mid-pair contention invisible in the table** (cat 7/6). gate-only flag. Fix: flag row if any arm's load_before/load_after > load_max, or if ps_top shows foreign >100% CPU; render in flag column.
+
+  2. **High — harness_sha256 not in resume/table identity** (cat 3/4/11): scorer lives in corpus.py; records from older harness adopted; proof already shows cross-harness adoption. Fix: compare harness_sha256 in pair_done/search_done (or at least G-V13 uniform harness across records); re-run cells when it changes... careful: harness changes that don't affect semantics would force full re-run — better: G-V13 aborts table if mixed harness_sha256 among records, leaving adoption but making mixing loud. Concrete: add to render_table: die if >1 distinct harness_sha256 across records used. And document that a scorer change requires deleting records. Medium-high confidence.
+
+  3. **Medium — pepindex race when the first MSFragger unit fails** (cat 2/10): pool then runs concurrent first-time MSFraggers. Fix: after unit(first), if its msfragger cell failed, pick the next pending-msfragger unit alone again; or treat any msfragger failure before pepindex exists as queue abort.
+
+  4. **Medium — env hygiene gaps: GLIBC_TUNABLES, OMP_*/GOMP_*/KMP_*, _JAVA_OPTIONS/JAVA_TOOL_OPTIONS/JDK_JAVA_OPTIONS not stripped or guarded; caller's LD_LIBRARY_PATH inherited; ibminode05 env unverified** (cat 10). Fix: extend strip/abort list; record-and-abort on presence.
+
+  5. **Medium — ibminode05 preflight absent: GNU time, python>=3.9 (cancel_futures), default java version, FASTA sha equality across nodes** (cat 10/5/11). FASTA mismatch → whole-table G-V13 abort after 20h; python 3.8 → crash at queue end without QUEUE_DONE; java-11 default → different JVM on one node, unrecorded (records don't store java -version). Fix: launch-time preflight on the node (time --version, python version assert, java -version recorded into records, fasta shas compared to the other nodes or a plan pin).
+
+  6. **Medium — G-V04 identity covers only SPX_BIN + arm/lib top-level + jar; libs resolved from $SPX/lib and the OpenDIAlyzer conda env via LD_LIBRARY_PATH are unhashed and unrecorded** (cat 1/10). A sync_cluster.sh or conda update mid-run swaps a resolved lib → silent mixed builds; SIGBUS during an arm is caught (G-V08) but a between-arms swap is invisible. Fix: hash the resolved dependency set (ldd $SPX_BIN under the arm env, incl. dlopened Bruker SDK if known) into identity; record it.
+
+  7. **Low-medium — arm-order writeback bias**: dt-first rows measure the spx arm while the kernel writes back dt's (up to ~25 GB) mzML; spx-first rows have a much smaller file in flight → systematic asymmetry in within-row wall ratios (the headline comparison), n=1. Fix: `sync -f` the run dir (or POSIX fadvise DONTNEED on the mzML) between arms; or delete… can't delete. sync cheap.
+
+  8. **Low — acq_min never re-verified at run time** (cat 5/1): wrong registry value flows to the table with no guard. Fix: fingerprint(with_acq=True) during stage and G-V01/G-V02-compare to samples.yaml.
+
+  9. **Low-medium — patient identifiers in collected artifacts** (cat 9): records (sample.raw, cmd arrays with staged path embedding the specimen basename), queue-*.json, and logs are copied to /ceph/.../corpus_v3 whose readability by other users is unverified; table itself is clean (labels A-F). Fix: chmod 700/2770 the ceph results tree at collect; scrub or hash raw paths in records; stage under a neutral name.
+
+  10. **Low — `install_tools` doesn't re-hash after copy** — truncation would raise, so low; skip? A copied params file that silently differs... copy2 raises on IO error. I'll drop this; instead:
+
+  10. **Low — `identity()` misses lib subdirectories/hidden files** (fold into 6). Skip separate.
+
+  10'. **Low — search walls: patch/fix steps excluded from "search wall"** — the table labels engine-step only and "indicative" — documented. Skip.
+
+  Maybe also: **`status` shows searches "stale" when pair_run mismatch — fine.
+
+  Another possible finding: **G-V13 check `{a["host"] for a in p["arms"].values()} != {p["node"]}` — set comparison: if arms on {data} and node "data" fine; if one arm missing (failed pair) — only ok pairs checked. OK.
+
+  And **pair record `node` written by runner hostname — if runner on data but the table row node column says data — consistent.
+
+  One more potential issue — **`neighbour()` checks mtime_ns; on ceph, the historical 44 stale files: untouched. OK.
+
+  **`stage()` pin check on ceph raw BEFORE copy and copy AFTER — between them the raw could change (someone rewrites the .d) — the copy is pinned after, so covered.
+
+  **Wait — one more real one: `run_pair` deletes old mzMLs `for old in (root/"runs"/s["id"]).glob("*/*/*.mzML"): old.unlink()` — this ALSO deletes the dt mzML moved into runs that belongs to the CURRENT ok record when a pair is re-run due to... re-run only when pair_done False. If pair_done False because OUTPUT changed, deleting is right. OK.
+
+  And **`_node_run` phase 2: `pairs` snapshot — for samples whose pair JUST succeeded this launch, records fresh. OK.
+
+  **`collect` ignore `*.tmp*` also ignores... fine.
+
+  **Table `args.out` default REPO/plan["report"] = docs/benchmarks/corpus-v3.md — private repo OK.
+
+  Now — is there anything about **"searches never run on a node while it runs a timed pair"** across the two phases of ONE queue — enforced (sequential). Across queues — one per node. OK.
+
+  **Ratio direction in per-scheme summary "Sage ratio of totals" = spx/dt — consistent with ours/dT. OK.
+
+  **One more check of `render_table` `fmt(d, gb)` where d=(arm_dict, None) → gb(arm) uses peak_rss_kb. OK.
+
+  **`flag` for non-contended: "-". OK.
+
+  Also **`cmd_status` gate flag "contended" shown only for current pair record. OK.
+
+  Let me reconsider **the `-w` workdir**: historical `-w <WORKDIR>` received logs only; harness passes adir (runs/.../dt) — diaTracer writes its logs there ALONGSIDE time.log/dt.log — fine.
+
+  **diaTracer polls**: historical driver polled 30s for the ceph output size to settle; harness: output is on LOCAL scratch (stage), and verify_mzml runs after process exit — local fs, no lag. OK.
+
+  **os.replace from stage to runs — local. OK.
+
+  Alright — also **check `fingerprint` `instrument_serial` from GlobalMetadata — values like "1854399.140" string. OK.
+
+  **`check_pin` compares acq_datetime strings exactly — timezone format stable. OK.
+
+  Now also the brief asks explicitly: "compare the Sage TSV header and the historical awk with the ported code" — the historical awk `$8==1` = label==1 (target) whereas the port (and bench_table.py) filter rank==1 and include decoys. These are DIFFERENT rules. The stated source rule is bench_table.py (the table producer); the drivers' awk fed peps.txt counts echoed into .out files — but the TNBC-TABLE itself came from bench_table.py on the TSVs. So the port matches the table producer. BUT the planning note says "Peptides at 1% (pooled): unique peptide strings with rank == 1 and peptide_q <= 0.01" — and claims tnbc_ref.sh used that via awk $8/$38 — the plan MISREADS the awk: $8 is label, not rank; and there's no rank filter in the awk. So the historical DRIVER counts (the "Sage: N" lines in reference_*.out) were computed with (label==1, peptide_q<=0.01, any rank) — different from bench_table's (rank==1, q<=0.01, decoys included). Which produced "the most recent TNBC/HeLa tables"? bench_table.py. So the harness is consistent with the tables. The decoy inclusion remains a (documented) quirk: 68/62 decoy peptides counted as "peptides at 1% FDR" — that IS a stated-rule oddity: "peptides at 1% FDR" that includes decoy peptides is literally wrong FDR-wise, but it matches the historical tables, which is the decision. The record stores diag. Should I report it? The brief says report counting that "differs from the stated source rule, or a stated rule that differs from what the historical tables and drivers actually counted". The stated rule = bench_table.py = what the historical TABLES counted. Drivers counted differently (label==1). So there's a documented inconsistency between drivers and tables historically, and the port follows the tables. I'll note it as low/informational: the port is faithful to bench_table.py; note the driver awk discrepancy means "as in the historical drivers" is not literally true (decision text says "as in the most recent TNBC/HeLa tables (use the scorer that produced them)" — so decision explicitly picks the table scorer). Since the decision names the table scorer, not a finding; mention in checklist as verified-with-note.
+
+  Wait, actually, one more important check on msf_peptides vs bench_table: bench_table reads `row.get("modification_info","") or row.get("assigned_modifications","")`. Port: same. `proteins` or `protein`. Same. hs float. Same. Sorted reverse. Same walk. Identical. ✓.
+
+  And sage: bench_table uses `float(row[iq]) <= 0.01`; port same. ✓ Columns by header. ✓.
+
+  BUT — one REAL divergence: bench_table.py's sage_peps does NOT require the "label" column; port REQUIRES {"peptide","rank","peptide_q","label"} — real Sage v0.14.7 TSV HAS label (col 8). ✓ fine.
+
+  Now think about **"0 peptides fails the cell" vs a legitimately tiny file** — HeLa 10ng files could genuinely yield few peptides but >0. 0 = failure per decision. OK.
+
+  **diag_decoy_peptides_in_set not in table — fine.
+
+  Now assemble final answer: findings ranked, then checklist.
+
+  Ranking (most severe first):
+
+  1. High: Mid-pair load contention never reaches the table (cat 6/7). Arms record load_after and ps_top, but the flag column only reflects the pre-pair gate; on nodes where load swings from 4 to 112 within an hour, a clean-gated pair can run entirely under another user's load and report inflated walls (and slightly affected RSS) with flag "-". No signal in the table.
+
+  2. High: Scorer/record identity ignores harness_sha256 (cat 3/4/11). peptide scorers live in corpus.py; G-V11 adoption checks binary/lib/jar/pin/tools but not the harness; the proof run already adopted records across harness f24d0a69 → 7ab160cd. A mid-run harness fix (history says likely) silently mixes two counting/verification rules in one table; G-V13 can't see it.
+
+  3. Medium: pepindex race if the "first MSFragger alone" unit fails (cat 2/10). The pool then starts two first-ever MSFraggers concurrently → the very race P7 requires avoiding; possible corrupt index and silently wrong counts (or loud failures).
+
+  4. Medium: env hygiene — GLIBC_TUNABLES, OMP_*/GOMP_*/KMP_*, _JAVA_OPTIONS/JAVA_TOOL_OPTIONS/JDK_JAVA_OPTIONS, inherited LD_LIBRARY_PATH neither stripped nor guarded; ibminode05's env not checked (5.6). Any of these set on one node silently changes thread counts/JVM behavior for rows on that node; env_keys records names only and never reaches the table.
+
+  5. Medium: no node preflight on ibminode05: GNU time presence/format, python ≥3.9 (cancel_futures — a 3.8 node crashes in ex.shutdown after all work, no QUEUE_DONE), default `java` (ibminode05 also has java-11; bare `java` is invoked; JVM version not recorded anywhere), and cross-node FASTA sha equality (mismatch → G-V13 aborts the whole table after 20 h; searches must be redone).
+
+  6. Medium: G-V04/identity hashes only SPX_BIN, arm/lib top-level files, and the jar; libraries resolved through $SPX/lib or the OpenDIAlyzer conda env on LD_LIBRARY_PATH (present in the real env.sh) are unhashed — a mid-run update there (sync_cluster.sh runs tonight per R13) silently changes the measured build between arms; between-arms swaps fire no guard (SIGBUS mid-arm is caught, between-arm swap is not).
+
+  7. Low-medium: arm-order writeback asymmetry: after the dt arm the kernel holds up to ~25 GB dirty mzML (vm.dirty_ratio=20 on 2.2 TB); the following spx arm's wall absorbs the writeback on dt-first rows, while on spx-first rows the dt arm absorbs a much smaller file → systematic within-row wall-ratio bias, n=1. Fix: sync/fadvise between arms.
+
+  8. Low: acq_min never verified at run time (pin covers tdf sizes/datetime/serial but not acq_min; with_acq computed only in `pin` cmd). A bad registry value lands in the table silently.
+
+  9. Low-medium: specimen-identifying paths in records/logs/queue JSON are copied to ceph results (sample.raw, cmd arrays embedding the staged path with the raw basename); visibility of /ceph/ibmi/abi/oliver/spextract/corpus_v3 to other users unverified. Fix: restrictive perms at collect, scrub raw from records, or stage under neutral names.
+
+  10. Low: records/logs retention on node until manual collect; if operator runs `table --source scratch` and node scratch is later wiped without collect, no ceph copy — process gap; maybe skip. Instead:
+
+  10. Low: summary rows render full-looking per-scheme/corpus totals from complete rows only — with 48/49 complete, "corpus" totals miss a file; header notes it, exit 3 — visible; skip. Better: note in checklist as OK.
+
+  Hmm — also consider: **the `first` msfragger unit's sage runs alone too — fine.
+
+  One more scan of run_search for a wrong-TSV bug: `tsv = sdir/"in.tsv"` — MSFragger names output after the input file basename: input "./in.mzML" → "in.tsv". ✓. And `in_uncalibrated.mzBIN`. ✓ deleted by glob.
+
+  What about MSFragger writing `in.tsv` for a file that had 0 scans — G-V10 Scans=0? Not explicitly checked! The historical failure: fix_mzml_cvparams missing → "Scans = 0" → searches nothing → in.tsv header-only or missing → G-V10 catches (header-only/missing). ✓.
+
+  What about **`fix` step on diaTracer mzML "fixes 0 cvParams but still copies"** — log shows done: ✓.
+
+  **patch step check `patched (\d+) precursor` — requires >0. Real: 117388. ✓.
+
+  OK also one more: **the spx arm's e.log `Wrote N pseudo` — for the renamed v3 binary the line format might differ (R10) — builder open issue 4 covers the smoke. Skip (listed).
+
+  **Selftest fidelity concerns (cat 10 "guards that fire in the selftest only because of the fake world"):**
+  - G-V08 stale-output check relies on mtime > start_epoch: real files on local fs — fine.
+  - The fake time writes RSS 2500000 — fine.
+  - Guardtest proved real-node behavior for the key ones. OK.
+
+  **Checklist of categories examined clean:**
+  1. Wrong pairing — records keyed by id+pair_run, pin cross-checked at G-V02/G-V11/G-V13, node from record host with arm-host equality, label from --help, ratio direction ours/dT consistent in rows and summary. Clean except findings 2 (harness rule mixing) and 8 (acq_min).
+  2. Skipped/duplicated arms — G-V09 structural; no && ||; order alternates by queue index deterministically (enumerate over full sample list, stable across resumes); failed cells re-run on relaunch; first-MSFragger-alone present but see finding 3.
+  3. Stale adoption — output freshness via size+mtime, searches via pair_run+tools_sha; verified on node (GT0). Except harness_sha256 (finding 2).
+  4. Peptide counting — ported functions match bench_table.py line-for-line (verified against section 6 source): Sage rank=="1" & peptide_q<=0.01, unique peptide, decoys included (documented, diag stored); MSFragger keying, decoy rule, tie order, walk identical. Note: historical drivers' awk (`$8==1 && $38<=0.01`) is label==1 with NO rank filter — a different rule than both the port and the plan's description of it; port follows the table producer per the decision. Not counted as a finding.
+  5. Units — time log h:mm:ss parse handles m:ss and h:mm:ss; RSS kB/1e6 labelled per decision; hms formatting; totals/medians consistent. Clean.
+  6. RSS/wall attribution — direct child measured; patch/fix outside engine wall (documented); staging/prewarm outside timed window; writeback asymmetry = finding 7; contention = finding 1.
+  7. Load contamination — gate + flag path works (proof); mid-pair spikes invisible = finding 1; searches ungated (documented indicative).
+  8. Deletion/retention — stage deleted in finally incl. SIGTERM; mzML deleted only after both engines ok; old-attempt mzML glob is depth-correct (doesn't touch search dirs); collect ignores stage/tools/mzML/mzBIN; guardtest cleanup verified on node. Clean. (Finding 9 is about content, not deletion.)
+  9. Patient data — 0700 root + drwx------ scratch; staged raw never outlives pair; table uses A-F labels; residual identifier exposure in collected records/logs = finding 9.
+  10. Guards/env — abort semantics verified 85+37; fake world fidelity good (fake time mimics GNU signal reporting; real-node guardtest). Env strip list incomplete = finding 4; node preflights = finding 5; LD_LIBRARY_PATH-resolved libs unhashed = finding 6.
+  11. Launch/wait/collect/table — content-named harness copy, detached launch, lock probes, table aborts on mixed builds/tools, exit 3 on incomplete, FAILED never 0. Clean except finding 2.
+
+  Also mention: QUEUE_DONE counts; collect refuses while locked.
+
+  Length: keep it structured but not bloated. The user asked for a specific format. Let me write findings with exact line references.
+
+  Finding 1 location: corpus.py:377-388 load_gate, 1430-1431 flag rendering. Evidence: `"contended": load > lmax or bool(b)` only from gate; arms record load_after (line 494) but render uses only gate (line 1429-1431).
+
+  Finding 2 location: pair_done 572-589, search_done 567-569, render_table G-V13 1385-1388; record carries harness_sha256 (line 518) but nothing compares it. Evidence from 5.2: relaunch with harness 7ab160cd skipped pair recorded under f24d0a69 ("harness_sha256": "f24d0a69..." in record; QUEUE_START ... harness 7ab160cd ... "already done").
+
+  Finding 3 location: 765-770. `first = next(...); if first: failed += unit(first); ex.map(unit, rest)`. If unit(first)'s msfragger failed, pool runs other pending msfragger units concurrently, pepindex possibly unbuilt.
+
+  Finding 4 location: 60 STRIP_PREFIX, 269-270 strip_var, 293 env.update; 5.6 ibminode05 unchecked.
+
+  Finding 5 location: TIME constant line 57 (fixed /usr/bin/time, G-V15 doesn't check), line 772 cancel_futures (py3.9+), cmd_dt/cmd_msf bare "java" (440, 462), no java -version in records; install_tools/check_fasta hash node-local fastas (347-358) and G-V13 1387-1388 aborts at table time.
+
+  Finding 6 location: 297-301 identity(), env.sh LD_LIBRARY_PATH includes /ceph/.../OpenDIAlyzer/opt/env/lib (section 6 root env.sh; pair record ld_library_path in 5.4).
+
+  Finding 7 location: 492-500 arm timing; vm.dirty facts 5.6; order alternation 516.
+
+  Finding 8 location: 255-257 with_acq only in node_pin (857-864); stage 411/423 calls fingerprint without acq; table line 1433 uses e["acq_min"].
+
+  Finding 9 location: 526/557 records contain cmd (490) and sample (517 incl. raw); collect 874-876 copies them; no chmod on ceph dest.
+
+  Confidence levels: 1 high, 2 high, 3 medium, 4 medium, 5 medium (parts high — cancel_futures py3.9 requirement is certain; whether ibminode05 has 3.8 unknown), 6 medium/low-medium, 7 medium, 8 high (that it's unguarded), 9 medium.
+
+  Write it up.
+
+To resume this session: kimi -r session_90cdfc3e-8bc8-47c6-b2c6-6cdca203efe9
+exit=0

@@ -1,0 +1,9 @@
+[adv] no timeout(1) available -- running without a time limit
+[adv] prompt   292094 bytes -> /Users/kohlbach/Claude/speXtractor/harness/review
+
+=== reviewer yield ===
+  codex: SILENT (0 bytes) -- treat as NO REVIEW, not as a clean bill of health
+  kimi:       97 lines,    17634 bytes
+  vibe:       69 lines,     5987 bytes
+
+outputs: /Users/kohlbach/Claude/speXtractor/harness/review/{codex,kimi,vibe}.md

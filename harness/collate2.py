@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SpeXtractor benchmark harness v2 -- measurement, pairing, and the publish gate.
+"""DIAspeXtractor benchmark harness v2 -- measurement, pairing, and the publish gate.
 
 Everything between "a sealed artifact exists" and "a number appears in the vault" lives here.
 Run identity and plan binding are bench2.py's problem; this file consumes its runset contract
@@ -2338,7 +2338,7 @@ def _selftest_integration(st, tmp):
                           "params": {"trace:ms1_split_valleys": 7.0}}]}
         planp = root / "plan.yaml"
         planp.write_text(yaml.safe_dump(plan, default_flow_style=False, sort_keys=True))
-        os.environ.update({"SPEXTRACTOR_REGISTRY": str(regp), "FAKETOOL_MODE": "ok",
+        os.environ.update({"DIASPEXTRACTOR_REGISTRY": str(regp), "FAKETOOL_MODE": "ok",
                            "FAKESAGE_MODE": "ok", "FAKETOOL_SPECTRA": "700",
                            "FAKETOOL_MZ0": "500.0", "FAKETOOL_MZSTEP": "0.02",
                            "FAKETOOL_PEAKMODE": "indexed"})
@@ -2482,7 +2482,7 @@ def _selftest_truth_e2e(st, tmp, report, lib, raw08):
 
 def cmd_selftest(args):
     require_deps()
-    tmp = Path(tempfile.mkdtemp(prefix="spextractor-collate-selftest-"))
+    tmp = Path(tempfile.mkdtemp(prefix="diaspextractor-collate-selftest-"))
     try:
         st = selftest_collate(tmp)
         rc = st.report()

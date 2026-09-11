@@ -1,7 +1,10 @@
-# SpeXtractor benchmark harness v2
+# DIAspeXtractor benchmark harness v2
 
 `bench2.py` produces artifacts and provenance. `collate2.py` produces numbers. Nothing else may
 write into the published benchmark tables.
+
+Head-to-head against diaTracer on the whole corpus (both extractors, Sage and MSFragger, wall and RSS,
+per-node queues) is `corpus.py`; see [CORPUS.md](CORPUS.md).
 
 ```
 bench2.py   plan-check --plan P              # validate a plan; no side effects, no dirs created
