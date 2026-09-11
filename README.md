@@ -2,8 +2,9 @@
 
 Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data.
 
-DIAspeXtractor was called SpeXtractor up to version 2.0.0 (executable `spextractor`), and speXtract before that
-(`spextract`). Both names were taken by other tools. [CHANGELOG.md](CHANGELOG.md) maps the old names to the new ones.
+DIAspeXtractor is the tool released as speXtract (executable `spextract`) up to v1.1.0; it was briefly
+SpeXtractor in development. Both older names were taken by other tools. DIAspeXtractor 1.2.0 continues
+that version line, and [CHANGELOG.md](CHANGELOG.md) maps the old names and defaults to the new ones.
 
 DIAspeXtractor turns a data-independent acquisition into a set of pseudo-tandem spectra that any
 ordinary DDA search engine can read. Each emitted spectrum pairs one precursor hypothesis with the
@@ -157,16 +158,18 @@ tiles), 100 threads, on cluster nodes shared with other users, so the walls are 
 
 Before MS1 denoising, the MS1 prune and the tiled default, a 30-minute gradient (33,553 frames) took 2:54 at 57 GB
 and the 2-hour file 11:18 at 187 GB, emitting 0.85 M and 3.9 M pseudo-spectra.
-Those walls were **11.6% and 17.7% faster than v2.0.0** respectively, from four byte-identical
-changes made after that release (see the CHANGELOG): the Savitzky-Golay coefficients are cached,
-mzML spectra are serialised in parallel, the canonical sort sorts keys rather than 750-byte spectrum
-objects, and the assembled PeakMap takes its vector whole. Every one reproduces the pinned digests
-on both files, so identifications are unchanged.
+Those walls were **11.6% and 17.7% faster than the build before them** respectively, from four
+byte-identical changes in this release (see the CHANGELOG's "Measured"): the Savitzky-Golay
+coefficients are cached, mzML spectra are serialised in parallel, the canonical sort sorts keys rather
+than 750-byte spectrum objects, and the assembled PeakMap takes its vector whole. Every one reproduces
+the pinned digests on both files, so identifications are unchanged.
 
-On the 2-hour file, on the same node, v2.0.0 was **0.61× the wall time and 0.55× the peak memory** of
-the reference implementation, with 1.28× its Sage peptides at parity (0.996) with MSFragger under
-per-charge FDR control (docs/REFERENCE-COMPARISON-2026-09-08.md); the changes above take the wall
-ratio to roughly **0.54×** on the same measurement, and leave every peptide count untouched.
+On the 2-hour file, on the same node, the 2026-09-08 build was **0.61× the wall time and 0.55× the
+peak memory** of the reference implementation, with 1.28× its Sage peptides at parity (0.996) with
+MSFragger under per-charge FDR control (docs/REFERENCE-COMPARISON-2026-09-08.md); the changes above
+take the wall ratio to roughly **0.54×** on the same measurement, and leave every peptide count
+untouched. That comparison predates MS1 denoising and the tiled default, which move memory far
+further down and cost peptides on one file and gain on the other -- see the CHANGELOG.
 
 The allocator's retained free pages were the largest single memory item on a 2-hour acquisition;
 `perf:malloc_trim` returns them at the phase boundaries (−30% peak for +8.5% wall, measured in one tile) and
@@ -207,7 +210,7 @@ Twenty-five end-to-end checks against a synthetic acquisition (twenty-six in a b
 - that the MS1 prune changes no output, with negative controls that must change it;
 - that a non-finite MS1 m/z is refused before the prune;
 - that `dnoise:ms1` refuses a Bruker SDK calibration before the load;
-- that a leftover `SPEXTRACTOR_*` variable from before the rename refuses the run.
+- that a leftover `SPEXTRACTOR_*` variable from before the DIAspeXtractor rename refuses the run.
 
 No fixtures, no framework, no network. The suite's only Bruker `.d` holds an `analysis.tdf` and no
 frame data, so it cannot run the in-tool dnoise filter. That filter is covered by
@@ -221,14 +224,14 @@ scoring used for the benchmark record.
 ## Layout
 
 ```
-src/        the tool (one translation unit) plus three headers: the calibration model, the tdf reader
-            and the mzPeak streaming loader
-patches/    the three OpenMS patches and the pinned OpenMS commit (openms.lock)
+src/        the tool (one translation unit) plus four headers: the calibration model, the tdf reader,
+            the MS1 denoiser and the mzPeak streaming loader
+patches/    the four OpenMS patches and the pinned OpenMS commit (openms.lock)
 scripts/    build helpers, OpenMS patch application, cluster deployment
 test/       the end-to-end suite
 tests/      calibration and entrapment tests, golden calibration values
 bench/      benchmark drivers, the semantic digest and the cluster launcher
-docs/       measurements, design notes and review records
+docs/       measurements and design notes
 ```
 
 ## Documentation

@@ -2188,7 +2188,7 @@ static_assert. `rtOf()` is one load from a ~38 KB per-window table; the 1.69e13-
 never reads it (it reads `FragRt::rt`, the SoA copy, now built from `rtOf()`).
 
 **`rt_at` is SIGNED, and that is what makes it exact.** The first implementation clamped it into the
-window `trimToSpan` kept, and the S30 digest came back `69a6066d...` against the pinned `b499027f...`
+window `trimToSpan` kept, and the dataset D digest came back `69a6066d...` against the pinned `b499027f...`
 with 855,493 spectra against 854,817. A split counter localised it in one run:
 
     [soa-rt] off-grid 23140 = not-a-frame 0 (of which strictly between two frames 0) + trimmed-out 23140
@@ -2233,16 +2233,16 @@ byte-identical output.
 
 ### What this does and does not establish
 
-Fable's adversarial review predicted -5.5 GiB by correcting the naive arithmetic: parents are freed
+A fourth external review predicted -5.5 GiB by correcting the naive arithmetic: parents are freed
 at the split (`vector<Trace>().swap(in)`), so the 2.14e9 records are NOT all simultaneously
 resident; roughly 0.6 x children + 0.4 x parents ~ 49 GiB of records are at the peak, not 95.8. The
 measured -5.50 GB confirms that correction and refutes the -16 GiB I first claimed. **Every further
 per-record byte is therefore worth ~0.7 GB at the peak, not ~2 GB** -- use this coefficient, not the
 record-count product, to price the remaining field removals (`im` -> side array, `bframe`, `mz`).
 
-Three of four external reviewers (codex, vibe, kimi) were told this claim was load-bearing and asked
+Three of four external reviewers were told this claim was load-bearing and asked
 to check it, and all three repeated the author's original error that child RT is an off-grid
-weighted mean. Only Fable read `MassTrace.cpp`. The digest, not the review, was the arbiter -- and
+weighted mean. Only the fourth read `MassTrace.cpp`. The digest, not the review, was the arbiter -- and
 it caught a second error (the clamp) that no reviewer saw either.
 
 ## 2026-09-09: d(peak RSS)/d(windows in flight) = 2.85 GB per window -- measured, no code change
@@ -2307,8 +2307,8 @@ keep the `[trim]` site for the load's bookkeeping.
 
 ## 2026-09-09: tiling plan step 0 -- four zero-code measurements, one bug, one correction
 
-The 2D-tiling plan (`~/.claude/plans/humble-watching-dragonfly.md`) starts with measurements that
-need no architecture. All on dataset D (S30) unless stated; `soa2` = HEAD before Fix A.
+The 2D-tiling plan starts with measurements that
+need no architecture. All on dataset D unless stated; `soa2` = HEAD before Fix A.
 
 ### 0a. Allocator tunables on TNBC 009 (data, back to back, load 4.9, sidecar 250 ms)
 
@@ -2351,7 +2351,7 @@ the two readers' outputs differ). The differing slab digests of the 20 intact wi
 axis: it is built from the loaded frames, so removing frames shifts every later `rt_index`.
 Every pinned digest (D `b499027f`, TNBC 009 `057aad4b`) has 210 / ~170 spectra missing.
 
-Fix: `finish()` called after both readers (commit 8219485). **Gate (ibminode05, build 01e455f):**
+Fix: `finish()` called after both readers (commit 8219485). **Gate (node 1, build 01e455f):**
 
 | | before (`soa2`) | after, batch 256 | after, batch 4096 |
 |---|---:|---:|---:|
@@ -2369,7 +2369,7 @@ step 2d-i of the tiling plan (picker determinism under regrouping) with it: any 
 equivalent. **New pinned digest for dataset D: `bc3c5ac9`**; TNBC 009 is re-pinned from the
 probe's whole-run output below.
 
-### 0c. `trace:max_span_sec` sweep -- shipped as CHANGES OUTPUT, never gated until now (spock, `soa2`)
+### 0c. `trace:max_span_sec` sweep -- shipped as CHANGES OUTPUT, never gated until now (node 2, `soa2`)
 
 | `max_span_sec` | spectra | digest | Sage peptides (rank 1, q <= 0.01) | peak RSS | wall |
 |---:|---:|---|---:|---:|---:|
@@ -2516,7 +2516,7 @@ windows); children are short (TNBC, 1.22e9 traces: span p99 44 s, max 421 s; one
 > 123 s 0.0034%), parents are not bounded at all. Fix (d85c2b4): EPD gains `scan_time` (0 = as
 before) and the tool passes the MS level's median frame spacing (`trace:split_scan_time=frame`,
 default; `trace` = the old behaviour), so the window is the same for every trace and the split is
-local. Review (Codex/GPT-6, docs/reviews/2026-09-09-split-scan-time/): the patch and plumbing are
+local. External review (internal review record): the patch and plumbing are
 correct and `trace` reproduces the old arithmetic; two defects fixed in 86444a5 (an upper median
 of the gaps is 2x the cycle when most frames of a sparse window were skipped -> smallest positive
 gap; `ceil(7 / 1.4)` sits on an integer and flips with the last bit -> backed off by 1e-6 on the
@@ -2534,12 +2534,12 @@ default.
 ## 2026-09-09: tiling plan step 2 -- the output-identical refactors, each D-gated
 
 Every arm below reproduces the tail-fix pin on dataset D (`bc3c5ac9`, `SPECTRUM DATA IDENTICAL`)
-and passes the e2e suite; the reference is `/scratch/kohlbach/tail_S30/pseudo.mzML`
-(ceph `share/refs/S30_tail_bc3c5ac9.mzML`).
+and passes the e2e suite; the reference is the `tail_S30` run's `pseudo.mzML`
+(archived as `share/refs/S30_tail_bc3c5ac9.mzML`).
 
 | step | commit | what changed | gate result |
 |---|---|---|---|
-| 2b/2c mzPeak `frame=` + flight-time axis from the archive's embedded tdf | fdb33b6 | `frameIdOf()` returned 0 on every mzPeak spectrum, so the integer detector never ran on that input; the exact-m/z path's calibration now feeds `setTofAxis()` | `.d` identical; mzPeak (S30 v0.9.2 archive + sidecar tdf): **integer detector runs for the first time**, 855,561 spectra, Sage **12,537 vs 12,625 from the .d (-0.7%)**, set overlap 11,499 common / 1,126 d-only / 1,038 mz-only; the OpenMS detector on the same archive gives **12,756** (11,280 common with the .d) -- on this file the detectors' sign is the one the integer-detector memory records (openms +1.7%), and the archive's peaks differ from the .d's (the two detectors' outputs are not comparable peptide for peptide). LOAD 131 s / 63 GB peak against 45 s / 43 GB (the library decode). The July S08 archive carries no per-window IM band and never streamed. |
+| 2b/2c mzPeak `frame=` + flight-time axis from the archive's embedded tdf | fdb33b6 | `frameIdOf()` returned 0 on every mzPeak spectrum, so the integer detector never ran on that input; the exact-m/z path's calibration now feeds `setTofAxis()` | `.d` identical; mzPeak (dataset D v0.9.2 archive + sidecar tdf): **integer detector runs for the first time**, 855,561 spectra, Sage **12,537 vs 12,625 from the .d (-0.7%)**, set overlap 11,499 common / 1,126 d-only / 1,038 mz-only; the OpenMS detector on the same archive gives **12,756** (11,280 common with the .d) -- on this file the detectors' sign is the one the integer-detector memory records (openms +1.7%), and the archive's peaks differ from the .d's (the two detectors' outputs are not comparable peptide for peptide). LOAD 131 s / 63 GB peak against 45 s / 43 GB (the library decode). The July dataset A archive carries no per-window IM band and never streamed. |
 | 2e `TileWriter` at one block | 3856893, 371653d | `PlainMSDataWritingConsumer` subclass: header once, blocks appended in canonical order, per-thread encoders, index offsets rebased, exact count when known, same-width placeholder otherwise; native IDs renewed as `spectrum=<rank>` (what the bulk writer emitted for our id-less spectra) | identical; **WRITE 19.6 -> 13.2 s (11.7x -> 29.4x)**; header differs only in completion time and the `out` name; INDEX VALID (855,575 offsets); e2e check 14 (count/id/index/indexList) added, 0f534bd |
 | 2g content-only MS1 trace order | 7cd120f | `(mz, rt, im, intensity, npts, len, first frame time)`, equal-key neighbours logged | **0 equal-key neighbours** on D; identical |
 | 2d-ii the loader builds the slabs directly | 98b34d5, eb04568, a77e089, 9c97b60 | `CompactFrame` store and `toSlab` deleted; frames appended to the window's `PeakSlab` as picked, m/z quanta -> bins in place at window start; one reusable per-batch scratch; 2.5x virtual over-reservation, no shrink; per-window append in parallel | identical, **24/24 per-window slab digests identical**; LOAD on D: 45 s (old) -> 80 (1.25x growth, per-frame temporaries) -> 65 (projected reserve + shrink) -> 59 (scratch) -> see #4; RSS at load end 31.1 -> 40.3 GB (11.7 GB of arena free-list appears during the load and is returned after the slab pass: 39.0 -> 28.3 GB); D peak 43.3 -> 46.2 GB (load-phase, below the loop peak on the 2-h file) |
@@ -2564,7 +2564,7 @@ of ElutionPeakDetection is `chrom_fwhm / scan time`, and the scan time was each 
 average cycle time over its real points -- inflated by gaps, so gappy parents got a narrower window
 and any sub-range of one split differently. `frame` (new default) uses one run-wide value, the
 smallest gap between consecutive MS1 frame times; `trace` is the old behaviour. Build 0796595
-(arm `split1`), ibminode05 / data:
+(arm `split1`), node 1 / node 3:
 
 | | dataset D, `trace` | dataset D, `frame` | TNBC 009, `frame` (probe2 whole) |
 |---|---:|---:|---:|
@@ -2596,7 +2596,7 @@ acquisition's MSFragger run and the entrapment on TNBC 009 are due before releas
 **Tile invariance: no.** probe2 (arm `split1`, TNBC 009, core t6 3600-4200 s at H = 123 against
 the whole run under the same default): 314,685 core spectra, 379 identical (0.1%), 210,822 differ
 in the m/z list, 103,361 in the peak count -- the same 99.9% as with the old window, and uniform
-in RT. As the Codex review predicted: the smoothing is now local, the DECISION is not (EPD's
+in RT. As the external review predicted: the smoothing is now local, the DECISION is not (EPD's
 retained-maximum walk), and detection itself is not (seeds, running centroid, `visited`). The
 fragment-level number (the spectrum-level one saturates at one changed fragment): over the
 314,685 core spectra present in both, **80.7 M fragments have the identical m/z in both, 46.4 M
@@ -2607,10 +2607,10 @@ same metric on probe1's outputs (the old per-trace window) are recorded when the
 
 ## 2026-09-09: cause 2 vs cause 3 -- detection alone accounts for the larger half of the tile churn
 
-Judge's open question 1 (docs/reviews/2026-09-09-bounded-parents-design/): the whole run and the
+Judge's open question 1 (internal review record): the whole run and the
 core t6 probe (3600-4200 s, H = 123, frozen edges/G, MS1 whole-run) with `-trace:ms2_split_valleys
 0` -- the valley splitter off, so the fragment traces ARE the detector's parents -- dumped per
-window before trimming (`SPEXTRACTOR_FRAG_DUMP`, build 9981e97, ibminode05), symmetric difference
+window before trimming (`SPEXTRACTOR_FRAG_DUMP`, build 9981e97, node 1), symmetric difference
 of the parents whose RT lies in the core, key (mz 1e-4, apex RT, im 1e-4, apex intensity):
 
 | | parents in the core | whole-only | tile-only | common with a different extent |
@@ -2631,13 +2631,13 @@ in the whole run and in any tiling); the halo designs fight it and lose.
 
 ## 2026-09-09: the cell-atomic grid, step 2 -- per-cell detection is exact on real data
 
-Decision A (docs/reviews/2026-09-09-bounded-parents-design/): the integer detector traces each
+Decision A (internal review record): the integer detector traces each
 window per fixed RT cell (`tile:rt_sec`, cut at the run's MS1 frame times, stamped in the header),
 so that any grouping of cells into tiles reproduces the whole run bit for bit. Commits 8779a0b,
-fc88b82 (review fixes), ee49bda. Reviews: docs/reviews/2026-09-09-cell-grid/ (Codex, Kimi, a
+fc88b82 (review fixes), ee49bda. Reviews (internal review record; two external reviews and a
 four-lens refutation workflow: "sound-with-fixes", the fixes are in fc88b82).
 
-**Gates (ibminode05, fc88b82):**
+**Gates (node 1, fc88b82):**
 
 | gate | result |
 |---|---|
@@ -2666,7 +2666,7 @@ contract"), gated on the reader itself.
 The set churn (6%) is the FDR-set flip every perturbation shows; the cut lines add a small,
 localised excess that the gains next to the lines nearly balance.
 
-**Dataset D at -1 / 600 / 300 (arm `cell1`, ibminode05, Sage `sage_deiso`, entrapment
+**Dataset D at -1 / 600 / 300 (arm `cell1`, node 1, Sage `sage_deiso`, entrapment
 human+Arabidopsis, MSFragger 4.4.1 via `score_msf_td.py`):**
 
 | pitch | cells | spectra | Sage peptides | entrapment FDR @ nominal 1% (95% CI) | MSFragger | digest |
@@ -2706,7 +2706,7 @@ never about the splitter window.
 
 ### Cell grid, step 1: frozen frame tables (2026-09-10)
 
-The tiled reader's contract (docs/reviews/2026-09-10-tiled-reader-plan/judge.md, step 1) needs
+The tiled reader's contract (internal review record, step 1) needs
 every window's frame table -- the window store's frame sequence, the Pearson support `G`, and the
 MS1 -> window `nearest_local` map -- to be a RUN-LEVEL constant, so a tile that holds some of the
 frames scores exactly as the whole run does. Two commits:
@@ -2725,9 +2725,9 @@ frames scores exactly as the whole run does. Two commits:
   an EMPTY frame (a raw frame with no peaks is not in the table, matching the loop's skip; an
   empty ion-mobility slice, or a probe-dropped frame, is padded), counted per window
   (`[frames] window W: delivered N, padded P`), the slab asserted equal to its table afterwards;
-  header stamp `spx:frame_table=loader|mzpeak|slab` (mzML stays the slab: docs/BACKLOG.md).
+  header stamp `spx:frame_table=loader|mzpeak|slab` (mzML stays the slab: internal backlog).
 
-**Gate 1 (a) (ibminode05, 0862aa8, chain `step1a`):** D at the default (600) `f9e65631` MATCH;
+**Gate 1 (a) (node 1, 0862aa8, chain `step1a`):** D at the default (600) `f9e65631` MATCH;
 `-1` in both window modes IDENTICAL to their pins (`frame` = the split arm's output, `trace` =
 `bc3c5ac9`); 300 `3f8d421d` MATCH; e2e 15/15 (check 15 now really runs the integer detector:
 a773f6e). **The cell-exactness probes DIFFER at 1 (a), as they must:** the frozen table is the
@@ -2738,7 +2738,7 @@ not yet tile-exact; that is exactly the gap 1 (b) closes (the probe's dropped fr
 `F` is the run-level 1,342 again). The `SPEXTRACTOR_WINDOW_FILE` row's `G` is no longer read
 (only `tlo/thi`); the probe's support now comes from the table.
 
-**Gate 1 (b) (ibminode05, 38907fb, chain `step1b`, 01:17-02:13; the fix-up a91cfcf re-gated
+**Gate 1 (b) (node 1, 38907fb, chain `step1b`, 01:17-02:13; the fix-up a91cfcf re-gated
 below):**
 
 | arm | `[frames]` | result |
@@ -2749,7 +2749,7 @@ below):**
 | D at 300 | 0 padded | `3f8d421d` **MATCH** |
 | cell exactness, core 2 (cells 1-3 resident) | 15,624 delivered, **16,586 padded** (the probe's dropped frames) | **IDENTICAL** to the whole run at 300 |
 | cell exactness, core 3 (cells 2-4 resident) | 15,624 / 16,586 | **IDENTICAL** |
-| mzPeak S30 archive (v0.9.2 + sidecar tdf), new build vs the step-1a binary, default settings | source=mzpeak, 0 padded; the archive records `number_of_peaks`, so frames with none are skipped like the .d loop's | **IDENTICAL**; 611,445 spectra both (5:17 / 61.8 GB) |
+| mzPeak dataset D archive (v0.9.2 + sidecar tdf), new build vs the step-1a binary, default settings | source=mzpeak, 0 padded; the archive records `number_of_peaks`, so frames with none are skipped like the .d loop's | **IDENTICAL**; 611,445 spectra both (5:17 / 61.8 GB) |
 | TNBC 009 at the default | source=loader, 28 windows, 134,312 delivered, **0 padded** | `f0502f33` **MATCH**; 3,285,827 spectra, 16:47 / 124.1 GB (a loaded node) |
 | e2e | | **15/15** |
 
@@ -2758,18 +2758,18 @@ as the 2f metadata check predicted), today's output is byte-unchanged in every m
 cell-exactness probe is restored: with the dropped frames padded, every window scores on the
 run-level `F = 1,342` again and the core cells reproduce the whole run bit for bit. This is the
 first build on which "only some of a window's frames are resident" gives the whole run's output
--- the property the tiled reader is built on. Review (Codex, Kimi; docs/reviews/2026-09-10-frame-tables/):
+-- the property the tiled reader is built on. Review (two external reviewers; internal review record):
 sound at P = 0; the structural throws had to be made fatal (the loader's fallback catch would
 have appended a second full load onto the partial slabs) and the lockstep now matches (rt, frame
 id) -- a91cfcf. **The fix-up re-gated (chain `step1b2`, 02:15-03:05): the same nine arms, the
 same results -- `f9e65631` / IDENTICAL / IDENTICAL / `3f8d421d` / probes IDENTICAL / mzPeak
 IDENTICAL / `f0502f33` / 15/15, 0 padded on 24/24 and 28/28.** Step 1 is closed; the dev build on
-ibminode05 is a91cfcf's.
+node 1 is a91cfcf's.
 
 
 ### Cell grid, step 2: the tile loop on the resident source (2026-09-10)
 
-Commits 1e7dcb1 (the loop), 5570d25 and ad897d0 (the review fixes; docs/reviews/2026-09-10-tile-loop/),
+Commits 1e7dcb1 (the loop), 5570d25 and ad897d0 (the review fixes; internal review record),
 c4997d1 (the gate tools ship with every deploy). `tile:cells_per_tile` groups the cells into
 tiles; per tile the window loop's parallel region runs on the tile's frames (a slice of the
 resident slabs; run-level band edges from the whole slab), owns the precursors decided with the
@@ -2779,7 +2779,7 @@ carried-in, so transitive), sorts the tile's spectra and writes them as one bloc
 streaming writer (exact count with one tile; a same-width placeholder patched at the end
 otherwise, which the digest tools normalise). 0 = one tile = today's loop statement for statement.
 
-**Gate (ibminode05, ad897d0, chain `step2c`, 03:50-05:09; every digest with the current
+**Gate (node 1, ad897d0, chain `step2c`, 03:50-05:09; every digest with the current
 `semantic_digest.py`):**
 
 | arm | threads | wall | peak RSS | result |
@@ -2797,8 +2797,8 @@ otherwise, which the digest tools normalise). 0 = one tile = today's loop statem
 Diagnostic pair before the chain (`diag2`): whole vs 2 tiles at 300, `bench/mzml_specdiff.py`:
 611,034 of 611,034 spectra identical, 266.4 M fragments 100% matched with identical intensities,
 0 differing at any distance to the boundary. The one `DIFFERS` in the first run of this chain
-was the deployed digest tool (the 09-06 copy on ceph without the count normalisation; memory
-`gate-tools-drift-at-deployment`); `scripts/sync_cluster.sh` ships the bench tools now.
+was the deployed digest tool (the 09-06 copy on shared storage, without the count normalisation; memory
+`gate-tools-drift-at-deployment`); the deploy script ships the bench tools now.
 
 Reading: the tile loop is exact on real data for any tiling of the cells and any thread count,
 on both acquisitions, and a search engine reads the tiled file as the same file. The resident
@@ -2811,7 +2811,7 @@ per-tile sort/write), the price the pipeline (step 5) is meant to recover.
 ### Cell grid, step 3a: the band partition from metadata (2026-09-10)
 
 Commits 1641a00 (`trace:band_edges=slab|acquisition`), dde035e and 09947f5 (the review fixes;
-docs/reviews/2026-09-10-band-edges/). The integer detector traces each window in flight-time
+internal review record). The integer detector traces each window in flight-time
 bands, uniform in [tlo, thi]; a seed's band decides which `visited` set competes for it. Until
 now tlo/thi were the window's resident peaks' extremes -- data a reader holding only a tile's
 frames cannot see. `acquisition` takes tlo = 0 and thi = the larger of the digitizer's quantised
@@ -2854,12 +2854,12 @@ reader holding only a tile's frames can compute cost nothing measurable on eithe
 (+1 / +1 Sage, 0 / -3 MSFragger, +0.00 / +0.01 entrapment points), and they remove the last
 data-dependent input from the detector's partition. `slab` stays as the option that reproduces
 the earlier pins. New pins at the default: **D `8c1b047f`**, **TNBC 009 `bff54a1f`**; the `-1`
-and 300 pins are re-recorded on the flipped build below. Review: docs/reviews/2026-09-10-band-edges/
+and 300 pins are re-recorded on the flipped build below. Review: internal review record
 (three rounds; the first version's TNBC arm threw on the superset assert because MzAcqRangeUpper
 converts to 399,199 while the digitizer's last bin is 399,966 -- the reviewers' hazard, measured).
 
-**Pins at the flipped defaults (chain `repin` on 7e71998, ibminode05, 07:06-07:40; the reference
-files are kept on `/scratch/kohlbach/pins_acq/` for the reader gates):**
+**Pins at the flipped defaults (chain `repin` on 7e71998, node 1, 07:06-07:40; the reference
+files are kept on node 1 (`pins_acq/`) for the reader gates):**
 
 | arm | digest |
 |---|---|
@@ -2883,7 +2883,7 @@ the fixture writes the bounds a real tdf always has, and a suite that cannot run
 `SPEXTRACTOR_LEDGER=<file>` samples live bytes per data-structure category every 250 ms next to
 VmRSS, the glibc arena figures and a phase marker; `bench/ledger_report.py` reads the trace.
 Charges are atomic adds at allocation boundaries (never in a per-peak loop) and count TOUCHED
-bytes, so the 2.5x slab over-reservation does not inflate them. Four arms on dataset D, spock,
+bytes, so the 2.5x slab over-reservation does not inflate them. Four arms on dataset D, node 2,
 100 threads, 1 TB free, every arm digest-identical to its pin (chain `instr2`, binary
 906e758+ledger):
 
@@ -2945,13 +2945,13 @@ machine.
 
 ### Cell grid, step 3b: the .d streaming source, gated (2026-09-10)
 
-Commits 933bba5 (the two-pass source) and dbcfa9c (the review fixes; docs/reviews/2026-09-10-tiled-reader/).
+Commits 933bba5 (the two-pass source) and dbcfa9c (the review fixes; internal review record).
 Pass 1 reads MS1 only and the loader exports the whole DIA frame table anyway; pass 2 calls the
 patched loader once per tile over `Config::dia_ms2_rt_lo/hi`, into a fresh consumer lockstep-padded
 against the tile's slice of the frozen tables. `SPEXTRACTOR_TILE_RESIDENT=1` keeps the resident
 source for a same-build control.
 
-**Gate (ibminode05, 54a7721, chain `step3b`, 07:40-09:23): 14 arms, every one SPECTRUM DATA
+**Gate (node 1, 54a7721, chain `step3b`, 07:40-09:23): 14 arms, every one SPECTRUM DATA
 IDENTICAL to its pin, none differing.** G0 one tile on D at 600 / 300 / -1 `trace` and on TNBC at
 600; G1 D at 300 as 2, 3 and 6 tiles at 8 and 100 threads; the resident control on the same build;
 TNBC at 600 as 13 tiles. Every arm reported its frames: 32,210 window frames delivered on D and
@@ -2979,7 +2979,7 @@ back quietly). All three are fixed (2b1f6e3, 8e2f1c0, 906e758) and re-checked by
 chain on the rebuilt binary. **A gate whose failures are all in the gate is not a passing gate:
 it is a gate that has to be re-run, which is what the verify chain is for.**
 
-**Re-run and CLOSED (chain `verify`, ibminode05, f07da66, 09:24-09:36): `VERIFY_RESULT PASS`.**
+**Re-run and CLOSED (chain `verify`, node 1, f07da66, 09:24-09:36): `VERIFY_RESULT PASS`.**
 All three settle:
 
 - the stamps read `spx:tile_source = stream`, `band_edges = acquisition`, `frame_table = loader`,
@@ -2996,7 +2996,7 @@ frames delivered 10,416 / 10,416 / 11,378, 0 padded and 0 absent in every tile.
 
 ### Tiling has hit its floor on D: the MS1 pass (2026-09-10, chain `instr3`, 4258d16)
 
-Five arms, every one reproducing its pinned digest, on spock at 100 threads with the repaired
+Five arms, every one reproducing its pinned digest, on node 2 at 100 threads with the repaired
 ledger. Two controlled pairs, one per cell pitch, so grouping is the only variable inside a pair.
 
 | arm | wall | peak RSS |
@@ -3048,7 +3048,7 @@ tracing is the lead candidate for the long file, with a measured ceiling of 28.6
 Tiling cut the scorer's scan 12.016e12 -> 1.120e12 fragment visits (−90.7%) with identical survivors
 (13,857,222,667), loop CPU −33.7% (−9.7% on D: the untiled scan grows with run length squared). The
 13-tile loop's RSS climbs 15.5 -> 51.7 GiB tile over tile while charging ~6 GiB, because nothing
-trims between tiles. Details: docs/reviews/2026-09-10-streaming-memory/data4-tnbc.md.
+trims between tiles. Details: internal review record.
 
 ### The composition on D: MS1-only picker batch + in-loop trim, −15.3% peak (2026-09-10, chain `compose`, 531dad4)
 
@@ -3083,20 +3083,20 @@ Pitch-600 arms reproduce `bff54a1f`; the pitch-300 pair agree (`725298dd`). The 
 from the MS1 partition phase to the end of the load, where the MS1 map (44.2 GiB at the instant) binds.
 **Smaller tiles do not lower the peak** at either lever setting, because the peak is in pass 1. Pitch 300
 halves the scorer's fragment visits (−47%) and trims loop CPU ~10%, but it changes the output and is a
-science knob. Details: docs/reviews/2026-09-10-streaming-memory/data5-tnbc-levers.md.
+science knob. Details: internal review record.
 
 ### dnoise v0.1.0 as a preprocessor: every MS1/MS2 combination, both files (2026-09-10, chains `dnoise_d`, `dnoise2_d`, `dnoise_tnbc`, `dnoise2_tnbc`, d7cc14d, `-tile:cells_per_tile 1`)
 
 | configuration | D Sage | D MSFragger | D peak | TNBC Sage | TNBC MSFragger | TNBC peak |
 |---|---:|---:|---:|---:|---:|---:|
-| control | 13,491 | 12,918 | 31.84 GB | 29,067 | 27,949 | 68.82 GB (spock), 68.41 (data) |
+| control | 13,491 | 12,918 | 31.84 GB | 29,067 | 27,949 | 68.82 GB (node 2), 68.41 (node 3) |
 | no-op, every stage off | identical | identical | 32.17 (12.91) | identical | identical | 69.73 (27.53) |
 | MS1 only, dnoise's default | −4.3% | −4.0% | 21.41 (12.90) | +1.5% | −0.5% | 25.08 (25.24) |
 | MS2 only | −5.4% | −13.0% | 32.13 (10.51) | −10.0% | −20.9% | 67.80 (26.97) |
 | MS1 + MS2 | −7.2% | −15.3% | 8.13 (10.29) | −7.8% | −15.3% | 19.87 (26.32) |
 
 Peak is DIAspeXtractor's tiled peak, with dnoise's own run in brackets; the pipeline peak is the larger of the
-two. TNBC's MS1-only and MS1 + MS2 arms ran on data, the rest on spock, each against a control on its own
+two. TNBC's MS1-only and MS1 + MS2 arms ran on node 3, the rest on node 2, each against a control on its own
 node. The no-op reproduces both pins, so dnoise's rewrite changes nothing DIAspeXtractor reads. Entrapment
 never rises above the control's 95% interval: D's arms stay inside it (at most +0.16 points), and TNBC's
 all fall just below it (0.92-0.93% against 1.09%).
@@ -3110,7 +3110,7 @@ TNBC's MS1-only arm gains net peptides, and only on Sage. None of this was measu
 tile, where the window loop sets the peak.
 
 As a preprocessor, MS1 only fails the S gate on D. The user decided to run it inside the tool by default anyway
-(next section). Details: docs/reviews/2026-09-10-dnoise/real-dnoise-evaluation.md.
+(next section). Details: internal review record.
 
 ### dnoise MS1 inside the tool, on by default (2026-09-10, stage-2 build fd30bf0e, arm `dnoise_s2a`)
 
@@ -3134,17 +3134,17 @@ whole-file gates reproduce DIAspeXtractor run on dnoise's own filtered file:
 - **Cost and speed:** the filter costs 355 CPU-s on D and 1,121 on TNBC 009 at 100 threads. The MS1 load still gets
   faster (D 30.9 → 16.5 s wall), because the picker sees an eighth of the points.
 - **Final-build numbers** (arm `dnoise_s2b`, one cell per tile, every arm at its pin;
-  docs/reviews/2026-09-10-dnoise-port/final-matrix.md):
+  internal review record):
   - Defaults: D 22.48 GB at 3:41, TNBC 009 25.17 GB at 10:46.
   - With `-dnoise:ms1 false`: D 25.90 GB, TNBC 009 31.97 GB.
-  - TNBC 009's MS1 load gets faster on `data` (55.7 → 37.0 s) but not on `spock` (58.5 → 68.4 s), so its wall
+  - TNBC 009's MS1 load gets faster on node 3 (55.7 → 37.0 s) but not on node 2 (58.5 → 68.4 s), so its wall
     change depends on the node.
 
 ### MS1 prune, output-identical (2026-09-10)
 
 `perf:ms1_prune` (default true) drops picked MS1 centroids at or below `trace:noise_threshold_int` at load. A
 witness chain and a pre-prune edge sample keep band membership and the tracer's input exact
-(docs/reviews/2026-09-10-streaming-memory/data7-ms1-prune.md).
+(internal review record).
 - **Identity:** digests are identical with the prune off and on for D (`8c1b047f`, with all 245 `[det]`/`[ms1-edges]`
   lines identical), for dnoise-filtered D (`e43672a0`) and for TNBC 009 (`bff54a1f`).
 - **Peak** at one cell per tile, dnoise off (final build, back to back): D 31.99 → 25.90 GB (−19%), TNBC 009
@@ -3170,9 +3170,9 @@ Peak by tile count, at identical output:
 - **On the final build, at the defaults** (arm `dnoise_s2b`, identical output in every arm):
   - TNBC 009 on `data`: 99.70 GB and 9:42 at one tile, against 21.07 GB and 9:57 at 13 tiles with a trim between
     tiles (20.73 GB with the eager threshold, which nearly triples the MS1 load);
-  - D on ibminode05: 37.44 GB and 3:15 at one tile, against 22.48 GB and 3:41 at 3 tiles, and 21.99 GB and 3:47 at
+  - D on node 1: 37.44 GB and 3:15 at one tile, against 22.48 GB and 3:41 at 3 tiles, and 21.99 GB and 3:47 at
     3 tiles with a trim between tiles (18.14 GB and 4:06 with the eager threshold).
   - Decided 2026-09-11: `tile:cells_per_tile` 1 and the trim between tiles are the defaults (TNBC 009 21.07 GB / 9:57,
     D 21.99 GB / 3:47); the eager threshold is not adopted (CHANGELOG).
 
-Details: docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.
+Details: internal review record.

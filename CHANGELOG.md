@@ -1,392 +1,401 @@
 # Changelog
 
-## [Unreleased]
+## [1.2.0] - 2026-09-11
 
-### Renamed (2026-09-11) -- SpeXtractor is now DIAspeXtractor, spectra unchanged
+**Why 1.2.** This release succeeds the public v1.1.0 (2026-09-04). Two things in it are not backwards
+compatible, and both are deliberate. **The tool is renamed DIAspeXtractor and the executable is
+`diaspextractor`**, so every script that called `spextract` has to change and every ini file written by
+1.x carries the old tool-name section and must be regenerated (`-write_ini`); the environment prefix,
+the CMake option names and the repository URLs move with it, and there is no compatibility alias.
+**The output is not digest-comparable with 1.1.0**: MS1 denoising is on by default, the integer
+detector's band partition comes from the acquisition's metadata, detection runs in fixed
+600-second retention-time cells, the valley splitter's smoothing window is run-wide, and the
+streaming loader no longer drops the tail of every run. "Migrating from 1.1.0" below is the complete
+list of what changed under you. Everything else in this release is memory, speed, less code and
+corrections that leave the spectra alone -- and where an entry says *digest-identical*, that is a
+measured property of the shipped digests, not a design intent.
 
-Another tool is already named spextractor, so the project changes its name a second time for the same reason as the
-first (speXtract became SpeXtractor in 2.0.0). The spectra do not change: the name reaches only the mzML header, which
-the spectrum digest excludes, so this build must reproduce the pins of the last build before the rename, d200db4
-(dataset D `e43672a0`, TNBC 009 `3aafd0b5`; with `-dnoise:ms1 false` `8c1b047f` / `bff54a1f`). Those are not the 2.0.0
-pins; the sections below say why.
+**Where it stands.** At the shipped defaults, 100 threads, each pair back to back on one node: a
+30-minute in-house acquisition (dataset D) runs in **3:47 at 21.99 GB peak RSS** and a 2-hour public
+diaPASEF acquisition (PXD047793, run 009) in **9:57 at 21.07 GB** -- against 37.44 GB and 99.70 GB for
+the same output before this cycle's memory work. The reference digests are `e43672a0` (dataset D) and
+`3aafd0b5` (run 009) at the defaults, `8c1b047f` and `bff54a1f` with `-dnoise:ms1 false`. The record is
+docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
 
-| what | before | now |
+### Migrating from 1.1.0
+
+| what | 1.1.0 | 1.2.0 |
 |---|---|---|
-| executable and CMake target | `spextractor` | `diaspextractor` |
-| TOPP tool name: ini section, mzML software entry | `SpeXtractor` | `DIAspeXtractor`; regenerate 2.x ini files with `-write_ini` |
-| environment variables | `SPEXTRACTOR_*` | `DIASPEXTRACTOR_*`, including the three the patched libOpenMS reads (`DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK`, `DIASPEXTRACTOR_SDK_PARALLEL`, `DIASPEXTRACTOR_LOAD_BATCH`) |
-| CMake | `project(SpeXtractor)`, `SPEXTRACTOR_TESTS_ONLY`, `SPEXTRACTOR_VERSION`, `SPEXTRACTOR_WITH_MZPEAK` | `project(DIAspeXtractor)`, `DIASPEXTRACTOR_TESTS_ONLY`, `DIASPEXTRACTOR_VERSION`, `DIASPEXTRACTOR_WITH_MZPEAK` |
-| C++ namespace | `spextractor::` | `diaspextractor::` (`spx::` unchanged) |
-| sources | `src/spextractor.cpp`, `test/test_spextractor.py` | `src/diaspextractor.cpp`, `test/test_diaspextractor.py` |
-| repositories | `okohlbacher/spextractor`, `okohlbacher/spextractor-dev` | `okohlbacher/diaspextractor`, `okohlbacher/diaspextractor-dev` |
+| executable and CMake target | `spextract` | `diaspextractor` |
+| TOPP tool name: ini section, mzML software entry | `SpeXtract` | `DIAspeXtractor`; regenerate 1.x ini files with `-write_ini` |
+| environment variables | `SPEXTRACT_*` | `DIASPEXTRACTOR_*`, including the three the patched libOpenMS reads (`DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK`, `DIASPEXTRACTOR_SDK_PARALLEL`, `DIASPEXTRACTOR_LOAD_BATCH`) |
+| CMake | `project(SpeXtract)`, `SPEXTRACT_WITH_MZPEAK` | `project(DIAspeXtractor)`, `DIASPEXTRACTOR_WITH_MZPEAK`, and the new `DIASPEXTRACTOR_TESTS_ONLY` and `DIASPEXTRACTOR_VERSION` |
+| C++ namespace | anonymous | `diaspextractor::` (`spx::` unchanged) |
+| sources | `src/spextract.cpp`, `test/test_spextract.py` | `src/diaspextractor.cpp`, `test/test_diaspextractor.py` |
+| repository | `okohlbacher/speXtract` | `okohlbacher/diaspextractor` |
+| OpenMS patches | two | four, all applied by `scripts/apply_openms_patches.sh`; the third and fourth are new since 1.1.0 and a tree without the third does not build the tool |
+| reported version | OpenMS' | its own (`--help`, the ini `version` parameter, the output's software entry) |
 
-- **Old variables are refused, not ignored.** An old name would now do nothing without a word, so the tool refuses to
-  start while any `SPEXTRACTOR_*` variable is set, and names the variable and its `DIASPEXTRACTOR_` name (new e2e
-  check 22). `-DSPEXTRACTOR_TESTS_ONLY` likewise stops the CMake configure with an error; it used to be ignored, and
-  the full build then failed in `find_package(OpenMS)`.
-- **No compatibility alias.** No `spextractor` executable is installed: it would bring the collision back onto users'
-  PATH. Anyone who needs the old command locally can link it (`ln -s diaspextractor spextractor`).
-- **The OpenMS patches** rename the namespace, the three variables, their messages and the patch comments. Every hunk
-  keeps its context, so they apply to the same pinned OpenMS commit. libOpenMS compiles the variable names in: an
-  OpenMS tree patched for 2.x must be patched again from a pristine checkout of the pin
-  (`scripts/apply_openms_patches.sh` also installs the renamed `TdfMzCalibration.h`) and rebuilt.
-- **Unchanged:** the `spx:` run stamps and the `spx_guessed` / `spx_n_isotopes` precursor userParams. The bench tools
-  and older outputs read them, and `spx_*` sits inside the digest.
-
-### Changed (2026-09-11) -- memory default, byte-identical output
-
-- **`tile:cells_per_tile` defaults to 1: one 600-s retention-time cell per tile** (was 0, one tile). The spectra are
-  digest-identical for any tile count, so only memory and wall move. Final build, 100 threads, dnoise and the prune on,
-  each pair back to back on one node:
-  - TNBC 009: 99.70 GB at one tile, 21.07 GB at 13 tiles with the trim between tiles; wall 9:42 → 9:57.
-  - dataset D: 37.44 GB at one tile, 21.99 GB at 3 tiles with the trim between tiles; wall 3:15 → 3:47.
-  - `-tile:cells_per_tile 0` restores one tile. mzPeak output is written in one piece, so a run that writes mzPeak
-    runs all its cells as one tile (the whole run's memory) and logs a warning. The output format is resolved before
-    the load; an mzPeak run with more than one tile used to be refused only after the load and the MS1 tracing.
-- **`perf:malloc_trim` also trims between tiles**, after tile k is written and before tile k+1 is read. This is the
-  `SPEXTRACTOR_TILE_TRIM` probe folded in; the variable is gone. It takes about 4 GB off TNBC 009 and 0.5 GB off D at
-  the defaults. The `[trim] tile k/n` log line is unchanged.
-- **Not adopted: an eager glibc trim threshold** (`M_TRIM_THRESHOLD` 64 MiB with `M_TOP_PAD` 0). On TNBC 009 it went
-  only 0.3 GB below the between-tile trim (20.73 against 21.07 GB) and nearly tripled the MS1 load (34.3 → 96.3 s); on
-  D it cost 11% wall (3:41 → 4:06).
-- e2e checks 15-18 name `-tile:cells_per_tile 0` for their one-tile runs. Check 15 also asserts that it traces two or
-  more cells in one tile: at the new default it had silently become a tiled run. New check 18b, in builds that write
-  mzPeak (a plain build skips it): mzPeak output at the default runs its cells as one tile.
-
-### Removed (2026-09-11) -- the v3.0.0 cleanup; spectrum digests unchanged on every accepted input
-
-- **Three options with no measured non-default value.** An ini file that sets one must be regenerated
-  (`-write_ini`), and the mzML header no longer lists them:
-  - `trace:ms1_min_sample_rate` and `trace:ms2_min_sample_rate`: the default -1 selected MassTraceDetection's own
-    0.5, and the MS2 option's help recorded that 0.3 and 0.1 lose peptides.
-  - `trace:native_ms2_neighbors`: never benchmarked, and the `.d` streaming reader the tool calls never read it.
-    The `[stream]` load line no longer prints it.
-    `trace:native_ms1_neighbors` stays; its help now stands on its own.
-- **Finished probe environment variables**: `SPEXTRACTOR_MS2_RT_RANGE`, `SPEXTRACTOR_WINDOW_FILE` and
-  `SPEXTRACTOR_WINDOW_FILE_OUT` (the tiling plan's step-1 probe, superseded by the cell grid),
-  `SPEXTRACTOR_FRAG_DUMP` and `SPEXTRACTOR_FRAG_DUMP_RT`, `SPEXTRACTOR_PICK_SERIAL`, `SPEXTRACTOR_PICK_STATIC`,
-  `SPEXTRACTOR_PICK_MZ_MODE` ("under test" in v0.3.0; `weighted` stayed), `SPEXTRACTOR_Z1_CHARGE_UNSET` and
-  `SPEXTRACTOR_PRECURSOR_LIST`.
-- **Log lines no tool reads**: the window-loop stage breakdown and its `score gate` line, the `MS1` and `MS2`
-  RT-span lines, `Measured MS1 FWHM`, `[ms2ext]`, `[gstat]`, the per-tile `[tof] window` line, `[probe]`, and the
-  `not-a-frame` and `trimmed-out` fields of `[soa-rt]` (always equal to `off-grid`, and always 0). `[perf]`, `[det]`,
-  `[trim]`, `[tile]`, `[infer]`, `[tstage]`, `[dnoise]`, `[ms1-prune]` and `[ms1-hist]` are unchanged.
-
-### Changed (2026-09-11) -- byte-identical: less code
-
-- Dead code removed: the unreachable envelope-off sort in the envelope scorer, the always-zero monoisotope bin fields
-  of a precursor (MS1 traces carry no flight-time bin), `TofAxis::span`, the `compactify()` copy of `compactifyInto()`,
-  the `_OPENMP` and `_WIN32` branches of a build that requires OpenMP and POSIX, and one-caller layers
-  (`scoreCandidates_`, `weighted_` and `assembleFromList_` are now `assembleOne_`).
-- Option help cut down to the fact, the escape and a pointer to the measurement. Several help texts are corrected:
-  - `assembly:im_weight_sigma` changes which fragments survive the cap;
-  - `assembly:default_charge` does nothing while `require_isotope_support` is on;
-  - `trace:band_edges` falls back to the OpenMS detector, rather than refusing, when there is no tdf;
-  - `perf:ms1_trace_bands` and `perf:trace_bands` are not exact partitions;
-  - a single `%` replaces `%%`, which printed literally.
-- Comments trimmed to their invariants; the measurement history stays in docs/BASELINE.md and git.
-- Boilerplate removed from `CMakeLists.txt` (one `-ffp-contract=off` declaration), the unit tests (a one-line `CHECK`),
-  `scripts/sync_cluster.sh`, and the e2e suite, which now counts the checks it ran instead of keeping a hand-written sum.
-
-### Fixed (2026-09-11)
-
-- The GlobalMetadata axis bounds (the `trace:band_edges=acquisition` preflight) are parsed with the dnoise grammar in
-  the C locale, so a decimal-comma `LC_NUMERIC` no longer refuses `99.990834`. Leading whitespace, hex-float,
-  subnormal and underflowing values are now refused. New unit-test case.
-- An mzPeak frame with peaks but an empty ion-mobility array is refused as a short array; it used to be read out of bounds.
-- `DIASPEXTRACTOR_TILE_RESIDENT` is parsed once. With it set to `0` or empty, `trace:band_edges=slab` on a `.d` is
-  refused before the load, as with the variable unset, instead of after it.
-
-### Changed (2026-09-10) -- output changes: MS1 denoising is on by default
-
-- **dnoise's MS1 filter runs inside the tool, on the raw points before picking** (`dnoise:ms1`, default `true`).
-  It is a bit-identical C++ port of dnoise v0.1.0's default MS1 path: Garrett, Diedrich & Yates III, bioRxiv
-  2026.08.27.747603; MIT, see NOTICE and LICENSES/dnoise-MIT.txt. Per MS1 frame it runs an ion-mobility streak
-  filter (two passes), a halo filter, and the diaPASEF isolation-window gate.
-  - It keeps 12.7% of dataset D's MS1 points and 20.5% of TNBC 009's.
-  - The output is digest-identical to running the tool on dnoise's own filtered `.d`, so the searches recorded for
-    that route apply:
-    - dataset D: Sage −4.3%, MSFragger −4.0% peptides;
-    - TNBC 009: +1.5% and −0.5%;
-    - entrapment FDR inside the control's interval on D, just below it on TNBC 009.
-  - New reference digests: D `e43672a0`, TNBC 009 `3aafd0b5`.
-  - Memory at one cell per tile, against the prune-on default: D peak 25.90 → 22.48 GB (−13%), TNBC 009
-    31.97 → 25.17 GB (−21%); wall D 4:13 → 3:41 (−13%); on TNBC 009 the wall change depended on the node and the run (−15% to +3%
-    across three shared-node pairs).
-  - Bruker `.d` input only. Other inputs are not filtered, and the header records it (`spx:dnoise_ms1`).
-  - It refuses in milliseconds, naming the escape, when `trace:native_ms1_neighbors` > 0, or when a point's
-    flight-time index, scan index or raw intensity cannot be recovered exactly from the loader's values.
-  - `-dnoise:ms1 false` restores the previous output. Defaulting it on was the user's decision, taken with the
-    dataset D result in hand.
-
-### Fixed (2026-09-10) -- the dnoise port's second review; digests unchanged on every accepted input
-
-- **AccumulationTime is read as opentims reads it**: the tdf's text is parsed in the classic locale, whole, finite and
-  above 0. A decimal-comma locale used to turn "99.953" into 99. A frame above 100 ms (a correction below 1, several
-  raw counts per intensity) is refused at setup, and a corrected intensity at or above 2^24 has its own refusal.
-- **Every sqlite call of the tdf reader is checked**: each prepare, `SQLITE_DONE` after every row loop, the optional
-  `DiaFrameMsMsWindows` table decided from `sqlite_master` instead of from a failed query, and sqlite's own error text
-  in the refusal; the calibration and axis-bound readers likewise. A corrupt page used to end the windows loop as if
-  complete (1,554 of 3,000 windows on a probe; no gate at all on a one-page table). NULL `ScanNumBegin`/`ScanNumEnd`
-  are refused.
-- **Frames values are type- and range-checked before narrowing**: `NumScans`, `NumPeaks`, `MsMsType`, `TimsCalibration`
-  and `MAX(NumScans)` must be stored integers in range, and an MS1 frame with points needs a scan. The refusal names the
-  frame and the column; `NumScans` −1 used to become 4,294,967,295.
-- **The 1/K0 scan tables are built per TimsCalibration row over the scans of the MS1 frames that use it**, not over
-  the run's `MAX(NumScans)`, so an unused row or scans no MS1 frame has no longer refuse a run. The window gate keeps
-  the run's maximum, as dnoise does.
-- **The loader's m/z model is checked on the first MS1 frame**, not after a batch of 256, and before the load when a
-  Bruker SDK path is set (`OPENMS_BRUKER_SDK_PATH`): the loader then calibrates m/z through the SDK, which the TOF
-  recovery cannot invert.
-- **Every MS1 frame is denoised exactly once.** The resident pick filters an MS1 frame before its ion-mobility skip,
-  as the streaming consumer does, and a per-frame bitmap refuses a frame delivered twice or a non-empty MS1 frame never
-  delivered.
-- **A non-finite MS1 m/z is refused right after the pick**, on both load paths, prune on or off, and past the stream
-  fallback. It used to pass silently; sorted out of order around it, the band builder could drop every trace between
-  two band edges. The `[ms1-prune]` line keeps its `bad_mz` field, now always 0.
-- The resident load frees the filter's per-thread scratch right after the pick (up to ~4 GiB at 100 threads), and a
-  stream fallback zeroes the `[ms1-hist]` counters.
-- `dnoise:iterations 0` skips the streak filter only; the halo filter and the window gate still run (the help said it
-  kept every point).
-- **`scripts/sync_cluster.sh` deploys as one transaction on the node.** It uploaded sources and headers before taking
-  the lock, and a failed unit test or build restored only the `.cpp`. It now stages every file with checksums, takes
-  the lock, runs both unit tests (`test_dnoise_ms1`, `test_tdf_load`) from the stage, promotes by rename, re-checks the hashes after the build, writes the
-  provenance only on commit, and restores every promoted input on any failure. The provenance field `tool_headers_sha256`
-  now also hashes `DnoiseMs1.h` (earlier records hash only `TdfLoad.h` and `MzPeakStreamLoad.h`), and a new field
-  `tdf_load_unit_test` reads `passed`, or `skipped(<why>)` on a node without SQLite.
-- Comments: opentims computes `(uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5)`, the order the recovery
-  inverts; the tdf reader no longer claims to share opentims' SQLite library outside an in-tree build.
-- Left as they are, on purpose: no runtime self-test of the gate against third-party compiler flags, no ledger charge
-  for the filter's scratch, the 2^24 intensity bound and the recovery's search bounds.
-
-### Changed (2026-09-10) -- byte-identical
-
-- **The point recovery moved into `DnoiseMs1.h`** (`spx::dnoise::recover`), inside its contraction-off region, where
-  the unit test reaches it; `DnoiseRun` maps its refusals to the same messages.
-- **`DnoiseMs1.h` refuses more floating-point flags at compile time**: a compiler that announces reciprocal or
-  associative math, no signed zeros or ARM fast FP (`__RECIPROCAL_MATH__`, `__ASSOCIATIVE_MATH__`,
-  `__NO_SIGNED_ZEROS__`, `__ARM_FP_FAST`). Only clang still slips past: `-freciprocal-math`, `-fassociative-math` and `-fno-signed-zeros` on every target, and
-  `-funsafe-math-optimizations` and `-ffp-model=fast` on x86-64.
-- **`-ffp-contract=off` stays on for the whole tool.** Builds for FMA-capable targets such as arm64 or `-march=haswell`
-  are now contraction-free like the cluster reference; default x86-64 builds and all pins are unchanged.
-
-### Tests (2026-09-10)
-
-- e2e 22 → 24 checks. **19d**: a NaN or infinite MS1 m/z is refused before the prune, at 1 and 48 bands, prune off and
-  on. **21**: a `.d` holding only an `analysis.tdf` is refused before any loader output when `OPENMS_BRUKER_SDK_PATH` is
-  set, and without it gets past the dnoise setup and fails in the loader.
-- `tests/test_dnoise_ms1.cpp`: the point recovery on both benchmark files' metadata (every TOF bin, every scan also at
-  ±1 ulp, every raw count below 2^20 and every 7th up to 2^24, each refusal), the delivery bitmap, and `iterations 0` still running the halo and
-  the gate.
-- `tests/test_tdf_load.cpp`, new, built only where SQLite3 is found: temporary tdfs with absent, column-less and
-  corrupt window tables, a corrupt Frames page and out-of-range Frames values.
-- CI: negative compile steps for the refused flags; `build.yml` runs the `dnoise_ms1` and `tdf_load` ctests in the full
-  tool build; the Linux leg runs `tests/test_sync_cluster_txn.sh` (a fake node behind ssh/scp shims) against
-  `scripts/sync_cluster.sh`.
-
-### Performance (2026-09-10) -- byte-identical
-
-- **Picked MS1 centroids the tracer can never use are dropped at load** (`perf:ms1_prune`, default `true`).
-  - The prune keeps every peak above `trace:noise_threshold_int`, plus each spectrum's first and last peak and a
-    minimal chain of sub-threshold witnesses. The band edges are sampled before pruning. Together these keep every
-    MS1 band spectrum and the tracer's input exact.
-  - Digests are identical with the prune off and on on both benchmark files, and on dnoise-filtered input.
-  - Peak at one cell per tile, with dnoise off: D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB.
-- **A probe for a trim between tiles** (`SPEXTRACTOR_TILE_TRIM=1`; folded into `perf:malloc_trim` on 2026-09-11, the variable removed). This is an analysis instrument: the tile-count
-  analysis is in docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.
-
-### Fixed (2026-09-10)
-
-- `--helphelp` no longer aborts. The `tile:` option group had no registered subsection.
-
-### Performance (2026-09-08/09) -- all of it byte-identical
-
-Four changes, verified on both benchmark files against the pinned digests, so the peptide sets are
-unchanged by construction and no search was needed. Interleaved A/B on a 2-hour diaPASEF
-acquisition, arms alternating on one node: **13:42.9 -> 11:17.6 mean wall, -17.7%**, peak memory
-unchanged.
-
-- **The Savitzky-Golay coefficients are cached (OpenMS patch).** `ElutionPeakDetection::smoothData()`
-  constructed a filter and called `setParameters()` on every mass trace, and `updateMembers_()`
-  recomputes the coefficients with one Eigen SVD per half-window each time. They depend only on
-  (frame_length, polynomial_order) -- a handful of values in a run -- while smoothData() runs once
-  per trace, hundreds of millions of times. A thread_local cache leaves the coefficients, the
-  filtering loop and every float conversion untouched. **MS1 tracing CPU -40%, window loop -22.5%.**
-- **mzML spectra are encoded in parallel and written in order (fourth OpenMS patch).** Writing was
-  the largest serial block left, 10.7% of the run at 1.0x, and it is CPU-bound rather than
-  I/O-bound: it sustained ~400 MB/s against a filesystem measured at 4.0 GB/s. Serialising one
-  spectrum is independent of every other; only the concatenation is ordered. **WRITE 90.0 s ->
-  21.1 s, 1.0x -> 49x.** Each thread needs its own handler and validator -- OpenMS's writer memoises
-  CV-term validation in mutable state, and sharing one handler corrupts the heap.
-- **The canonical sort sorts keys, not spectra**, and the assembled PeakMap takes the vector whole.
-  `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
-  **SORT -61%; the ASSEMBLE phase is gone.**
-
-### Performance (2026-09-09, second batch) -- byte-identical unless stated
-
-- **The drained compact store is returned when the last window has materialised.** The window
-  loop's peak held ~40 GB of dead per-frame vectors in the allocator's free list for its whole
-  life; one `malloc_trim` at the moment the last window's slab exists returns it. Interleaved A/B
-  on a 2-hour acquisition, two reps each: **peak RSS 169.1 -> 138.1 GB (-18%)**, wall within the
-  pair spread, output identical.
-- **The mzML is written by a streaming writer (`TileWriter`)**: header once, spectra appended in
-  the canonical order in parallel-encoded chunks with the index offsets rebased as they land, the
-  declared count exact when the total is known and a same-width placeholder otherwise. Bytes from
-  `<spectrumList>` on are the bulk writer's; **WRITE 19.6 -> 13.2 s on the 30-minute file** (the
-  per-thread encoders no longer share a handler). Emitted spectra now carry `id="spectrum=<rank>"`.
-- **The loader builds each window's peak slab directly.** The per-window `CompactFrame` store and
-  its copy at window start are gone; frames are appended as they are picked, m/z quanta become
-  flight-time bins in place when the window starts, and the batch's windows are appended in
-  parallel from one reusable scratch. Output and every per-window slab digest identical. Costs
-  +12 s of LOAD on the 30-minute file today (first-touch page faults on fewer threads; on the
-  backlog) and lifts the load-phase peak by ~3 GB there, below the window loop's peak on a
-  2-hour file.
-- **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span,
-  first frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
-
-### Changed (2026-09-10) -- output changes (a few bins at the band edges)
-- **The integer detector's band partition comes from the acquisition's metadata**
-  (`trace:band_edges=acquisition`, the new default). Each isolation window is traced in
-  flight-time bands; their edges were the window's resident peaks' extremes -- data a reader
-  holding only a tile's frames cannot see. They are now `[0, DigitizerNumSamples - 1]` (the
-  digitizer's last bin through the store's quantum, or the acquisition's upper m/z through the
-  calibration, whichever is larger): run-level constants from `analysis.tdf`'s GlobalMetadata.
-  The interior edges move by a bin or two, which re-assigns the seeds nearest each edge; measured
-  against `slab` on the same build: dataset D Sage 13,491 vs 13,490 (13,488 common), MSFragger
-  12,918 both, entrapment FDR 1.30% both; TNBC 009 Sage 29,067 vs 29,066, MSFragger 27,949 vs
-  27,952, entrapment 1.09% vs 1.08%. New reference digests: D `8c1b047f`, TNBC 009 `bff54a1f`.
-  `-trace:band_edges slab` reproduces the earlier output. With the integer detector,
-  `acquisition` refuses an input without a tdf before loading (`-trace:detector openms` is the
-  escape); the header records `spx:band_edges`.
-
-### Instrumentation (2026-09-10) -- no shipped behaviour changes
-
-- **The per-structure memory ledger and the phase table were repaired.** Three independent
-  reviewers refused to price allocator reclamation off the previous version, and each of their
-  four objections was correct. The tile loop's read, sort and write all run INSIDE the window
-  loop, and the table summed every row, so `TOTAL(measured)` reached 105-109% of the run and the
-  unattributed column went negative; phases now carry a nesting depth and an enclosed row is
-  marked and left out of the sum. The MS1 band partition -- a full copy of the MS1 map plus a
-  1-5% halo, and the largest allocation of the MS1 phase -- was carried under `ms1_map` until
-  detection returned; it is handed to `band_arena` at the swap and released band by band, and it
-  measures **13.6 GiB on dataset D where the old ledger reported 0.6**. A window's emitted
-  spectra were charged only after the stage that produces them, and are now charged as they are
-  emitted, together with the ~700 bytes of empty slot header per owned precursor. The columns
-  were `>>20` of a byte count and were labelled `_mb`; they are `_mib`, and `bench/ledger_report.py`
-  reads either. Verified output-identical on dataset D at both pitches and every tiling.
-  MassTraceDetection's own internal copy of each band remains unattributed: charging it needs an
-  OpenMS patch, and the source now says so where the gap is.
-- **`DIASPEXTRACTOR_LOAD_TRIM=<n>`, a probe, off by default.** Calls `malloc_trim(0)` every nth
-  picker flush. The repaired ledger shows the resident arm's process peak on D is not live data:
-  RSS falls 45,279 -> 28,052 MiB at the end of the load while the charged total does not move, so
-  ~17 GiB of the peak is one load's worth of allocator free list. `MALLOC_TRIM_THRESHOLD_` cannot
-  reach it, because `free()` trims only the top of the main arena and with ~100 threads the
-  retention sits in per-thread arenas.
-
-### Added (2026-09-10)
-- **`tile:cells_per_tile` -- the window loop runs tile by tile.** The retention-time cells are
-  grouped into tiles of n cells; each tile traces its isolation windows on the tile's frames only,
-  owns the precursors whose MS1 frame time lies in [T_k - delta_rt, T_{k+1} - delta_rt) (decided
-  with the scorer's own arithmetic, so a precursor never has a candidate at or beyond its tile's
-  upper edge), scores them with the previous tile's boundary fragments carried over (every
-  fragment within 2 delta_rt of the edge, re-carried transitively), and its spectra are sorted
-  and written as one block through the streaming writer before the next tile starts. Output is
-  the same for every n by construction of the cell grid -- measured: dataset D at pitch 300 as
-  1, 2, 3 and 6 tiles at 8 and 100 threads, and TNBC 009 at 600 as 13 tiles, spectrum for
-  spectrum identical to the one-tile runs; Sage reads the tiled file as the same file (13,836 peptides on D at 300 either way); e2e 18/18. 0 (the default) is one tile, today's loop
-  statement for statement; the pins are unchanged. mzPeak output is bulk-only and needs one tile.
-  A tiled file declares its count through a same-width placeholder patched at the end
-  (`count="0000611034"`), which the digest tools normalise. The mzML is written as `<out>.part`
-  and renamed on completion, so a failed run never leaves a plausible partial file behind.
-
-### Changed (2026-09-10) -- byte-identical on both pinned acquisitions and on the mzPeak archive
-
-- **Every isolation window's frame table is frozen from the reader's metadata.** The window
-  store's frame sequence, the Pearson support (`G` = the window's frame count) and the MS1-frame
-  to window-frame map are now run-level constants read from the loader (the calibration patch
-  exports the `.d` frame table and windows; the mzPeak reader's metadata sweep is cached), not
-  from whatever frames happen to be resident. The consumer walks each window's delivered frames
-  in lockstep with its table and appends every frame the reader skipped as an empty frame,
-  counted per window (`[frames] window W: delivered N, padded P`; 0 on both benchmark files).
-  Output is unchanged; what changed is that a window traced and scored with only some of its
-  frames resident now reproduces the whole run exactly (the cell-exactness probe: 100% of
-  spectra identical with 16,586 of 32,210 frames padded), which is the property the streaming
-  reader will rest on. Header stamps `spx:frame_table` (`loader` | `mzpeak` | `slab`) and
-  `spx:pearson_G=frames`; a frame-table mismatch is a fatal structural error, never a fallback.
-
-### Added (2026-09-09)
-- **`tile:rt_sec` -- detection in fixed retention-time cells (default 600 s).** The integer detector traces each window per RT cell cut at the run's
-  MS1 frame times, so the output is bit-identical however the cells are grouped into tiles and
-  however many threads run (at a fixed `perf:trace_bands`); the cut lines are stamped into the
-  header (`spx:tile_rt_sec`, `spx:tile_boundaries`). This is what makes a streaming, tiled run
-  reproduce the whole run exactly -- the halo designs could not (docs/BASELINE.md, "cause 2 vs
-  cause 3"). Mass traces that elute across a cut line are cut there: on the 2-hour file at 600 s,
-  Sage 28,845 -> 29,066 (+0.8%) with 9.4% of the peptides within 15 s of a line lost against 6.0%
-  elsewhere (the usual set churn); on the 30-minute file Sage +0.8%, MSFragger +1.5%, entrapment
-  FDR 1.16 -> 1.30% (inside its interval); 300 s gives Sage +3.4% at 1.38% entrapment and is not
-  the default. `-1` is one cell = the previous output, byte-identical; e2e check 15 holds the
-  thread invariance at a pitch that cuts the fixture in two.
-
-### Changed (2026-09-09)
-- **The valley splitter's smoothing window comes from the acquisition's cycle time
-  (`trace:split_scan_time=frame`, new default; `trace` restores the old behaviour).** OpenMS
-  ElutionPeakDetection derives its Savitzky-Golay window from each mass trace's own average cycle
-  time, and the tool hands it a trace's real points only, so a trace with gaps was smoothed with a
-  narrower window than its neighbours and split more. With one run-wide window the traces are
-  fewer and longer -- 37% fewer MS1 traces and 28% fewer spectra on the 30-minute file, 16% fewer
-  spectra on the 2-hour file -- and identify MORE peptides: Sage 12,625 -> 13,388 (+6.0%) and
-  27,859 -> 28,845 (+3.5%), MSFragger 12,236 -> 12,732 (+4.1%) on the 30-minute file, with the
-  entrapment FDR at nominal 1% moving from 1.35% to 1.16% there (12,496 vs 11,722 target peptides
-  against the entrapment database). Found
-  while measuring RT tiling: the per-trace window made a trace's split depend on where the run was
-  cut. The EPD patch gains an advanced `scan_time` parameter (0 = the OpenMS default).
-- **mzPeak input runs the integer detector.** mzPeak native IDs now carry `frame=<Id>` and the
-  flight-time axis is built from the archive's embedded (or sidecar) `analysis.tdf`; before, every
-  mzPeak spectrum was unmappable and the tool fell back to the OpenMS detector with a warning. On
-  the 30-minute archive: 855,561 spectra, Sage 12,537 (the `.d` gives 12,625; the OpenMS detector
-  on the same archive 12,756). Archives converted without the vendor tdf need
-  `DIASPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz>`.
-- **e2e check 14**: the declared spectrum count, `id="spectrum=K"`, `index="K"` and every
-  `<indexList>` offset agree.
-
-### Fixed
-- **The streaming loader dropped the last `n mod 256` MS2 window spectra of every run.** The pick
-  consumer's tail flush was overridden but never invoked (OpenMS reaches it only through
-  `retrieveSwathMaps`, which the streaming path does not use). The `.d` reader hands frames over
-  window-group by window-group, so the loss fell on the last group: on a 31-minute file the last
-  105 cycles of two windows (210 of 32,210 spectra); on mzPeak input the last ~9 cycles of every
-  window. The v2.0.0 note "`SPEXTRACTOR_PICK_BATCH` is fast and rejected -- the picker carries
-  per-thread state" was this bug: at 4096 the dropped tail was two whole windows plus 427 frames of
-  two more, 11% of the MS2 spectra. With the tail kept, batch 256 and 4096 produce the identical
-  digest: the picker is per-frame pure and the batch size is a resource knob. Dataset D: +758
-  spectra, Sage 12,609 -> 12,625 peptides. Output changes; digests re-pinned.
-- **The parallel mzML writer emitted an empty `<indexList>`** (`count="0"`, one dummy entry) since
-  it shipped in v2.0.0: the per-thread handlers' spectrum offsets were discarded on concatenation.
-  Search engines do not read the index, so no result was affected; the file was not a valid
-  indexedmzML. Offsets are now rebased as each chunk is appended; an independent validator checks
-  every offset on the benchmark output (854,817 spectra).
+- **`SPEXTRACTOR_*` variables are refused, not ignored.** An old name would now do nothing without a
+  word, so the tool refuses to start while any `SPEXTRACTOR_*` variable is set, and names the variable
+  and its `DIASPEXTRACTOR_` name (e2e check 22). `-DSPEXTRACTOR_TESTS_ONLY` likewise stops the CMake
+  configure with an error; it used to be ignored, and the full build then failed far from the cause in
+  `find_package(OpenMS)`. **The guard covers only `SPEXTRACTOR_*`, not 1.1.0's own `SPEXTRACT_*`
+  prefix**, which is still silently ignored -- so if you carried a `SPEXTRACT_...` export over from
+  1.1.0, rename it by hand: the tool will not tell you.
+- **No compatibility alias.** No `spextract` or `spextractor` executable is installed: both names are
+  taken by other tools, which is why the tool was renamed in the first place. Anyone who needs the old
+  command locally can link it (`ln -s diaspextractor spextract`).
+- **The OpenMS patches carry the new names** -- namespace, the three variables, their messages and the
+  patch comments -- and every hunk keeps its context, so they apply to the same pinned OpenMS commit.
+  libOpenMS compiles the variable names in: a tree patched for an older release must be patched again
+  from a pristine checkout of the pin (`scripts/apply_openms_patches.sh` also installs the renamed
+  `TdfMzCalibration.h`) and rebuilt.
+- **Unchanged by the rename:** the `spx:` run stamps and the `spx_guessed` / `spx_n_isotopes` precursor
+  userParams. The bench tools and older outputs read them, and `spx_*` sits inside the spectrum digest.
+- **Defaults that changed since 1.1.0.** With an entry of their own below: `dnoise:ms1` (new, on),
+  `perf:ms1_prune` (new, on), `tile:cells_per_tile` (new, 1), `tile:rt_sec` (new, 600 s),
+  `trace:band_edges` (new, `acquisition`) and `trace:split_scan_time` (new, `frame`). Recorded under
+  v2.0.0 below, which was an internal tag but whose changes reach a 1.1.0 user here for the first time:
+  `charge:min_charge` 2 -> 1 with the new `charge:im_charge_veto` (report FDR per charge -- the z=1
+  stratum carries ~3% entrapment FDR under one pooled 1% cut), `perf:ms1_trace_bands` 12 -> 48,
+  `perf:malloc_trim` (new, on, and now trimming between tiles), `-threads` defaulting to every core and
+  the output format following the `-out` extension.
+- **Options and probe environment variables that no longer exist** are listed under "Removed". An ini
+  file that sets one must be regenerated.
 
 ### Changed
-- **Twenty-four falsified options removed** (from 71 to 47; 21 fewer in the plain `--help`). Each
-  either carried a falsification verdict in its own help text or had no measurement on record, and
-  each defaulted to its no-op value, so output is unchanged: the `merge:` and `consolidate:` groups,
-  the cross-precursor redistribution family (`rp_max`, `competitive`, `apportion`), the wavelet
-  smoother and its selftest, post-centroiding frame aggregation, `open_search_safe` (a documented
-  no-op), `rank_by`, `ambiguity_margin`, `max_trace_length_sec`, `dedup_precursors` and
-  `split_valleys_fwhm`. `gate:variance_support`, `gate:coelution`, the two averagine-monoisotope
-  flags and `charge:scoring=envelope` are deliberately kept: the record says to keep them.
-- Four finished experiment knobs, a never-called accessor, an orphaned doc comment, a duplicate
-  option read and a struct member with no reader are gone with them.
+
+- **MS1 denoising runs inside the tool, on the raw points before picking** (`dnoise:ms1`, default
+  `true`). It is a bit-identical C++ port of dnoise v0.1.0's default MS1 path: Garrett, Diedrich &
+  Yates III, bioRxiv 2026.08.27.747603; MIT, see NOTICE and LICENSES/dnoise-MIT.txt. Per MS1 frame it
+  runs an ion-mobility streak filter (two passes), a halo filter, and the diaPASEF isolation-window
+  gate.
+  - It keeps 12.7% of dataset D's MS1 points and 20.5% of run 009's.
+  - The output is digest-identical to running the tool on dnoise's own filtered `.d`, so the searches
+    recorded for that route apply: **dataset D Sage -4.3%, MSFragger -4.0% peptides; run 009 +1.5% and
+    -0.5%**; entrapment FDR inside the control's interval on D, just below it on run 009.
+  - New reference digests: **D `e43672a0`, run 009 `3aafd0b5`** (with `-dnoise:ms1 false`, `8c1b047f`
+    and `bff54a1f`).
+  - Memory at one cell per tile, against the prune-on default: D peak 25.90 -> 22.48 GB (-13%),
+    run 009 31.97 -> 25.17 GB (-21%); wall D 4:13 -> 3:41 (-13%); on run 009 the wall change depended
+    on the node and the run (-15% to +3% across three shared-node pairs).
+  - Bruker `.d` input only. Other inputs are not filtered, and the header records it (`spx:dnoise_ms1`).
+  - It refuses in milliseconds, naming the escape, when `trace:native_ms1_neighbors` > 0, or when a
+    point's flight-time index, scan index or raw intensity cannot be recovered exactly from the
+    loader's values.
+  - **`-dnoise:ms1 false` restores the previous output.** Defaulting it on was the user's decision,
+    taken with the dataset D result in hand: it costs peptides on D and gains a little on run 009, and
+    it is what makes the memory figures above reachable.
+- **`tile:cells_per_tile` defaults to 1: one 600-s retention-time cell per tile** (it arrived in this
+  cycle at 0, one tile). The spectra are digest-identical for any tile count, so only memory and wall
+  move. Final build, 100 threads, dnoise and the prune on, each pair back to back on one node:
+  - run 009: **99.70 GB at one tile, 21.07 GB at 13 tiles** with the trim between tiles; wall
+    9:42 -> 9:57.
+  - dataset D: **37.44 GB at one tile, 21.99 GB at 3 tiles** with the trim between tiles; wall
+    3:15 -> 3:47.
+  - `-tile:cells_per_tile 0` restores one tile. mzPeak output is written in one piece, so a run that
+    writes mzPeak runs all its cells as one tile (the whole run's memory) and logs a warning. The
+    output format is resolved before the load; an mzPeak run with more than one tile used to be refused
+    only after the load and the MS1 tracing.
+- **`perf:malloc_trim` (on) also trims between tiles**, after tile k is written and before tile k+1 is
+  read. It takes about 4 GB off run 009 and 0.5 GB off D at the defaults. The `[trim] tile k/n` log
+  line is unchanged.
+- **Not adopted: an eager glibc trim threshold** (`M_TRIM_THRESHOLD` 64 MiB with `M_TOP_PAD` 0). On
+  run 009 it went only 0.3 GB below the between-tile trim (20.73 against 21.07 GB) and nearly tripled
+  the MS1 load (34.3 -> 96.3 s); on D it cost 11% wall (3:41 -> 4:06).
+- **The integer detector's band partition comes from the acquisition's metadata**
+  (`trace:band_edges=acquisition`, the default). Each isolation window is traced in flight-time bands;
+  their edges used to be the window's resident peaks' extremes -- data a reader holding only a tile's
+  frames cannot see. They are now `[0, DigitizerNumSamples - 1]` (the digitizer's last bin through the
+  store's quantum, or the acquisition's upper m/z through the calibration, whichever is larger):
+  run-level constants from `analysis.tdf`'s GlobalMetadata. The interior edges move by a bin or two,
+  which re-assigns the seeds nearest each edge; measured against `slab` on the same build: dataset D
+  Sage 13,491 vs 13,490 (13,488 common), MSFragger 12,918 both, entrapment FDR 1.30% both; run 009 Sage
+  29,067 vs 29,066, MSFragger 27,949 vs 27,952, entrapment 1.09% vs 1.08%. `-trace:band_edges slab`
+  reproduces the earlier output. With the integer detector, `acquisition` refuses an input without a
+  tdf before loading (`-trace:detector openms` is the escape); the header records `spx:band_edges`.
+- **The valley splitter's smoothing window comes from the acquisition's cycle time**
+  (`trace:split_scan_time=frame`, the default; `trace` restores the old behaviour). OpenMS
+  ElutionPeakDetection derives its Savitzky-Golay window from each mass trace's own average cycle time,
+  and the tool hands it a trace's real points only, so a trace with gaps was smoothed with a narrower
+  window than its neighbours and split more. With one run-wide window the traces are fewer and longer
+  -- 37% fewer MS1 traces and 28% fewer spectra on D, 16% fewer spectra on run 009 -- and identify MORE
+  peptides: Sage 12,625 -> 13,388 (+6.0%) and 27,859 -> 28,845 (+3.5%), MSFragger 12,236 -> 12,732
+  (+4.1%) on D, with the entrapment FDR at nominal 1% moving from 1.35% to 1.16% there (12,496 vs
+  11,722 target peptides against the entrapment database). Found while measuring RT tiling: the
+  per-trace window made a trace's split depend on where the run was cut. The EPD patch gains an
+  advanced `scan_time` parameter (0 = the OpenMS default).
+- **mzPeak input runs the integer detector.** mzPeak native IDs now carry `frame=<Id>` and the
+  flight-time axis is built from the archive's embedded (or sidecar) `analysis.tdf`; before, every
+  mzPeak spectrum was unmappable and the tool fell back to the OpenMS detector with a warning. On the
+  30-minute archive: 855,561 spectra, Sage 12,537 (the `.d` gives 12,625; the OpenMS detector on the
+  same archive 12,756). Archives converted without the vendor tdf need
+  `DIASPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz>`.
+- **Every isolation window's frame table is frozen from the reader's metadata** (digest-identical on
+  both pinned acquisitions and on the mzPeak archive). The window store's frame sequence, the Pearson
+  support (`G` = the window's frame count) and the MS1-frame to window-frame map are now run-level
+  constants read from the loader (the calibration patch exports the `.d` frame table and windows; the
+  mzPeak reader's metadata sweep is cached), not from whatever frames happen to be resident. The
+  consumer walks each window's delivered frames in lockstep with its table and appends every frame the
+  reader skipped as an empty frame, counted per window (`[frames] window W: delivered N, padded P`; 0
+  on both benchmark files). What changed is that a window traced and scored with only some of its
+  frames resident now reproduces the whole run exactly (the cell-exactness probe: 100% of spectra
+  identical with 16,586 of 32,210 frames padded), which is the property the tiled reader rests on. The
+  header stamps `spx:frame_table` (`loader` | `mzpeak` | `slab`) and `spx:pearson_G=frames`; a
+  frame-table mismatch is a fatal structural error, never a fallback.
+- **The point recovery moved into `DnoiseMs1.h`** (`spx::dnoise::recover`), inside its
+  contraction-off region, where the unit test reaches it; `DnoiseRun` maps its refusals to the same
+  messages. Digest-identical.
+- **`DnoiseMs1.h` refuses more floating-point flags at compile time**: a compiler that announces
+  reciprocal or associative math, no signed zeros or ARM fast FP (`__RECIPROCAL_MATH__`,
+  `__ASSOCIATIVE_MATH__`, `__NO_SIGNED_ZEROS__`, `__ARM_FP_FAST`). Only clang still slips past:
+  `-freciprocal-math`, `-fassociative-math` and `-fno-signed-zeros` on every target, and
+  `-funsafe-math-optimizations` and `-ffp-model=fast` on x86-64.
+- **`-ffp-contract=off` stays on for the whole tool.** Builds for FMA-capable targets such as arm64 or
+  `-march=haswell` are now contraction-free like the cluster reference; default x86-64 builds and all
+  pins are unchanged.
+- **The cluster deploy script (development repository) deploys as one transaction on the node.** It
+  uploaded sources and headers before taking the lock, and a failed unit test or build restored only
+  the `.cpp`. It now stages every file with checksums, takes the lock, runs both unit tests
+  (`test_dnoise_ms1`, `test_tdf_load`) from the stage, promotes by rename, re-checks the hashes after
+  the build, writes the provenance only on commit, and restores every promoted input on any failure.
+  The provenance field `tool_headers_sha256` now also hashes `DnoiseMs1.h`, and a new field
+  `tdf_load_unit_test` reads `passed`, or `skipped(<why>)` on a node without SQLite.
+
+### Added
+
+- **`tile:cells_per_tile` -- the window loop runs tile by tile.** The retention-time cells are grouped
+  into tiles of n cells; each tile traces its isolation windows on the tile's frames only, owns the
+  precursors whose MS1 frame time lies in [T_k - delta_rt, T_{k+1} - delta_rt) (decided with the
+  scorer's own arithmetic, so a precursor never has a candidate at or beyond its tile's upper edge),
+  scores them with the previous tile's boundary fragments carried over (every fragment within
+  2 delta_rt of the edge, re-carried transitively), and its spectra are sorted and written as one block
+  through the streaming writer before the next tile starts. **Output is the same for every n by
+  construction of the cell grid** -- measured: dataset D at pitch 300 as 1, 2, 3 and 6 tiles at 8 and
+  100 threads, and run 009 at 600 as 13 tiles, spectrum for spectrum identical to the one-tile runs;
+  Sage reads the tiled file as the same file (13,836 peptides on D at 300 either way). A tiled file
+  declares its count through a same-width placeholder patched at the end (`count="0000611034"`), which
+  the digest tools normalise. The mzML is written as `<out>.part` and renamed on completion, so a
+  failed run never leaves a plausible partial file behind.
+- **`tile:rt_sec` -- detection in fixed retention-time cells (default 600 s).** The integer detector
+  traces each window per RT cell cut at the run's MS1 frame times, so the output is digest-identical
+  however the cells are grouped into tiles and however many threads run (at a fixed
+  `perf:trace_bands`); the cut lines are stamped into the header (`spx:tile_rt_sec`,
+  `spx:tile_boundaries`). This is what makes a tiled run reproduce the whole run exactly -- the halo
+  designs could not (docs/BASELINE.md, "cause 2 vs cause 3"). Mass traces that elute across a cut line
+  are cut there: on run 009 at 600 s, Sage 28,845 -> 29,066 (+0.8%) with 9.4% of the peptides within
+  15 s of a line lost against 6.0% elsewhere (the usual set churn); on dataset D Sage +0.8%,
+  MSFragger +1.5%, entrapment FDR 1.16 -> 1.30% (inside its interval); 300 s gives Sage +3.4% at 1.38%
+  entrapment and is not the default. `-1` is one cell = the previous output, byte-identical.
+- **`perf:ms1_prune` (default `true`) -- picked MS1 centroids the tracer can never use are dropped at
+  load.** The prune keeps every peak above `trace:noise_threshold_int`, plus each spectrum's first and
+  last peak and a minimal chain of sub-threshold witnesses. The band edges are sampled before pruning.
+  Together these keep every MS1 band spectrum and the tracer's input exact, so **the digests are
+  identical with the prune off and on** on both benchmark files and on dnoise-filtered input. Peak at
+  one cell per tile, with dnoise off: D 31.99 -> 25.90 GB, run 009 69.11 -> 31.97 GB.
+- **`DIASPEXTRACTOR_LOAD_TRIM=<n>`, a probe, off by default.** Calls `malloc_trim(0)` every nth picker
+  flush. The repaired ledger shows the resident arm's process peak on D is not live data: RSS falls
+  45,279 -> 28,052 MiB at the end of the load while the charged total does not move, so ~17 GiB of the
+  peak is one load's worth of allocator free list. `MALLOC_TRIM_THRESHOLD_` cannot reach it, because
+  `free()` trims only the top of the main arena and with ~100 threads the retention sits in per-thread
+  arenas.
+- **The end-to-end suite is 25 checks, 26 in a build that writes mzPeak** (13 before this cycle). New:
+  **14** the declared spectrum count, `id="spectrum=K"`, `index="K"` and every `<indexList>` offset
+  agree; **15** thread invariance at a pitch that cuts the fixture in two, and that a one-tile run
+  traces two or more cells; **19d** a NaN or infinite MS1 m/z is refused before the prune, at 1 and 48
+  bands, prune off and on; **21** a `.d`
+  holding only an `analysis.tdf` is refused before any loader output when `OPENMS_BRUKER_SDK_PATH` is
+  set, and without it gets past the dnoise setup and fails in the loader; **22** a leftover
+  `SPEXTRACTOR_*` variable refuses the run before it starts; **18b**, in a build that writes mzPeak (a
+  plain build skips it), that mzPeak output at the default runs its cells as one tile. Checks 15-18
+  name `-tile:cells_per_tile 0` for their one-tile runs. The suite counts the checks it ran instead of
+  keeping a hand-written sum.
+- **Unit tests.** `tests/test_dnoise_ms1.cpp`: the point recovery on both benchmark files' metadata
+  (every TOF bin, every scan also at +/-1 ulp, every raw count below 2^20 and every 7th up to 2^24,
+  each refusal), the delivery bitmap, and `iterations 0` still running the halo and the gate.
+  `tests/test_tdf_load.cpp`, new, built wherever SQLite3 is found: temporary tdfs with absent,
+  column-less and corrupt window tables, a corrupt Frames page and out-of-range Frames values.
+- **CI**: negative compile steps for the refused floating-point flags; `build.yml` runs the
+  `dnoise_ms1` and `tdf_load` ctests in the full tool build; in the development repository the Linux
+  leg also runs the cluster deploy script against a fake node behind ssh/scp shims (the public
+  repository skips that step). CI syntax-checks every tracked Python file rather than an arbitrary
+  fifth of them, and `apply_openms_patches.sh` checks the OpenMS pin it documents.
 
 ### Fixed
-- The one-shot-load peak picker no longer runs, and no longer logs "Loaded 0 frames.", on the
-  streaming default; the compact-store digest no longer hashes an empty map on the integer path.
-- The eight benchmark plans had aborted on their first pre-flight since the identifier scrub gave
-  the sample ids a space here and an underscore in the registry.
-- CI syntax-checks every tracked Python file rather than an arbitrary fifth of them, and
-  `apply_openms_patches.sh` checks the OpenMS pin it documents.
+
+- **The streaming loader dropped the last `n mod 256` MS2 window spectra of every run.** The pick
+  consumer's tail flush was overridden but never invoked (OpenMS reaches it only through
+  `retrieveSwathMaps`, which the streaming path does not use). The `.d` reader hands frames over window
+  group by window group, so the loss fell on the last group: on a 31-minute file the last 105 cycles of
+  two windows (210 of 32,210 spectra); on mzPeak input the last ~9 cycles of every window. The earlier
+  note "`PICK_BATCH` is fast and rejected -- the picker carries per-thread state" was this bug: at 4096
+  the dropped tail was two whole windows plus 427 frames of two more, 11% of the MS2 spectra. With the
+  tail kept, batch 256 and 4096 produce the identical digest: the picker is per-frame pure and the
+  batch size is a resource knob. Dataset D: +758 spectra, Sage 12,609 -> 12,625 peptides. **Output
+  changes; digests re-pinned.**
+- **The parallel mzML writer emitted an empty `<indexList>`** (`count="0"`, one dummy entry): the
+  per-thread handlers' spectrum offsets were discarded on concatenation. Search engines do not read the
+  index, so no result was affected; the file was not a valid indexedmzML. Offsets are now rebased as
+  each chunk is appended, and an independent validator checks every offset on the benchmark output
+  (854,817 spectra).
+- **The GlobalMetadata axis bounds** (the `trace:band_edges=acquisition` preflight) are parsed with the
+  dnoise grammar in the C locale, so a decimal-comma `LC_NUMERIC` no longer refuses `99.990834`.
+  Leading whitespace, hex-float, subnormal and underflowing values are now refused. New unit-test case.
+- **An mzPeak frame with peaks but an empty ion-mobility array** is refused as a short array; it used to
+  be read out of bounds.
+- **`DIASPEXTRACTOR_TILE_RESIDENT` is parsed once.** With it set to `0` or empty, `trace:band_edges=slab`
+  on a `.d` is refused before the load, as with the variable unset, instead of after it.
+- **AccumulationTime is read as opentims reads it**: the tdf's text is parsed in the classic locale,
+  whole, finite and above 0. A decimal-comma locale used to turn "99.953" into 99. A frame above 100 ms
+  (a correction below 1, several raw counts per intensity) is refused at setup, and a corrected
+  intensity at or above 2^24 has its own refusal.
+- **Every sqlite call of the tdf reader is checked**: each prepare, `SQLITE_DONE` after every row loop,
+  the optional `DiaFrameMsMsWindows` table decided from `sqlite_master` instead of from a failed query,
+  and sqlite's own error text in the refusal; the calibration and axis-bound readers likewise. A corrupt
+  page used to end the windows loop as if complete (1,554 of 3,000 windows on a probe; no gate at all on
+  a one-page table). NULL `ScanNumBegin`/`ScanNumEnd` are refused.
+- **Frames values are type- and range-checked before narrowing**: `NumScans`, `NumPeaks`, `MsMsType`,
+  `TimsCalibration` and `MAX(NumScans)` must be stored integers in range, and an MS1 frame with points
+  needs a scan. The refusal names the frame and the column; `NumScans` -1 used to become 4,294,967,295.
+- **The 1/K0 scan tables are built per TimsCalibration row** over the scans of the MS1 frames that use
+  it, not over the run's `MAX(NumScans)`, so an unused row or scans no MS1 frame has no longer refuse a
+  run. The window gate keeps the run's maximum, as dnoise does.
+- **The loader's m/z model is checked on the first MS1 frame**, not after a batch of 256, and before the
+  load when a Bruker SDK path is set (`OPENMS_BRUKER_SDK_PATH`): the loader then calibrates m/z through
+  the SDK, which the TOF recovery cannot invert.
+- **Every MS1 frame is denoised exactly once.** The resident pick filters an MS1 frame before its
+  ion-mobility skip, as the streaming consumer does, and a per-frame bitmap refuses a frame delivered
+  twice or a non-empty MS1 frame never delivered.
+- **A non-finite MS1 m/z is refused right after the pick**, on both load paths, prune on or off, and
+  past the stream fallback. It used to pass silently; sorted out of order around it, the band builder
+  could drop every trace between two band edges. The `[ms1-prune]` line keeps its `bad_mz` field, now
+  always 0.
+- The resident load frees the filter's per-thread scratch right after the pick (up to ~4 GiB at 100
+  threads), and a stream fallback zeroes the `[ms1-hist]` counters.
+- `dnoise:iterations 0` skips the streak filter only; the halo filter and the window gate still run (the
+  help said it kept every point).
+- `--helphelp` no longer aborts. The `tile:` option group had no registered subsection.
+- The one-shot-load peak picker no longer runs, and no longer logs "Loaded 0 frames.", on the streaming
+  default; the compact-store digest no longer hashes an empty map on the integer path.
+
+### Removed
+
+The spectrum digests are unchanged on every accepted input by all of the following: each removed option
+defaulted to its no-op value and each removed variable was a probe.
+
+- **Twenty-four falsified options** (from 71 to 47; 21 fewer in the plain `--help`). Each either carried
+  a falsification verdict in its own help text or had no measurement on record: the `merge:` and
+  `consolidate:` groups, the cross-precursor redistribution family (`rp_max`, `competitive`,
+  `apportion`), the wavelet smoother and its selftest, post-centroiding frame aggregation,
+  `open_search_safe` (a documented no-op), `rank_by`, `ambiguity_margin`, `max_trace_length_sec`,
+  `dedup_precursors` and `split_valleys_fwhm`. `gate:variance_support`, `gate:coelution`, the two
+  averagine-monoisotope flags and `charge:scoring=envelope` are deliberately kept: the record says to
+  keep them. Four finished experiment knobs, a never-called accessor, an orphaned doc comment, a
+  duplicate option read and a struct member with no reader go with them.
+- **Three more options with no measured non-default value.** An ini file that sets one must be
+  regenerated (`-write_ini`), and the mzML header no longer lists them:
+  - `trace:ms1_min_sample_rate` and `trace:ms2_min_sample_rate`: the default -1 selected
+    MassTraceDetection's own 0.5, and the MS2 option's help recorded that 0.3 and 0.1 lose peptides.
+  - `trace:native_ms2_neighbors`: never benchmarked, and the `.d` streaming reader the tool calls never
+    read it. The `[stream]` load line no longer prints it. `trace:native_ms1_neighbors` stays; its help
+    now stands on its own.
+- **Finished probe environment variables** (`SPEXTRACT_`-prefixed in 1.1.0, `SPEXTRACTOR_` in the
+  development tree): `MS2_RT_RANGE`, `WINDOW_FILE` and `WINDOW_FILE_OUT` (the
+  tiling plan's step-1 probe, superseded by the cell grid), `FRAG_DUMP` and `FRAG_DUMP_RT`,
+  `PICK_SERIAL`, `PICK_STATIC`, `PICK_MZ_MODE` ("under test" in v0.3.0; `weighted` stayed),
+  `Z1_CHARGE_UNSET`, `PRECURSOR_LIST`, and `TILE_TRIM`, which is now folded into `perf:malloc_trim`.
+- **Log lines no tool reads**: the window-loop stage breakdown and its `score gate` line, the `MS1` and
+  `MS2` RT-span lines, `Measured MS1 FWHM`, `[ms2ext]`, `[gstat]`, the per-tile `[tof] window` line,
+  `[probe]`, and the `not-a-frame` and `trimmed-out` fields of `[soa-rt]` (always equal to `off-grid`,
+  and always 0). `[perf]`, `[det]`, `[trim]`, `[tile]`, `[infer]`, `[tstage]`, `[dnoise]`,
+  `[ms1-prune]` and `[ms1-hist]` are unchanged.
+- **Dead code**, digest-identical: the unreachable envelope-off sort in the envelope scorer, the
+  always-zero monoisotope bin fields of a precursor (MS1 traces carry no flight-time bin),
+  `TofAxis::span`, the `compactify()` copy of `compactifyInto()`, the `_OPENMP` and `_WIN32` branches of
+  a build that requires OpenMP and POSIX, and one-caller layers (`scoreCandidates_`, `weighted_` and
+  `assembleFromList_` are now `assembleOne_`). Boilerplate goes too, from `CMakeLists.txt` (one
+  `-ffp-contract=off` declaration), the unit tests and the e2e suite.
+  **Together with the options and the probes, `src/` is 1,357 lines shorter** (2,050 removed, 693
+  added).
+- Option help is cut to the fact, the escape and a pointer to the measurement, and several help texts
+  are corrected: `assembly:im_weight_sigma` changes which fragments survive the cap;
+  `assembly:default_charge` does nothing while `require_isotope_support` is on; `trace:band_edges` falls
+  back to the OpenMS detector, rather than refusing, when there is no tdf; `perf:ms1_trace_bands` and
+  `perf:trace_bands` are not exact partitions; a single `%` replaces `%%`, which printed literally; and
+  the three options whose output does not depend on their value say *digest-identical* in so many words.
+  Comments are trimmed to their invariants; the measurement history stays in docs/BASELINE.md and git.
+
+### Measured
+
+Everything in this section is digest-identical on both pinned acquisitions unless the entry says
+otherwise, so the peptide sets are unchanged by construction and no search was needed.
+
+- **Four changes, interleaved A/B on a 2-hour acquisition, arms alternating on one node:
+  13:42.9 -> 11:17.6 mean wall, -17.7%, peak memory unchanged.**
+  - **The Savitzky-Golay coefficients are cached (OpenMS patch).**
+    `ElutionPeakDetection::smoothData()` constructed a filter and called `setParameters()` on every mass
+    trace, and `updateMembers_()` recomputes the coefficients with one Eigen SVD per half-window each
+    time. They depend only on (frame_length, polynomial_order) -- a handful of values in a run -- while
+    `smoothData()` runs once per trace, hundreds of millions of times. A thread_local cache leaves the
+    coefficients, the filtering loop and every float conversion untouched. **MS1 tracing CPU -40%,
+    window loop -22.5%.**
+  - **mzML spectra are encoded in parallel and written in order (fourth OpenMS patch).** Writing was the
+    largest serial block left, 10.7% of the run at 1.0x, and it is CPU-bound rather than I/O-bound: it
+    sustained ~400 MB/s against a filesystem measured at 4.0 GB/s. Serialising one spectrum is
+    independent of every other; only the concatenation is ordered. **WRITE 90.0 s -> 21.1 s,
+    1.0x -> 49x.** Each thread needs its own handler and validator -- OpenMS' writer memoises CV-term
+    validation in mutable state, and sharing one handler corrupts the heap.
+  - **The canonical sort sorts keys, not spectra**, and the assembled PeakMap takes the vector whole.
+    `std::sort` moves what it is handed, and an `MSSpectrum` is ~750 bytes against 32 for a key.
+    **SORT -61%; the ASSEMBLE phase is gone.**
+- **The drained compact store is returned when the last window has materialised.** The window loop's
+  peak held ~40 GB of dead per-frame vectors in the allocator's free list for its whole life; one
+  `malloc_trim` at the moment the last window's slab exists returns it. Interleaved A/B on a 2-hour
+  acquisition, two reps each: **peak RSS 169.1 -> 138.1 GB (-18%)**, wall within the pair spread.
+- **The mzML is written by a streaming writer (`TileWriter`)**: header once, spectra appended in the
+  canonical order in parallel-encoded chunks with the index offsets rebased as they land, the declared
+  count exact when the total is known and a same-width placeholder otherwise. Bytes from
+  `<spectrumList>` on are the bulk writer's; **WRITE 19.6 -> 13.2 s on dataset D** (the per-thread
+  encoders no longer share a handler). Emitted spectra now carry `id="spectrum=<rank>"`.
+- **The loader builds each window's peak slab directly.** The per-window `CompactFrame` store and its
+  copy at window start are gone; frames are appended as they are picked, m/z quanta become flight-time
+  bins in place when the window starts, and the batch's windows are appended in parallel from one
+  reusable scratch. Output and every per-window slab digest identical. It costs +12 s of LOAD on
+  dataset D today (first-touch page faults on fewer threads; on the backlog) and lifts the load-phase
+  peak by ~3 GB there, below the window loop's peak on a 2-hour file.
+- **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span, first
+  frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
+- **The per-structure memory ledger and the phase table were repaired** (instrumentation only; no
+  shipped behaviour changes). Three independent reviewers refused to price allocator reclamation off the
+  previous version, and each of their four objections was correct. The tile loop's read, sort and write
+  all run INSIDE the window loop, and the table summed every row, so `TOTAL(measured)` reached 105-109%
+  of the run and the unattributed column went negative; phases now carry a nesting depth and an enclosed
+  row is marked and left out of the sum. The MS1 band partition -- a full copy of the MS1 map plus a
+  1-5% halo, and the largest allocation of the MS1 phase -- was carried under `ms1_map` until detection
+  returned; it is handed to `band_arena` at the swap and released band by band, and it measures
+  **13.6 GiB on dataset D where the old ledger reported 0.6**. A window's emitted spectra were charged
+  only after the stage that produces them, and are now charged as they are emitted, together with the
+  ~700 bytes of empty slot header per owned precursor. The columns were `>>20` of a byte count and were
+  labelled `_mb`; they are `_mib`, and `bench/ledger_report.py` reads either. MassTraceDetection's own
+  internal copy of each band remains unattributed: charging it needs an OpenMS patch, and the source now
+  says so where the gap is.
+- **Review and fix passes.** The dnoise port was reviewed twice before it was defaulted on, and the
+  release candidate was reviewed twice more: a code round that produced the memory default, the
+  simplification pass and the export scrubs, and a re-review of the renamed tree that produced seven
+  further fixes (three of them holes in the deploy transaction, the rest help text and comments that
+  described the code as it used to be). Each pass is recorded with its verdicts. **The last round ran
+  two external reviewers and an internal pass instead of the usual three external reviewers -- the
+  third was unavailable -- so that round is not a complete three-model review**, and nothing it raised
+  was deferred.
+- Left as they are, on purpose: no runtime self-test of the dnoise gate against third-party compiler
+  flags, no ledger charge for the filter's scratch, the 2^24 intensity bound and the recovery's search
+  bounds.
 
 ## v2.0.0 — 2026-09-08
+
+*Never published: v2.0.0 was an internal development tag, so the public version line runs 1.0.0 -> 1.1.0
+-> 1.2.0 and the changes below first reach users in 1.2.0.*
 
 **Why 2.0.** The interface breaks: the executable is `spextractor`, so every script that called
 `spextract` has to change, and ini files written by 1.x carry the old tool-name section and must be

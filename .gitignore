@@ -17,10 +17,10 @@ evidence/
 # Review dispatch/stderr logs: the .md reviews are the artefact.
 docs/reviews/**/*.log
 
-# Corpus review inputs: the brief and the two codex session transcripts (the brief echoed back,
-# then a quota error -- codex returned 0 bytes) quote the registry, so they carry the 43 public
-# raw .d paths on ceph. No tracked file names a raw acquisition path; these stay local. The
-# review artefacts -- verdicts.md, kimi.*, vibe.*, adv_review.log -- are committed.
+# Corpus review inputs: the review brief and the raw session transcripts of the reviewer that
+# returned nothing (the brief echoed back, then a quota error) quote the sample registry, so they
+# carry 43 raw acquisition paths. No tracked file names a raw acquisition path; these stay local.
+# The review artefacts themselves -- the verdicts, the per-reviewer reports and the dispatch log --
+# are committed.
 harness/review/corpus-brief.md
-harness/review/codex.transcript
-harness/review/codex_rerun.transcript
+harness/review/*.transcript

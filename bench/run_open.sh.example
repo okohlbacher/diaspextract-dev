@@ -36,7 +36,7 @@ echo "entrapment: $NT target / $NE foreign, ratio $RATIO" >> $L
 
 # ---- arms: reuse mzML already produced --------------------------------------------------------
 # All three arms must come from ONE node and ONE binary. base and envelope already exist here;
-# split_count exists only on spock, from a different binary. Comparing across nodes/binaries is
+# split_count exists only on one node, from a different binary. Comparing across nodes/binaries is
 # precisely the error class this benchmark was built to eliminate, so it is re-extracted here
 # rather than copied.
 TOOL=/path/to/scratch/OpenMS/build/bin/diaspextractor
