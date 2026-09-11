@@ -4,7 +4,7 @@ Re-verified against the code 2026-09-05, every claim below checked by hand:
 **most of this document argues against the wrong failure.**
 
 **1. `4->2` means WE said 4 and the truth was 2 -- an OVERCALL, not an undercall.**
-`harness/collate.py` keys the counter `zc[(z, best["Precursor.Charge"])]` with `z` read off OUR
+The benchmark collation keys the counter `zc[(z, best["Precursor.Charge"])]` with `z` read off OUR
 mzML, and prints it `f"{a}->{t}"`. So the key is (ours, truth). The delta-mass a search
 engine sees is ours minus truth = **+1198 Da** at m/z 600, not the -1198 quoted in the
 `assembly:open_search_safe` help string and repeated below. The repository does not agree with
@@ -58,7 +58,7 @@ population is disjoint from the shipped one, so 74.6% cannot be differenced agai
 nonetheless still quoted as a live adoption gate in `bench/README.md`.
 
 **8. Charge is the only metric in the harness with no chance floor.** The shifted-query control in
-`harness/collate2.py` records `matched_decoy` but not `charge_pairs`. Correcting this can only
+the benchmark collation records `matched_decoy` but not `charge_pairs`. Correcting this can only
 help: on a chance match our z is independent of truth, so chance agreement is
 `sum_z p_ours(z) p_truth(z) <= max_z p_truth(z)` -- chance matches drag the score toward or below
 the constant baseline, so the honest margin over "always answer z=2" is **wider** than +5.0 points.

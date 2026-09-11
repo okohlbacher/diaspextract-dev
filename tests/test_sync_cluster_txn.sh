@@ -74,7 +74,9 @@ mk_node() {
   # real make/mtime semantics; like CMake's Makefile generator, libOpenMS relinks before the tool compiles, and
   # the tool's compile reads its inputs before the (slow) rest of the build writes the binary. A failing compile
   # takes a second after the relink, as a real one does: make with 1 s timestamps (macOS make 3.81) would
-  # otherwise see a header restored in the same second as no newer than the lib.
+  # otherwise see a header restored in the same second as no newer than the lib. And a successful build returns a
+  # second after it wrote the binary: the next deploy would otherwise promote in that second, and make 3.81 would
+  # call the tree up to date and do nothing.
   printf '%b\n' \
    'I=../src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h' 'T=../src/topp' \
    'spextractor: bin/spextractor' \
@@ -83,7 +85,7 @@ mk_node() {
    '\tcat $^ > $@.part' \
    '\ttouch ../building; sleep $$(cat ../slow); rm -f ../building' \
    '\tif grep -q BREAK_BUILD $(T)/spextractor.cpp; then sleep 1; echo "error: forced compile failure" >&2; exit 1; fi' \
-   '\tmv -f $@.part $@' '.PHONY: spextractor' > $O/build/Makefile
+   '\tmv -f $@.part $@' '\tsleep 1' '.PHONY: spextractor' > $O/build/Makefile
 }
 install_script() {  # path-substituted copy; refuses if any real cluster path survives
   sed -e "s#/scratch/kohlbach#$R#g" -e "s#/ceph/ibmi/abi/oliver/spextract#$N/ceph#g" "$1" > "$2"

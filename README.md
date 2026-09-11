@@ -103,7 +103,7 @@ sage sage.json -o results pseudo.mzML
 | option | default | what it does |
 |---|---|---|
 | `-threads` | all cores | worker threads; an explicit `-threads 1` on the command line is honoured (only the command line is inspected: `threads = 1` in an ini file is treated as unset). Parallelism is isolation windows × flight-time bands, and the window loop reaches ~78× (30-min) to ~89× (2-hour) thread occupancy at 100 threads; window concurrency is bounded by a free-RAM admission gate, not by core count |
-| `-out_type` | follows the extension | `mzML` or `mzpeak`; in a build with mzPeak, `.mzpeak` when the extension says nothing (a plain build writes mzML only). Search engines read mzML, so write `.mzML` whenever a search comes next. mzPeak is written in one piece, so a run longer than one 600-s cell writes it only with `-tile:cells_per_tile 0` |
+| `-out_type` | follows the extension | `mzML` or `mzpeak`; in a build with mzPeak, `.mzpeak` when the extension says nothing (a plain build writes mzML only). Search engines read mzML, so write `.mzML` whenever a search comes next. mzPeak is written in one piece, so it runs as one tile (the whole run's memory, with a warning) |
 | `-trace:detector` | `integer` | `integer` works on the instrument's flight-time bin; `openms` uses OpenMS `MassTraceDetection`. Different algorithms — see below |
 | `-charge:min_charge` | 1 | lowest precursor charge to emit. Singly charged precursors are genuine on tryptic data (their mobility sits on the 1+ trend line) and are 14–20% of Sage peptides on a 2-hour acquisition, though only ~1.7% on a 30-minute one. Their stratum carries 3–9% entrapment FDR under a pooled 1% cut (file-dependent), so control FDR per charge downstream. `-charge:min_charge 2 -charge:im_charge_veto false` restores the old behaviour (the veto runs first, so `2` alone keeps its re-called 2+) |
 | `-charge:im_charge_veto` | `true` | the 2+ and 3+ ion-mobility trend lines are fitted per run from the run's own confident precursors; a z=1 call on the 2+ line (11–26% of z=1 calls depending on the file: a halved 2+ envelope) is re-called 2+, one on the 3+ line is dropped. Genuine 1+ ions are untouched |
@@ -116,7 +116,7 @@ sage sage.json -o results pseudo.mzML
 | `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: dataset D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB |
 | `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
 | `-trace:band_edges` | `acquisition` | the integer detector's per-window band edges come from the tdf's metadata (the digitizer's last bin) instead of the window's resident peaks, so a streaming reader can reproduce them. Measured neutral on both benchmark files (Sage +1/+1, MSFragger 0/−3, entrapment +0.00/+0.01 points); `slab` reproduces the pre‑2026‑09‑10 output |
-| `-tile:cells_per_tile` | 1 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. On a `.d` (the streaming source) **memory is one tile's**: at the defaults TNBC 009 peaks at 21.07 GB in 13 tiles with a trim between tiles against 99.70 GB in one (wall 9:57 against 9:42, same node), dataset D at 21.99 GB in 3 tiles against 37.44 GB (3:47 against 3:15). mzPeak output needs one tile |
+| `-tile:cells_per_tile` | 1 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. On a `.d` (the streaming source) **memory is one tile's**: at the defaults TNBC 009 peaks at 21.07 GB in 13 tiles with a trim between tiles against 99.70 GB in one (wall 9:57 against 9:42, same node), dataset D at 21.99 GB in 3 tiles against 37.44 GB (3:47 against 3:15). mzPeak output always runs as one tile |
 | `-tile:rt_sec` | 600 | the integer detector traces each isolation window in fixed retention-time **cells** of this pitch, cut at the run's MS1 frame times and recorded in the mzML header (`spx:tile_boundaries`). The cut is part of the definition: any grouping of cells into tiles, resident or streamed, reproduces the same spectra bit for bit. Science price measured 2026-09-10 against whole-window tracing (`-1`): Sage +0.8% on both benchmark files, MSFragger +1.5% / flat, entrapment FDR +0.14 / +0.16 points (inside the release rule); ~2.5% of peptides straddle a cut line and lose 9% there against 6–8% elsewhere |
 
 `spextractor --helphelp` lists every option, most with a pointer to the measurement behind the default.
@@ -195,7 +195,7 @@ by raw counts. The two statements are about different things and both have been 
 python3 test/test_spextractor.py build/spextractor
 ```
 
-Twenty-four end-to-end checks against a synthetic acquisition cover:
+Twenty-four end-to-end checks against a synthetic acquisition (twenty-five in a build that writes mzPeak) cover:
 - isotope ownership and the charge floor;
 - parameter validation;
 - thread- and tile-count invariance;
@@ -224,7 +224,6 @@ scripts/    build helpers, OpenMS patch application, cluster deployment
 test/       the end-to-end suite
 tests/      calibration and entrapment tests, golden calibration values
 bench/      benchmark drivers, the semantic digest and the cluster launcher
-harness/    the benchmark harness and the sample-registry template
 docs/       measurements, design notes and review records
 ```
 

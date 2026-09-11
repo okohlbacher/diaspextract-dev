@@ -45,8 +45,7 @@ The second form needs no OpenMS and is what CI runs on four platforms.
   measurement; a wall-clock delta from two runs on a shared machine usually isn't either.
 - Keep defaults reproducible: a run with `-in`, `-out` and `-threads` must reproduce the benchmarked
   configuration. There is a test for this, because it has been broken before.
-- Don't commit acquisition or specimen identifiers. `harness/samples.yaml` is untracked for this
-  reason; copy `harness/samples.yaml.example`.
+- Don't commit acquisition or specimen identifiers; keep sample paths and names in untracked local files.
 
 ## Reporting a bug
 

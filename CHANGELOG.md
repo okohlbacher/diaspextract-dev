@@ -9,15 +9,18 @@
   each pair back to back on one node:
   - TNBC 009: 99.70 GB at one tile, 21.07 GB at 13 tiles with the trim between tiles; wall 9:42 → 9:57.
   - dataset D: 37.44 GB at one tile, 21.99 GB at 3 tiles with the trim between tiles; wall 3:15 → 3:47.
-  - `-tile:cells_per_tile 0` restores one tile. mzPeak output is written in one piece, so a run longer than one cell
-    writes mzPeak only with `-tile:cells_per_tile 0`; the refusal now names that escape.
+  - `-tile:cells_per_tile 0` restores one tile. mzPeak output is written in one piece, so a run that writes mzPeak
+    runs all its cells as one tile (the whole run's memory) and logs a warning. The output format is resolved before
+    the load; an mzPeak run with more than one tile used to be refused only after the load and the MS1 tracing.
 - **`perf:malloc_trim` also trims between tiles**, after tile k is written and before tile k+1 is read. This is the
   `SPEXTRACTOR_TILE_TRIM` probe folded in; the variable is gone. It takes about 4 GB off TNBC 009 and 0.5 GB off D at
   the defaults. The `[trim] tile k/n` log line is unchanged.
 - **Not adopted: an eager glibc trim threshold** (`M_TRIM_THRESHOLD` 64 MiB with `M_TOP_PAD` 0). On TNBC 009 it went
   only 0.3 GB below the between-tile trim (20.73 against 21.07 GB) and nearly tripled the MS1 load (34.3 → 96.3 s); on
   D it cost 11% wall (3:41 → 4:06).
-- e2e checks 16-18 name `-tile:cells_per_tile 0` for their one-tile reference runs.
+- e2e checks 15-18 name `-tile:cells_per_tile 0` for their one-tile runs. Check 15 also asserts that it traces two or
+  more cells in one tile: at the new default it had silently become a tiled run. New check 18b, in builds that write
+  mzPeak (a plain build skips it): mzPeak output at the default runs its cells as one tile.
 
 ### Removed (2026-09-11) -- the v3.0.0 cleanup; spectrum digests unchanged on every accepted input
 
@@ -26,6 +29,7 @@
   - `trace:ms1_min_sample_rate` and `trace:ms2_min_sample_rate`: the default -1 selected MassTraceDetection's own
     0.5, and the MS2 option's help recorded that 0.3 and 0.1 lose peptides.
   - `trace:native_ms2_neighbors`: never benchmarked, and the `.d` streaming reader the tool calls never read it.
+    The `[stream]` load line no longer prints it.
     `trace:native_ms1_neighbors` stays; its help now stands on its own.
 - **Finished probe environment variables**: `SPEXTRACTOR_MS2_RT_RANGE`, `SPEXTRACTOR_WINDOW_FILE` and
   `SPEXTRACTOR_WINDOW_FILE_OUT` (the tiling plan's step-1 probe, superseded by the cell grid),

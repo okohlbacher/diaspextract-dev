@@ -2111,7 +2111,8 @@ protected:
     registerOutputFile_("out", "<file>", "", "Output pseudo-MS2 spectra. The FORMAT FOLLOWS THE "
                         "EXTENSION: .mzpeak (default) or .mzML. mzPeak is columnar and much smaller; "
                         "mzML is what DDA search engines read today, so pass an .mzML name (or "
-                        "-out_type mzML) if the next step is a search.");
+                        "-out_type mzML) if the next step is a search. mzPeak is written in one piece, "
+                        "so it runs as one tile (the whole run's memory).");
 #ifdef SPEXTRACTOR_WITH_MZPEAK
     setValidFormats_("out", {"mzpeak", "mzML"});
 #else
@@ -2119,7 +2120,7 @@ protected:
 #endif
     registerStringOption_("out_type", "<type>", "", "Force the output format instead of taking it "
                           "from the extension of -out. Empty = follow the extension; mzPeak if the "
-                          "extension says nothing.", false);
+                          "extension says nothing. mzPeak output runs as one tile (see -out).", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
     registerTOPPSubsection_("gate", "Precursor-to-fragment co-localization gate");
@@ -2152,7 +2153,7 @@ protected:
                        "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
                        "Output is digest-identical for any tile count (the cell grid); memory is one tile's. At the defaults TNBC 009 peaks at 99.70 GB in one "
                        "tile and 21.07 GB in 13 tiles with a trim between tiles (wall 9:42 -> 9:57, same node), dataset D at 37.44 -> 21.99 GB in 3 tiles "
-                       "(3:15 -> 3:47). 0 = all cells in one tile, which mzPeak output needs (it is written in one piece).", false, true);
+                       "(3:15 -> 3:47). 0 = all cells in one tile; mzPeak output always runs as one tile (it is written in one piece).", false, true);
     registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time behind the valley splitter's window (chrom_fwhm / scan time). 'frame': the run's MS1 cycle time, one value for every trace. 'trace': each trace's own average cycle time (OpenMS's behaviour; the default before 2026-09-09, Sage -5.7% on dataset D): docs/BASELINE.md '2026-09-09: the valley splitter's scan time'.", false, true);
     setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' works on the instrument's flight-time bins "
@@ -3189,6 +3190,31 @@ protected:
     const bool stream_load = (getStringOption_("perf:stream_load") == "true");
     const bool trim_on = (getStringOption_("perf:malloc_trim") == "true");
     bool streamed = false;
+    // Output format, resolved before the load: it decides the tiling below (mzPeak output runs as one tile), and a
+    // plain build refuses -out_type mzpeak here in milliseconds. The extension is authoritative, because that is what
+    // a user typing `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
+    FileTypes::Type out_type = FileTypes::MZML;
+    const String out_type_opt = getStringOption_("out_type");
+#ifdef SPEXTRACTOR_WITH_MZPEAK
+    if (!out_type_opt.empty())
+      out_type = (out_type_opt == "mzML") ? FileTypes::MZML : FileTypes::MZPEAK;
+    else
+    {
+      const FileTypes::Type by_name = FileHandler::getTypeByFileName(out);
+      out_type = (by_name == FileTypes::MZML || by_name == FileTypes::MZPEAK) ? by_name
+                                                                             : FileTypes::MZPEAK;
+    }
+    if (out_type == FileTypes::MZPEAK)
+      writeLogInfo_("Writing mzPeak. NOTE: DDA search engines read mzML, not mzPeak -- if this file "
+                    "is going straight into a search, write .mzML instead (or -out_type mzML).");
+#else
+    // Built without mzPeak support: mzML is the only container this binary can write. Refuse an
+    // explicit request for mzPeak rather than silently writing something else.
+    if (!out_type_opt.empty() && out_type_opt != "mzML")
+      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary "
+            "can only write mzML.");
+#endif
     // [3a] trace:band_edges=acquisition needs the tdf's GlobalMetadata bounds: refuse BEFORE the
     // load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
     // tdf is recovered, below). Milliseconds against minutes of loading.
@@ -3385,8 +3411,7 @@ protected:
           report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
-                      + String(ms2_by_window.size()) + " (native ms2_neighbors="
-                      + String(cfg.dia_ms2_n_neighbors) + ")" + clk_() + rss_() + mem_());
+                      + String(ms2_by_window.size()) + clk_() + rss_() + mem_());
       }
       catch (const InputRefusal&) { throw; }   // a refusal of the input, not a reader failure: never fall back onto partial slabs
       catch (const Exception::BaseException& e)
@@ -4035,7 +4060,10 @@ protected:
     const int cells_per_tile = getIntOption_("tile:cells_per_tile");
     {
       const size_t n_cells_run = cell_edges.size() + 1;
-      const size_t per = (cells_per_tile <= 0 || cell_pitch <= 0.0) ? n_cells_run : (size_t)cells_per_tile;
+      const bool one_piece = (out_type != FileTypes::MZML);   // mzPeak output is bulk-only: one tile
+      const size_t per = (cells_per_tile <= 0 || cell_pitch <= 0.0 || one_piece) ? n_cells_run : (size_t)cells_per_tile;
+      if (one_piece && cells_per_tile > 0 && cell_pitch > 0.0 && n_cells_run > 1)
+        writeLogWarn_("[tile] mzPeak output is written in one piece: the " + String(n_cells_run) + " cells run as one tile (the whole run's memory); write mzML (-out_type mzML) for tiled memory.");
       for (size_t c0 = 0; c0 < n_cells_run; c0 += per)
       {
         const size_t c1 = std::min(n_cells_run, c0 + per);
@@ -4114,7 +4142,7 @@ protected:
     }
     // [tile] The output: settings and stamps are fixed before the first tile, the mzML writer is
     // opened once and fed a sorted block per tile (with one tile the count is exact and the bytes
-    // are the bulk writer's); mzPeak output is bulk-only, so it needs one tile.
+    // are the bulk writer's); mzPeak output is bulk-only, so it runs as one tile (the tiling above).
     PeakMap out_exp;
     std::shared_ptr<DataProcessing> out_dp = std::make_shared<DataProcessing>(getProcessingInfo_(DataProcessing::DATA_PROCESSING));
     // [provenance] Header stamps that make an archived file attributable: calibration path (exported from
@@ -4141,33 +4169,6 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
-    // Output format. The extension is authoritative, because that is what a user typing
-    // `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
-    FileTypes::Type out_type = FileTypes::MZML;
-    const String out_type_opt = getStringOption_("out_type");
-#ifdef SPEXTRACTOR_WITH_MZPEAK
-    if (!out_type_opt.empty())
-      out_type = (out_type_opt == "mzML") ? FileTypes::MZML : FileTypes::MZPEAK;
-    else
-    {
-      const FileTypes::Type by_name = FileHandler::getTypeByFileName(out);
-      out_type = (by_name == FileTypes::MZML || by_name == FileTypes::MZPEAK) ? by_name
-                                                                             : FileTypes::MZPEAK;
-    }
-    if (out_type == FileTypes::MZPEAK)
-      writeLogInfo_("Writing mzPeak. NOTE: DDA search engines read mzML, not mzPeak -- if this file "
-                    "is going straight into a search, write .mzML instead (or -out_type mzML).");
-#else
-    // Built without mzPeak support: mzML is the only container this binary can write. Refuse an
-    // explicit request for mzPeak rather than silently writing something else.
-    if (!out_type_opt.empty() && out_type_opt != "mzML")
-      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary "
-            "can only write mzML.");
-#endif
-    if (out_type != FileTypes::MZML && tiles.size() > 1)
-      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "mzPeak output is written in one piece, and this run has " + String(tiles.size()) + " tiles: write mzML (-out_type mzML), or run one tile (-tile:cells_per_tile 0).");
     std::unique_ptr<TileWriter> writer;
     // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
     // structurally valid file holding the earlier tiles only (review, step 2)

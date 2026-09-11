@@ -474,15 +474,19 @@ def main():
     # 15: the cell grid (tile:rt_sec) is thread-invariant: each cell is traced on its own slice with
     #     its own seeds/visited, band stores are absorbed in a fixed order, and the band count is
     #     explicit -- so 1 and 4 threads must give byte-identical spectra at a pitch that cuts the
-    #     fixture into two cells (14 cycles of 1.4 s; pitch 10 s = 7 frames -> 2 cells).
+    #     fixture into two cells (14 cycles of 1.4 s; pitch 10 s = 7 frames -> 2 cells). Both runs keep
+    #     the two cells in ONE tile (-tile:cells_per_tile 0): the only 1-thread run of a window body with
+    #     two or more cells. At the default of one cell per tile it silently became a tiled run.
     def c15():
         # the cells exist only on the integer detector: without the tdf the tool falls back to
         # openms and clears the grid AFTER logging it (the first version of this check passed vacuously)
         env = tdf_env()
-        r1 = run(binary, inp, os.path.join(work, "cell1.mzML"), extra=("-tile:rt_sec", "10"), threads=1, env=env)
-        r4 = run(binary, inp, os.path.join(work, "cell4.mzML"), extra=("-tile:rt_sec", "10"), threads=4, env=env)
+        r1 = run(binary, inp, os.path.join(work, "cell1.mzML"), extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "0"), threads=1, env=env)
+        r4 = run(binary, inp, os.path.join(work, "cell4.mzML"), extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "0"), threads=4, env=env)
         m = re.search(r"\[cell\] pitch [0-9.]+ s = (\d+) MS1 frames .*?: (\d+) cells", r1.stdout + r1.stderr)
         assert m and int(m.group(2)) >= 2, "the fixture was not cut into >= 2 cells:\n" + (r1.stdout + r1.stderr)[-800:]
+        mt = re.search(r"\[tile\] (\d+) tile\(s\) of up to (\d+) cell", r1.stdout + r1.stderr)
+        assert mt and int(mt.group(1)) == 1 and int(mt.group(2)) >= 2, "check 15 must trace >= 2 cells in ONE tile:\n" + (r1.stdout + r1.stderr)[-800:]
         assert stamp(os.path.join(work, "cell1.mzML"), "detector") == "integer", "cells need the integer detector; it did not run"
         assert stamp(os.path.join(work, "cell1.mzML"), "tile_boundaries") not in (None, "", "none"), "the header records no cut lines"
         assert digest(os.path.join(work, "cell1.mzML")) == digest(os.path.join(work, "cell4.mzML")), \
@@ -505,7 +509,7 @@ def main():
         env = tdf_env()
         inp_t = tiled_fixture("tiles.mzML")
         one = os.path.join(work, "tiles_one.mzML")
-        # every one-tile reference names 0: the default is one cell per tile since 2026-09-11 (checks 16-18)
+        # every one-tile reference names 0: the default is one cell per tile since 2026-09-11 (checks 15-18)
         run(binary, inp_t, one, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "0"), threads=4, env=env)
         n_one, cnt_one = invariants(one, "one-tile file")
         assert cnt_one == str(n_one).encode(), f"one-tile count is not exact: {cnt_one!r}"
@@ -568,6 +572,24 @@ def main():
         assert digest(t) == digest(one), "the tiled run of a window with an empty tile differs from the one-tile run"
         invariants(t, "empty-tile file")
     check("a window with no frames in a tile", c18)
+
+    # 18b: mzPeak output is written in one piece, so a run whose cells make several tiles at the default
+    #      tile:cells_per_tile runs them as ONE tile, with a warning; it used to be refused after the load and the
+    #      MS1 tracing. Only a build that writes mzPeak can run this; a plain build skips it and says so.
+    hlp = subprocess.run([binary, "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if re.search(r"valid formats: [^)]*'mzpeak'", re.sub(r"\s+", " ", hlp.stdout + hlp.stderr)):
+        def c18b():
+            inp_m = tiled_fixture("tiles_mzp.mzML")
+            o = os.path.join(work, "tiles.mzpeak")
+            r = run(binary, inp_m, o, extra=("-tile:rt_sec", "10"), threads=2, env=tdf_env())
+            log = r.stdout + r.stderr
+            mt = re.search(r"\[tile\] (\d+) tile\(s\) of up to (\d+) cell", log)
+            assert mt and int(mt.group(1)) == 1 and int(mt.group(2)) >= 2, "mzPeak output did not run its cells as one tile:\n" + log[-800:]
+            assert "mzPeak output is written in one piece" in log, "the cells ran as one tile without the warning:\n" + log[-800:]
+            assert os.path.exists(o) and re.search(r"Wrote [1-9]\d* pseudo-MS2 spectra", log), "no mzPeak spectra written:\n" + log[-800:]
+        check("mzPeak output runs its cells as one tile instead of refusing", c18b)
+    else:
+        print("  SKIP  mzPeak output runs its cells as one tile: this build writes no mzPeak (--help lists no mzpeak format)")
 
     # 19: the MS1 prune (perf:ms1_prune, default true) drops picked MS1 peaks at or below
     #     trace:noise_threshold_int at load and must leave the output byte-identical. The fixture makes it

@@ -3165,8 +3165,9 @@ Peak by tile count, at identical output:
 - **On the final build, at the defaults** (arm `dnoise_s2b`, identical output in every arm):
   - TNBC 009 on `data`: 99.70 GB and 9:42 at one tile, against 21.07 GB and 9:57 at 13 tiles with a trim between
     tiles (20.73 GB with the eager threshold, which nearly triples the MS1 load);
-  - D on ibminode05: 37.44 GB and 3:15 at one tile, against 22.48 GB and 3:41 at 3 tiles.
-  - The tile default, a per-tile trim and the eager threshold are open decisions
-    (docs/reviews/2026-09-10-dnoise-port/final-matrix.md).
+  - D on ibminode05: 37.44 GB and 3:15 at one tile, against 22.48 GB and 3:41 at 3 tiles, and 21.99 GB and 3:47 at
+    3 tiles with a trim between tiles (18.14 GB and 4:06 with the eager threshold).
+  - Decided 2026-09-11: `tile:cells_per_tile` 1 and the trim between tiles are the defaults (TNBC 009 21.07 GB / 9:57,
+    D 21.99 GB / 3:47); the eager threshold is not adopted (CHANGELOG).
 
 Details: docs/reviews/2026-09-10-streaming-memory/data6-tile-count.md.
