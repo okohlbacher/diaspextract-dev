@@ -38,7 +38,8 @@ all of them (sqlite `immutable=1`, read-only) and prints the lines to paste; `ac
 The registry is read with a loader that refuses duplicate keys (PyYAML's `safe_load` keeps the last one
 without a word), and no two samples of a plan may share a raw path or a pin (G-V01).
 
-A plan is a top-level section (`corpus_v3`, and the proof plans `corpus_v3_selftest`, `corpus_v3_selftest_r2`)
+A plan is a top-level section (`corpus_v3`, and the proof plans `corpus_v3_selftest`,
+`corpus_v3_selftest_r2`, `corpus_v3_selftest_v120`)
 with exactly these keys:
 
 | key | meaning |
@@ -49,7 +50,7 @@ with exactly these keys:
 | `results_ceph` | where `collect` copies to (basename must start with `corpus_v3`) |
 | `report` | table path relative to the repository |
 | `threads` | `-t` for diaTracer, `-threads` for ours (100) |
-| `load_wait_min` | how long the load gate waits before running a pair anyway and flagging it (60) |
+| `load_wait_min` | how long the load gate waits before running a pair anyway and flagging it (20; T0 decision 2026-09-11) |
 | `n_samples` | the number of samples across all queues (49); anything else refuses the plan (G-V01) |
 | `search_db_sha256` | sha256 of the two node-local databases the configs name (`sage_fasta`, `msfragger_db`), checked on each node before staging (G-V12) |
 | `tools` | `sage`, `sage_config`, `msfragger_jar`, `msfragger_params`, `patch`, `fix` sources (copied run-local) |
@@ -416,23 +417,131 @@ user decision. What changed is described in the sections above. Proof:
   changed ceph-resident library and a changed measurement-code hash are not adopted.
 - **Offline selftest on data** with the same harness: 136/136 (the extra case reads the real `/proc`).
 
+## Release preflight and smoke (2026-09-11, arm `v1.2.0`)
+
+The last two items the review left open (`harness/review/verdicts.md`, "Still open" 2 and 3): the real
+release binary had never run under the harness, and no multi-tile, zero-padded output had gone through
+either engine. Both are closed here. `corpus_v3` now points at the published arm and waits 20 min.
+
+**Preflight on all three queue nodes** (`corpus.py preflight`, `PREFLIGHT_OK`), the first check of
+ibminode05:
+
+| | spock | data | ibminode05 |
+|---|---|---|---|
+| cores / 1-min load | 224 / 4.5 | 224 / 80 | 128 / 57 |
+| python, GNU `time -v`, `/proc` | ok | ok | ok |
+| JDK | 21.0.12 | 21.0.12 | 21.0.12 |
+| `sage_fasta` / `msfragger_db` sha256 | pins match | pins match | pins match |
+| queue lock, our tools running | free, none | free, none | free, none |
+| `/scratch` free | 18.9 TB | 9.0 TB | 8.4 TB |
+
+Beyond what `preflight` itself covers, the same node-side code (`arm_env`, `identity`, `arm_meta`) was run
+read-only on each node: the arm resolves to `/ceph/ibmi/abi/oliver/spextract/v1.2.0`, `SPX_BIN` is inside
+it, `env.sh` exports nothing that would be stripped (`env_removed` empty), `--help` gives the label
+**DIAspeXtractor 1.2.0**, the provenance's `binary_sha256` equals the binary's, and `ldd` under the arm
+environment resolves **18 libraries, all inside the arm, `/ceph` and the system library directories**
+(12 on ceph). Equal on all three nodes: binary, `lib/**`, the 12 ceph-resident libraries, the diaTracer
+jar and `ext/bruker/**` (including `libtimsdata-2-21-0-4.so`), Sage, the MSFragger jar, both engine
+configs, the patch and fix scripts, and both databases. The six libraries that differ are the node-local
+glibc set (`libc`, `libm`, `libpthread`, `librt`, `libdl`, `ld-linux`), which `build_identity` excludes by
+design and the table header lists.
+
+**Smoke, plan `corpus_v3_selftest_v120`, node ibminode05, HeLa_22** (120 min, the file the release smoke
+showed at 12 tiles), 08:45:20-08:51:45, `QUEUE_DONE failed 0 mzml_left 0`:
+
+- gate flagged (`load 47.0 > 12`, waited 61 s); staging 15.3 s; `acq_min_read` 120.0; order diaTracer first.
+- diaTracer 2:02, 91.6 GB, 62,784 spectra = its `Writing mzML file...62784 scans`, and equal to the count in
+  the reference mzML that has sat beside the raw since 2026-09-05 (unchanged, 421,492,539 B).
+- Ours 0:51, 4.8 GB, **`spectrumList count="0000061342"`** over **12 tiles**
+  (`coverage: 144644 precursor-window pairs owned exactly once over 12 tile(s)`), equal to
+  `Wrote 61342 pseudo`.
+- Both arms flagged `during` (foreign CPU 40.8 and 40.1 cores > 12) from other users' work.
+- Four searches, all ok, every read check on a real value: patch 62,784 = the count; MSFragger
+  `Scans` **62,784** and **61,342** -- the zero-padded count read back exactly; Sage lower bounds 62,296
+  (99.2%) and 52,059 (84.9%, the sparse 10 ng spectra below `min_peaks`, as review F1 predicted).
+- Peptides: Sage 9,186 / 4,423, MSFragger 8,116 / 2,850 (diaTracer / ours). **The two diaTracer cells equal
+  docs/HELA-TABLE.md's published reference numbers for run 22 exactly** (9,186 and 8,116), which is an
+  independent check of the whole scoring path. The low ratios are this scheme, not a regression: the
+  2026-09-05 table has 4,764 / 2,676 for the old build on the same file.
+- `collect` copied 33 files to `/ceph/.../corpus_v3_selftest_v120/ibminode05` (0700, no group/other),
+  `table --source ceph` rendered the row complete, `purge` found nothing left.
+- Afterwards on ibminode05: no `*.mzML`, `*.mzBIN*` or staged copy under the root, root `0700`, the raw
+  basename only in `queue-*.json` (which `collect` skips) and nowhere in `records/`, `runs/` or on ceph,
+  bracketed `pgrep` for diaTracer, MSFragger, Sage, the extractor and the runner all 0, lock free.
+
+**Guard test on ibminode05** against the same arm (`guardtest --plan corpus_v3_selftest_v120 --node
+ibminode05`, nonce `20260911-090102-9df84f`, 09:01-09:08, node load 44-94): **39/39**, `guardtest --show`
+exit 0, lock free afterwards. This is the first guard test on ibminode05 and the first on the release
+binary. GT5 refused a wrapper arm carrying the release provenance
+(`binary_sha256 ['ec6ae270...'] != sha256(SPX_BIN) ffe94686...`); GT2 reproduced the republish SIGBUS
+(`rc=135 exit=0 signal=7`) and refused the wrong-pin raw; GT4 aborted on a binary changing mid-arm; GT6 ran
+a real HeLa_22 pair (2:50) whose four searches all failed as intended (Sage with 49,138 rows and 0 peptides,
+MSFragger without `TOTAL TIME`), kept both mzMLs and reported `failed 4`; GT7 and GT8 refused a second queue
+and a `collect` while the lock was held. Afterwards: no staged raw, mzML or mzBIN under the guardtest root,
+bracketed `pgrep` all 0, the ceph reference mzML and the published arm byte-identical.
+
+Offline `selftest` on the laptop with the same `corpus.py`: **135/135**, and the measurement hashes are
+still `050e2e2a` / `064af71b` / `4fe0a1ce` -- the harness has not drifted since the review. One caveat: the
+39/39 guard test of 2026-09-11 02:04 ran on `corpus.py` `10a088d9`, and the file that will run the corpus is
+`3601ef3a` (the rename pass landed afterwards in 3814eee). The three measurement hashes and the 135/135
+selftest are identical across the two, so no measured function changed -- and the guard test above re-proves
+all 39 cases on `3601ef3a` itself.
+
+### Estimated queue hours
+
+From the diaTracer reference mzML beside every raw (exact spectra and bytes for all 49), the `ref wall`
+columns of docs/HELA-TABLE.md and docs/TNBC-TABLE.md, the v1.2.0 walls of the release gates and this
+smoke, and a least-squares fit of the eight engine steps measured by the two harness runs (Sage
+0.387 ms/spectrum, MSFragger 12.4 s + 0.444 ms/spectrum, both at `search_workers: 1`):
+
+| node | n | phase 1 | phase 2 | gate wait at today's load | total |
+|---|---:|---:|---:|---:|---:|
+| spock | 24 | 6:07 | 6:21 | 0:00 (load 4.5, under 24) | **~12.5 h** |
+| data | 11 | 4:56 | 5:26 | 3:40 (load 66-80, every pair waits) | **~14.0 h** |
+| ibminode05 | 14 | 1:54 | 3:03 | 4:40 (load 54, every pair waits) | **~9.6 h** |
+
+The corpus finishes with the longest queue, so ~14 h at today's loads, one night. Phase 2 carries the
+uncertainty: it extrapolates the patch/fix step from 0.2-0.9 GB mzMLs to a ~28 GB TNBC one, and assumes
+our spectrum count equals diaTracer's on the HeLa schemes where v1.2.0 has never been measured (it is
+0.709x on the in-house file, 1.080x on TNBC, 0.977x on HeLa_22). Treat the totals as +-30%.
+
+Because both data and ibminode05 sit permanently above their load thresholds (24 for >= 200 cores, 12
+below), **every row from those two nodes will be flagged and none from them will enter the unflagged wall
+ratios**; spock at load 4.5 is the only node whose rows can be clean, which is an argument for leaving the
+largest queue there. Moving `TNBC_013` from data to ibminode05 would even the queues out (12.5 / 12.6 /
+11.6 h, longest 12.6 h), a ~1.4 h saving that is inside the estimate's own error bar; not taken.
+
 ## Before the real run
 
-- Publish the arm first and never republish it during the run. `v3.0.0/env.sh` must export `SPX_BIN`,
-  and `SPX_BIN.provenance` must carry `binary_sha256=`.
-- Point `corpus_v3_selftest.arm` at the v3 arm and run, on each node, `launch --plan corpus_v3_selftest`
-  (one small file), then `guardtest --node <n>`, and check `guardtest --show` exits 0. Both prove the
-  label, the `Wrote N pseudo` line and the arm on the renamed binary before a timed pair uses them. A
-  one-file smoke on a multi-tile output (e.g. HeLa_22) additionally proves MSFragger on a zero-padded
-  `spectrumList count`.
+- Publish the arm first and never republish it during the run. `<arm>/env.sh` must export `SPX_BIN`,
+  and `SPX_BIN.provenance` must carry `binary_sha256=`. **Done 2026-09-11: `corpus_v3.arm: v1.2.0`**, the
+  published release arm (`bin/diaspextractor`, sha256 `ec6ae270...`, git `91a1b28`).
+- Point a selftest plan at the release arm and run one file end to end, then `guardtest --node <n>` with
+  `guardtest --show` exit 0. Both prove the label, the `Wrote N pseudo` line and the arm on the renamed
+  binary before a timed pair uses them. A one-file smoke on a multi-tile output (e.g. HeLa_22) additionally
+  proves MSFragger on a zero-padded `spectrumList count`. **Done 2026-09-11**, plan
+  `corpus_v3_selftest_v120` -- see "Release preflight and smoke" below.
 - Run `preflight` (all queue nodes: python, GNU time, JDK feature version equal across nodes, database pins,
   nothing of ours running, lock free; `PREFLIGHT_OK`), then `dry-run --node <n>` for each node. Launch one
-  node at a time and check `LAUNCH_OK`.
-- Decide the node split and load wait at T0 from measured loads (review F7): at 01:05 data had a 1-min
-  load of 75 and spock 4.4; with `load_wait_min: 60` each pair on a loaded node waits an hour and then runs
-  flagged. Moving samples between queues is an edit of `samples.yaml` (keep `n_samples` at 49).
+  node at a time and check `LAUNCH_OK`. **Done 2026-09-11: `PREFLIGHT_OK` on spock, data and ibminode05**
+  (the first check of ibminode05), plus a `dry-run` on ibminode05.
+- Decide the node split and load wait at T0 from measured loads (review F7). **Decided 2026-09-11:
+  `load_wait_min: 20`** -- a pair on a node that stays loaded waits 20 min, then runs anyway with
+  `gate.contended = true` and the load in the record. The point is not to lose a day waiting for a quiet
+  moment that a shared node never gives; contended rows are flagged and excluded from the unflagged wall
+  ratios, and the peptide numbers do not depend on the load. The **split is unchanged** (spock 24, data 11,
+  ibminode05 14). Moving samples between queues is an edit of `samples.yaml` (keep `n_samples` at 49).
 - Search walls are indicative with `search_workers: 2`; set 1 if they are to be reported.
 - Keep other chains off the three nodes. G-V05 refuses a launch beside our own tools, and the load gate
   flags everything else.
 - Add `harness/corpus.py` and `harness/CORPUS.md` to `.export-private` (they name the comparison tool
-  and cluster paths); `samples.yaml` is already ignored.
+  and cluster paths); `samples.yaml` is already ignored. **Done**: `.export-private` excludes `harness/`
+  whole, so `harness/review/` is covered too.
+- Disk: phase 2 starts only after every pair of the queue has finished, so both mzMLs of every sample of
+  that queue are on the node at once. Estimated peak from the diaTracer reference mzML sizes plus the
+  largest staged `.d` and the phase-2 patched/fixed copies: spock ~573 GB, data ~507 GB, ibminode05
+  ~127 GB, against 18.9 / 9.0 / 8.4 TB free on 2026-09-11.
+- The Sage binary is the one every earlier table used (sha256 `d3820543a31bfa2a...`, the
+  `sage-v0.14.7-x86_64-unknown-linux-gnu` tarball). `sage --version` on it prints **`sage 0.14.6`**: the
+  tarball's CLI version string was not bumped. The rate-line rule of G-V10 was read from the 0.14.7 source
+  and verified against this binary's own logs on data and ibminode05.

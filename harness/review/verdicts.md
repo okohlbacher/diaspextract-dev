@@ -78,10 +78,21 @@ the queue.
 ## Still open
 
 1. **R0:** a three-CLI review of this harness needs codex after 2026-09-17 17:41 (or the user's acceptance).
-2. **F7:** node split and load wait at T0.
-3. **Not yet proven on the real corpus binary:** the v3.0.0 arm (label, `ldd` closure inside the allowed library
-   roots) and a multi-tile, zero-padded output through MSFragger. G-V10 now fails such a cell loudly instead of
-   biasing it. Smoke `corpus_v3_selftest` on v3.0.0 (HeLa_22) and run `preflight` on all three nodes before T0.
+2. **F7: closed 2026-09-11.** `load_wait_min: 20` (user decision: do not lose a day waiting; contended rows are
+   flagged and the load recorded), node split unchanged (spock 24, data 11, ibminode05 14). Measured loads that
+   day: spock 4.5, data 66-80, ibminode05 54 -- so data and ibminode05 sit permanently above their thresholds and
+   every row of theirs will be flagged. See CORPUS.md "Release preflight and smoke".
+3. **Closed 2026-09-11 on the published `v1.2.0` arm.** `preflight` is `PREFLIGHT_OK` on spock, data and
+   ibminode05 (the first check of ibminode05); the arm resolves with label `DIAspeXtractor 1.2.0`, provenance
+   `binary_sha256` `ec6ae270...`, and 18 `ldd`-resolved libraries all inside the arm, `/ceph` and the system
+   library directories, identical across the three nodes but for the node-local glibc set. The smoke
+   (`corpus_v3_selftest_v120`, HeLa_22 on ibminode05) produced a 12-tile output with
+   `spectrumList count="0000061342"`, and **MSFragger read back `Scans = 61342`**; Sage lower bounds 62,296 and
+   52,059 of 62,784 / 61,342. Its two diaTracer peptide cells (Sage 9,186, MSFragger 8,116) equal
+   docs/HELA-TABLE.md's published reference numbers for run 22 exactly. `guardtest --node ibminode05` against
+   the same arm: **39/39**, `--show` exit 0 -- the first guard test on ibminode05, on the release binary, and
+   on `corpus.py` `3601ef3a` (the committed file; the 02:04 guard test ran `10a088d9`, which differs only in
+   text outside the measured functions: same three measurement hashes, same 135/135 selftest).
 4. **Export privacy:** `harness/corpus.py`, `harness/CORPUS.md` and `harness/review/` belong in `.export-private`
    (repo root, not edited here).
 5. **Leftovers of this proof** (public HeLa data only), to delete when no longer needed:
