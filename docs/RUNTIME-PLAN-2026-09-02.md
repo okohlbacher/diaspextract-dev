@@ -174,7 +174,7 @@ Remaining sweep: batch 64, batch 1024, MALLOC_ARENA_MAX=4.
 - Reader: OpenMS' in-tree `MzPeakFile` (2,571 lines, direct Arrow) has no ims-compact/tof or
   per-peak-IM support and returned 0 spectra on these files; the mzPeak C++ library fork
   (okohlbacher/mzpeak-openms trunk 139cc64, 2026-09-01; 164 ahead of / 1 behind OpenMS/mzpeak)
-  reads ims-compact, per-peak IM and per-window mobility bands. SpeXtractor now carries
+  reads ims-compact, per-peak IM and per-window mobility bands. DIAspeXtractor now carries
   `src/MzPeakStreamLoad.h`: a streaming .mzpeak loader on that library with the same (MS1 first,
   then per-(frame, window)) hand-off contract as the .d loader; build-optional via `-DMZPEAK_ROOT`.
   Cluster build: library against contrib Arrow 23 (pin relaxed from >=24), Boost 1.89 from the

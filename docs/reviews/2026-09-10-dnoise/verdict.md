@@ -1,4 +1,4 @@
-# dnoise in SpeXtractor: decision and plan
+# dnoise in DIAspeXtractor: decision and plan
 
 > **Corrections, 2026-09-10 (stage1-measurement.md in this folder).** Measured on raw MS1 frames: the streak
 > clustering reformulation in section 3 removes strictly MORE than the per-point definition, so it is not an
@@ -8,7 +8,7 @@
 > real dnoise v0.1.0 defaults are ±3 TOF, two iterations, halo ON and both MS1 gates on.
 >
 > **Superseded, 2026-09-10 (later the same day).** The user decided to implement dnoise's MS1 path inside
-> SpeXtractor and turn it on by default, after seeing the measured cost (real-dnoise-evaluation.md). This
+> DIAspeXtractor and turn it on by default, after seeing the measured cost (real-dnoise-evaluation.md). This
 > document's design is not what is being built:
 > - The algorithm is now known exactly from the v0.1.0 source, and a rewrite reproduces the binary's output.
 >   The streak sweep of section 3 is not dnoise. "Iterations > 1 is vacuous" is false: 1 vs 2 passes differ
@@ -52,7 +52,7 @@
 
 One anti-overlap worth stating: the picker's `delta_im` = 0.01 span cap *partitions* a real streak into ~7-9-scan pieces, so it works against dnoise's premise. A filter running upstream on raw scan indices sees the streak whole and is unaffected.
 
-There is also a dead seam already in the loader: the 3×3 (m/z × IM) neighbour denoiser (`ms1_min_support = 0`, `dia_ms2_min_support = 1`, active only under `dia_ms2_n_neighbors > 0`, which SpeXtractor leaves at 0). It is a 2-D *support* test, not a 1-D *run-length* test — not dnoise stage 1, but the proof that the loader is the right layer.
+There is also a dead seam already in the loader: the 3×3 (m/z × IM) neighbour denoiser (`ms1_min_support = 0`, `dia_ms2_min_support = 1`, active only under `dia_ms2_n_neighbors > 0`, which DIAspeXtractor leaves at 0). It is a 2-D *support* test, not a 1-D *run-length* test — not dnoise stage 1, but the proof that the loader is the right layer.
 
 ---
 

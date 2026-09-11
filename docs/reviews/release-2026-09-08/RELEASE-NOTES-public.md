@@ -12,7 +12,7 @@ Three things break compatibility with 1.x, and each is deliberate:
 
 On a 2-hour public diaPASEF acquisition (PXD047793, run 009), both tools on the same node at 100 threads:
 
-| | reference implementation | SpeXtractor 2.0.0 | ratio |
+| | reference implementation | DIAspeXtractor 2.0.0 | ratio |
 |---|---|---|---|
 | wall | 20:57 (mean of 2) | **12:42** | **0.61×** |
 | peak RSS | 341 GB (mean of 2) | **188 GB** | **0.55×** |
@@ -44,4 +44,4 @@ Run 001 gives 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour files is at th
 
 ## Unchanged limits
 
-SpeXtractor cannot be built against a released OpenMS package; the commit is pinned in `patches/openms.lock` and `.github/workflows/build.yml` is the reference recipe. It needs a large machine: ~57 GB on a 30-minute acquisition, ~170–190 GB on a 2-hour one. The in-house benchmark cohort is patient-derived and cannot be published; the public-data numbers above are reproducible from the PXD accessions.
+DIAspeXtractor cannot be built against a released OpenMS package; the commit is pinned in `patches/openms.lock` and `.github/workflows/build.yml` is the reference recipe. It needs a large machine: ~57 GB on a 30-minute acquisition, ~170–190 GB on a 2-hour one. The in-house benchmark cohort is patient-derived and cannot be published; the public-data numbers above are reproducible from the PXD accessions.

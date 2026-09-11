@@ -109,7 +109,7 @@ what a faithful-but-not-identical reimplementation looks like: a small per-file 
 sign, not a systematic loss.
 
 **Memory is the bigger and more consistent result: 140 GB against 230 GB, a 39% cut**, matching the
-36% seen on dataset D (105 vs 164 GB). It also puts speXtractor BELOW the reference implementation's 163 GB on this file for
+36% seen on dataset D (105 vs 164 GB). It also puts DIAspeXtractor BELOW the reference implementation's 163 GB on this file for
 the first time. Wall time is a wash here (11:51 vs 11:42) although it won on dataset D (6:53 vs 7:17);
 window-loop CPU is 31,033 s against 41,530 s, i.e. the integer path does 25% less work but fills
 fewer threads (64x vs 87x), so on the larger file the two effects cancel.

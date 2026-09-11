@@ -1,8 +1,11 @@
-# SpeXtractor
+# DIAspeXtractor
 
 Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data.
 
-SpeXtractor turns a data-independent acquisition into a set of pseudo-tandem spectra that any
+DIAspeXtractor was called SpeXtractor up to version 2.0.0 (executable `spextractor`), and speXtract before that
+(`spextract`). Both names were taken by other tools. [CHANGELOG.md](CHANGELOG.md) maps the old names to the new ones.
+
+DIAspeXtractor turns a data-independent acquisition into a set of pseudo-tandem spectra that any
 ordinary DDA search engine can read. Each emitted spectrum pairs one precursor hypothesis with the
 fragment traces that co-elute with it in both retention time and ion mobility. The output is mzML
 (or mzPeak, following the `-out` extension), so it feeds Sage, MSFragger, Comet or anything else that
@@ -12,7 +15,7 @@ That last point is the reason the tool exists: because the search space is not e
 the search runs, an **open or blind search** over the output can report variants and unexpected
 modifications that a library-based DIA workflow cannot represent.
 
-SpeXtractor is BSD-3-Clause and is a standalone application. **OpenMS is a prerequisite, not a
+DIAspeXtractor is BSD-3-Clause and is a standalone application. **OpenMS is a prerequisite, not a
 host** — the tool links against an OpenMS installation but lives outside the OpenMS source tree.
 
 ## Requirements
@@ -36,8 +39,8 @@ them (kB ÷ 10⁶).
 ## Install
 
 ```bash
-git clone https://github.com/okohlbacher/spextractor.git
-cd spextractor
+git clone https://github.com/okohlbacher/diaspextractor.git
+cd diaspextractor
 scripts/apply_openms_patches.sh /path/to/OpenMS    # see "OpenMS patches" below
 cmake --build /path/to/OpenMS/build -j             # rebuild OpenMS: the patches change its headers and libOpenMS
 cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
@@ -45,7 +48,7 @@ cmake --build build -j
 export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS  # a source-built OpenMS has no installed share/; the binary dies on --help without it
 ```
 
-The binary is `build/spextractor`. `cmake --install build` puts it in `<install prefix>/bin` (set `-DCMAKE_INSTALL_PREFIX`).
+The binary is `build/diaspextractor`. `cmake --install build` puts it in `<install prefix>/bin` (set `-DCMAKE_INSTALL_PREFIX`).
 
 ### OpenMS patches
 
@@ -60,7 +63,7 @@ notice a missing second or fourth:**
   (`tdf_table_modeltype1` | `bruker_sdk` | `legacy_chord_APPROXIMATE`). An unsupported calibration
   table **fails closed** rather than silently producing biased masses.
 - **Lock-free elution-peak detection.** OpenMS guards a shared vector with a program-global critical
-  section. Called from inside SpeXtractor's parallel window loop, that one lock serialises the tool.
+  section. Called from inside DIAspeXtractor's parallel window loop, that one lock serialises the tool.
 - **`MassTrace` move operations.** OpenMS declares a defaulted destructor and copy operations on
   `MassTrace`, which suppresses the implicit moves, so every `std::move` deep-copied its points. A
   `static_assert` stops the build without this one.
@@ -84,7 +87,7 @@ reads `.d` and mzML, and writes mzML. `.d` remains the primary input and is fast
 ## Run
 
 ```bash
-spextractor -in sample.d -out pseudo.mzML -threads 64
+diaspextractor -in sample.d -out pseudo.mzML -threads 64
 ```
 
 That is the complete command. Every default is the configuration the project benchmarks; a run that
@@ -119,7 +122,7 @@ sage sage.json -o results pseudo.mzML
 | `-tile:cells_per_tile` | 1 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. On a `.d` (the streaming source) **memory is one tile's**: at the defaults TNBC 009 peaks at 21.07 GB in 13 tiles with a trim between tiles against 99.70 GB in one (wall 9:57 against 9:42, same node), dataset D at 21.99 GB in 3 tiles against 37.44 GB (3:47 against 3:15). mzPeak output always runs as one tile |
 | `-tile:rt_sec` | 600 | the integer detector traces each isolation window in fixed retention-time **cells** of this pitch, cut at the run's MS1 frame times and recorded in the mzML header (`spx:tile_boundaries`). The cut is part of the definition: any grouping of cells into tiles, resident or streamed, reproduces the same spectra bit for bit. Science price measured 2026-09-10 against whole-window tracing (`-1`): Sage +0.8% on both benchmark files, MSFragger +1.5% / flat, entrapment FDR +0.14 / +0.16 points (inside the release rule); ~2.5% of peptides straddle a cut line and lose 9% there against 6–8% elsewhere |
 
-`spextractor --helphelp` lists every option, most with a pointer to the measurement behind the default.
+`diaspextractor --helphelp` lists every option, most with a pointer to the measurement behind the default.
 
 ### Reading the output
 
@@ -192,10 +195,10 @@ by raw counts. The two statements are about different things and both have been 
 ## Tests
 
 ```bash
-python3 test/test_spextractor.py build/spextractor
+python3 test/test_diaspextractor.py build/diaspextractor
 ```
 
-Twenty-four end-to-end checks against a synthetic acquisition (twenty-five in a build that writes mzPeak) cover:
+Twenty-five end-to-end checks against a synthetic acquisition (twenty-six in a build that writes mzPeak) cover:
 - isotope ownership and the charge floor;
 - parameter validation;
 - thread- and tile-count invariance;
@@ -203,7 +206,8 @@ Twenty-four end-to-end checks against a synthetic acquisition (twenty-five in a 
 - that the shipped detector is the one that actually runs;
 - that the MS1 prune changes no output, with negative controls that must change it;
 - that a non-finite MS1 m/z is refused before the prune;
-- that `dnoise:ms1` refuses a Bruker SDK calibration before the load.
+- that `dnoise:ms1` refuses a Bruker SDK calibration before the load;
+- that a leftover `SPEXTRACTOR_*` variable from before the rename refuses the run.
 
 No fixtures, no framework, no network. The suite's only Bruker `.d` holds an `analysis.tdf` and no
 frame data, so it cannot run the in-tool dnoise filter. That filter is covered by

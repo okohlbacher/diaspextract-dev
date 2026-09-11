@@ -9,7 +9,7 @@ under-shipped. Highest-leverage week = turning finished, honest science into som
 party can build, run, and verify — not another quality lever.
 
 ## Scoreboard (dataset D; engines deterministic sigma=0; the reference implementation denominators NOT yet reconciled)
-| metric | SpeXtractor | the reference implementation | ratio |
+| metric | DIAspeXtractor | the reference implementation | ratio |
 |---|---|---|---|
 | closed Sage (corr_power=2 default) | 10,802 | 11,517 | 93.8% (+im_weight opt: 11,112 = 96.5%) |
 | closed MSFragger | 11,560 | 13,932 | 83.0% |

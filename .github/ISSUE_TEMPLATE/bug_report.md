@@ -7,10 +7,10 @@ labels: bug
 **Command line** (the complete one):
 
 ```
-spextractor -in ... -out ... -threads ...
+diaspextractor -in ... -out ... -threads ...
 ```
 
-**Versions**: SpeXtractor / OpenMS / OS / compiler
+**Versions**: DIAspeXtractor / OpenMS / OS / compiler
 
 **Provenance from the output mzML** — these record what actually ran, and are usually the answer:
 

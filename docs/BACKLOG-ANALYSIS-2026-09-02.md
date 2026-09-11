@@ -51,7 +51,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 
 | # | issue | status | evidence | root cause | fix | owner |
 |---|---|---|---|---|---|---|
-| D1 | mzPeak input: −11.7% peptides, fragment error +10.05 vs +3.39 ppm | **ISOLATED 18:58**: with the exact calibration recovered from the tdf (same archive, same reader, same binary) **12,082 peptides (−1.1% vs `.d`)**, paired ppm vs the `.d` run +0.00/+0.00 → the two-point transform was **91%** of the loss; the residual ~1% is the IM axis | d10_MZPexact | archive carries only `mzpeak:transform_params` | exact path now DEFAULT and fail-closed (tdf embedded or sidecar); converter ask (handoff §5) unchanged | closed for SpeXtractor |
+| D1 | mzPeak input: −11.7% peptides, fragment error +10.05 vs +3.39 ppm | **ISOLATED 18:58**: with the exact calibration recovered from the tdf (same archive, same reader, same binary) **12,082 peptides (−1.1% vs `.d`)**, paired ppm vs the `.d` run +0.00/+0.00 → the two-point transform was **91%** of the loss; the residual ~1% is the IM axis | d10_MZPexact | archive carries only `mzpeak:transform_params` | exact path now DEFAULT and fail-closed (tdf embedded or sidecar); converter ask (handoff §5) unchanged | closed for DIAspeXtractor |
 | D2 | `--ims-chunked` aborts on TDF | CONFIRMED | dataset D + dataset A | facet-layout mismatch in the writer | converter (handoff §1) | converter |
 | D3 | archive 4.5–5.6% larger than `tdf_bin` | MEASURED | — | per-peak f64 1/K0 (0.57) + tof (0.52) | converter question (handoff §2) | converter |
 | D4 | band as name-only CV params; `precursor_index` NULL → reader attaches both ions to precursor 0 | CONFIRMED | `spx_band2` | converter metadata + reader attach key | worked around (flatten + match by m/z, 0.05 Da); converter/reader fix (handoff §3–4) | converter + library |
@@ -110,7 +110,7 @@ codex #13 (false calibration provenance on mzPeak output) **fixed in code today*
 - **B1** byte-identical at fixed config (4 runs); parallel pick == serial pick.
 - **D6** false mzPeak calibration provenance — fixed in code.
 - **E1 (tests/CI)** exist since v0.2.0; only the determinism smoke test remains.
-- OpenMS in-tree `MzPeakFile` (0 spectra on ims-compact) — closed for SpeXtractor (bypassed); open only as a separate OpenMS product.
+- OpenMS in-tree `MzPeakFile` (0 spectra on ims-compact) — closed for DIAspeXtractor (bypassed); open only as a separate OpenMS product.
 
 ## Status at 20:10 (end of the first day of the plan)
 

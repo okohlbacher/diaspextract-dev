@@ -112,5 +112,5 @@ points more of D's MS2 and 4.5 points more of TNBC's; that is exactly the MS2 di
 MS1 + MS2 and MS2-only configurations in the searched runs. On its own the halo removes 2.4% of D's MS1
 points and 19.2% of TNBC's.
 
-The full runs, SpeXtractor on the output, and both search engines with entrapment are chains `dnoise_d`,
+The full runs, DIAspeXtractor on the output, and both search engines with entrapment are chains `dnoise_d`,
 `dnoise_tnbc`, `dnoise2_d` and `dnoise2_tnbc`, written up in `real-dnoise-evaluation.md`.

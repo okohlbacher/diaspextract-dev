@@ -647,7 +647,7 @@ EVIDENCE: **Volatile alone, measured on the cluster** (/scratch/kohlbach/dnoise_
 - clang pragma-only fails under explicit -ffp-contract=fast, and so does the old port/hs_pragma binary. On clang the volatile is therefore the sole effective guard there, and it is measured sufficient.
 - The port/hs_*/hsg_* binaries reproduce these results.
 
-**In-tree OpenMS build.** The cluster build of SpeXtractor is in-tree: /scratch/kohlbach/OpenMS/build/src/topp/CMakeFiles/spextractor.dir/flags.make has `-O3 -std=gnu++23 ... -mssse3 ... -ffp-contract=off`. OpenMS cmake/compiler_flags.cmake adds -ffp-contract=off itself (:104 GNU, :134 Clang), and -mssse3 has no FMA instructions. So that build gets the flag and cannot contract at all. MSVC/clang-cl are not project targets.
+**In-tree OpenMS build.** The cluster build of DIAspeXtractor is in-tree: /scratch/kohlbach/OpenMS/build/src/topp/CMakeFiles/spextractor.dir/flags.make has `-O3 -std=gnu++23 ... -mssse3 ... -ffp-contract=off`. OpenMS cmake/compiler_flags.cmake adds -ffp-contract=off itself (:104 GNU, :134 Clang), and -mssse3 has no FMA instructions. So that build gets the flag and cannot contract at all. MSVC/clang-cl are not project targets.
 
 **What remains (low severity).** Stage-1 CMake gives test_dnoise_ms1 `SPX_NO_FP_CONTRACT` (stage1_tracked.diff:42), and baseline x86-64 cannot emit FMA. So portability CI never exercises the header guards alone; the proof above lives only in scratch probes. kimi's suggested CI arm is cheap and worthwhile, but it is not needed to establish that the guard works.
 

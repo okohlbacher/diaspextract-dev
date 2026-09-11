@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Renamed (2026-09-11) -- SpeXtractor is now DIAspeXtractor, spectra unchanged
+
+Another tool is already named spextractor, so the project changes its name a second time for the same reason as the
+first (speXtract became SpeXtractor in 2.0.0). The spectra do not change: the name reaches only the mzML header, which
+the spectrum digest excludes, so this build must reproduce the pins of the last build before the rename, d200db4
+(dataset D `e43672a0`, TNBC 009 `3aafd0b5`; with `-dnoise:ms1 false` `8c1b047f` / `bff54a1f`). Those are not the 2.0.0
+pins; the sections below say why.
+
+| what | before | now |
+|---|---|---|
+| executable and CMake target | `spextractor` | `diaspextractor` |
+| TOPP tool name: ini section, mzML software entry | `SpeXtractor` | `DIAspeXtractor`; regenerate 2.x ini files with `-write_ini` |
+| environment variables | `SPEXTRACTOR_*` | `DIASPEXTRACTOR_*`, including the three the patched libOpenMS reads (`DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK`, `DIASPEXTRACTOR_SDK_PARALLEL`, `DIASPEXTRACTOR_LOAD_BATCH`) |
+| CMake | `project(SpeXtractor)`, `SPEXTRACTOR_TESTS_ONLY`, `SPEXTRACTOR_VERSION`, `SPEXTRACTOR_WITH_MZPEAK` | `project(DIAspeXtractor)`, `DIASPEXTRACTOR_TESTS_ONLY`, `DIASPEXTRACTOR_VERSION`, `DIASPEXTRACTOR_WITH_MZPEAK` |
+| C++ namespace | `spextractor::` | `diaspextractor::` (`spx::` unchanged) |
+| sources | `src/spextractor.cpp`, `test/test_spextractor.py` | `src/diaspextractor.cpp`, `test/test_diaspextractor.py` |
+| repositories | `okohlbacher/spextractor`, `okohlbacher/spextractor-dev` | `okohlbacher/diaspextractor`, `okohlbacher/diaspextractor-dev` |
+
+- **Old variables are refused, not ignored.** An old name would now do nothing without a word, so the tool refuses to
+  start while any `SPEXTRACTOR_*` variable is set, and names the variable and its `DIASPEXTRACTOR_` name (new e2e
+  check 22). `-DSPEXTRACTOR_TESTS_ONLY` likewise stops the CMake configure with an error; it used to be ignored, and
+  the full build then failed in `find_package(OpenMS)`.
+- **No compatibility alias.** No `spextractor` executable is installed: it would bring the collision back onto users'
+  PATH. Anyone who needs the old command locally can link it (`ln -s diaspextractor spextractor`).
+- **The OpenMS patches** rename the namespace, the three variables, their messages and the patch comments. Every hunk
+  keeps its context, so they apply to the same pinned OpenMS commit. libOpenMS compiles the variable names in: an
+  OpenMS tree patched for 2.x must be patched again from a pristine checkout of the pin
+  (`scripts/apply_openms_patches.sh` also installs the renamed `TdfMzCalibration.h`) and rebuilt.
+- **Unchanged:** the `spx:` run stamps and the `spx_guessed` / `spx_n_isotopes` precursor userParams. The bench tools
+  and older outputs read them, and `spx_*` sits inside the digest.
+
 ### Changed (2026-09-11) -- memory default, byte-identical output
 
 - **`tile:cells_per_tile` defaults to 1: one 600-s retention-time cell per tile** (was 0, one tile). The spectra are
@@ -63,7 +94,7 @@
   the C locale, so a decimal-comma `LC_NUMERIC` no longer refuses `99.990834`. Leading whitespace, hex-float,
   subnormal and underflowing values are now refused. New unit-test case.
 - An mzPeak frame with peaks but an empty ion-mobility array is refused as a short array; it used to be read out of bounds.
-- `SPEXTRACTOR_TILE_RESIDENT` is parsed once. With it set to `0` or empty, `trace:band_edges=slab` on a `.d` is
+- `DIASPEXTRACTOR_TILE_RESIDENT` is parsed once. With it set to `0` or empty, `trace:band_edges=slab` on a `.d` is
   refused before the load, as with the variable unset, instead of after it.
 
 ### Changed (2026-09-10) -- output changes: MS1 denoising is on by default
@@ -245,7 +276,7 @@ unchanged.
   reads either. Verified output-identical on dataset D at both pitches and every tiling.
   MassTraceDetection's own internal copy of each band remains unattributed: charging it needs an
   OpenMS patch, and the source now says so where the gap is.
-- **`SPEXTRACTOR_LOAD_TRIM=<n>`, a probe, off by default.** Calls `malloc_trim(0)` every nth
+- **`DIASPEXTRACTOR_LOAD_TRIM=<n>`, a probe, off by default.** Calls `malloc_trim(0)` every nth
   picker flush. The repaired ledger shows the resident arm's process peak on D is not live data:
   RSS falls 45,279 -> 28,052 MiB at the end of the load while the charged total does not move, so
   ~17 GiB of the peak is one load's worth of allocator free list. `MALLOC_TRIM_THRESHOLD_` cannot
@@ -314,7 +345,7 @@ unchanged.
   mzPeak spectrum was unmappable and the tool fell back to the OpenMS detector with a warning. On
   the 30-minute archive: 855,561 spectra, Sage 12,537 (the `.d` gives 12,625; the OpenMS detector
   on the same archive 12,756). Archives converted without the vendor tdf need
-  `SPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz>`.
+  `DIASPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz>`.
 - **e2e check 14**: the declared spectrum count, `id="spectrum=K"`, `index="K"` and every
   `<indexList>` offset agree.
 
@@ -584,7 +615,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
 - **Head to head with the reference implementation at this release's defaults** (PXD047793 run 009,
   the same node, both tools at 100 threads):
 
-  | | reference implementation | SpeXtractor v2.0.0 | ratio |
+  | | reference implementation | DIAspeXtractor v2.0.0 | ratio |
   |---|---|---|---|
   | wall | 21:12.24 / 20:41.46 (mean 20:56.9) | **12:42.21** | **0.61x** |
   | peak RSS | 357.7 / 323.4 GB (mean 340.6) | **187.9 GB** | **0.55x** |
@@ -596,7 +627,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   | MSFragger, pooled -- 009 / 001 | 27,427 / 18,745 | 26,559 / 18,212 | 0.97 / 0.97 |
 
   The reference is a JVM run with `-Xmx400G`, so its peak partly reflects what it was allowed; the
-  honest memory statement is "roughly half, and not sensitive to a heap flag". The SpeXtractor wall
+  honest memory statement is "roughly half, and not sensitive to a heap flag". The DIAspeXtractor wall
   is one run against the reference's two-rep mean; the previous default's two reps spread 8%. Before this cycle the
   same file ran 1.46x *slower* than the reference (31:27 against 21:28).
 
@@ -873,7 +904,7 @@ handicap rather than establishing a lead.
 | Sage peptides @1% FDR | 11,976 | 10,333 | 9,891 | mean 105.1%, 95% CI [93.0, 117.3] -- consistent with PARITY |
 | MSFragger peptidoforms @1% | 11,463 | 11,465 | 9,404 | mean 85.0%, 95% CI [76.7, 93.2] -- a supported DEFICIT |
 | median precursor mass error | +1.5 | +3.2 | +2.3 ppm | the reference implementation -1.4 / +0.3 / -0.6 |
-SpeXtractor also emits ~1.32x more spectra, so per-spectrum efficiency favours the reference implementation. The MSFragger
+DIAspeXtractor also emits ~1.32x more spectra, so per-spectrum efficiency favours the reference implementation. The MSFragger
 gap survives perfect masses and is therefore search/detection-side.
 
 ### Safety

@@ -32,9 +32,10 @@ def parse(text):
             cur["dn"] = ast.literal_eval(s[len("dnoise stats "):])
         elif m := re.match(r"size (\S+)\s+\S+/den\.d$", s):
             cur["size"] = m.group(1)
-        elif m := re.match(r"spextractor Elapsed \(wall clock\).*: ([\d:.]+)", s):
+        # chain logs label the timed arm by its binary: spextractor before the rename to DIAspeXtractor, diaspextractor after
+        elif m := re.match(r"(?:dia)?spextractor Elapsed \(wall clock\).*: ([\d:.]+)", s):
             cur["wall"] = m.group(1)
-        elif m := re.match(r"spextractor Maximum resident set size \(kbytes\): (\d+)", s):
+        elif m := re.match(r"(?:dia)?spextractor Maximum resident set size \(kbytes\): (\d+)", s):
             cur["peak_gb"] = int(m.group(1)) / 1e6
         elif m := re.match(r"Wrote (\d+) pseudo", s):
             cur["spectra"] = int(m.group(1))
@@ -99,7 +100,7 @@ dnoise exit=0
   size 7.5G	/scratch/kohlbach/dnoise_eval/D/default/den.d
   size 9.2G	/ceph/ibmi/abi/data/2026_AGXT_PH1_liver_diaPASEF/raw_d/FKL4341.d
 spextractor exit=0
-  spextractor Elapsed (wall clock) time (h:mm:ss or m:ss): 3:06.84
+  diaspextractor Elapsed (wall clock) time (h:mm:ss or m:ss): 3:06.84
   spextractor Maximum resident set size (kbytes): 21408832
   Wrote 496722 pseudo
   [ms1-hist] picked MS1 peaks 43546607 by intensity: <100 9673713 (22.2%)

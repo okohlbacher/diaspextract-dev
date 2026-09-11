@@ -1,4 +1,4 @@
-# SpeXtractor vs the reference implementation, measured 2026-09-07/08
+# DIAspeXtractor vs the reference implementation, measured 2026-09-07/08
 
 The first three sections (runtime, quality, the MSFragger deficit) were measured on the **previous
 default** (`charge:min_charge=2`, `perf:ms1_trace_bands=48`); the Decision section on the two builds
@@ -14,9 +14,9 @@ ratio 0.6805.
 | | rep 1 | rep 2 | mean |
 |---|---|---|---|
 | reference implementation | 21:12.24 / 357.7 GB | 20:41.46 / 323.4 GB | 20:56.9 / 340.6 GB |
-| **SpeXtractor, previous default** (min_charge 2) | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
+| **DIAspeXtractor, previous default** (min_charge 2) | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
 | ratio, previous default | | | **0.53x wall, 0.53x RSS** |
-| **SpeXtractor, shipped default** (one run) | 12:42.21 / 187.9 GB | | 12:42.21 / 187.9 GB |
+| **DIAspeXtractor, shipped default** (one run) | 12:42.21 / 187.9 GB | | 12:42.21 / 187.9 GB |
 | ratio, shipped default | | | **0.61x wall, 0.55x RSS** |
 
 Re-measured rather than taken from the earlier campaign: a cross-time comparison is what produced
@@ -26,7 +26,7 @@ one withdrawn claim. Before this week's work the same file ran **31:26.98** agai
 
 Caveat on the memory ratio: the reference is a JVM run with `-Xmx400G`, so its peak RSS partly
 reflects what it was allowed rather than what it needs (the same flags gave 268.2 GB in the earlier
-campaign). SpeXtractor's 179 GB (previous default) / 188 GB (shipped default) is a genuine
+campaign). DIAspeXtractor's 179 GB (previous default) / 188 GB (shipped default) is a genuine
 requirement and is not sensitive
 to a heap flag.
 
@@ -56,7 +56,7 @@ No shipped-default Sage protein count for 009 is on record. The previous-default
 of 5,813 above appears only in this file -- it is in neither docs/BASELINE.md nor docs/TNBC-TABLE.md
 -- so treat it as unverified.
 
-The direction is consistent across both files and the magnitude is not: SpeXtractor finds more with
+The direction is consistent across both files and the magnitude is not: DIAspeXtractor finds more with
 Sage and fewer with MSFragger, and at the previous default the Sage advantage was 1.28 on one file
 and 1.06 on the other. At the shipped default the pooled Sage ratios are 1.47 (009) and 1.29 (001),
 per-charge 1.28 and 1.25 (Decision
@@ -72,7 +72,7 @@ default, min_charge 2):
 |---|---:|---:|---:|---:|---:|
 | only reference | 6,749 | 18.19 | **21.1%** | 55.4% | 23.5% |
 | common | 21,641 | 26.30 | ~0% | 70.0% | 29.9% |
-| only SpeXtractor | 3,428 | 18.56 | ~0% | 70.1% | 27.8% |
+| only DIAspeXtractor | 3,428 | 18.56 | ~0% | 70.1% | 27.8% |
 
 Two things. First, both exclusive sets are **marginal** -- median hyperscore ~18 against ~26 for the
 peptides both tools find -- so a large part of the "gap" is churn at the acceptance boundary rather
@@ -215,7 +215,7 @@ docs/BASELINE.md; the 009 pair exists only in the source comment beside the veto
 The like-for-like comparison, both tools under the same per-charge FDR walk, on 009 (the shipped
 build):
 
-| | SpeXtractor | reference | ratio |
+| | DIAspeXtractor | reference | ratio |
 |---|---:|---:|---|
 | Sage peptides, per-charge 1% | 27,831 | 21,743 | **1.28** |
 | MSFragger peptides, per-charge 1% | 28,181 | 28,294 | **1.00** |
@@ -228,7 +228,7 @@ are now at parity.
 
 The same on the second file, at the shipped default (the 3+ arm dropped), against the reference on 001:
 
-| | SpeXtractor | reference | ratio |
+| | DIAspeXtractor | reference | ratio |
 |---|---:|---:|---|
 | Sage peptides, per-charge 1% | 19,262 | 15,418 | **1.25** |
 | MSFragger peptides, per-charge 1% | 19,230 | 19,652 | **0.98** |

@@ -1,4 +1,4 @@
-Analysis of whether to reimplement the dnoise denoising method in SpeXtractor, 2026-09-10, at the
+Analysis of whether to reimplement the dnoise denoising method in DIAspeXtractor, 2026-09-10, at the
 user's request.
 
 The paper: Garrett, Diedrich and Yates III, *dnoise: Fast Native Data Reduction for Bruker

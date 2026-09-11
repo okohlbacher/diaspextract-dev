@@ -1,6 +1,6 @@
-#ifndef SPEXTRACTOR_TDF_MZ_CALIBRATION_H
-#define SPEXTRACTOR_TDF_MZ_CALIBRATION_H
-// Copyright (c) 2026, SpeXtractor authors. BSD-3-Clause.
+#ifndef DIASPEXTRACTOR_TDF_MZ_CALIBRATION_H
+#define DIASPEXTRACTOR_TDF_MZ_CALIBRATION_H
+// Copyright (c) 2026, DIAspeXtractor authors. BSD-3-Clause.
 //
 // Exact TOF -> m/z conversion for Bruker TDF (timsTOF) data, ModelType 1. Header-only and dependency-free:
 // shared by the OpenMS loader patch (patches/openms-brukertims-mz-calibration.patch) and the C++ golden test
@@ -25,7 +25,7 @@
 #include <limits>
 #include <string>
 
-namespace spextractor
+namespace diaspextractor
 {
 
 /// Constants as stored in the TDF `MzCalibration` row plus the per-frame digitizer temperature.
@@ -96,6 +96,6 @@ struct TdfMzCalibration
   }
 };
 
-} // namespace spextractor
+} // namespace diaspextractor
 
-#endif // SPEXTRACTOR_TDF_MZ_CALIBRATION_H
+#endif // DIASPEXTRACTOR_TDF_MZ_CALIBRATION_H

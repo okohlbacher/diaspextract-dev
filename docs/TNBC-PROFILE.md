@@ -1,4 +1,4 @@
-# SpeXtractor on TNBC (PXD047793): runtime and memory by phase and data structure
+# DIAspeXtractor on TNBC (PXD047793): runtime and memory by phase and data structure
 
 Sixteen 130-min diaPASEF runs, the defaults of the build stated below, `-threads 100`, medians unless
 noted. Sources: the
@@ -74,7 +74,7 @@ the milestone arithmetic suggests is a mis-normalisation: the term is 20 B per p
    freed by other threads), and ~120 GB is 28 windows in flight. RAM, not CPU, sets concurrency;
    the admission gate over-books each window ~2x at its momentary peak.
 4. **On the 2020 HeLa and in-house files none of this shows** (5 min, 80 GB): the serial phases
-   are small there. It is the 2-h, 4e9-peak class where SpeXtractor is 1.4-2.3x slower than the
+   are small there. It is the 2-h, 4e9-peak class where DIAspeXtractor is 1.4-2.3x slower than the
    reference extractor, and the three items above are the whole explanation.
 
 ## Levers, ranked by expected wall gain on this file class (all inference until run)

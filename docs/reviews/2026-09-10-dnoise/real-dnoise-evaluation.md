@@ -1,6 +1,6 @@
 # The real dnoise v0.1.0 on both files, searched (2026-09-10)
 
-What dnoise does to SpeXtractor's output when it runs as a preprocessor on the raw `.d`, for every
+What dnoise does to DIAspeXtractor's output when it runs as a preprocessor on the raw `.d`, for every
 combination of its MS1 and MS2 filters, judged on peptides from both engines and on entrapment.
 
 ## Method
@@ -20,7 +20,7 @@ The last two configurations are not a clean factorial. With `--denoise-msms`, th
 MS2, and MS2 only has the halo off. Dry runs attribute the difference to the halo exactly: 0.4 points more
 of D's MS2 removed and 4.5 points more of TNBC's (`stage1-measurement.md`).
 
-SpeXtractor build `d7cc14d`, 100 threads, pitch 600, **`-tile:cells_per_tile 1`**, so one 600-s cell per
+DIAspeXtractor build `d7cc14d`, 100 threads, pitch 600, **`-tile:cells_per_tile 1`**, so one 600-s cell per
 tile. The output does not depend on the tile count, by construction. Memory does: every peak below is the
 tiled peak. The shipped default is one tile (`cells_per_tile 0`), where the window loop sets the peak, and
 that was not measured with dnoise.
@@ -50,14 +50,14 @@ evaluation corrected.
 ## Results
 
 Built by `bench/dnoise_table.py` from the chain logs and the recorded control searches. Wall and peak in
-these two tables are SpeXtractor's alone; dnoise's own run is in the next section. "Picked MS1 peaks" is
+these two tables are DIAspeXtractor's alone; dnoise's own run is in the next section. "Picked MS1 peaks" is
 the count from `SPEXTRACTOR_MS1_HIST`. One cell needed a manual read: TNBC MS2-only's `e.log` contains
 binary bytes, so the chain's `grep` hid its `Wrote` line. The count was read with `grep -a`, and equals
 MSFragger's scan count for that input.
 
 ### Dataset D (ibminode05)
 
-| configuration | MS1 points kept | all points kept | .d size | SpeXtractor wall | SpeXtractor peak | pseudo-spectra | picked MS1 peaks | Sage peptides | MSFragger peptides | entrapment FDR (95% CI) | Sage set vs control: common / lost / gained |
+| configuration | MS1 points kept | all points kept | .d size | DIAspeXtractor wall | DIAspeXtractor peak | pseudo-spectra | picked MS1 peaks | Sage peptides | MSFragger peptides | entrapment FDR (95% CI) | Sage set vs control: common / lost / gained |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
 | control, original file | 100% | 100% | 9.2G | 3:48.08 | 31.84 GB | 611,850 | 725,116,915 | 13,491 | 12,918 | 1.30% (1.07-1.55%) | reference |
 | dnoise, every stage off | 100.0% | 100.0% | 9.1G | 3:47.44 | 32.17 GB | 611,850 | 725,116,915 | 13,491 (+0.0%) | 12,918 (+0.0%) | 1.30% (1.07-1.55%) | identical output |
@@ -67,7 +67,7 @@ MSFragger's scan count for that input.
 
 ### TNBC 009
 
-| configuration | node | MS1 points kept | all points kept | .d size | SpeXtractor wall | SpeXtractor peak | pseudo-spectra | picked MS1 peaks | Sage peptides | MSFragger peptides | entrapment FDR (95% CI) | Sage set vs control: common / lost / gained |
+| configuration | node | MS1 points kept | all points kept | .d size | DIAspeXtractor wall | DIAspeXtractor peak | pseudo-spectra | picked MS1 peaks | Sage peptides | MSFragger peptides | entrapment FDR (95% CI) | Sage set vs control: common / lost / gained |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
 | control, original file | spock | 100% | 100% | 20G | 9:18.79 | 68.82 GB | 3,285,827 | 2,391,660,683 | 29,067 | 27,949 | 1.09% (0.94-1.23%) | reference |
 | control, original file | data | 100% | 100% | 20G | 9:16.95 | 68.41 GB | 3,285,827 | 2,391,660,683 | same output | same output | same output | identical output |
@@ -81,7 +81,7 @@ Chain `tnbc2`, earlier the same day, ran two more TNBC controls on spock: 10:16 
 
 ### The preprocessing step itself
 
-dnoise's own wall and peak, and the pipeline's. Pipeline wall is dnoise plus SpeXtractor; pipeline peak is
+dnoise's own wall and peak, and the pipeline's. Pipeline wall is dnoise plus DIAspeXtractor; pipeline peak is
 the larger of the two.
 
 | configuration | D: dnoise | D: pipeline | TNBC: dnoise | TNBC: pipeline |
@@ -120,16 +120,16 @@ Full tables, including by charge and by RT tenth, come from
 
 ## Findings
 
-1. **The rewrite is lossless for SpeXtractor.** The no-op reproduces both pins (D `8c1b047f`, TNBC
-   `bff54a1f`), so on an unfiltered file dnoise's writer changes nothing SpeXtractor reads. The differences
+1. **The rewrite is lossless for DIAspeXtractor.** The no-op reproduces both pins (D `8c1b047f`, TNBC
+   `bff54a1f`), so on an unfiltered file dnoise's writer changes nothing DIAspeXtractor reads. The differences
    below are the filters, plus however the writer handles frames the filters empty, which the no-op cannot
    exercise.
 2. **MS1 filtering unlocks the memory; MS2 filtering alone changes nothing.** dnoise's default keeps 12.7%
-   of D's MS1 points and 20.5% of TNBC's. The picked MS1 map shrinks 16.7× and 7.7×, and SpeXtractor's
+   of D's MS1 points and 20.5% of TNBC's. The picked MS1 map shrinks 16.7× and 7.7×, and DIAspeXtractor's
    tiled peak falls 33% on D and 63% on TNBC against the same-node control. MS2 only leaves the
    peak within 1.5% of the control, because pass 1 sets it. Once MS1 is filtered, MS2 filtering does lower
-   memory: on D, SpeXtractor goes from 21.41 to 8.13 GB and the pipeline to 10.29 GB, where dnoise itself
-   binds. On TNBC, SpeXtractor goes from 25.08 to 19.87 GB, but the pipeline stays at dnoise's 25-26 GB
+   memory: on D, DIAspeXtractor goes from 21.41 to 8.13 GB and the pipeline to 10.29 GB, where dnoise itself
+   binds. On TNBC, DIAspeXtractor goes from 25.08 to 19.87 GB, but the pipeline stays at dnoise's 25-26 GB
    (25.24 and 26.32 GB).
 3. **In peptide counts, MS1 only is nearly free on TNBC and not on D.** TNBC: Sage +1.5%, MSFragger
    −0.5%, though 9.3% of the control's Sage peptides are replaced. D: Sage −4.3% and MSFragger −4.0%, the
@@ -157,7 +157,7 @@ Full tables, including by charge and by RT tenth, come from
    1:34 for both. On spock, TNBC MS2 only runs 6:12 against the control's 9:19. On data, TNBC MS1 + MS2 runs
    4:16 against the control's 9:17.
 
-## What this means for SpeXtractor
+## What this means for DIAspeXtractor
 
 - **Not as a default.** dnoise's own default fails the S gate on D. Every MS2 setting costs 13-21% of
   MSFragger peptides and 5-10% of Sage's.
