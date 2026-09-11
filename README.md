@@ -28,7 +28,7 @@ host** — the tool links against an OpenMS installation but lives outside the O
 | OpenMP | required |
 | CMake | 3.21+ (OpenMS's own requirement; the tool itself needs 3.16) |
 | **Memory** | **~22 GB peak** on a 30-minute gradient (dataset D) and **~21 GB** on a 2-hour acquisition (TNBC 009) at the shipped defaults, 100 threads, with one 600-s retention-time cell per tile (25 GB on the 2-hour file with `-perf:malloc_trim false`); in one tile (`-tile:cells_per_tile 0`) the same files peak at ~37 and ~100 GB (the 30–60 min cohort spanned 68–109 GB at the 2026-09-04 defaults). It follows how dense the acquisition is more than how long it runs |
-| Disk | at the shipped defaults a 30-minute run (dataset D) emits **496,722** spectra and a 2-hour run (TNBC 009) **3,010,923** — about a quarter *fewer* than the 656k and ~3.9 M of the pre-1.2.0 default, whose mzML was 6.2 GB and 19–20 GB. Budget from the spectrum count. mzPeak is about a third of the mzML: dataset D's 496,722 spectra are 1.76 GB as mzPeak |
+| Disk | measured on the release build at the shipped defaults: a 30-minute run (dataset D) writes **496,722** spectra as a **4.9 GB** mzML, a 2-hour run (TNBC 009) **3,010,923** as **27.8 GB** — about 9–10 kB per spectrum on both. That is about a quarter *fewer* spectra than the pre-1.2.0 default emitted (656k and ~3.9 M), but size from these figures, not from an older run's: per-spectrum size differs between acquisitions. mzPeak is about a third of the mzML (dataset D's 496,722 spectra are 1.76 GB) |
 
 The memory figure is not a suggestion. A full-depth diaPASEF acquisition holds millions of mass traces
 in flight. At the shipped defaults the window loop holds one 600-s tile at a time, so a 30-minute in-house
