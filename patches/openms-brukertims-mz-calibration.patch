@@ -79,13 +79,10 @@
  #include <opentims++/scan2inv_ion_mobility_converter.h>
  #include <OpenMS/FORMAT/RationalScan2ImConverter.h>
  #include <SQLiteCpp/SQLiteCpp.h>
-@@ -918,9 +926,117 @@
-         return PerFramePressureCompensationWithMissingReference;
-       default:
-         return NoPressureCompensation;
-+    }
-+  }
-+
+@@ -921,6 +929,114 @@
+     }
+   }
+ 
 +// [DIAspeXtractor table-mz] License-free EXACT TOF->m/z from the TDF MzCalibration table.
 +// The MODEL lives in DIAspeXtractor's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
 +// scripts/sync_cluster.sh) so the shipped code is the code the C++ unit test exercises.
@@ -149,7 +146,7 @@
 +      cal_.C2 = sqlite3_column_double(st, 5); cal_.T1_ref = sqlite3_column_double(st, 6);
 +      cal_.dC1 = sqlite3_column_double(st, 7); cal_.dC2 = sqlite3_column_double(st, 8);
 +      cal_.C3 = sqlite3_column_double(st, 9);  cal_.C4 = sqlite3_column_double(st, 10);
-     }
++    }
 +    sqlite3_finalize(st); st = nullptr;
 +    if (!cal_.isSupported())
 +    { const std::string why = cal_.unsupportedReason(); sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: " + why); }
@@ -176,7 +173,7 @@
 +    }
 +    sqlite3_finalize(st);
 +    sqlite3_close(db);
-   }
++  }
 +  // frame_id 0 is not a real Bruker frame (Frames.Id is 1-based); one pristine OpenMS DDA path
 +  // converts with a hardcoded 0. Slot 0 therefore holds T1_ref by construction = no temperature
 +  // correction (<=0.7 ppm on the files measured). Documented rather than incidental.
@@ -192,7 +189,7 @@
 +  std::string description() override final { return "TdfMzCalibration (ModelType 1 + temperature, exact)"; }
 +};
 +} // namespace
- 
++
 +
    // =====================================================================
    // Helper: open TimsDataHandle with tiered calibration strategy
@@ -346,9 +343,7 @@
 +#endif
 +      std::vector<FrameCentroider> cents((size_t)nthr);
 +      for (size_t b0 = 0; b0 < ms1_to_emit; b0 += mb)
-       {
--        TimsFrame& frame = handle->get_frame(ms1_frame_ids[i]);
--        loadMS1Spectrum(frame, spec, config, centroider);
++      {
 +        const size_t b1 = std::min(ms1_to_emit, b0 + mb);
 +        const int n = (int)(b1 - b0);
 +        std::vector<MSSpectrum> out((size_t)n);
@@ -385,6 +380,13 @@
 +        setProgress(b1 - 1);
 +        g_perf_load.ms1_decode += std::chrono::duration<double>(_m1 - _m0).count();
 +        g_perf_load.ms1_handoff += std::chrono::duration<double>(std::chrono::steady_clock::now() - _m1).count();
++      }
++      for (const auto& c : cents)
+       {
+-        TimsFrame& frame = handle->get_frame(ms1_frame_ids[i]);
+-        loadMS1Spectrum(frame, spec, config, centroider);
++        centroider.cap_hits_ += c.cap_hits_; centroider.total_calls_ += c.total_calls_;
++        centroider.max_dropped_intensity_ = std::max(centroider.max_dropped_intensity_, c.max_dropped_intensity_);
        }
 -      // Sort peaks by m/z (and the associated IM float data array alongside).
 -      // TIMS save_to_buffs returns peaks in (scan_id, m/z-within-scan) order,
@@ -396,11 +398,6 @@
 -      spec.sortByPosition();
 -      consumer.consumeSpectrum(spec);
 -      setProgress(i);
-+      for (const auto& c : cents)
-+      {
-+        centroider.cap_hits_ += c.cap_hits_; centroider.total_calls_ += c.total_calls_;
-+        centroider.max_dropped_intensity_ = std::max(centroider.max_dropped_intensity_, c.max_dropped_intensity_);
-+      }
      }
      endProgress();
      centroider.reportCapSummary(static_cast<size_t>(config.ms1_centroid_max_peaks));
@@ -450,6 +447,10 @@
        auto wit = group_to_windows.find(group);
        if (wit == group_to_windows.end()) continue;
 -      const auto& dia_windows = wit->second;
+-
+-      for (const DIAWindow* win : dia_windows)
+-      {
+-        for (size_t i = 0; i < frame_ids.size(); ++i)
 +      const auto& dia_windows = wit->second;   // windows of this group, in table order
 +      // [DIAspeXtractor tile] the frames of this group whose time lies in the configured range (the
 +      // frame table above was exported for ALL of them); the batch loop below is unchanged, so a
@@ -458,11 +459,9 @@
 +      frame_ids.reserve(frame_ids_all.size());
 +      for (uint32_t fid : frame_ids_all)
 +      { const double t = handle->get_frame(fid).time; if (t >= config.dia_ms2_rt_lo && t < config.dia_ms2_rt_hi) frame_ids.push_back(fid); }
- 
--      for (const DIAWindow* win : dia_windows)
++
 +      for (size_t b0 = 0; b0 < frame_ids.size(); b0 += batch)
-       {
--        for (size_t i = 0; i < frame_ids.size(); ++i)
++      {
 +        const size_t b1 = std::min(frame_ids.size(), b0 + batch);
 +        const int n = (int)(b1 - b0);
 +        // per frame slot: one spectrum per window of the group (empty = skipped)
@@ -499,31 +498,41 @@
 -
            frame.save_to_buffs(nullptr, scan_ids.data(), nullptr, intensities.data(),
 -                              mzs.data(), inv_ion_mobilities.data(), nullptr);
-+                              mzs.data(), inv_ion_mobilities.data(), nullptr, tl_ctx.get());
-+          frame.close();                                    // releases the frame's view of OUR buffer
- 
+-
 -          MSSpectrum spec;
 -          spec.setRT(frame.time);
 -          spec.setMSLevel(2);
 -          spec.setDriftTimeUnit(DriftTimeUnit::VSSC);
 -          spec.setType(SpectrumSettings::SpectrumType::CENTROID);
 -          spec.setNativeID("frame=" + String(frame.id) + " windowGroup=" + String(win->window_group) + " scan=" + String(win->scan_begin));
+-
+-          Precursor prec;
+-          prec.setMZ(win->mz_center);
+-          prec.setIsolationWindowLowerOffset(win->mz_width / 2.0);
+-          prec.setIsolationWindowUpperOffset(win->mz_width / 2.0);
+-          spec.setPrecursors({prec});
+-
+-          spec.setMetaValue("ion mobility lower limit", win->im_lower);
+-          spec.setMetaValue("ion mobility upper limit", win->im_upper);
++                              mzs.data(), inv_ion_mobilities.data(), nullptr, tl_ctx.get());
++          frame.close();                                    // releases the frame's view of OUR buffer
+ 
+-          DataArrays::FloatDataArray im_array;
+-          IMDataConverter::setIMUnit(im_array, DriftTimeUnit::VSSC);
+-
+-          for (uint32_t p = 0; p < frame.num_peaks; ++p)
 +          auto& slot = out[(size_t)k];
 +          slot.reserve(dia_windows.size());
 +          for (const DIAWindow* win : dia_windows)
-+          {
+           {
+-            if (inv_ion_mobilities[p] >= win->im_lower && inv_ion_mobilities[p] <= win->im_upper)
 +            MSSpectrum spec;
 +            spec.setRT(frame.time);
 +            spec.setMSLevel(2);
 +            spec.setDriftTimeUnit(DriftTimeUnit::VSSC);
 +            spec.setType(SpectrumSettings::SpectrumType::CENTROID);
 +            spec.setNativeID("frame=" + String(frame.id) + " windowGroup=" + String(win->window_group) + " scan=" + String(win->scan_begin));
- 
--          Precursor prec;
--          prec.setMZ(win->mz_center);
--          prec.setIsolationWindowLowerOffset(win->mz_width / 2.0);
--          prec.setIsolationWindowUpperOffset(win->mz_width / 2.0);
--          spec.setPrecursors({prec});
++
 +            Precursor prec;
 +            prec.setMZ(win->mz_center);
 +            prec.setIsolationWindowLowerOffset(win->mz_width / 2.0);
@@ -531,25 +540,11 @@
 +            spec.setPrecursors({prec});
 +            spec.setMetaValue("ion mobility lower limit", win->im_lower);
 +            spec.setMetaValue("ion mobility upper limit", win->im_upper);
- 
--          spec.setMetaValue("ion mobility lower limit", win->im_lower);
--          spec.setMetaValue("ion mobility upper limit", win->im_upper);
--
--          DataArrays::FloatDataArray im_array;
--          IMDataConverter::setIMUnit(im_array, DriftTimeUnit::VSSC);
--
--          for (uint32_t p = 0; p < frame.num_peaks; ++p)
--          {
--            if (inv_ion_mobilities[p] >= win->im_lower && inv_ion_mobilities[p] <= win->im_upper)
++
 +            DataArrays::FloatDataArray im_array;
 +            IMDataConverter::setIMUnit(im_array, DriftTimeUnit::VSSC);
 +            for (uint32_t pk = 0; pk < frame.num_peaks; ++pk)
-             {
--              Peak1D peak;
--              peak.setMZ(mzs[p]);
--              peak.setIntensity(static_cast<double>(intensities[p]));
--              spec.push_back(peak);
--              im_array.push_back(static_cast<float>(inv_ion_mobilities[p]));
++            {
 +              if (inv_ion_mobilities[pk] >= win->im_lower && inv_ion_mobilities[pk] <= win->im_upper)
 +              {
 +                Peak1D peak;
@@ -558,13 +553,18 @@
 +                spec.push_back(peak);
 +                im_array.push_back(static_cast<float>(inv_ion_mobilities[pk]));
 +              }
-             }
++            }
 +            if (!spec.empty())
-+            {
+             {
+-              Peak1D peak;
+-              peak.setMZ(mzs[p]);
+-              peak.setIntensity(static_cast<double>(intensities[p]));
+-              spec.push_back(peak);
+-              im_array.push_back(static_cast<float>(inv_ion_mobilities[p]));
 +              spec.getFloatDataArrays().push_back(std::move(im_array));
 +              spec.setIMPeakType(IMPeakType::IM_PROFILE);
 +              spec.sortByPosition();   // TIMS order is (scan, m/z-within-scan); consumers assume global m/z order
-+            }
+             }
 +            slot.push_back(std::move(spec));   // keep the slot (possibly empty spectrum) to preserve window index
            }
 -

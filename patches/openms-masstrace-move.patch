@@ -12,16 +12,16 @@
 # Apply from the OpenMS tree root: patch -p1 -N < openms-masstrace-move.patch
 --- a/src/openms/include/OpenMS/KERNEL/MassTrace.h
 +++ b/src/openms/include/OpenMS/KERNEL/MassTrace.h
-@@ -70,6 +70,12 @@
- 
+@@ -71,6 +71,12 @@
      /// Assignment operator
      MassTrace & operator=(const MassTrace &) = default;
-+
+ 
 +    /// Move operations (DIAspeXtractor patch). The defaulted destructor and copy operations above
 +    /// suppress the implicit moves, so every std::move of a MassTrace was a deep copy of
 +    /// trace_peaks_ and smoothed_intensities_; deduced noexcept, since every member is nothrow-movable.
 +    MassTrace(MassTrace &&) = default;
 +    MassTrace & operator=(MassTrace &&) = default;
- 
++
      /// Random access operator
      PeakType& operator[](const Size & mt_idx);
+     const PeakType& operator[](const Size & mt_idx) const;
