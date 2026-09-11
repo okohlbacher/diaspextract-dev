@@ -49,8 +49,9 @@ dest() { if [ "$1" = TdfMzCalibration.h ]; then echo "$OMS/src/openms/include/Op
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 finish() {
   rc=$?; set +e; trap '' HUP INT TERM   # a second signal must not abort the rollback half-way and strand the lock
-  # The rename is the commit point, not the flag: a failed mv, or a signal between the two, leaves $PROV.tmp behind.
-  if [ -e "$PROV.tmp" ]; then COMMITTED=0; rm -f "$PROV.tmp"; fi
+  # The rename is the commit point, not the flag: a failed mv, or a signal between the two, leaves $PROV.tmp behind;
+  # a directory in $PROV's place swallows it (mv moves the file INTO it), leaving no provenance file.
+  if [ -e "$PROV.tmp" ] || [ ! -f "$PROV" ]; then COMMITTED=0; rm -f "$PROV.tmp"; fi
   if [ "$COMMITTED" != 1 ]; then
     UNDONE=""
     for f in $PROMOTED; do
@@ -58,7 +59,7 @@ finish() {
       if [ -e "$S/bak/$f" ]; then { mv -f "$S/bak/$f" "$d" && touch "$d"; } || UNDONE="$UNDONE $f"; else rm -f "$d" || UNDONE="$UNDONE $f"; fi
     done
     # every backed-up input must hold its backup's bytes again (a directory in a file's place swallows the mv)
-    if [ -n "$PROMOTED" ] && [ -z "$UNDONE" ] && ! sha256sum -c --quiet "$S/restore.sha256"; then UNDONE=" (restore.sha256)"; fi
+    if [ -n "$PROMOTED" ] && [ -z "$UNDONE" ] && [ -s "$S/restore.sha256" ] && ! sha256sum -c --quiet "$S/restore.sha256"; then UNDONE=" (restore.sha256)"; fi
     if [ -n "$UNDONE" ]; then
       echo "FAIL-CLOSED: rollback incomplete for:$UNDONE; there is NO provenance. Kept the stage $S (bak/, prov.prev)" \
            "and the lock $LOCK: put the backups back by hand, then rm -rf $S and rmdir $LOCK."
@@ -66,12 +67,12 @@ finish() {
     fi
     [ -z "$PROMOTED" ] || echo "ROLLED BACK every promoted build input:$PROMOTED"
     if [ -e "$S/prov.prev" ]; then
-      if grep -qx "binary_sha256=$(sha "$BUILD/bin/diaspextractor")" "$S/prov.prev" &&
+      if [ ! -e "$PROV" ] && grep -qx "binary_sha256=$(sha "$BUILD/bin/diaspextractor")" "$S/prov.prev" &&
          grep -qx "libopenms_sha256=$(sha "$BUILD/lib/libOpenMS.so")" "$S/prov.prev"; then
         mv -f "$S/prov.prev" "$PROV"; echo "bin/diaspextractor, libOpenMS.so and provenance unchanged"
       else
         mv -f "$S/prov.prev" "$PROV.stale"
-        echo "FAIL-CLOSED: the failed build changed bin/diaspextractor or libOpenMS.so; there is NO provenance" \
+        echo "FAIL-CLOSED: the failed build changed bin/diaspextractor or libOpenMS.so, or something outside the lock put $PROV in place; there is NO provenance" \
              "(old one parked at $PROV.stale). Run make diaspextractor on the restored tree, or deploy again."
       fi
     fi

@@ -2145,7 +2145,7 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces: the apex threshold is this x trace:ms2_noise_threshold_int (OpenMS default 3.0). Lower recovers weaker fragments.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerTOPPSubsection_("tile", "Retention-time cells and tiles (integer detector)");   // without it --helphelp threw ElementNotFound
-    registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch (seconds) of the fixed retention-time cells the integer detector traces in, cut at the run's MS1 frame times and stamped in the header (spx:tile_boundaries). Output is bit-identical for any grouping into tiles and any thread count at a fixed perf:trace_bands; a trace eluting across a cut is cut there. -1 = one cell (the whole run). CHANGES OUTPUT; the price of 600: docs/BASELINE.md '2026-09-09: the cell-atomic grid, step 2'.", false, true);
+    registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch (seconds) of the fixed retention-time cells the integer detector traces in, cut at the run's MS1 frame times and stamped in the header (spx:tile_boundaries). The spectra are digest-identical for any grouping into tiles and any thread count at a fixed perf:trace_bands (the header stamps the grouping); a trace eluting across a cut is cut there. -1 = one cell (the whole run). CHANGES OUTPUT; the price of 600: docs/BASELINE.md '2026-09-09: the cell-atomic grid, step 2'.", false, true);
     registerStringOption_("trace:band_edges", "<mode>", "acquisition", "Where the integer detector's per-window flight-time band edges come from. 'acquisition': tlo = 0 and thi = the larger of the digitizer's last bin (GlobalMetadata DigitizerNumSamples) and MzAcqRangeUpper through the window's frame calibrations, run-level metadata a reader holding one tile can compute. A calibration tdf without those bounds is refused; an input with no tdf falls back to -trace:detector openms, which has no bands. 'slab': the window's resident peaks' extremes (the default before 2026-09-10); on a .d it needs -perf:stream_load false. Measured neutral: docs/BASELINE.md 'Cell grid, step 3a'.", false);
     setValidStrings_("trace:band_edges", {"slab", "acquisition"});
     registerIntOption_("tile:cells_per_tile", "<n>", 1, "Group the retention-time cells into TILES of n cells each and run the window loop tile by tile: "
@@ -2182,7 +2182,7 @@ protected:
                           "measured interleaved on one node. Between tiles (after tile k is written, before tile k+1 is read) it "
                           "takes about 4 GB off TNBC 009 and 0.5 GB off dataset D at the defaults. On by default because memory is "
                           "what bounds this tool (it decides how many isolation windows fit at once, and whether the run fits the "
-                          "machine at all). Turn it off when time is the binding constraint. Output is byte-identical "
+                          "machine at all). Turn it off when time is the binding constraint. The spectra are digest-identical "
                           "either way.", false);
     setValidStrings_("perf:malloc_trim", {"true", "false"});
     registerStringOption_("perf:stream_load", "<true/false>", "true",
@@ -2199,7 +2199,7 @@ protected:
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
     registerStringOption_("perf:ms1_prune", "<true/false>", "true",
                           "Drop picked MS1 centroids at or below trace:noise_threshold_int as they load, keeping the witnesses that leave every MS1 "
-                          "band spectrum as it was. Byte-identical output, smaller MS1 map (peak at one cell per tile, dnoise off: dataset D 31.99 -> "
+                          "band spectrum as it was. Digest-identical spectra, smaller MS1 map (peak at one cell per tile, dnoise off: dataset D 31.99 -> "
                           "25.90 GB, TNBC 009 69.11 -> 31.97 GB). false = keep every centroid. docs/BASELINE.md 'MS1 prune, output-identical'.", false);
     setValidStrings_("perf:ms1_prune", {"true", "false"});
     registerIntOption_("perf:trace_bands", "<n>", 12, "Split each window's fragment m/z range into N bands traced concurrently, lifting parallelism past the window count. The band count changes the output: docs/BASELINE.md 'perf:trace_bands 48: FAILS the gate'. 1 = off. 0 = auto (windows x bands >= threads), which the integer detector refuses at a positive tile:rt_sec (the default) and on the .d streaming source.", false);
@@ -2456,7 +2456,7 @@ protected:
     auto _ts0 = tt_now();
     if (split_valleys > 0.0 && mts.size() > 1)
     {
-      const int nchunk = std::max(1, bands * 4);      // 4x chunks vs threads -> dynamic load balance
+      const int nchunk = std::max(1, bands * 4);      // 4 chunks per band -> dynamic load balance
       const size_t n_in = mts.size();
       vector<vector<MassTrace>> parts(nchunk);
       #pragma omp taskloop grainsize(1) default(shared)
@@ -2477,7 +2477,7 @@ protected:
     }
     tt_split = tt_s(_ts0, tt_now());
     writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(mts.size()) + " traces: edges "
-                  + String(tt_edge) + " s | distribute " + String(tt_dist) + " s (serial) | detect "
+                  + String(tt_edge) + " s | distribute " + String(tt_dist) + " s | detect "
                   + String(tt_mtd) + " s | gather " + String(tt_gather) + " s (serial) | valley-split "
                   + String(tt_split) + " s");
     vector<Trace> out;
@@ -3320,8 +3320,8 @@ protected:
       const bool in_mzpeak = false;
 #endif
       // [3b] the streaming source needs the Bruker loader: a .d only, never an mzML or an mzPeak
-      // archive (the resident path reads those whole). DIASPEXTRACTOR_TILE_RESIDENT=1 forces the
-      // resident source for a same-build A/B; any other value leaves the default.
+      // archive (the resident path reads those whole). DIASPEXTRACTOR_TILE_RESIDENT set to any non-empty
+      // value other than 0 (parsed once, above) forces the resident source for a same-build A/B.
       tile_source = !in_mzpeak && !force_resident && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF;
       if (tile_source)
       {

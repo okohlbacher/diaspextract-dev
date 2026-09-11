@@ -248,7 +248,7 @@ printf '3\n' > $O/slow; set_version $V/repoA v17 c15 1 1 BREAK_BUILD
 wait_for $O/building; PID=$(sed -n 's/^.* pid \([0-9][0-9]*\) .*$/\1/p' $R/.deploy.lock/owner); : > $V/slow_touch
 wait_for $V/slow_touch.hit && kill -TERM "$PID"
 wait; rc=$(cat $V/s9b.rc); rm -f $V/shim/touch $V/slow_touch $V/slow_touch.hit; printf '0\n' > $O/slow
-ok "S9b a TERM during the rollback: every input restored, provenance truthful, lock released (rc $rc)" 'tree_is v15 && prov_is v15 && prov_truthful && grep -q "ROLLED BACK" $V/s9b.out && clean'
+ok "S9b a TERM during the rollback: every input restored, provenance truthful, lock released (rc $rc)" '[ $rc = 2 ] && tree_is v15 && prov_is v15 && prov_truthful && grep -q "ROLLED BACK" $V/s9b.out && clean'
 
 ok "S13 setup: a clean committed v18" 'reset_node v18 c18'
 cp $PROV $V/prov_v18
