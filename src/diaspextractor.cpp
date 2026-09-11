@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACTOR_VERSION
-#define DIASPEXTRACTOR_VERSION "1.2.0"
+#define DIASPEXTRACTOR_VERSION "1.2.1"
 #endif
 
 using namespace OpenMS;

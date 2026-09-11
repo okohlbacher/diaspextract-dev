@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.1 — 2026-09-11
+
+Documentation and CI only: the extractor is byte-for-byte the 1.2.0 binary, and all four pinned digests
+are unchanged.
+
+### Fixed
+
+- **A claim in 1.2.0 about the floating-point guard was wrong.** `src/DnoiseMs1.h` refuses a
+  value-changing floating-point flag only when the compiler announces it through a predefined macro, and
+  compilers differ more than the 1.2.0 entry said. Measured in CI: **GCC 11 announces none of
+  `-freciprocal-math`, `-funsafe-math-optimizations`, `-fno-signed-zeros` or `-fassociative-math`**, so
+  building with them there is not refused; GCC 16 announces all four; clang announces only
+  `-funsafe-math-optimizations` and `-ffp-model=fast`, on x86-64. The flags still change the port's output
+  and must not be used; `tests/test_dnoise_ms1.cpp` pins the window-gate boxes whatever the compiler says.
+- **The CI step that asserts the guard now asserts what the compiler can actually see.** It probes each
+  flag's predefined macros first, requires the `#error` for every announced flag, and reports the rest as
+  unprotected instead of failing. On GCC 11 the old step failed the release commit.
+
 ## v1.2.0 — 2026-09-11
 
 **Why 1.2.** This release succeeds the public v1.1.0 (2026-09-04). Two things in it are not backwards

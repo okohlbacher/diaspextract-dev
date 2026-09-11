@@ -50,11 +50,27 @@ jobs:
           G="$RUNNER_TEMP/guard.cpp"
           printf '#include "DnoiseMs1.h"\n' > "$G"
           c++ -std=c++20 -fsyntax-only -I src "$G" || { echo "::error::DnoiseMs1.h does not compile on its own"; exit 1; }
+          # The #error can only see a flag the compiler announces through a predefined macro, and compilers
+          # differ: GCC 11 announces none of -freciprocal-math, -funsafe-math-optimizations,
+          # -fno-signed-zeros or -fassociative-math, GCC 16 announces all four, clang announces neither
+          # of the first three. Assert refusal exactly for the flags THIS compiler announces, and print
+          # the rest as unprotected rather than pretending the guard covers them.
+          MACROS='__FAST_MATH__|__FINITE_MATH_ONLY__|_M_FP_FAST|__RECIPROCAL_MATH__|__ASSOCIATIVE_MATH__|__NO_SIGNED_ZEROS__|__ARM_FP_FAST|__FLT_EVAL_METHOD__'
+          guard_macros() { c++ -std=c++20 $1 -dM -E -x c++ /dev/null | grep -E "^#define ($MACROS)" | sort; }
+          # against the no-flag baseline, because clang defines __FLT_EVAL_METHOD__ 0 unconditionally and a
+          # guard macro set to 0 does not trip the #error
+          guard_macros "" > "$RUNNER_TEMP/base.txt"
           fail=0
           for f in $FLAGS; do
             # shellcheck disable=SC2086  # ${f//+/ } splits a '+'-joined combination into its flags
+            guard_macros "${f//+/ }" > "$RUNNER_TEMP/with.txt"
+            announced=$(comm -13 "$RUNNER_TEMP/base.txt" "$RUNNER_TEMP/with.txt" | grep -Ev '^#define (__FLT_EVAL_METHOD__|__FINITE_MATH_ONLY__) 0$' | grep -c . || true)
             if c++ -std=c++20 -fsyntax-only ${f//+/ } -I src "$G" 2> "$G.err"; then
-              echo "::error::DnoiseMs1.h compiled under $f"; fail=1
+              if [ "$announced" -eq 0 ]; then
+                echo "  unprotected: $f is not announced by this compiler, so no #error can catch it"
+                continue
+              fi
+              echo "::error::DnoiseMs1.h compiled under $f although the compiler announces it"; fail=1
             elif grep -Eq 'DnoiseMs1\.h:[0-9]+:[0-9]+: (fatal )?error:' "$G.err" && grep -q '#error' "$G.err"; then
               echo "  ok: $f refused by the #error"
             else

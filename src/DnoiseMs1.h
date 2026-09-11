@@ -37,8 +37,10 @@
 //      one FMA flips 3 of D's 24 boxes (13 points on 8724). The builder keeps that product apart
 //      through a volatile and is compiled with contraction off; CMakeLists.txt passes -ffp-contract=off
 //      as well. Value-changing flags the compiler announces in a macro are refused by the #error below.
-//      Only clang slips past: -freciprocal-math, -fassociative-math and -fno-signed-zeros on every target,
-//      -funsafe-math-optimizations and -ffp-model=fast on x86-64. Do not use them: -freciprocal-math,
+//      What that catches depends on the compiler, because only an announced flag can be seen (measured in
+//      CI): GCC 16 announces all four of -freciprocal-math, -funsafe-math-optimizations, -fno-signed-zeros
+//      and -fassociative-math; GCC 11 announces none of them; clang announces only -funsafe-math-optimizations
+//      and -ffp-model=fast, both on x86-64. Do not use them: -freciprocal-math,
 //      -funsafe-math-optimizations and -ffp-model=fast each move D's boxes. tests/test_dnoise_ms1.cpp pins
 //      D's boxes, the three FMA-sensitive ones included.
 // Not ported, because dnoise's defaults never reach it on diaPASEF MS1: the mz_ppm width override,
