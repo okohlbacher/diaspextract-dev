@@ -913,6 +913,40 @@ README.md, with inline `[n]` markers in the text. Keep CITATION.cff as the machi
 of the tool's own citation; the README section is for what the tool builds on and is benchmarked
 against.
 
+### Rename the tool, docs and repositories to DIAspeXtract (2026-09-12, user request)
+
+**What.** Third rename, dropping the "-or": tool name `DIAspeXtract`, binary `diaspextract`, repositories
+`okohlbacher/diaspextract` and `okohlbacher/diaspextract-dev`, and every mention in docs and code. History:
+speXtract (original, collided) -> SpeXtractor (2026-09-06) -> DIAspeXtractor (2026-09-11, v1.2.0) -> DIAspeXtract.
+
+**Check first.** `diaspextract` / `DIAspeXtract` for collisions on GitHub (repos, orgs, code), bioconda, conda-forge,
+PyPI, bio.tools (was unreachable last time), the OpenMS TOPP list and the literature. The original collision was on the
+bare `spextract`; the `DIA` prefix is what separates the new name, so check the prefixed form, not the stem.
+
+**Scope, from the previous rename** (same procedure, one day of attended work): the rename tool
+`rename_dia.py` with its ordered lookbehind rules and exclusion list (it is in the 2026-09-11 session scratchpad,
+`plan/tools/`; re-create it from `git show 5e8a660` if gone), then the hand edits it cannot do: CMake project and
+option (`DIASPEXTRACT_TESTS_ONLY`, the old option a FATAL_ERROR), the version define, `main()`'s fail-closed guard
+extended to refuse `DIASPEXTRACTOR_*` as well as `SPEXTRACTOR_*`, namespace, the OpenMS patches (namespace, the three
+getenv names read inside libOpenMS, comments; hunks must still apply to the pinned tree), `scripts/sync_cluster.sh`
+and its transaction harness, `build.yml`'s version and name gates, `verify_publish_dia.sh` on the cluster (a new copy,
+never `sed -i` on a script a chain uses), the in-tree OpenMS build on ibminode05 (`executables.cmake`, `src/topp/CMakeLists.txt`,
+the patched sources, then `cmake .` and a rebuild), `harness/` (env prefix `DIASPEXTRACT_*`), CITATION.cff, README,
+NOTICE, SECURITY, CONTRIBUTING, the public logo's title/aria-label, and the export script's `--name`.
+
+**Decisions carried over unless revisited.** `spx:` header stamps and `spx_` precursor keys stay (they sit inside
+the digest; renaming them moves all four pins). No compatibility alias for the old binary name. Frozen: verbatim
+reviewer outputs under docs/reviews, released CHANGELOG sections, the ceph install root
+`/ceph/ibmi/abi/oliver/spextract` and the published arms (new arms publish `bin/diaspextract`). Prose-only renames in
+historical docs. The private harness plan schema id stays.
+
+**Gate.** Digest identity on both files at the defaults (D `e43672a0`, TNBC 009 `3aafd0b5`; dnoise off `8c1b047f`,
+`bff54a1f`), e2e including the guard check for BOTH old prefixes, the deploy-transaction harness, CI on all legs.
+
+**Release.** A binary and repository rename is a breaking change for 1.2.x users: ship it as its own release with a
+migration section (the 1.2.0 one is the template), rename the GitHub repositories at that point (redirects cover the
+old URLs), update the two `origin` remotes, and archive nothing until the export is verified.
+
 ### Rename the project and repositories to DIAspeXtractor (2026-09-10, user request) -- DONE (2026-09-11)
 
 **Done 2026-09-11** in the commit after b5f6395 (CHANGELOG [Unreleased], "Renamed"). Decided: binary `diaspextractor`;
