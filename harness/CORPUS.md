@@ -71,7 +71,8 @@ pid stamp and lock line, not by `pgrep`.
 and records were readable by every user of a shared node; `launch` also creates it private). It takes
 the node lock, retrying for 5 s because a `status` probe flocks it for microseconds, and removes any staged
 copy a killed runner left behind. Then it:
-- resolves the arm: `source env.sh` after removing `SPEXTRACTOR_*`, `DIASPEXTRACTOR_*`, `MALLOC_*`, `OMP_*`,
+- resolves the arm: `source env.sh` after removing `DIASPEXTRACT_*` (and the renamed-away `SPEXTRACTOR_*`,
+  `DIASPEXTRACTOR_*`), `MALLOC_*`, `OMP_*`,
   `GOMP_*`, `KMP_*`, `TCMALLOC_*`, `LD_PRELOAD`, `GLIBC_TUNABLES`, `_JAVA_OPTIONS`, `JAVA_TOOL_OPTIONS`,
   `JDK_JAVA_OPTIONS` and the inherited `LD_LIBRARY_PATH` (`_JAVA_OPTIONS` overrides an explicit `-Xmx`,
   verified on data); `LC_ALL=C`, `TMPDIR=<jnatmp>`. An env.sh that exports any of them aborts (G-V03);

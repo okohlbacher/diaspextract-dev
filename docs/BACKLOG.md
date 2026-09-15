@@ -170,7 +170,7 @@ day; two of them have since been overtaken:
    IM prior still fails — z=4 lies between z=2 and z=3 — but a 2-D prior does not. Since the
    `charge:min_charge` 2 -> 1 change, `charge:im_charge_veto` fits per-run 2+/3+ mobility lines from
    the run's own confident calls and re-calls a z=1 lying on the 2+ line, or drops one on the 3+
-   band (CHANGELOG.md v2.0.0, "`charge:min_charge` default 2 -> 1"; src/diaspextractor.cpp:1830,
+   band (CHANGELOG.md v2.0.0, "`charge:min_charge` default 2 -> 1"; src/diaspextract.cpp:1830,
    3548-3568). What a learned 2-D prior would add on top of the veto is unmeasured.
 3. **The failure mode is localised.** ~44% of within-cycle duplicates are separated by ~1000 ppm
    ≈ one isotope spacing: the same peptide assigned to different monoisotopes. That is the thing
@@ -243,7 +243,7 @@ the spectra themselves which call is correct — rather than assuming either too
 and that reference has three problems established on 2026-09-05: it is stale (it predates
 `require_isotope_support=true`, the apex estimator, the integer detector, `perf:stream_load` and both
 moves of `charge:min_charge` — to 2, and back to 1 with the mobility veto (CHANGELOG.md v2.0.0;
-src/diaspextractor.cpp:1810) — so the measured population is disjoint from the shipped one); it is
+src/diaspextract.cpp:1810) — so the measured population is disjoint from the shipped one); it is
 structurally blind (tryptic, <=2 mods, z2-4 — exactly the space this tool exists to look outside);
 and the confusion table it produced belongs to a retired algorithm whose tie-break is the opposite
 of the shipped one. This experiment replaces a library-shaped oracle with **identification as
@@ -259,7 +259,7 @@ agreement this way would just echo our own annotation back at us.
 The experiment is therefore only meaningful if the adjudicating search **re-derives** charge:
 run both tools' outputs with `override_charge = 1, z = 1..5` (MSFragger) and the equivalent
 Sage configuration, so the winning charge is chosen by spectral evidence. That arm already exists
-for MSFragger — `docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`, where it moved DIAspeXtractor +4.5%.
+for MSFragger — `docs/BENCHMARK-MATRIX-2026-09-01.md:120-121`, where it moved DIAspeXtract +4.5%.
 
 **Design.**
 1. Extract the same acquisition with both tools. Use the public HeLa benchmark (PXD017703) so the
@@ -303,10 +303,10 @@ above).
 ## From the public HeLa table (2026-09-05, docs/HELA-TABLE.md)
 
 - **Low-load A/B on public data.** *Status 2026-09-08: half moot, nothing re-measured.* At 10 ng
-  DIAspeXtractor loses on both engines and both 2019 schemes (py3: Sage 4.8k vs 9.2k). The
+  DIAspeXtract loses on both engines and both 2019 schemes (py3: Sage 4.8k vs 9.2k). The
   isotope-support gate and the z>=2 floor were adopted at 200 ng in-house; the floor is since gone
   (`charge:min_charge` default is 1 with the mobility veto, CHANGELOG.md v2.0.0;
-  src/diaspextractor.cpp:1810), and nothing at 10 ng has been re-measured (no 10 ng / HeLa / PXD017703
+  src/diaspextract.cpp:1810), and nothing at 10 ng has been re-measured (no 10 ng / HeLa / PXD017703
   entry in docs/BASELINE.md after line 1196). Do: (1) re-measure `assembly:require_isotope_support`
   on the six 10 ng files at the v38 default (1.5-5 min per extraction, both engines already wired);
   (2) measure the v38 default (z=1 + veto) on the 10 ng files and on one 100 ng HeLa file as the
@@ -373,9 +373,9 @@ hyperscore at the boundary — then there is no content gap left and the item cl
 **The idea — a hypothesis to measure, not a recorded observation.** A 1+ hypothesis whose M+1 was not
 traced becomes a `guessed` precursor, and `assembly:require_isotope_support=true` erases it
 (docs/charge-inference.md:37-40; CHANGELOG.md v0.3.0, "`assembly:require_isotope_support` and
-`perf:stream_load` now default to TRUE"; src/diaspextractor.cpp:3562). Whether the gate drops genuine 1+
+`perf:stream_load` now default to TRUE"; src/diaspextract.cpp:3562). Whether the gate drops genuine 1+
 singletons is not established anywhere in the repository — the only in-repo link between the two is
-src/diaspextractor.cpp:3562, which uses the gate to *drop* 3+-band z=1 calls. Count, on 009 and 001, how
+src/diaspextract.cpp:3562, which uses the gate to *drop* 3+-band z=1 calls. Count, on 009 and 001, how
 many of the reference tool's 1+ identifications we emit only as `guessed`.
 
 **Why.** The gate was adopted at `min_charge` 2 on dataset D (6.9x slower and worse with it off,
@@ -398,7 +398,7 @@ OpenMS MS1 path; then key `findPartner` on the flight-time bin instead of the IE
 key is unavailable (CHANGELOG.md v2.0.0, "`Trace::tof` is 0 on the OpenMS MS1 path";
 docs/BASELINE.md:1593-1597), and the MS1 PeakMap (13.8 GB on dataset D at 20 B/peak, 44.5 GiB on TNBC) plus
 its 48 band sub-maps is the largest structure outside the window loop (docs/TNBC-PROFILE.md:102,
-131-132; docs/BASELINE.md:1512-1513). No `ms1_detector` option exists yet (grep src/diaspextractor.cpp).
+131-132; docs/BASELINE.md:1512-1513). No `ms1_detector` option exists yet (grep src/diaspextract.cpp).
 
 **What would falsify it.** Gate C showing >= 1% peptide loss in either engine, or the engines
 contradicting each other — the MS2 integer detector agrees with OpenMS on only ~85% of the union
@@ -408,7 +408,7 @@ it a memory-only trade.
 ### Band-independent tracing: make `perf:trace_bands` a free speed knob
 
 **The idea.** Each MS2 band carries its own `visited` bitset over the whole window
-(src/diaspextractor.cpp:1074; comment at 4046), so a trace grown by one band consumes peaks in another
+(src/diaspextract.cpp:1074; comment at 4046), so a trace grown by one band consumes peaks in another
 band's core, and ownership at band edges depends on the band count. Make ownership band-independent
 (a shared claim set with deterministic order, or the halo + core-ownership scheme the MS1 path uses,
 docs/BASELINE.md:1673-1675) so that every band count yields the same spectrum list.
@@ -439,7 +439,7 @@ control spread (133.0 vs 121.7 s) still exceeds the effect.
 
 ### The peak picker is sensitive to how frames are grouped across threads -- CLOSED (2026-09-09): it was a dropped tail
 
-**What it was.** `DIASPEXTRACTOR_PICK_BATCH` 256 -> 4096 changed the digest and cost 7.2% Sage / 6.1%
+**What it was.** `DIASPEXTRACT_PICK_BATCH` 256 -> 4096 changed the digest and cost 7.2% Sage / 6.1%
 MSFragger peptides on dataset D, and the picker was suspected of per-thread state. Step 0b of the
 tiling plan compared per-window slab digests and picked peak counts at both sizes: 20 of the 22
 windows present at 4096 had IDENTICAL peak counts, and two windows were missing altogether. The
@@ -494,7 +494,7 @@ differences are confined to within the smoother's edge of a boundary after the f
 **Implemented 2026-09-10.** `src/DnoiseMs1.h` is a bit-identical port of dnoise v0.1.0's default MS1 path. It runs
 inside the tool on the raw points before picking (`dnoise:ms1`, default true, `.d` input only). The gates:
 - dnoise off reproduces both old pins (D `8c1b047f`, TNBC 009 `bff54a1f`);
-- dnoise on reproduces DIAspeXtractor on dnoise's own filtered file (D `e43672a0`, TNBC 009 `3aafd0b5`), at 100 and
+- dnoise on reproduces DIAspeXtract on dnoise's own filtered file (D `e43672a0`, TNBC 009 `3aafd0b5`), at 100 and
   8 threads;
 - the kept point counts equal dnoise's (118,053,254 and 649,615,267).
 
@@ -542,8 +542,8 @@ design removes strictly more than the paper's definition, and its map bound fail
 picked MS1 map is below the tracer's own 100-count threshold and is never traced.
 
 **The real dnoise v0.1.0 as a preprocessor, searched (docs/reviews/2026-09-10-dnoise/real-dnoise-evaluation.md):**
-the no-op reproduces both pins, so its rewrite changes nothing DIAspeXtractor reads. Its default, MS1 only, cuts
-DIAspeXtractor's tiled peak (`-tile:cells_per_tile 1`) by 33% on D and 63% on TNBC 009 against same-node
+the no-op reproduces both pins, so its rewrite changes nothing DIAspeXtract reads. Its default, MS1 only, cuts
+DIAspeXtract's tiled peak (`-tile:cells_per_tile 1`) by 33% on D and 63% on TNBC 009 against same-node
 controls; the shipped single tile was not measured. Entrapment stays inside the gate: 1.36% against 1.30% on
 D, 0.93% against 1.09% on TNBC, just below the control's interval. The peptide cost is D −4.3% on Sage and
 −4.0% on MSFragger, TNBC +1.5% and −0.5%: on D that fails the S gate. Anything that filters MS2 costs 13-21% of MSFragger
@@ -619,8 +619,8 @@ default costs anything a peptide count would hide.
 
 **The idea.** The fitted 2+ and 3+ lines are ~1 sigma apart at low m/z (at m/z 500: 0.867 vs 0.822
 1/K0 against a 3+ sigma of 0.051), so v38 drops a z=1 on the 3+ band instead of re-labelling it
-(src/diaspextractor.cpp:3556-3563). The principled arbiter is the intermediate-isotope test — a
-co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 3+ — which the `DIASPEXTRACTOR_Z1_DIAG` machinery
+(src/diaspextract.cpp:3556-3563). The principled arbiter is the intermediate-isotope test — a
+co-eluting trace at +ISO/2 says 2+, at +ISO/3 says 3+ — which the `DIASPEXTRACT_Z1_DIAG` machinery
 already computes (docs/BASELINE.md:1839-1841); it is not yet wired in.
 
 **Why.** ~1.8% of z=1 calls are genuinely 3+ and are now discarded; recovering them is the only
@@ -628,7 +628,7 @@ upside left in the veto.
 
 **What would falsify it.** z=3 peptides not moving on 009 or dataset D with the tie-breaker on — re-calling
 178k/93k spectra to 3+ already identified nothing (5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D;
-src/diaspextractor.cpp:3557-3559, docs/BASELINE.md:1835-1836) — meaning dropping is final.
+src/diaspextract.cpp:3557-3559, docs/BASELINE.md:1835-1836) — meaning dropping is final.
 
 ### The 009 Sage protein count under z=1
 
@@ -846,7 +846,7 @@ distribution is the first thing to look at, before any search runs.
 
 Found by walking the openms-external-tools checklist. Two were fixed in the tool (the live update
 check, and `verboseVersion_` dropping the OpenMS build -- both now gated in CI). These three
-cannot be fixed inside DIAspeXtractor and are recorded rather than left to be rediscovered.
+cannot be fixed inside DIAspeXtract and are recorded rather than left to be rediscovered.
 
 **1. `--help` advertises a documentation URL that 404s.** `TOPPBase::getDocumentationURL()`
 (TOPPBase.cpp:2375-2388) returns `http://www.openms.de/doxygen/nightly/html/TOPP_<tool>.html`
@@ -878,7 +878,7 @@ packaging at all (blocked on the missing Developer ID private key -- see the rel
 ### Linux GUI application, distributable (2026-09-09, user request)
 
 Alongside the macOS (.app/.dmg, blocked on the Developer ID private key) and Windows (SignPath)
-packaging that does not yet exist, a **Linux desktop GUI** for DIAspeXtractor, shipped as a
+packaging that does not yet exist, a **Linux desktop GUI** for DIAspeXtract, shipped as a
 self-contained distributable (AppImage first -- one file, no install, runs on any glibc >= the
 build host's; Flatpak second if a store presence is wanted). Scope: a thin front end over the
 CLI (input .d/.mzpeak/.mzML, output path/format, the handful of options users actually set --
@@ -913,7 +913,12 @@ README.md, with inline `[n]` markers in the text. Keep CITATION.cff as the machi
 of the tool's own citation; the README section is for what the tool builds on and is benchmarked
 against.
 
-### Rename the tool, docs and repositories to DIAspeXtract (2026-09-12, user request)
+### Rename the tool, docs and repositories to DIAspeXtract (2026-09-12, user request) -- DONE (2026-09-15)
+
+**Done 2026-09-15** on branch `rename/diaspextract-1.3.0`, released as v1.3.0 (CHANGELOG.md, "Migrating from 1.2.x"):
+the rename tool (scratchpad `rename13/rename_dia.py`, the same shape as the 2026-09-11 one) plus the hand edits below;
+the guard in `main()` refuses `DIASPEXTRACTOR_*` and `SPEXTRACTOR_*`; filename-dated docs, docs/benchmarks, docs/reviews
+and the released CHANGELOG sections keep the names they were written under. The entry below is the plan as written.
 
 **What.** Third rename, dropping the "-or": tool name `DIAspeXtract`, binary `diaspextract`, repositories
 `okohlbacher/diaspextract` and `okohlbacher/diaspextract-dev`, and every mention in docs and code. History:
@@ -1039,7 +1044,7 @@ Profile the recovery against the filter before claiming a wall effect on long fi
 
 The memory-work plan (`.claude/plans`, see docs/BASELINE.md:1228) asked this file to record what it
 skipped. Status of each step at the v2.0.0 release, from CHANGELOG.md, docs/BASELINE.md and the
-source (`src` = src/diaspextractor.cpp; CHANGELOG entries are cited by title because the file is being
+source (`src` = src/diaspextract.cpp; CHANGELOG entries are cited by title because the file is being
 re-cut for the release):
 
 | step | status | evidence |
@@ -1110,7 +1115,7 @@ Two items follow, both D-class:
 
 | item | status | what it is |
 |---|---|---|
-| MS1 staging batch A/B (`DIASPEXTRACTOR_PICK_BATCH` 16/32/64/256/512 on D, streaming, 3 tiles) | RUNNING (chain `ms1batch`) | zero code. `ms1_buf_` is 256 frames of raw peaks (3.8-4.8 GiB on D) and the loader holds its own copy behind it; both scale with the batch, and step 0b proved batch composition is output-invariant. The only question is the wall cost. |
+| MS1 staging batch A/B (`DIASPEXTRACT_PICK_BATCH` 16/32/64/256/512 on D, streaming, 3 tiles) | RUNNING (chain `ms1batch`) | zero code. `ms1_buf_` is 256 frames of raw peaks (3.8-4.8 GiB on D) and the loader holds its own copy behind it; both scale with the batch, and step 0b proved batch composition is output-invariant. The only question is the wall cost. |
 | periodic `malloc_trim` DURING the load, not only at its end | NOT STARTED | ~5 lines under the existing `perf:malloc_trim` gate, every N batches. The env-var route (`MALLOC_TRIM_THRESHOLD_`/`MALLOC_MMAP_THRESHOLD_`) is already priced and rejected: step 0a measured -15.5 GB but +26% wall, because it changes the threshold for every allocation in the process rather than reclaiming at a few chosen points. |
 
 ### Missed variant-peptide precursor in dataset B (2026-09-15, found while auditing variant detection)

@@ -42,7 +42,7 @@ drops emissions.
 * **Both defects are real and verified in the source.** The 43.5% kernel time and the 1,993 s
   single-core tail are measured, not inferred. The *fixes* were wrong, not the diagnosis.
 * The 9.7× decomposes as **3.67× CPU × 2.64× parallelism** against the reference implementation (457 s, 38.4 cores,
-  6.8% system on the same node and `.d`). DIAspeXtractor's *user* CPU alone would finish in ~5 min at
+  6.8% system on the same node and `.d`). DIAspeXtract's *user* CPU alone would finish in ~5 min at
   120 cores — the algorithm is not 10× slow, it runs on a ninth of the machine.
 * Window `[327.52, 468.80)` holds 489,986 of 2,145,053 precursors (**23.7%**), capping the loop
   at **4.2×** by Amdahl regardless of thread count.

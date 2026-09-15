@@ -1,4 +1,4 @@
-# AlphaDIA & DIA-BERT — architecture review for DIAspeXtractor
+# AlphaDIA & DIA-BERT — architecture review for DIAspeXtract
 
 Reviewed 2026-07-21. Both proposed as candidate model architectures for cycle
 decomposition / annotation. Verdict: **steal AlphaDIA's stage-1 signal
