@@ -1,0 +1,65 @@
+Your working directory (already current, do not cd anywhere else; every relative path below is relative to it) is: /private/tmp/advrev-vibe-1300
+
+You are an adversarial reviewer of a RENAME + RELEASE branch. Review only -- do not modify, create or delete any file. Do not run the build. Read code and diffs; reason; report.
+
+## The project
+
+DIAspeXtract (until today DIAspeXtractor, before that SpeXtractor, originally speXtract): a C++20 OpenMS TOPP tool that extracts pseudo-DDA spectra from Bruker timsTOF diaPASEF data. Standalone repository that links a PATCHED development OpenMS (four patches in patches/, applied to the commit pinned in patches/openms.lock). Today, 2026-09-15, it is being released as **v1.3.0**: a rename ONLY. The previous release was v1.2.1 (2026-09-11); the previous rename (SpeXtractor -> DIAspeXtractor) shipped as v1.2.0 with a migration section, and is the template for this one.
+
+## Scope (frozen)
+
+Your working directory is a detached git worktree at HEAD = `d02ec719fe02acf49c1754ef6077317daf5ee131` (branch `rename/diaspextract-1.3.0`). The base is `0120485` (last commit before the branch). Working tree is clean. Review:
+
+    git diff 0120485 HEAD -- . ':(exclude)docs/reviews'
+
+(62 files, +526/-441; also saved verbatim at /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/branch.diff). Three commits: bb9ee04 (a BACKLOG entry, ignore), 4f25921 (the code/build/CI/harness rename + version 1.3.0), d02ec71 (docs, CHANGELOG, CITATION).
+
+ALSO review the public-export script, which lives outside the repository:
+/private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/export_public_v3.sh
+(copy of scratchpad/release/export_public_v3.sh). It copies `git ls-files` of this repo minus the patterns in `.export-private` into a separate public clone, checks version/name fields and scrubs residuals. It will be run as
+`export_public_v3.sh --version 1.3.0 --name DIAspeXtract --date 2026-09-15 --src <this repo> --dst <public clone>`.
+
+## What the rename must achieve (the invariants)
+
+1. Tool name `DIAspeXtract`, executable and CMake target `diaspextract`, C++ namespace `diaspextract::`, env prefix `DIASPEXTRACT_*`, sources `src/diaspextract.cpp` and `test/test_diaspextract.py`, repositories `okohlbacher/diaspextract` and `okohlbacher/diaspextract-dev`, version 1.3.0 everywhere the version lives (CMake project(VERSION), `#define DIASPEXTRACT_VERSION` in the source -- CMake FATAL_ERRORs if the two differ -- CITATION.cff version + date-released, the CHANGELOG heading).
+2. **Fail-closed guard in main()** (src/diaspextract.cpp near line 4818): any environment variable under EITHER old prefix, `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*`, must refuse the run before TOPPBase runs, naming each variable and its `DIASPEXTRACT_` replacement, exit code ILLEGAL_PARAMETERS. `DIASPEXTRACT_*` must be accepted. There is no dual read and no compatibility alias for the old binary name (decided; do not propose one). The 1.1.0 prefix `SPEXTRACT_*` is deliberately NOT guarded (as in 1.2.0).
+3. The OpenMS patches carry the new names (namespace, three getenv names read inside libOpenMS: DIASPEXTRACT_ALLOW_CHORD_FALLBACK, DIASPEXTRACT_SDK_PARALLEL, DIASPEXTRACT_LOAD_BATCH, comments) and every hunk must still apply to the pinned OpenMS commit -- so only `+` lines and `#` header comment lines may change; context lines and hunk headers must not.
+4. The spectra do not change: the name reaches only the mzML header (software entry) and the ini section name, which the spectrum-list digest excludes, so the four pinned digests (dataset D e43672a0 / run 009 3aafd0b5 at the defaults; 8c1b047f / bff54a1f with -dnoise:ms1 false) reproduce. NO option, default or algorithm may change in this branch.
+5. CI: .github/workflows/build.yml (full OpenMS source build; name gate greps `^DIAspeXtract ` in --help, version gate compares --help's `Version:` with project(VERSION)); tests.yml (OpenMS-independent unit tests with -DDIASPEXTRACT_TESTS_ONLY=ON).
+6. The deploy script scripts/sync_cluster.sh (a node-side transaction) and its harness tests/test_sync_cluster_txn.sh; the benchmark harness harness/*.py (private) strips the tool prefixes from the environment before running an arm.
+7. A rebuild from identical source must give an identical binary sha256, so the version define was bumped in the SAME commit as the code rename (4f25921) and the later docs commit touches no build input.
+
+## What is deliberately NOT renamed (do not report these)
+
+- docs/reviews/**, docs/benchmarks/**, harness/review/** (verbatim reviewer outputs) and every filename-dated doc `docs/*-2026-MM-DD.md`: frozen history.
+- CHANGELOG.md released sections (`## v1.2.1` and older): frozen.
+- The cluster install root `/ceph/ibmi/abi/oliver/spextract` and its published arms; quoted commands/variables/paths from earlier runs in living docs (BASELINE's naming note explains this).
+- `spx:` header stamps and `spx_` precursor userParams (inside the digest).
+- The private harness plan schema id `spextractor.plan/2`.
+- The bare old names SpeXtractor / spextractor / SPEXTRACTOR_ / speXtract / spextract were never in scope of this rename; they appear in the guard, the migration table, history lines, and `bench/dnoise_table.py`'s label regex on purpose.
+
+## What I most want attacked (answer each, numbered)
+
+Q1. **Incomplete renames.** Find any `DIAspeXtractor` / `diaspextractor` / `DIASPEXTRACTOR_` left in a LIVING file that is not one of the deliberate mentions above (guard, CMake FATAL_ERROR, check 22, migration table, history lines, harness STRIP_PREFIX, bench.py's running-extractor guard, dnoise_table's label regex, CORPUS.md's v1.2.0 record). Also the REVERSE: any place where the rename tool hit something it should not have (a URL, a path on the cluster, a quoted command that ran under the old name, a regex whose meaning changed). Check .github/, CMakeLists.txt, scripts/, patches/, src/, test/, tests/, harness/, bench/, README/CONTRIBUTING/SECURITY/NOTICE/CITATION.
+
+Q2. **The fail-closed guard** (src/diaspextract.cpp main()). Is there any environment variable name that (a) starts with an old prefix and is NOT refused, or (b) starts with DIASPEXTRACT_ and IS refused? Look at the strncmp lengths (12 and 15), the `%.*s` arithmetic (n, m), a variable whose name IS the bare prefix (`SPEXTRACTOR_=1`), a name containing no `=`, an empty environ entry. Does it print before TOPPBase's own output? Does it exit ILLEGAL_PARAMETERS (6)? Does the e2e check 22 in test/test_diaspextract.py actually verify what the CHANGELOG claims (one of each prefix AND both at once, each named with its new name, nothing written, no [det] line)? Could the assertion `re.search(r"(?<![A-Z])" + v + r"\b", log)` pass for the wrong reason (the guard's generic message mentions `SPEXTRACTOR_*` and `DIASPEXTRACTOR_*` on every line)?
+
+Q3. **CMake option handling.** `option(DIASPEXTRACT_TESTS_ONLY ...)` plus a `foreach(_old SPEXTRACTOR_TESTS_ONLY DIASPEXTRACTOR_TESTS_ONLY) if(DEFINED ${_old}) FATAL_ERROR`. Is `if(DEFINED ${_old})` correct CMake for a variable whose NAME is in `_old`? Does a stale CMakeCache entry from a 1.2.x build directory trigger it (it should)? Does the version-drift check `file(STRINGS src/diaspextract.cpp _spx_fallback REGEX "^#define DIASPEXTRACT_VERSION \"")` still match the source line? Anything in the MZPEAK block or install() that still names the old target?
+
+Q4. **Patch hunks.** For each of patches/*.patch: did the rename touch ONLY `+` lines and `#` header lines? Look for a changed context line (a line starting with a space) or a changed `@@` header, which would make the patch fail to apply to the pinned OpenMS. Are the three getenv names consistent between the calibration patch, the CHANGELOG migration table and README?
+
+Q5. **CI gates.** build.yml: does `grep -q '^DIAspeXtract '` (trailing space) match OpenMS TOPPBase's actual --help header format (`<name> -- <description>`)? Does the version sed on `project(DIAspeXtract VERSION` still extract the number? Any path in either workflow still `diaspextractor`? Does tests.yml's `-DDIASPEXTRACT_TESTS_ONLY=ON` build the calibration test as intended? Is anything in build.yml's e2e/patch-check steps referencing the old file names?
+
+Q6. **The export script** (export_public_v3.sh, outside the repo). It will be run with --name DIAspeXtract --version 1.3.0 --date 2026-09-15. Will every check in step (c) pass against THIS tree (compare its regexes with CMakeLists.txt line 2 and 65-68, CITATION.cff, src/diaspextract.cpp's #define and TOPPBase(...) call, README line 1, build.yml, the CHANGELOG first heading)? Are the scrub scans in (d) correct (word boundaries, the `-i` flags, the xargs exit-code logic 0/1/123)? Any way a residual passes or a clean tree fails? Is anything in .export-private missing that the branch diff now makes necessary (a new private file, a file that names an acquisition/specimen/cluster path)? Note patches/openms-topp-mzpeak-cmake.py IS private; scripts/sync_cluster.sh IS private; docs/BACKLOG.md IS private.
+
+Q7. **The CHANGELOG v1.3.0 section** (CHANGELOG.md lines 3-44). Every statement must be TRUE of this tree. Check especially: "the name reaches only the mzML header (the software entry and the `spx:` run stamps' tool name) and the ini section" -- do the spx: stamps (src/diaspextract.cpp ~4147-4171) carry the tool name at all? "Nothing else in the tree changed between 1.2.1 and this release" (git log 62b53ea..HEAD; .gitignore also changed in d02ec71). The migration table's every cell. "GitHub redirects the old URLs, and a clone keeps working until its remote is updated". "e2e check 22 now sets one of each, and both at once". "the check count of the e2e suite (25; 26 where the build writes mzPeak)" -- count the `check(` calls in test/test_diaspextract.py. The "Older names, for the record" line (speXtract up to v1.1.0; SpeXtractor the internal 2.0.0 tag; DIAspeXtractor 1.2.0 and 1.2.1) -- against CHANGELOG's own released sections.
+
+Q8. **README correctness.** The history paragraph (lines 5-8): "The older names were taken by other tools" -- was DIAspeXtractor taken, or only speXtract/SpeXtractor (docs/BACKLOG.md's rename entries state the reasons)? Every command line, path, binary name and repository URL. The "Options worth knowing" table's defaults against the register*Option_/registerFlag_ calls in src/diaspextract.cpp (registerOptionsAndFlags_, ~line 2100-2330): report any default that differs. The Tests section's count and its bullet about the refused prefixes. Any link to a file that the public export will not carry (see .export-private).
+
+Q9. **Anything that changes output.** Any diff hunk in src/, patches/ or CMakeLists.txt that is not a pure identifier/string rename -- a changed default, a changed condition, a changed flag. Quote it.
+
+Q10. **The harness and scripts.** harness/corpus.py STRIP_PREFIX now strips DIASPEXTRACT_* too (the LIVE prefix) -- is that the intended behaviour (env.sh of the arm decides, the caller's environment must not leak) or does it break something a caller relies on? harness/bench.py's running-extractor guard: `("diaspextract" in l or "spextractor" in l)` -- any process on a shared node that this now wrongly matches or misses? scripts/sync_cluster.sh: is every node-side path renamed consistently with tests/test_sync_cluster_txn.sh's fixture (flags.make dir, provenance file, unit dir, .bak name, make target, shipped tools)? `epd_patch_markers` counts `grep -ci 'spextract\|lock'` -- does the count stay the same under the new comments?
+
+## Output format
+
+A numbered list of findings, most severe first. For each: **file:line**, the quoted text, what is wrong, a concrete failing input or scenario, severity HIGH / MEDIUM / LOW, and one line "would this bite on a real release, or is it theoretical?". Then answer Q1-Q10 explicitly, one short paragraph each; where something is fine, say so in one sentence rather than padding. No praise, no summary of the diff. If you could not read a file, say which.

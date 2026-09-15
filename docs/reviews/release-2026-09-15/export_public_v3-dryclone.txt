@@ -1,0 +1,73 @@
+== export DIAspeXtract 1.3.0: /Users/kohlbach/Projects/OpenMS/New Tools/DIAspeXtractor/diaspextractor @ d02ec719f (origin/rename/diaspextract-1.3.0) -> /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/public_dry @ 6cd31cd39 (origin/main)
+   work dir /var/folders/0d/nx2m0w3n76s59tfg8g708d240000gn/T//export_public.kDZfkR
+   tracked in src 309, excluded by .export-private 230, exported 79; dst tracked before 82, preserved (dst-only) 3, to remove 2, to add 2
+== version and name fields (DIAspeXtract 1.3.0 2026-09-15)
+  ok: CMake project (CMakeLists.txt)
+  ok: CMake executable (CMakeLists.txt)
+  ok: CITATION title (CITATION.cff)
+  ok: CITATION version (CITATION.cff)
+  ok: source #define (src/diaspextract.cpp)
+  ok: TOPPBase name (src/diaspextract.cpp)
+  ok: README title (README.md)
+  ok: build.yml name gate (.github/workflows/build.yml)
+  ok: CHANGELOG first heading: ## v1.3.0 — 2026-09-15
+  ok: CHANGELOG heading carries 2026-09-15
+  ok: CITATION date-released (CITATION.cff)
+== scrub residuals (must be empty)
+  ok: cohort labels S08/S23/S26/S30/S33/S36 (word-bounded, _ is not a boundary)
+  ok: reference implementation named
+  ok: specimen IDs FKL/K25423/QKL
+  ok: local paths /Users/kohlbach
+  ok: cohort project AGXT/PH1/liver (word-bounded)
+  ok: private directories docs/reviews, docs/benchmarks
+== internal-development mentions (informational, not a gate)
+   (end of informational scan)
+== file-list diff (staged in --dst, nothing committed)
+   exported 79 + preserved dst-only 3 = 82 files in the public tree; added 0, modified 42, type-changed 0, removed 0, unchanged 37
+   M	.github/ISSUE_TEMPLATE/bug_report.md
+   M	.github/PULL_REQUEST_TEMPLATE.md
+   M	.github/workflows/build.yml
+   M	.github/workflows/tests.yml
+   M	.gitignore
+   M	CHANGELOG.md
+   M	CITATION.cff
+   M	CMakeLists.txt
+   M	CONTRIBUTING.md
+   M	NOTICE
+   M	README.md
+   M	SECURITY.md
+   M	bench/README.md
+   M	bench/coverage.py
+   M	bench/cycle_redundancy.py
+   M	bench/joint_bench.py
+   M	bench/ledger_report.py
+   M	bench/mzml_specdiff.py
+   M	bench/run_joint.sh.example
+   M	bench/run_open.sh.example
+   M	bench/tile_concat.py
+   M	docs/BASELINE.md
+   M	docs/HELA-TABLE.md
+   M	docs/MZ-AXIS-DESIGN.md
+   M	docs/TNBC-TABLE.md
+   M	docs/charge-inference.md
+   M	docs/search-engine-policy.md
+   M	patches/mzpeak-cpp-arrow23.py
+   M	patches/openms-brukertims-mz-calibration.patch
+   M	patches/openms-epd-lockfree.patch
+   M	patches/openms-masstrace-move.patch
+   M	patches/openms-mzml-parallel-write.patch
+   M	scripts/apply_openms_patches.sh
+   M	scripts/build_mzpeak_lib.sh
+   M	scripts/check_option_tokens.py
+   M	src/DnoiseMs1.h
+   M	src/MzPeakStreamLoad.h
+   M	src/TdfLoad.h
+   M	src/TdfMzCalibration.h
+   R097	src/diaspextractor.cpp	src/diaspextract.cpp
+   R094	test/test_diaspextractor.py	test/test_diaspextract.py
+   M	tests/test_calibration_cpp.cpp
+   M	tests/test_dnoise_ms1.cpp
+   M	tests/test_tdf_load.cpp
+    44 files changed, 390 insertions(+), 326 deletions(-)
+   excluded by .export-private (230 paths): /var/folders/0d/nx2m0w3n76s59tfg8g708d240000gn/T//export_public.kDZfkR/excluded.txt; preserved: assets/logo-128.png assets/logo.png assets/logo.svg 
+EXPORT VERIFIED: DIAspeXtract 1.3.0 from d02ec719f (origin/rename/diaspextract-1.3.0) into /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/public_dry; review `git -C /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/public_dry status`, then commit with a summarising message.

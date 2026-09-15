@@ -1,0 +1,9 @@
+  ! kimi 0.42.0 -> 0.43.1   upgrade: kimi upgrade
+  ! vibe 2.25.3 -> 2.25.4   upgrade: uv tool upgrade mistral-vibe
+· smoke-testing vibe …
+· isolating vibe in /tmp/advrev-vibe-50266 (it can write)
+· running vibe (limit 2400s) …
+· vibe left its worktree clean
+! vibe produced no output at all.
+  first lines of /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/vibe.md.log:
+vibe dispatch rc=3

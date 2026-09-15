@@ -1,0 +1,8 @@
+  ! kimi 0.42.0 -> 0.43.1   upgrade: kimi upgrade
+  ! vibe 2.25.3 -> 2.25.4   upgrade: uv tool upgrade mistral-vibe
+· smoke-testing kimi …
+· isolating kimi in /tmp/advrev-kimi-49913 (it can write)
+· running kimi (limit 2400s) …
+· kimi left its worktree clean
+· kimi wrote 16344 bytes to /private/tmp/claude-501/-Users-kohlbach-Claude-OpenMS---DIAtracer/e4677b2f-9916-478b-9db2-706d8e88d289/scratchpad/rename13/review/kimi.md
+kimi dispatch rc=0
