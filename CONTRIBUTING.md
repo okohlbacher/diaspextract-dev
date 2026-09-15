@@ -39,6 +39,11 @@ cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON && cmake --build build && ctest --te
 
 The second form needs no OpenMS and is what CI runs on four platforms.
 
+Run the end-to-end suite from a shell with no `DIASPEXTRACT_*` variable set: it passes the caller's
+environment through to the tool (check 22 strips only the two old prefixes it tests), so a stray probe
+variable would configure every check. CI runs it under `env -i`, and the cluster publish script starts
+from a clean environment.
+
 ## Pull requests
 
 - Say what you measured, on what, and what would have falsified it. "Should be faster" is not a

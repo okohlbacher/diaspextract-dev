@@ -3,9 +3,9 @@
 Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data.
 
 DIAspeXtract was DIAspeXtractor (executable `diaspextractor`) in 1.2.0 and 1.2.1, and the tool released as
-speXtract (executable `spextract`) up to v1.1.0; it was briefly SpeXtractor in development. The older names
-were taken by other tools. DIAspeXtract 1.3.0 continues that version line, and [CHANGELOG.md](CHANGELOG.md)
-maps the old names and defaults to the new ones.
+speXtract (executable `spextract`) up to v1.1.0; it was briefly SpeXtractor in development. speXtract and
+SpeXtractor were taken by other tools; 1.3.0 only drops the "-or". DIAspeXtract 1.3.0 continues that version
+line, and [CHANGELOG.md](CHANGELOG.md) maps the old names and defaults to the new ones.
 
 DIAspeXtract turns a data-independent acquisition into a set of pseudo-tandem spectra that any
 ordinary DDA search engine can read. Each emitted spectrum pairs one precursor hypothesis with the
@@ -84,6 +84,14 @@ notice a missing second or fourth:**
   handler and validator: the writer memoises CV-term validation in mutable state, and sharing one
   handler corrupts the heap. Measured on a 30-minute acquisition: **20.1 s → 5.9 s**.
 
+Three environment variables reach the patched libOpenMS, none of them needed for a normal run:
+`DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1` (exactly `1`) opts into the legacy chord when the exact calibration
+is unavailable, which otherwise fails closed; `DIASPEXTRACT_LOAD_BATCH=<n>` sets the frames per decode
+batch of the parallel `.d` loader (default 256; the frames reach the detector in the same order at any
+value); and `DIASPEXTRACT_SDK_PARALLEL` (any value) lets that loader decode in parallel while the Bruker
+SDK converter is active, which it does serially by default because the SDK's thread-safety is not vouched
+for.
+
 Optionally, `OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library for the
 conversion instead. It is an independent cross-check, not a requirement, and is not redistributed.
 
@@ -137,7 +145,7 @@ sage sage.json -o results pseudo.mzML
 ### Reading the output
 
 Emitted spectra are MS2 with a synthetic precursor. Provenance is recorded as userParams on the run,
-and the header is authoritative. A 1.2.0 run at the defaults stamps sixteen: the detector and
+and the header is authoritative. A run at the defaults stamps sixteen: the detector and
 calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
 `spx:pearson_G`, `spx:im_weight_sigma`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
 `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`,

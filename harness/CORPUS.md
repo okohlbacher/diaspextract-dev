@@ -488,6 +488,12 @@ still `050e2e2a` / `064af71b` / `4fe0a1ce` -- the harness has not drifted since 
 selftest are identical across the two, so no measured function changed -- and the guard test above re-proves
 all 39 cases on `3601ef3a` itself.
 
+**2026-09-15, the 1.3.0 rename** (branch `rename/diaspextract-1.3.0`): the pair hash is `3215b73e` now, because
+the rename edited `STRIP_PREFIX` (it strips `DIASPEXTRACT_*` and both old prefixes) inside the measured
+function; search `064af71b` and the peptide rule `4fe0a1ce` are unchanged. Re-proved on the `v1.3.0rc1` arm
+(plan `corpus_v3_selftest_v130`, HeLa_22 on ibminode05): `selftest` 135/135, `guardtest` 39/39, and the release
+smoke's `QUEUE_DONE failed 0` reproduces the v1.2.0 smoke's records (61,342 spectra, Sage 4,423, MSFragger 2,850).
+
 ### Estimated queue hours
 
 From the diaTracer reference mzML beside every raw (exact spectra and bytes for all 49), the `ref wall`

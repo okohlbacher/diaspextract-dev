@@ -112,6 +112,21 @@ def die(guard, message):
     raise Abort(guard, message)
 
 
+# The harness reads DIASPEXTRACT_REGISTRY and DIASPEXTRACT_BENCH_ROOT from its own environment. An export
+# under a previous prefix (DIASPEXTRACTOR_*, the 1.2.x name; SPEXTRACTOR_*, the 2.0.0 tree) would otherwise
+# be ignored without a word and the run fall back to samples.yaml or the registry's bench_root -- the
+# failure class the tool's own guard (e2e check 22) exists to kill, so the harness refuses the same way.
+OLD_PREFIXES = ("DIASPEXTRACTOR_", "SPEXTRACTOR_")
+
+
+def refuse_old_prefixes(environ=None):
+    environ = os.environ if environ is None else environ
+    stale = sorted(k for k in environ if k.startswith(OLD_PREFIXES))
+    if stale:
+        die("G-B00", "old-prefix variable(s) set, refused (the harness reads DIASPEXTRACT_* only): "
+            + ", ".join("%s (now DIASPEXTRACT_%s)" % (k, k.split("_", 1)[1]) for k in stale))
+
+
 def canon(obj):
     """The single canonical serializer.
 
@@ -2771,6 +2786,7 @@ def main(argv=None):
     table = {"plan-check": cmd_plan_check, "pin": cmd_pin, "run": cmd_run,
              "verify": cmd_verify, "show": cmd_show, "selftest": cmd_selftest}
     try:
+        refuse_old_prefixes()
         return table[args.cmd](args)
     except Abort as exc:
         sys.stderr.write("\nABORT %s\n%s\n\n" % (exc.guard, exc.message))

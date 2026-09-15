@@ -4,13 +4,14 @@
 
 **Why 1.3.** A rename only. The tool, its executable, its environment prefix and its repositories are
 **DIAspeXtract** now (executable `diaspextract`), dropping the "-or" of 1.2.x's DIAspeXtractor; the
-spectra do not change. The name reaches only the mzML header (the software entry and the `spx:` run
-stamps' tool name) and the ini section, which the spectrum-list digest excludes, so this release
-reproduces every 1.2.x pin: dataset D `e43672a0`, run 009 `3aafd0b5` at the defaults, `8c1b047f` and
-`bff54a1f` with `-dnoise:ms1 false`. A binary and repository rename breaks every script that called
-`diaspextractor` and every `DIASPEXTRACTOR_*` export, so it ships as its own minor release with a migration
-section rather than folded into the next change to the spectra. Nothing else in the tree changed
-between 1.2.1 and this release.
+spectra do not change. The name reaches only the mzML header (the software entry and the
+data-processing step that references it) and the ini section, which the spectrum-list digest
+excludes, so this release reproduces every 1.2.x pin: dataset D `e43672a0`, run 009 `3aafd0b5` at the
+defaults, `8c1b047f` and `bff54a1f` with `-dnoise:ms1 false`. A binary and repository rename breaks
+every script that called `diaspextractor` and every `DIASPEXTRACTOR_*` export, so it ships as its own
+minor release with a migration section rather than folded into the next change to the spectra. Apart
+from this rename and one `.gitignore` line (`docs/**/*.log`), nothing the release carries changed since
+1.2.1; only the private development records grew.
 
 ### Migrating from 1.2.x
 
@@ -28,7 +29,10 @@ between 1.2.1 and this release.
   the tool refuses to start while any `DIASPEXTRACTOR_*` **or** `SPEXTRACTOR_*` variable is set, and
   names each variable and its `DIASPEXTRACT_` name (e2e check 22 now sets one of each, and both at once).
   `-DDIASPEXTRACTOR_TESTS_ONLY` and `-DSPEXTRACTOR_TESTS_ONLY` likewise stop the CMake configure with an
-  error. As in 1.2.0, 1.1.0's `SPEXTRACT_*` prefix is not guarded: rename such an export by hand.
+  error. Those two are the only `-D` names CMake refuses: a stale `-DDIASPEXTRACTOR_WITH_MZPEAK` or
+  `-DDIASPEXTRACTOR_VERSION` from a 1.2.x build script is an unused cache entry that configures without a
+  word (mzPeak support is switched on by `-DMZPEAK_ROOT`, as before), so check a copied build script by hand.
+  As in 1.2.0, 1.1.0's `SPEXTRACT_*` prefix is not guarded: rename such an export by hand.
 - **No compatibility alias.** No `diaspextractor` executable is installed. Anyone who needs the old
   command locally can link it (`ln -s diaspextract diaspextractor`).
 - **The OpenMS patches carry the new names** -- namespace, the three variables, their messages and the
@@ -37,7 +41,8 @@ between 1.2.1 and this release.
   must be patched again from a pristine checkout of the pin (`scripts/apply_openms_patches.sh` also
   installs the renamed `TdfMzCalibration.h`) and rebuilt, and the tool's own target is `diaspextract`.
 - **Unchanged by the rename:** every option and default, the `spx:` run stamps and the `spx_guessed` /
-  `spx_n_isotopes` precursor userParams (they sit inside the spectrum digest), the four digests above,
+  `spx_n_isotopes` precursor userParams (the `spx_*` precursor userParams sit inside the spectrum
+  digest; the run stamps sit in the header, which the bench tools read), the four digests above,
   the OpenMS pin, and the check count of the e2e suite (25; 26 where the build writes mzPeak).
 - Older names, for the record: speXtract (`spextract`, up to v1.1.0), SpeXtractor (`spextractor`, the
   internal 2.0.0 tag), DIAspeXtractor (`diaspextractor`, 1.2.0 and 1.2.1). Released sections below keep

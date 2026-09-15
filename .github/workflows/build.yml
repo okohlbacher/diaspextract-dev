@@ -120,10 +120,11 @@ jobs:
 
           # OUR version, not the OpenMS one TOPPBase prints by default.
           V=$(sed -n 's/^project(DIAspeXtract VERSION \([0-9.]*\).*/\1/p' diaspextract/CMakeLists.txt)
-          grep -q "^Version: $V" help.txt \
+          VE=${V//./\\.}   # 1.3.0 -> 1\.3\.0: the dots are literal in both greps below
+          grep -q "^Version: $VE" help.txt \
             || { echo "::error::wrong version (want $V, likely OpenMS's)"; cat help.txt; exit 1; }
           # and the OpenMS build alongside it, because a bug report needs both numbers
-          grep -qE "^Version: $V \\(OpenMS .+\\)" help.txt \
+          grep -qE "^Version: $VE \\(OpenMS .+\\)" help.txt \
             || { echo "::error::Version line does not carry the OpenMS build"; cat help.txt; exit 1; }
 
           # OpenMS builds with ENABLE_UPDATE_CHECK=ON by default and TOPPBase then makes a network
