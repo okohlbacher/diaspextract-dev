@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DIAspeXtractor benchmark harness -- the ONLY sanctioned way to benchmark this tool.
+"""DIAspeXtract benchmark harness -- the ONLY sanctioned way to benchmark this tool.
 
 Ad-hoc shell scripts produced eleven distinct data-handling failures in a single session, all
 bookkeeping rather than algorithmic. Each guard below exists because a specific failure
@@ -50,7 +50,7 @@ that silently produces a plausible wrong number is worse than one that refuses t
              resolved config, git ref, host, timestamps) beside its outputs.
 
   FAILURE 11 orphan process. A stale run perturbed a benchmark's memory-adaptive admission.
-             GUARD: pre-flight refuses to start if another spextractor or diaspextractor is running.
+             GUARD: pre-flight refuses to start if another diaspextract (or an older diaspextractor / spextractor) is running.
 
 Usage:
     bench.py run   --plan plan.yaml            # execute arms + baselines
@@ -172,13 +172,14 @@ def preflight(plan: Plan, reg: dict) -> dict:
     # FAILURE 11: an orphaned run perturbed a benchmark's memory-adaptive admission and
     # competed for cores for 37 minutes without being noticed.
     ps = sh("ps -eo pid,etime,args").stdout
-    # "spextractor" is a substring of "diaspextractor", so one pattern sees the pre- and the post-rename
-    # binary. NOT "spextract": the ceph install root is /ceph/ibmi/abi/oliver/spextract, so every Sage,
-    # MSFragger or diaTracer command line under it would abort the run as "another extractor".
+    # Three binary names have run here: diaspextract (now), diaspextractor (1.2.x) and spextractor (2.0.0). "spextractor"
+    # is NOT a substring of "diaspextract", so both stems are matched. NOT a bare "spextract": the ceph install root is
+    # /ceph/ibmi/abi/oliver/spextract, so every Sage, MSFragger or diaTracer command line under it would abort the run
+    # as "another extractor"; "diaspextract" needs its prefix and never matches the root.
     running = [l for l in ps.splitlines()
-               if "spextractor" in l and "grep" not in l and str(os.getpid()) not in l]
+               if ("diaspextract" in l or "spextractor" in l) and "grep" not in l and str(os.getpid()) not in l]
     if running:
-        die("another spextractor or diaspextractor is already running -- it will contend for cores and\n"
+        die("another diaspextract (or diaspextractor / spextractor) is already running -- it will contend for cores and\n"
             "       perturb memory-adaptive admission. Kill it or wait:\n         "
             + "\n         ".join(x.strip()[:110] for x in running[:5]))
 

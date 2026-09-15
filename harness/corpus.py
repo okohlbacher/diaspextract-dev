@@ -73,7 +73,8 @@ SAGE_MIN_READ = 0.5                 # Sage must search at least this fraction of
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 # Variables the tools must not inherit (review F4): probes, allocator and OpenMP knobs, JVM options
 # (_JAVA_OPTIONS overrides an explicit -Xmx). The caller's LD_LIBRARY_PATH is dropped before env.sh runs.
-STRIP_PREFIX = ("SPEXTRACTOR_", "DIASPEXTRACTOR_", "MALLOC_", "OMP_", "GOMP_", "KMP_", "TCMALLOC_")
+# The three tool prefixes: DIASPEXTRACT_ is the live one, the other two are the renamed-away prefixes the tool refuses.
+STRIP_PREFIX = ("SPEXTRACTOR_", "DIASPEXTRACTOR_", "DIASPEXTRACT_", "MALLOC_", "OMP_", "GOMP_", "KMP_", "TCMALLOC_")
 STRIP_EXACT = frozenset({"LD_PRELOAD", "GLIBC_TUNABLES", "_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS"})
 INHERIT_DROP = frozenset({"LD_LIBRARY_PATH"})
 LIB_ROOTS = ("/ceph/", "/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/")   # where a measured library may resolve
@@ -2112,7 +2113,7 @@ exit $rc
 '''
 FAKE_SPX = FAKE_HEAD + r'''
 if "--help" in sys.argv:
-    print("DIAspeXtractor -- Extracts pseudo-MS/MS spectra\nVersion: 9.9.9")
+    print("DIAspeXtract -- Extracts pseudo-MS/MS spectra\nVersion: 9.9.9")
     sys.exit(0)
 inp, out = arg("-in"), arg("-out")
 with open(os.environ["FAKE_ENVDUMP"], "a") as f:
@@ -2257,7 +2258,7 @@ def _world(w: Path) -> None:
         (spx / arm / "env.sh").write_text("export SPX_BIN=%s\n" % (spx / arm / "bin" / "fakespx"))
         _prov(spx / arm)
     (spx / "arm_probe").mkdir()
-    (spx / "arm_probe" / "env.sh").write_text("export SPX_BIN=%s\nexport SPEXTRACTOR_DET=1\n" % (spx / "arm" / "bin" / "fakespx"))
+    (spx / "arm_probe" / "env.sh").write_text("export SPX_BIN=%s\nexport DIASPEXTRACT_DET=1\n" % (spx / "arm" / "bin" / "fakespx"))
     (spx / "arm_omp").mkdir()
     (spx / "arm_omp" / "env.sh").write_text("export SPX_BIN=%s\nexport OMP_NUM_THREADS=8\n" % (spx / "arm" / "bin" / "fakespx"))
     (spx / "arm_outside").mkdir()
@@ -2337,7 +2338,7 @@ def selftest(args=None) -> int:
         os.environ.update(PATH=str(w / "bin") + os.pathsep + os.environ["PATH"], FAKE_ENVDUMP=str(w / "envdump.txt"),
                           FAKE_MSF_TIMES=str(w / "msf_times.log"), FAKE_MSF_SLEEP="0.3",
                           FAKE_NEIGHBOUR=str(w / "ceph" / "raw" / "run_A_diatracer.mzML"),
-                          SPEXTRACTOR_PROBE="1", DIASPEXTRACTOR_PROBE="1", MALLOC_ARENA_MAX="2", LD_PRELOAD="",
+                          SPEXTRACTOR_PROBE="1", DIASPEXTRACTOR_PROBE="1", DIASPEXTRACT_PROBE="1", MALLOC_ARENA_MAX="2", LD_PRELOAD="",
                           GLIBC_TUNABLES="glibc.malloc.arena_max=2", OMP_NUM_THREADS="3", _JAVA_OPTIONS="-Xmx64m",
                           LD_LIBRARY_PATH="/nonexistent/inherited")
         neigh0 = neighbour(str(w / "ceph" / "raw" / "run_A.d"))
@@ -2398,7 +2399,7 @@ def selftest(args=None) -> int:
         C.abort("G-V03", "provenance sha mismatch", lambda: arm_meta(arm_env(qb)[0], identity(qb, arm_env(qb)[0])), "provenance")
         qn = dict(q1, arm="arm_nohelp")
         C.abort("G-V03", "label unresolvable", lambda: arm_meta(arm_env(qn)[0], identity(qn, arm_env(qn)[0])), "label")
-        C.check("G-V03", "label read from --help", arm_meta(env, identity(q1, env))["label"] == "DIAspeXtractor 9.9.9")
+        C.check("G-V03", "label read from --help", arm_meta(env, identity(q1, env))["label"] == "DIAspeXtract 9.9.9")
 
         # ---- G-V04 binary drift
         ident0 = identity(q1, env)
@@ -2511,7 +2512,8 @@ def selftest(args=None) -> int:
         C.check("G-V07", "ceph neighbour untouched", neighbour(str(w / "ceph" / "raw" / "run_A.d")) == neigh0)
         dump = (w / "envdump.txt").read_text().split()
         C.check("G-V03", "tool env had no probe/allocator variables",
-                not any(strip_var(k) for k in dump) and "SPEXTRACTOR_PROBE" in R["A", "pair"]["env_removed"])
+                not any(strip_var(k) for k in dump)
+                and {"SPEXTRACTOR_PROBE", "DIASPEXTRACTOR_PROBE", "DIASPEXTRACT_PROBE"} <= set(R["A", "pair"]["env_removed"]))
         spans = sorted(tuple(map(float, l.split())) for l in (w / "msf_times.log").read_text().splitlines())
         C.check("G-V10", "first MSFragger ran alone", len(spans) == 4 and all(spans[0][1] <= s[0] for s in spans[1:]), spans[:2])
         runs1 = {s: R[s, "pair"]["pair_run"] for s in "AB"}
@@ -2575,7 +2577,7 @@ def selftest(args=None) -> int:
         plan_t, reg_t = _reg(q1)
         md, inc, tot = rt(q1, list(R.values()), "after resume and re-count")
         C.check("G-V13", "table renders complete rows, no zero cells",
-                inc == 0 and tot == 2 and "DIAspeXtractor 9.9.9" in md and "| 0 |" not in md and "**corpus** | 2 |" in md, (inc, tot))
+                inc == 0 and tot == 2 and "DIAspeXtract 9.9.9" in md and "| 0 |" not in md and "**corpus** | 2 |" in md, (inc, tot))
         C.check("G-V13", "table names the rules: target+decoy with target-only totals, KiB, unflagged-row ratio",
                 all(x in md for x in ("**target+decoy**", "Target-only peptides", "KiB", "unflagged rows", "Measurement code")))
         (w / "table.md").write_text(md)
@@ -2673,7 +2675,7 @@ def selftest(args=None) -> int:
         g9 = R9["A", "pair"]["gate"]         # its load is quiet; `busy` may see a parallel selftest's fake MSFragger
         C.check("G-V06", "50 foreign cores during both arms flag the row although the gate load was quiet",
                 g9["load"] <= g9["load_max"] and all(R9["A", "pair"]["arms"][t]["during"]["contended"] for t in TOOLS)
-                and "during diaTracer-2.2.1: foreign CPU" in md9 and "during DIAspeXtractor 9.9.9: foreign CPU" in md9
+                and "during diaTracer-2.2.1: foreign CPU" in md9 and "during DIAspeXtract 9.9.9: foreign CPU" in md9
                 and "| 1/1 |" in md9, R9["A", "pair"]["arms"]["dt"].get("during"))
 
         # ---- run 5: a new binary re-runs everything

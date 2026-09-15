@@ -25,7 +25,7 @@ jobs:
           python-version: '3.12'
 
       - name: Configure and build the OpenMS-independent targets
-        run: cmake -B build -DDIASPEXTRACTOR_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release

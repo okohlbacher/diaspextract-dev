@@ -71,7 +71,7 @@ def main():
     if not rows:
         sys.exit("ABORT: no rows parsed from %s" % a.tsv)
     # [rt-unit] Sage reports rt in MINUTES for these inputs, but the unit is a property of
-    # the INPUT mzML, not of Sage: DIAspeXtractor writes scan start time in seconds
+    # the INPUT mzML, not of Sage: DIAspeXtract writes scan start time in seconds
     # (UO:0000010) and the reference extractor writes minutes (UO:0000031). Detect rather
     # than assume -- reading seconds as minutes silently scales every RT by 60 and the
     # result still looks plausible. Same guard as bench/cycle_redundancy.py.

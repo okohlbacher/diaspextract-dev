@@ -53,18 +53,18 @@ done
 set_flags() {  # yes|no: whether the tool's include path reaches a sqlite3.h (on the cluster: OpenMS's bundled SQLite)
   local sq=""; [ "$1" = yes ] && sq="-I$SQ "
   printf 'CXX_INCLUDES = -I%s/src/openms/extern/SQLiteCpp/include %s-I%s/src/openms/include -isystem %s/contrib/include\nCXX_FLAGS = -std=c++17 -O0\n' \
-    "$O" "$sq" "$O" "$R" > $O/build/src/topp/CMakeFiles/diaspextractor.dir/flags.make
+    "$O" "$sq" "$O" "$R" > $O/build/src/topp/CMakeFiles/diaspextract.dir/flags.make
 }
 mk_node() {
-  N=$1; R=$N/scratch; TOOLS=$N/ceph/tools; TESTS=$N/ceph/tests; O=$R/OpenMS; PROV=$O/build/bin/diaspextractor.provenance
+  N=$1; R=$N/scratch; TOOLS=$N/ceph/tools; TESTS=$N/ceph/tests; O=$R/OpenMS; PROV=$O/build/bin/diaspextract.provenance
   SQ=$O/src/openms/extern/SQLiteCpp/sqlite3
   mkdir -p $O/src/topp $O/src/openms/include/OpenMS/FORMAT $O/src/openms/include/OpenMS/KERNEL \
            $O/src/openms/source/FORMAT $O/src/openms/source/FEATUREFINDER $O/build/bin $O/build/lib \
-           $O/build/src/topp/CMakeFiles/diaspextractor.dir $SQ $TOOLS
+           $O/build/src/topp/CMakeFiles/diaspextract.dir $SQ $TOOLS
   printf 'CMAKE_CXX_COMPILER:FILEPATH=%s\nCF_OPENMS_PACKAGE_VERSION_FULLSTRING:INTERNAL=3.5.0-fake\n' "$(command -v c++)" > $O/build/CMakeCache.txt
   set_flags yes
   printf '#include <OpenMS/FORMAT/TdfMzCalibration.h>\n' > $O/src/openms/source/FORMAT/BrukerTimsFile.cpp
-  printf '// DIAspeXtractor lock\n' > $O/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
+  printf '// DIAspeXtract lock\n' > $O/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
   printf 'MassTrace(MassTrace &&) = default;\n' > $O/src/openms/include/OpenMS/KERNEL/MassTrace.h
   printf '0\n' > $O/slow
   # the bundled SQLite: its header in the tool's include path, the static library libOpenMS.so is linked from
@@ -79,19 +79,19 @@ mk_node() {
   # call the tree up to date and do nothing.
   printf '%b\n' \
    'I=../src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h' 'T=../src/topp' \
-   'diaspextractor: bin/diaspextractor' \
+   'diaspextract: bin/diaspextract' \
    'lib/libOpenMS.so: $(I) ../src/openms/source/FORMAT/BrukerTimsFile.cpp' '\tcat $^ > $@' \
-   'bin/diaspextractor: lib/libOpenMS.so $(T)/diaspextractor.cpp $(T)/TdfLoad.h $(T)/MzPeakStreamLoad.h $(T)/DnoiseMs1.h' \
+   'bin/diaspextract: lib/libOpenMS.so $(T)/diaspextract.cpp $(T)/TdfLoad.h $(T)/MzPeakStreamLoad.h $(T)/DnoiseMs1.h' \
    '\tcat $^ > $@.part' \
    '\ttouch ../building; sleep $$(cat ../slow); rm -f ../building' \
-   '\tif grep -q BREAK_BUILD $(T)/diaspextractor.cpp; then sleep 1; echo "error: forced compile failure" >&2; exit 1; fi' \
-   '\tmv -f $@.part $@' '\tsleep 1' '.PHONY: diaspextractor' > $O/build/Makefile
+   '\tif grep -q BREAK_BUILD $(T)/diaspextract.cpp; then sleep 1; echo "error: forced compile failure" >&2; exit 1; fi' \
+   '\tmv -f $@.part $@' '\tsleep 1' '.PHONY: diaspextract' > $O/build/Makefile
 }
 install_script() {  # path-substituted copy; refuses if any real cluster path survives
   sed -e "s#/scratch/kohlbach#$R#g" -e "s#/ceph/ibmi/abi/oliver/spextract#$N/ceph#g" "$1" > "$2"
   if grep -n '/scratch/kohlbach\|/ceph/ibmi' "$2"; then echo "ABORT: real path survived in $2"; exit 98; fi
 }
-SHIPPED="test/test_diaspextractor.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
+SHIPPED="test/test_diaspextract.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
 mk_repo() {
   mkdir -p $1/src $1/tests $1/test $1/bench $1/scripts
   git -C $1 init -q && git -C $1 config user.email t@t && git -C $1 config user.name t && git -C $1 config commit.gpgsign false
@@ -99,7 +99,7 @@ mk_repo() {
 }
 set_version() {  # repo tag calib dnoise_ok tdf_ok [cpp extra]
   local D=$1
-  printf '// diaspextractor %s\n%s\n' "$2" "${6:-}" > $D/src/diaspextractor.cpp
+  printf '// diaspextract %s\n%s\n' "$2" "${6:-}" > $D/src/diaspextract.cpp
   printf '#define CALIB_TAG "%s"\n' "$3" > $D/src/TdfMzCalibration.h
   printf '#define TDF_OK %s // TdfLoad %s\n' "$5" "$2" > $D/src/TdfLoad.h
   printf '// MzPeakStreamLoad %s\n' "$2" > $D/src/MzPeakStreamLoad.h
@@ -119,17 +119,17 @@ same() { cmp -s "$1" "$2"; }
 shaf() { shasum -a 256 "$1" | cut -d' ' -f1; }
 pv()   { sed -n "s/^$1=//p" "$2"; }
 tree_is() { local W=$V/ver/$1
-  same $W/src/diaspextractor.cpp $O/src/topp/diaspextractor.cpp && same $W/src/TdfMzCalibration.h $O/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h &&
+  same $W/src/diaspextract.cpp $O/src/topp/diaspextract.cpp && same $W/src/TdfMzCalibration.h $O/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h &&
   same $W/src/TdfLoad.h $O/src/topp/TdfLoad.h && same $W/src/MzPeakStreamLoad.h $O/src/topp/MzPeakStreamLoad.h && same $W/src/DnoiseMs1.h $O/src/topp/DnoiseMs1.h; }
-ship_is() { local W=$V/ver/$1 f; for f in test/test_diaspextractor.py bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh; do same $W/$f "$TOOLS/$(basename $f)" || return 1; done
-  same $W/tests/calibration_golden.json $TESTS/calibration_golden.json && same $W/tests/test_dnoise_ms1.cpp $R/diaspextractor_unit/test_dnoise_ms1.cpp &&
-  same $W/tests/test_tdf_load.cpp $R/diaspextractor_unit/test_tdf_load.cpp && [ -e $R/diaspextractor_unit/test_dnoise_ms1.log ] && [ -e $R/diaspextractor_unit/test_tdf_load.log ]; }
+ship_is() { local W=$V/ver/$1 f; for f in test/test_diaspextract.py bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh; do same $W/$f "$TOOLS/$(basename $f)" || return 1; done
+  same $W/tests/calibration_golden.json $TESTS/calibration_golden.json && same $W/tests/test_dnoise_ms1.cpp $R/diaspextract_unit/test_dnoise_ms1.cpp &&
+  same $W/tests/test_tdf_load.cpp $R/diaspextract_unit/test_tdf_load.cpp && [ -e $R/diaspextract_unit/test_dnoise_ms1.log ] && [ -e $R/diaspextract_unit/test_tdf_load.log ]; }
 prov_is() { local W=$V/ver/$1 P=${2:-$PROV}
-  [ "$(pv src_sha256 $P)" = "$(shaf $W/src/diaspextractor.cpp)" ] && [ "$(pv calibration_header_sha256 $P)" = "$(shaf $W/src/TdfMzCalibration.h)" ] &&
+  [ "$(pv src_sha256 $P)" = "$(shaf $W/src/diaspextract.cpp)" ] && [ "$(pv calibration_header_sha256 $P)" = "$(shaf $W/src/TdfMzCalibration.h)" ] &&
   [ "$(pv tool_headers_sha256 $P)" = "$(cat $W/src/TdfLoad.h $W/src/MzPeakStreamLoad.h $W/src/DnoiseMs1.h | shasum -a 256 | cut -d' ' -f1)" ] &&
   [ "$(pv git $P)" = "$(cat $W/REV)" ]; }
 ut_is() { [ "$(pv dnoise_unit_test $PROV)" = passed ] && [ "$(pv tdf_load_unit_test $PROV)" = "$1" ]; }
-prov_truthful() { [ -e $PROV ] && [ "$(pv binary_sha256 $PROV)" = "$(shaf $O/build/bin/diaspextractor)" ] && [ "$(pv libopenms_sha256 $PROV)" = "$(shaf $O/build/lib/libOpenMS.so)" ]; }
+prov_truthful() { [ -e $PROV ] && [ "$(pv binary_sha256 $PROV)" = "$(shaf $O/build/bin/diaspextract)" ] && [ "$(pv libopenms_sha256 $PROV)" = "$(shaf $O/build/lib/libOpenMS.so)" ]; }
 clean() { [ ! -e $R/.deploy.lock ] && [ -z "$(find $R -maxdepth 1 -type d -name '.deploy.stage.*')" ]; }
 records() { grep -c '^src_sha256=' $R/deploys.log 2> /dev/null || echo 0; }
 wait_for()  { local i=0; while [ ! -e "$1" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; [ -e "$1" ]; }
@@ -142,9 +142,9 @@ rc=$(deploy $V/repoA $V/s0.out)
 ok "S0 first deploy commits (rc $rc)" '[ $rc = 0 ] && tree_is v0 && ship_is v0 && prov_is v0 && prov_truthful && ut_is passed && clean && [ $(records) = 1 ]'
 set_version $V/repoA v1 c1 1 1
 rc=$(deploy $V/repoA $V/s1.out)
-ok "S1 success: inputs, tools, provenance all v1; old cpp kept as .bak (rc $rc)" '[ $rc = 0 ] && tree_is v1 && ship_is v1 && prov_is v1 && prov_truthful && same $V/ver/v0/src/diaspextractor.cpp $O/src/topp/diaspextractor.cpp.bak && clean && [ $(records) = 2 ]'
+ok "S1 success: inputs, tools, provenance all v1; old cpp kept as .bak (rc $rc)" '[ $rc = 0 ] && tree_is v1 && ship_is v1 && prov_is v1 && prov_truthful && same $V/ver/v0/src/diaspextract.cpp $O/src/topp/diaspextract.cpp.bak && clean && [ $(records) = 2 ]'
 ok "S1 both unit tests passed against the staged v1 headers while the tree still held v0's" 'ut_is passed && grep -q "^tdf_load_unit_test=passed" $V/s1.out'
-ok "S1 build tree is up to date after commit" '(cd $O/build && make -q bin/diaspextractor)'
+ok "S1 build tree is up to date after commit" '(cd $O/build && make -q bin/diaspextract)'
 ok "S1 transaction log reached the caller" 'grep -q "DEPLOY COMMITTED" $V/s1.out'
 
 sleep 1; S=$(snap); set_version $V/repoA v2 c2 0 1
@@ -161,8 +161,8 @@ ok "S3 build failure (calibration changed): rc 2, every input restored, tools un
 ok "S3 failed build had relinked libOpenMS.so (the fixture reproduces the cluster logs)" '[ "$(shaf $O/build/lib/libOpenMS.so)" != "$lib_v1" ]'
 ok "S3 provenance fail-closed: absent, parked as .stale == v1 provenance" '[ ! -e $PROV ] && same $PROV.stale $V/prov_v1 && grep -q FAIL-CLOSED $V/s3.out'
 ok "S3 restored calibration header is newer than the lib the failed build relinked (next make relinks it)" '! (cd $O/build && make -q lib/libOpenMS.so)'
-(cd $O/build && make diaspextractor > /dev/null 2>&1)
-ok "S3 recovery: make on the restored tree reproduces the v1 binary and lib the parked provenance names" '[ "$(shaf $O/build/lib/libOpenMS.so)" = "$(pv libopenms_sha256 $PROV.stale)" ] && [ "$(shaf $O/build/bin/diaspextractor)" = "$(pv binary_sha256 $PROV.stale)" ]'
+(cd $O/build && make diaspextract > /dev/null 2>&1)
+ok "S3 recovery: make on the restored tree reproduces the v1 binary and lib the parked provenance names" '[ "$(shaf $O/build/lib/libOpenMS.so)" = "$(pv libopenms_sha256 $PROV.stale)" ] && [ "$(shaf $O/build/bin/diaspextract)" = "$(pv binary_sha256 $PROV.stale)" ]'
 mv $PROV.stale $PROV
 
 set_version $V/repoA v4 c1 1 1 BREAK_BUILD
@@ -189,7 +189,7 @@ cp $O/src/openms/source/FORMAT/BrukerTimsFile.cpp $V/bruker.keep; printf 'unpatc
 S=$(snap); set_version $V/repoA v8 c8 1 1
 rc=$(deploy $V/repoA $V/s6.out)
 ok "S6 calibration patch missing: rc 1, node unchanged" '[ $rc = 1 ] && grep -q "no calibration patch" $V/s6.out && [ "$S" = "$(snap)" ]'
-cp $V/bruker.keep $O/src/openms/source/FORMAT/BrukerTimsFile.cpp; (cd $O/build && make diaspextractor > /dev/null 2>&1)
+cp $V/bruker.keep $O/src/openms/source/FORMAT/BrukerTimsFile.cpp; (cd $O/build && make diaspextract > /dev/null 2>&1)
 
 S=$(snap); set_version $V/repoA v9 c9 1 1
 rc=$(TORN=TdfLoad.h deploy $V/repoA $V/s7.out)
@@ -201,7 +201,7 @@ wait_for $O/building; printf '// intruder outside the lock\n' > $O/src/topp/TdfL
 ok "S8 lockless writer during build: rc 2, inputs back to v6, no provenance recorded for the mixed binary" '[ $rc = 2 ] && grep -q "changed during the build" $V/s8.out && tree_is v6 && [ ! -e $PROV ] && [ -e $PROV.stale ] && clean'
 
 # S9 needs a truthful provenance to lose: rebuild the restored v6 tree, which reproduces what the parked one names
-(cd $O/build && make diaspextractor > /dev/null 2>&1); mv $PROV.stale $PROV
+(cd $O/build && make diaspextract > /dev/null 2>&1); mv $PROV.stale $PROV
 ok "S9 setup: the restored tree rebuilds to the parked v6 provenance" 'prov_is v6 && prov_truthful'
 set_version $V/repoA v11 c6 1 1
 ( deploy $V/repoA $V/s9.out > $V/s9.rc ) &
@@ -213,7 +213,7 @@ printf '0\n' > $O/slow
 
 set_flags no; set_version $V/repoA v12 c12 1 0
 rc=$(deploy $V/repoA $V/s10.out)
-ok "S10 no sqlite3.h in the tool include dirs: test_tdf_load skipped, deploy commits and the provenance says so (rc $rc)" '[ $rc = 0 ] && tree_is v12 && prov_is v12 && prov_truthful && ut_is "skipped(no sqlite3.h in the tool include dirs)" && grep -q "tdf_load unit test SKIPPED" $V/s10.out && grep -q skipped $R/diaspextractor_unit/test_tdf_load.log && clean'
+ok "S10 no sqlite3.h in the tool include dirs: test_tdf_load skipped, deploy commits and the provenance says so (rc $rc)" '[ $rc = 0 ] && tree_is v12 && prov_is v12 && prov_truthful && ut_is "skipped(no sqlite3.h in the tool include dirs)" && grep -q "tdf_load unit test SKIPPED" $V/s10.out && grep -q skipped $R/diaspextract_unit/test_tdf_load.log && clean'
 set_flags yes; mv $O/build/lib/libsqlite3.a $V/libsqlite3.a.keep; set_version $V/repoA v13 c13 1 1
 rc=$(deploy $V/repoA $V/s10b.out)
 ok "S10b no bundled libsqlite3.a: skipped, commits, provenance names the missing library (rc $rc)" '[ $rc = 0 ] && tree_is v13 && prov_truthful && ut_is "skipped(no $O/build/lib/libsqlite3.a)" && clean'
@@ -254,7 +254,7 @@ ok "S13 setup: a clean committed v18" 'reset_node v18 c18'
 cp $PROV $V/prov_v18
 printf '3\n' > $O/slow; set_version $V/repoA v19 c19 1 1
 ( deploy $V/repoA $V/s13.out > $V/s13.rc ) &
-wait_for $O/building && mkdir -p $PROV/diaspextractor.provenance.tmp   # the old provenance is parked: a directory in its place fails the rename
+wait_for $O/building && mkdir -p $PROV/diaspextract.provenance.tmp   # the old provenance is parked: a directory in its place fails the rename
 wait; rc=$(cat $V/s13.rc); printf '0\n' > $O/slow
 ok "S13 a failed provenance rename is never reported as a commit (rc $rc)" '[ $rc != 0 ] && ! grep -q "^COMMITTED (binary + provenance)" $V/s13.out'
 ok "S13 it rolls back like a failed build: inputs v18, no provenance.tmp, old provenance parked, clean" 'tree_is v18 && grep -q "ROLLED BACK" $V/s13.out && [ ! -e $PROV.tmp ] && same $PROV.stale $V/prov_v18 && clean'
@@ -267,8 +267,8 @@ wait_for $O/building && chmod a-w $O/src/topp   # four of the five restores now 
 wait; rc=$(cat $V/s14.rc); chmod u+w $O/src/topp; printf '0\n' > $O/slow
 ST=$(find $R -maxdepth 1 -type d -name '.deploy.stage.*' | head -1)
 ok "S14 a failed rollback rename is not reported as a complete rollback (rc $rc)" '[ $rc = 2 ] && ! grep -q "ROLLED BACK every" $V/s14.out && grep -q "rollback incomplete" $V/s14.out'
-ok "S14 the unrestored backups, the parked provenance and the lock are kept" '[ -e $R/.deploy.lock ] && [ -n "$ST" ] && same $ST/bak/diaspextractor.cpp $V/ver/v20/src/diaspextractor.cpp && same $ST/prov.prev $V/prov_v20'
-ok "S14 no provenance is put back over a tree that still holds the failed deploy's source" '[ ! -e $PROV ] || [ "$(pv src_sha256 $PROV)" = "$(shaf $O/src/topp/diaspextractor.cpp)" ]'
+ok "S14 the unrestored backups, the parked provenance and the lock are kept" '[ -e $R/.deploy.lock ] && [ -n "$ST" ] && same $ST/bak/diaspextract.cpp $V/ver/v20/src/diaspextract.cpp && same $ST/prov.prev $V/prov_v20'
+ok "S14 no provenance is put back over a tree that still holds the failed deploy's source" '[ ! -e $PROV ] || [ "$(pv src_sha256 $PROV)" = "$(shaf $O/src/topp/diaspextract.cpp)" ]'
 
 echo "== $PASS passed, $FAIL failed"
 if [ "$FAIL" = 0 ]; then rm -rf "$V"; else echo "   fixture kept for inspection: $V"; fi
