@@ -1112,3 +1112,15 @@ Two items follow, both D-class:
 |---|---|---|
 | MS1 staging batch A/B (`DIASPEXTRACTOR_PICK_BATCH` 16/32/64/256/512 on D, streaming, 3 tiles) | RUNNING (chain `ms1batch`) | zero code. `ms1_buf_` is 256 frames of raw peaks (3.8-4.8 GiB on D) and the loader holds its own copy behind it; both scale with the batch, and step 0b proved batch composition is output-invariant. The only question is the wall cost. |
 | periodic `malloc_trim` DURING the load, not only at its end | NOT STARTED | ~5 lines under the existing `perf:malloc_trim` gate, every N batches. The env-var route (`MALLOC_TRIM_THRESHOLD_`/`MALLOC_MMAP_THRESHOLD_`) is already priced and rejected: step 0a measured -15.5 GB but +26% wall, because it changes the threshold for every allocation in the process rather than reclaiming at a few chosen points. |
+
+### Missed variant-peptide precursor in dataset B (2026-09-15, found while auditing variant detection)
+
+A genotype-confirmed variant peptide (fully tryptic 10-mer, precursor m/z 552.795, z=2, 16.6 min) is
+quantified by a library-based DIA search at ~40 % of its reference peptide's intensity, and the
+reference implementation emits a pseudo-spectrum for it (its fragment ladder scores 8/18 ions), but
+DIAspeXtractor 1.2.x emits no pseudo-spectrum at that precursor at any charge within 30 ppm between
+16.3 and 16.9 min. The reference peptide of the same protein is emitted normally at 16.41 min. Use this
+precursor as a regression target: find out whether the feature is lost at detection, gating, or
+emission, and add the 16.3-16.9 min window of that file to the sensitivity checks. A second variant
+peptide (23-mer, z=3, ~26.0 min) IS emitted by both tools with a 26/44-ion ladder in dataset A, so the
+gap is specific, not general.
