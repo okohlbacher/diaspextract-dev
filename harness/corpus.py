@@ -54,15 +54,20 @@ renders as FAILED, never as a number). Each id is triggered by --selftest.
   G-V15 node environment: root under /home, jnatmp not writable, MemAvailable or /proc unreadable,
         python < 3.9, TIME not GNU time -v, no java
 Extended plans (optional plan keys `cells`, `entrapment`; harness/CORPUS.md "Extra cells"):
-  G-V16 cell result: exit!=0, signal, wall cap passed or MemAvailable under the floor (the tool's session is
-        killed), unparseable time log, output missing/stale/unterminated, count <=0, the tool's count line
-        missing/different, its finalisation line missing
-  G-V17 re-encode: tool failed, a numpress term left, a spectrum not m/z-sorted or undecodable, spectrum count
-        changed, RT/selected ion/charge/1/K0/isolation target values changed, a spectrum without MS:1000744
+  G-V16 cell result: exit!=0, signal, wall cap passed or MemAvailable under the floor for MEM_FLOOR_SAMPLES
+        samples (the tool's session is killed), unparseable time log, output missing/stale/unterminated, count
+        <=0, the tool's count line missing/different, its finalisation line missing (the tools get a private
+        TMPDIR; a crash inside a cell fails that cell as CRASH)
+  G-V17 re-encode: tool failed, a numpress term left, a spectrum without an m/z array or not m/z-sorted or
+        undecodable, a precursor value not a number, raw m/z arrays undecodable, spectrum count changed,
+        RT/selected ion/charge/1/K0/isolation target values changed, any spectrum's m/z values changed, a
+        spectrum without MS:1000744
   G-V18 no-op cell (FLAG): a cell's content digest equals the one of the cell it must differ from, or the
         check could not run
-  G-V19 charge strata: a result TSV without charge/score columns, a split that does not add up to the cell's
-        count, an entrapment FASTA without ENTRAP_ peptides, 0 target peptides in the entrapment search
+  G-V19 charge strata: a result TSV without charge/score columns or with a non-integer charge, a split that
+        does not add up to the cell's count, an entrapment FASTA without ENTRAP_ peptides, 0 target peptides
+        in the entrapment search
+  (G-V03 for cells also: OPENMS_DATA_PATH not the arm's data tree, the provenance's data tree hash differs)
 """
 from __future__ import annotations
 
@@ -110,16 +115,20 @@ BUSY_FIXED = [r"diaTracer-2\.2\.[1]\.jar", r"MSFragger-4\.4\.[1]\.jar", r"/sag[e
 OPTIONAL_PLAN_KEYS = {"cells", "entrapment"}
 CELL_KEYS = {"kind", "arm", "args", "wall_cap_h"}                 # plus optional differs_from
 CELL_NAME = r"[a-z][a-z0-9_]{0,23}"
-# One kind so far: diaWeaver (alhigaylan/diaWeaver, branch diaWeaver-2). Its env.sh exports `bin`; the arm's `prov`
-# file lists `sha256_published:` for every published file; the tool writes ONE <out dir>/pseudo_spectra.mzML, logs
-# "Wrote N pseudo spectra." and, after its RT sort and numpress rewrite, "Done. Output".
+# One kind so far: diaWeaver (alhigaylan/diaWeaver, branch diaWeaver-2). Its env.sh exports `bin` and points
+# OPENMS_DATA_PATH at the arm's `data` tree (the files the tool reads at run time); the arm's `prov` file lists
+# `sha256_published:` for every published file and `<data_prov>=` for the data tree; the tool writes ONE
+# <out dir>/pseudo_spectra.mzML, logs "Wrote N pseudo spectra." and, after its RT sort and numpress rewrite, "Done. Output".
 CELL_KINDS = {"dwv": {"bin": "DWV_BIN", "prov": "PROVENANCE", "out": "pseudo_spectra.mzML", "log": "dwv.log",
-                      "count": rb"Wrote (\d+) pseudo spectra", "done": b"Done. Output"}}
+                      "count": rb"Wrote (\d+) pseudo spectra", "done": b"Done. Output",
+                      "data": "share/OpenMS", "data_prov": "share_OpenMS_tree_sha256"}}
 # Re-encode of a cell output before any search (G-V17). The ONLY place these option strings live. The fork's FileFilter
 # (7ed1169, src/topp/FileFilter.cpp:417/430-447/1011-1013): `-sort` = sortSpectra(true), spectra by RT and every peak
 # list by m/z with its data arrays; numpress defaults to none, zlib to false, m/z to 64 bit. It sits beside the cell bin.
 REENCODE = ("FileFilter", ("-sort",))
 NUMPRESS_CV = (b"MS:1002312", b"MS:1002313", b"MS:1002314", b"MS:1002746", b"MS:1002747", b"MS:1002748")
+NUMPRESS_LINEAR = (b"MS:1002312", b"MS:1002746")    # linear, linear + zlib: diaWeaver's m/z encoding, decoded by mzml_scan
+MEM_FLOOR_SAMPLES = 3     # a cell is killed only when MemAvailable stays under MEM_FLOOR for this many MON_S samples
 PREC_CV = (b"MS:1000016", b"MS:1000744", b"MS:1000041", b"MS:1002815", b"MS:1000827")   # RT, sel. m/z, z, 1/K0, target
 CELL_TOOL_KEYS = ("digest",)                        # bench/semantic_digest.py, for plans with cells
 ENTRAP_TOOL_KEYS = ("sage_entrap", "entrapment")    # Sage config naming the target+entrapment FASTA; bench/entrapment.py
@@ -443,7 +452,8 @@ def build_identity(ident: dict) -> dict:
            "jar_sha256": ident.get("jar_sha256"), "bruker_sha256": ident.get("bruker_sha256")}
     if ident.get("cells"):
         out["cells"] = {n: {"binary_sha256": c["binary_sha256"], "lib_sha256": c["lib_sha256"],
-                            "reencode_sha256": c["reencode_sha256"], "deps_sha256": ceph(c["deps_sha256"])}
+                            "reencode_sha256": c["reencode_sha256"], "deps_sha256": ceph(c["deps_sha256"]),
+                            "data_tree_sha256": c.get("data_tree_sha256"), "env_sha256": c.get("env_sha256")}
                         for n, c in ident["cells"].items()}
     return out
 
@@ -519,12 +529,26 @@ def cell_env(q: dict, name: str) -> dict:
             die_queue("G-V03", "cell %s: %s unset or not an executable file: %r" % (name, what, b))
         if not os.path.realpath(b).startswith(arm_dir + os.sep):
             die_queue("G-V03", "cell %s: %s %s is outside the cell arm %s" % (name, what, b, arm_dir))
-    env.update(LC_ALL="C", TMPDIR=q["jnatmp"])
+    data = env.get("OPENMS_DATA_PATH", "")
+    if not data or os.path.realpath(data) != os.path.join(arm_dir, CELL_KINDS[c["kind"]]["data"]):
+        die_queue("G-V03", "cell %s: OPENMS_DATA_PATH %r is not the cell arm's %s: the tool would read unpinned data files"
+                  % (name, data, CELL_KINDS[c["kind"]]["data"]))
+    env.update(LC_ALL="C", TMPDIR=q["jnatmp"])      # run_cell gives the tools a private per-cell TMPDIR
     return env
 
 
+def data_tree_sha256(d: Path):
+    """The publish step's `cd d && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum` (byte order):
+    the value an arm's provenance records for its run-time data tree."""
+    if not d.is_dir():
+        return None
+    files = sorted(b"./" + str(p.relative_to(d)).encode() for p in d.rglob("*") if p.is_file() and not p.is_symlink())
+    return hashlib.sha256(b"".join(b"%s  %s\n" % (sha256(d / f[2:].decode()).encode(), f) for f in files)).hexdigest()
+
+
 def cells_identity(q: dict) -> dict:
-    """G-V04/G-V11/G-V13 for the cells: binary, re-encode tool, the arm's lib/** and the libraries both resolve."""
+    """G-V04/G-V11/G-V13 for the cells: binary, re-encode tool, the arm's lib/**, the libraries both resolve, the
+    run-time data tree (OPENMS_DATA_PATH) and the env.sh that sets it all."""
     by_arm, out = {}, {}
     for name, c in cells(q).items():
         if c["arm"] not in by_arm:
@@ -534,7 +558,9 @@ def cells_identity(q: dict) -> dict:
             arm = os.path.realpath(Path(q["spx_root"]) / c["arm"])
             by_arm[c["arm"]] = {"binary": b, "binary_sha256": sha256(b), "reencode_sha256": sha256(tool),
                                 "lib_sha256": tree_sha256(Path(arm) / "lib"),
-                                "deps_sha256": dict(ldd_deps(env, arm, b), **ldd_deps(env, arm, tool))}
+                                "deps_sha256": dict(ldd_deps(env, arm, b), **ldd_deps(env, arm, tool)),
+                                "data_tree_sha256": data_tree_sha256(Path(arm) / CELL_KINDS[c["kind"]]["data"]),
+                                "env_sha256": sha256(Path(q["spx_root"]) / c["arm"] / "env.sh")}
         out[name] = by_arm[c["arm"]]
     return out
 
@@ -564,6 +590,11 @@ def cell_provenance(q: dict, name: str, cenv: dict, cid: dict) -> list:
     bad = sorted(k for k, v in want.items() if listed.get(k) != v)
     if bad:
         die_queue("G-V03", "cell %s: %s sha256_published omits or differs from %s" % (name, prov, bad[:4]))
+    key = kind["data_prov"] + "="
+    data = [x[len(key):].strip() for x in lines if x.startswith(key)]
+    if len(data) != 1 or data[0] != cid["data_tree_sha256"]:
+        die_queue("G-V03", "cell %s: %s %s %s, the data tree in use (%s) is %s"
+                  % (name, prov, key, data or "missing", kind["data"], cid["data_tree_sha256"]))
     return lines
 
 
@@ -1037,6 +1068,7 @@ def stage_tdf(q: dict, s: dict, pair_run: str) -> tuple:
         dst.mkdir(mode=0o700)
         for f in STAGE_FILES:
             shutil.copyfile(raw / f, dst / f)
+            os.chmod(dst / f, 0o600)
     except OSError as x:
         die("G-V07", "staging copy of %s failed: %s" % (s["id"], x.strerror or type(x).__name__))
     secs = time.monotonic() - t0
@@ -1055,19 +1087,22 @@ def kill_session(pid: int) -> None:
 
 def run_capped(argv, cwd, env, log: Path, cap_s: float) -> tuple:
     """run_logged with a wall cap and a node memory floor (G-V16). The tool runs in its own session, and the whole
-    session is killed when the cap passes, when MemAvailable falls below MEM_FLOOR of MemTotal (a runaway arm must not
-    take a shared node down), or when the runner itself is stopped. Returns (returncode, reason stopped or None)."""
-    t0, why = time.monotonic(), None
+    session is killed when the cap passes, when MemAvailable stays below MEM_FLOOR of MemTotal for MEM_FLOOR_SAMPLES
+    consecutive samples (a runaway arm must not take a shared node down; a neighbour's transient dip must not cost a
+    12-h cell), or when the runner itself is stopped. Returns (returncode, reason stopped or None)."""
+    t0, why, low = time.monotonic(), None, 0
     with open(log, "wb") as f:
         p = subprocess.Popen(argv, cwd=str(cwd), env=env, stdout=f, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
         try:
             while p.poll() is None:
                 m = proc_snapshot()
+                low = low + 1 if m and m["memavail_kb"] < MEM_FLOOR * m["memtotal_kb"] else 0
                 if time.monotonic() - t0 > cap_s:
                     why = "wall cap %.0f s exceeded" % cap_s
-                elif m and m["memavail_kb"] < MEM_FLOOR * m["memtotal_kb"]:
-                    why = "MemAvailable %.1f%% of total" % (100.0 * m["memavail_kb"] / m["memtotal_kb"])
+                elif low >= MEM_FLOOR_SAMPLES:
+                    why = "MemAvailable %.1f%% of total in %d consecutive samples" % (
+                        100.0 * m["memavail_kb"] / m["memtotal_kb"], low)
                 if why:
                     kill_session(p.pid)
                     break
@@ -1093,20 +1128,72 @@ def time_cpu(path: Path) -> dict:
             "cpu_pct": int(c.group(1)) if c else None}
 
 
+def numpress_linear(data: bytes) -> list:
+    """MS-Numpress linear prediction decoding (MSNumpress decodeLinear), stdlib only: an 8-byte big-endian fixed point,
+    two little-endian unsigned 4-byte ints, then half-byte-coded second-order residuals. Bit-identical to what the
+    fork's FileFilter decodes (240 real diaWeaver-shaped spectra, review 2026-09-16). Corrupt input raises."""
+    import struct
+    n = len(data)
+    if n < 8 or 8 < n < 12 or 12 < n < 16:
+        raise ValueError("numpress linear: corrupt length %d" % n)
+    fp = struct.unpack(">d", data[:8])[0]
+    ints, out = [0, 0, 0], []
+    for k, off in ((1, 8), (2, 12)):
+        if n > off:
+            ints[k] = int.from_bytes(data[off:off + 4], "little")
+            out.append(ints[k] / fp)
+    di, half = 16, 0
+    while di < n:
+        if di == n - 1 and half == 1 and data[di] & 0xF == 0:
+            break                                       # the padding half-byte of an odd count
+        if half == 0:
+            head = data[di] >> 4
+        else:
+            head = data[di] & 0xF
+            di += 1
+        half = 1 - half
+        m, res = (head, 0) if head <= 8 else (head - 8, (0xFFFFFFFF << (32 - 4 * (head - 8))) & 0xFFFFFFFF)
+        for i in range(8 - m):                          # value half-bytes, least significant first
+            if half == 0:
+                hb = data[di] >> 4
+            else:
+                hb = data[di] & 0xF
+                di += 1
+            res |= hb << (4 * i)
+            half = 1 - half
+        ints[0], ints[1] = ints[1], ints[2]
+        ints[2] = 2 * ints[1] - ints[0] + (res - (1 << 32) if res & 0x80000000 else res)
+        out.append(ints[2] / fp)
+    return out
+
+
 def mzml_scan(path: Path, decode=False) -> dict:
     """One pass over an mzML (G-V17, G-V18): spectra, numpress terms anywhere, per-spectrum RT and precursor values
     (a digest of the sorted tuples: order may change, values may not), charge and 1/K0 tallies, peaks. With `decode`,
-    each m/z array (plain or zlib, 32/64 bit) is read and its order checked, and an order-independent content digest
-    is built: every spectrum block hashed without its id/index/spectrumRef, the sorted block digests hashed again.
-    diaWeaver's final RT sort is unstable and renumbers scan=N, so two runs of one arm differ in order and ids but
-    not in this digest."""
-    import array, zlib
+    each m/z array (plain, zlib, MS-Numpress linear with or without zlib; 32/64 bit) is read and its order checked,
+    and two order-independent digests are built. `peak_digest`: each spectrum's precursor values and sorted m/z
+    values (the numpress decode is bit-identical to OpenMS's, so a raw and a re-encoded file compare exactly).
+    `content_digest`: every spectrum block without its id/index/spectrumRef/dataProcessingRef (OpenMS puts
+    dataProcessingRef on whichever spectrum comes first, and diaWeaver's unstable RT sort decides which one that is).
+    Block digests are sorted and hashed again, so two runs of one arm that differ only in order and ids do not
+    differ in these digests. An m/z array that cannot be decoded counts as `undecoded`, a precursor value that is not
+    a number as `bad_values`, a spectrum without an m/z array as `missing_mz`; none of them raises."""
+    import array, binascii, zlib
     acc_re, val_re = re.compile(rb'\saccession="(MS:\d+)"'), re.compile(rb'\svalue="([^"]*)"')
-    ids_re = re.compile(rb'\s(?:id|index|spectrumRef)="[^"]*"')
-    out = {"spectra": 0, "numpress_terms": 0, "unsorted": 0, "undecoded": 0, "length_mismatch": 0,
-           "missing_selected_ion": 0, "im_zero": 0, "im_missing": 0, "charges": {}}
-    keys, blocks, peaks = [], [], array.array("l")
-    inside, h, prec, arr, n_decl = False, None, {}, {}, 0
+    ids_re = re.compile(rb'\s(?:id|index|spectrumRef|dataProcessingRef)="[^"]*"')
+    out = {"spectra": 0, "numpress_terms": 0, "unsorted": 0, "undecoded": 0, "length_mismatch": 0, "missing_mz": 0,
+           "bad_values": 0, "missing_selected_ion": 0, "im_zero": 0, "im_missing": 0, "charges": {}}
+    keys, blocks, pkeys, peaks = [], [], [], array.array("l")
+    inside, h, prec, arr, n_decl, mzs, seen = False, None, {}, {}, 0, None, False
+
+    def fl(v):
+        if v in (None, ""):
+            return ""
+        try:
+            return repr(float(v))
+        except ValueError:
+            out["bad_values"] += 1
+            return "?" + v
     with open(path, "rb") as f:
         for line in f:
             if b"<cvParam" in line:
@@ -1117,64 +1204,83 @@ def mzml_scan(path: Path, decode=False) -> dict:
                 if inside:
                     if acc in PREC_CV and acc not in prec:
                         v = val_re.search(line)
-                        prec[acc] = v.group(1).decode() if v else ""
+                        prec[acc] = v.group(1).decode(errors="replace") if v else ""
                     arr[acc] = True
             if not inside:
                 if b"<spectrum " in line or line.lstrip().startswith(b"<spectrum>"):
-                    inside, prec, arr = True, {}, {}
+                    inside, prec, arr, mzs, seen = True, {}, {}, None, False
                     m = re.search(rb'defaultArrayLength="(\d+)"', line)
                     n_decl = int(m.group(1)) if m else -1
                     h = hashlib.sha256(ids_re.sub(b"", line)) if decode else None
                 continue
             if h is not None:
-                h.update(ids_re.sub(b"", line) if b"spectrumRef" in line else line)
+                h.update(ids_re.sub(b"", line) if b"spectrumRef" in line or b"dataProcessingRef" in line else line)
             if b"<binaryDataArray " in line or b"<binaryDataArray>" in line:
                 arr = {}
             elif b"<binary>" in line and b"MS:1000514" in arr:
+                seen = True
                 if not decode:
                     continue
-                if any(t in arr for t in NUMPRESS_CV) or not (b"MS:1000523" in arr or b"MS:1000521" in arr):
+                values = None
+                try:
+                    raw = base64.b64decode(line.split(b"<binary>", 1)[1].split(b"</binary>", 1)[0], validate=True)
+                    if b"MS:1000574" in arr or b"MS:1002746" in arr:
+                        raw = zlib.decompress(raw)
+                    if any(t in arr for t in NUMPRESS_LINEAR):
+                        values = numpress_linear(raw)
+                    elif not any(t in arr for t in NUMPRESS_CV) and (b"MS:1000523" in arr or b"MS:1000521" in arr):
+                        mz = array.array("d" if b"MS:1000523" in arr else "f")
+                        mz.frombytes(raw)
+                        if sys.byteorder != "little":
+                            mz.byteswap()
+                        values = mz.tolist()
+                except (ValueError, IndexError, zlib.error, binascii.Error):
+                    values = None
+                if values is None:
                     out["undecoded"] += 1
                     continue
-                raw = base64.b64decode(line.split(b"<binary>", 1)[1].split(b"</binary>", 1)[0])
-                if b"MS:1000574" in arr:
-                    raw = zlib.decompress(raw)
-                mz = array.array("d" if b"MS:1000523" in arr else "f")
-                mz.frombytes(raw)
-                if sys.byteorder != "little":
-                    mz.byteswap()
-                values = mz.tolist()
+                mzs = values
                 out["unsorted"] += values != sorted(values)
                 out["length_mismatch"] += len(values) != n_decl
             elif b"</spectrum>" in line:
                 inside = False
                 out["spectra"] += 1
                 peaks.append(n_decl)
-                fl = lambda k: repr(float(prec[k])) if prec.get(k) not in (None, "") else ""
-                keys.append("|".join(fl(k) for k in PREC_CV))
-                out["missing_selected_ion"] += not fl(b"MS:1000744")
+                vals = {k: fl(prec.get(k)) for k in PREC_CV}
+                key = "|".join(vals[k] for k in PREC_CV)
+                keys.append(key)
+                out["missing_mz"] += not seen
+                out["missing_selected_ion"] += not vals[b"MS:1000744"]
                 z = prec.get(b"MS:1000041") or "none"
                 out["charges"][z] = out["charges"].get(z, 0) + 1
-                im = fl(b"MS:1002815")
+                im = vals[b"MS:1002815"]
                 out["im_missing"] += not im
-                out["im_zero"] += bool(im) and float(im) == 0.0
+                out["im_zero"] += im == repr(0.0)
+                if decode and mzs is not None:
+                    pkeys.append(hashlib.sha256(key.encode() + array.array("d", sorted(mzs)).tobytes()).digest())
                 if h is not None:
                     blocks.append(h.digest())
     keys.sort()
     out["prec_digest"] = hashlib.sha256("\n".join(keys).encode()).hexdigest()
     out["peaks_total"] = sum(peaks)
     out["peaks_median"] = statistics.median(peaks) if peaks else 0
+    out["peaks_min"] = min(peaks) if peaks else 0
     if decode:
         blocks.sort()
+        pkeys.sort()
         out["content_digest"] = hashlib.sha256(b"".join(blocks)).hexdigest()
+        out["peak_digest"] = hashlib.sha256(b"".join(pkeys)).hexdigest() \
+            if len(pkeys) == out["spectra"] and not out["undecoded"] else None
     return out
 
 
 def reencode(q, name, cenv, src: Path, adir: Path, rec: dict, digest) -> None:
     """G-V17: the cell output rewritten by REENCODE before any search (Sage 0.14 drops a numpress m/z array; diaWeaver
-    writes peaks unsorted). The rewrite must carry no numpress term, m/z-sorted peaks, the same spectra and the same
-    RT/precursor values, and a selected ion m/z in every spectrum (no selected-ion patch for cells). The original is
-    deleted once the rewrite passed; `rec["output"]` is the rewrite, the file every search reads."""
+    writes peaks unsorted). The rewrite must carry no numpress term, an m/z array in every spectrum, m/z-sorted peaks,
+    the same spectra with the same RT/precursor values and the same m/z values (both files decoded), and a selected
+    ion m/z in every spectrum (no selected-ion patch for cells). The raw scan's unsorted count is the measurement of
+    diaWeaver's own peak order. The original is deleted once the rewrite passed; `rec["output"]` is the rewrite, the
+    file every search reads."""
     tool = str(Path(cenv[CELL_KINDS[q["cells"][name]["kind"]]["bin"]]).parent / REENCODE[0])
     dst, tl = adir / "reencoded.mzML", adir / "reencode.time"
     argv = cmd_reencode(tool, src, dst, tl)
@@ -1187,19 +1293,27 @@ def reencode(q, name, cenv, src: Path, adir: Path, rec: dict, digest) -> None:
         o = verify_mzml(dst, t0)
     except Abort as a:
         die("G-V17", a.message)
-    before, after = mzml_scan(src), mzml_scan(dst, decode=True)
+    before, after = mzml_scan(src, decode=True), mzml_scan(dst, decode=True)
     rec.update(spectra_stats=before, reencoded_stats=after)
     if after["numpress_terms"]:
         die("G-V17", "%d numpress term(s) remain after the re-encode of %s" % (after["numpress_terms"], name))
-    if after["unsorted"] or after["undecoded"] or after["length_mismatch"]:
-        die("G-V17", "re-encoded %s: %d spectra not m/z-sorted, %d m/z arrays undecodable, %d with a length mismatch"
-            % (name, after["unsorted"], after["undecoded"], after["length_mismatch"]))
+    if after["unsorted"] or after["undecoded"] or after["length_mismatch"] or after["missing_mz"] or after["bad_values"]:
+        die("G-V17", "re-encoded %s: %d spectra not m/z-sorted, %d m/z arrays undecodable, %d with a length mismatch, "
+            "%d without an m/z array, %d precursor values not a number" % (name, after["unsorted"], after["undecoded"],
+                                                                          after["length_mismatch"], after["missing_mz"],
+                                                                          after["bad_values"]))
+    if before["undecoded"] or before["missing_mz"] or before["bad_values"]:
+        die("G-V17", "raw output of %s: %d m/z arrays undecodable, %d spectra without one, %d precursor values not a "
+            "number: its peaks cannot be compared with the re-encode" % (name, before["undecoded"], before["missing_mz"],
+                                                                          before["bad_values"]))
     counts = {before["spectra"], after["spectra"], o["count"], rec["raw_output"]["count"]}
     if len(counts) != 1:
         die("G-V17", "re-encode of %s changed the spectrum count: %d -> %d (spectrumList %d -> %d)"
             % (name, before["spectra"], after["spectra"], rec["raw_output"]["count"], o["count"]))
     if after["prec_digest"] != before["prec_digest"]:
         die("G-V17", "re-encode of %s changed RT, selected ion m/z, charge, 1/K0 or isolation target values" % name)
+    if not after["peak_digest"] or after["peak_digest"] != before["peak_digest"]:
+        die("G-V17", "re-encode of %s changed the m/z values of at least one spectrum" % name)
     if after["missing_selected_ion"]:
         die("G-V17", "%d spectra of %s carry no selected ion m/z (MS:1000744)" % (after["missing_selected_ion"], name))
     try:
@@ -1211,46 +1325,58 @@ def reencode(q, name, cenv, src: Path, adir: Path, rec: dict, digest) -> None:
 
 
 def run_cell(q, name, staged: Path, adir: Path, cenv, env, ident0, rec: dict, digest) -> None:
-    """One extra cell, timed like run_arm (G-V16 in place of G-V08), then re-encoded outside its timed window."""
+    """One extra cell, timed like run_arm (G-V16 in place of G-V08), then re-encoded outside its timed window. Both
+    tools get a private TMPDIR inside the (0700) cell directory, emptied afterwards: the shared jnatmp is not private,
+    and anything a tool spills there is patient-derived."""
     c = q["cells"][name]
     kind = CELL_KINDS[c["kind"]]
     adir.mkdir(parents=True)
-    tl, log, out = adir / "time.log", adir / kind["log"], adir / kind["out"]
-    argv = cmd_dwv(q, cenv[kind["bin"]], staged, adir, tl, c["args"])
-    if not str(staged).startswith(str(Path(q["root"]) / "stage") + os.sep):
-        die("G-V07", "cell input outside the stage root: %s" % staged)
-    check_identity(q, env, ident0, "before the %s cell" % name)
-    rec.update(tool=name, kind=c["kind"], arm=c["arm"], cmd=argv, cwd=str(adir), host=hostname(), cores=os.cpu_count(),
-               wall_cap_s=c["wall_cap_h"] * 3600, sync_s=flush_io(q["root"]), prewarm_s=prewarm(staged))
-    rec.update(ps_top=ps_top(), load_before=load1(), memavail_before_kb=mem_available_kb(), start=now_iso())
-    with ArmMonitor(load_max(q)) as mon:
-        t0 = time.time()
-        rc, stopped = run_capped(argv, adir, cenv, log, c["wall_cap_h"] * 3600)
-    rec.update(end=now_iso(), start_epoch=t0, time_rc=rc, stopped=stopped, during=mon.summary(), load_after=load1(),
-               memavail_after_kb=mem_available_kb())
-    check_identity(q, env, ident0, "during the %s cell" % name)
-    if stopped:
-        die("G-V16", "%s killed: %s" % (name, stopped))
-    rec.update(parse_time_log(tl, "G-V16"), cpu=time_cpu(tl))
-    check_exit(rec, rc, "G-V16", name)
-    if not out.is_file():
-        die("G-V16", "%s wrote no %s" % (name, kind["out"]))
+    tmp = adir / "tmp"
+    tmp.mkdir(mode=0o700)
+    cenv = dict(cenv, TMPDIR=str(tmp))
     try:
-        o = verify_mzml(out, t0)
-    except Abort as a:
-        die("G-V16", a.message)
-    n = log_count(log, kind["count"])
-    rec.update(raw_output=o, log_count=n)
-    if n != o["count"]:
-        die("G-V16", "%s: log count %s != spectrumList count %s" % (name, n, o["count"]))
-    if kind["done"] not in log.read_bytes():
-        die("G-V16", "%s log lacks %r: the final rewrite did not finish" % (name, kind["done"].decode()))
-    reencode(q, name, cenv, out, adir, rec, digest)
+        tl, log, out = adir / "time.log", adir / kind["log"], adir / kind["out"]
+        argv = cmd_dwv(q, cenv[kind["bin"]], staged, adir, tl, c["args"])
+        if not str(staged).startswith(str(Path(q["root"]) / "stage") + os.sep):
+            die("G-V07", "cell input outside the stage root: %s" % staged)
+        check_identity(q, env, ident0, "before the %s cell" % name)
+        rec.update(tool=name, kind=c["kind"], arm=c["arm"], cmd=argv, cwd=str(adir), tmpdir=str(tmp), host=hostname(),
+                   cores=os.cpu_count(), wall_cap_s=c["wall_cap_h"] * 3600, sync_s=flush_io(q["root"]),
+                   prewarm_s=prewarm(staged))
+        rec.update(ps_top=ps_top(), load_before=load1(), memavail_before_kb=mem_available_kb(), start=now_iso())
+        with ArmMonitor(load_max(q)) as mon:
+            t0 = time.time()
+            rc, stopped = run_capped(argv, adir, cenv, log, c["wall_cap_h"] * 3600)
+        rec.update(end=now_iso(), start_epoch=t0, time_rc=rc, stopped=stopped, during=mon.summary(), load_after=load1(),
+                   memavail_after_kb=mem_available_kb())
+        check_identity(q, env, ident0, "during the %s cell" % name)
+        if stopped:
+            die("G-V16", "%s killed: %s" % (name, stopped))
+        rec.update(parse_time_log(tl, "G-V16"), cpu=time_cpu(tl))
+        check_exit(rec, rc, "G-V16", name)
+        if not out.is_file():
+            die("G-V16", "%s wrote no %s" % (name, kind["out"]))
+        try:
+            o = verify_mzml(out, t0)
+        except Abort as a:
+            die("G-V16", a.message)
+        n = log_count(log, kind["count"])
+        rec.update(raw_output=o, log_count=n)
+        if n != o["count"]:
+            die("G-V16", "%s: log count %s != spectrumList count %s" % (name, n, o["count"]))
+        if kind["done"] not in log.read_bytes():
+            die("G-V16", "%s log lacks %r: the final rewrite did not finish" % (name, kind["done"].decode()))
+        reencode(q, name, cenv, out, adir, rec, digest)
+    finally:
+        rec["tmp_files"] = sum(1 for p in tmp.rglob("*") if not p.is_dir()) if tmp.is_dir() else None
+        remove_tree(tmp)
 
 
 def noop_check(rec: dict) -> None:
     """G-V18 (flags): a cell with `differs_from` must differ from that cell in content (order-independent digest; the
-    spectrum-list digest and count are recorded beside it). Not computable (either cell failed) counts as flagged."""
+    spectrum-list digest and count are recorded beside it). Not computable (either cell failed) counts as flagged.
+    One-sided: equal content is a no-op for certain, but "differs" also results when the tool's output varies from run
+    to run, so it does not prove that the settings made the difference."""
     for name, c in (rec.get("cells") or {}).items():
         ref = c.get("differs_from")
         a, b = rec["arms"].get(name) or {}, rec["arms"].get(ref) or {}
@@ -1304,12 +1430,13 @@ def run_group(q, idx, s, env, ident0, meta, removed, patterns, cenvs, digest) ->
             try:
                 run_cell(q, name, staged, root / "runs" / s["id"] / pair_run / name, cenvs[name], env, ident0, a, digest)
                 a["status"] = "ok"
-            except Abort as x:
-                if x.queue:
+            except Exception as x:          # a crash inside one cell is that cell's failure, like a guard (review 2026-09-16)
+                if isinstance(x, Abort) and x.queue:
                     raise
-                a.update(status="failed", guard=x.guard, message=x.message)
+                g, msg = (x.guard, x.message) if isinstance(x, Abort) else ("CRASH", "%s: %s" % (type(x).__name__, x))
+                a.update(status="failed", guard=g, message=msg)
                 rec["cells_failed"].append(name)
-                say("cell %s %s failed [%s] %s" % (s["id"], name, x.guard, x.message))
+                say("cell %s %s failed [%s] %s" % (s["id"], name, g, msg))
         noop_check(rec)
         rec["status"] = "ok"
     except Abort as a:
@@ -1500,6 +1627,14 @@ def tsv_iter(tsv: Path, need: set, guard: str):
         yield from r
 
 
+def tsv_charge(v: str, tsv: Path) -> int:
+    """G-V19: a charge cell of a result TSV that is not an integer refuses the split instead of crashing the queue."""
+    try:
+        return int(v)
+    except ValueError:
+        die("G-V19", "%s: charge %r is not an integer" % (tsv.name, v))
+
+
 def entrap_strata(tsv: Path, est, fasta: str) -> dict:
     """G-V19: bench/entrapment.py's own estimator (peptide-hypothesis ratio, score() with its bootstrap CI) per charge
     stratum. score() takes each non-decoy peptide's best PSM by sage_discriminant_score; the same choice puts the
@@ -1521,7 +1656,7 @@ def entrap_strata(tsv: Path, est, fasta: str) -> dict:
         if not prots or all(x.startswith("rev_") for x in prots):
             continue
         if row[ip] not in best or sc > best[row[ip]][0]:
-            best[row[ip]] = (sc, int(row[iz]), "\t".join(row))
+            best[row[ip]] = (sc, tsv_charge(row[iz], tsv), "\t".join(row))
     out = {"ratio": ratio, "fasta": fasta}
     with tempfile.TemporaryDirectory() as td:
         for name, lo, hi in STRATA:
@@ -1625,7 +1760,7 @@ def sage_by_charge(tsv: Path) -> dict:
         if row[ir] == "1" and float(row[iq]) <= 0.01:
             sc = float(row[isc])
             if row[ip] not in best or sc > best[row[ip]][0]:
-                best[row[ip]] = (sc, int(row[iz]), row[il] != "-1")
+                best[row[ip]] = (sc, tsv_charge(row[iz], tsv), row[il] != "-1")
     return {name: {"peptides": sum(1 for _, z, _ in best.values() if lo <= z <= hi),
                    "target_peptides": sum(1 for _, z, t in best.values() if t and lo <= z <= hi)}
             for name, lo, hi in STRATA}
@@ -1644,7 +1779,7 @@ def msf_by_charge(tsv: Path) -> dict:
         dec = all(x.startswith("rev_") for x in prots)
         hs = float(get(row, "hyperscore"))
         if key not in best or hs > best[key][0]:
-            best[key] = (hs, dec, int(get(row, "charge")))
+            best[key] = (hs, dec, tsv_charge(get(row, "charge"), tsv))
     t = d = cut = 0
     ranked = sorted(best.values(), key=lambda v: (v[0], v[1]), reverse=True)
     for i, (hs, dec, z) in enumerate(ranked):
@@ -1656,7 +1791,8 @@ def msf_by_charge(tsv: Path) -> dict:
 
 def add_split(root, sid: str, tool: str, engine: str, ctx: dict) -> bool:
     """Per-charge split of a finished Sage or MSFragger cell (extended plans), written into its record with the cells
-    hash. The split must add up to the cell's own count (G-V19)."""
+    hash. The split must add up to the cell's own count (G-V19). A crash (a charge that is not an integer, a missing
+    TSV) fails this search cell, never the queue."""
     p = rec_path(root, sid, tool, engine)
     r = read_json(p)
     try:
@@ -1667,9 +1803,12 @@ def add_split(root, sid: str, tool: str, engine: str, ctx: dict) -> bool:
                     % (tool, engine, k, by["z1"][k], by["z2p"][k], by["all"][k], r[k]))
         r["by_charge"] = by
         r["measure_sha256"] = dict(r["measure_sha256"], cells=ctx["measure"]["cells"])
-    except Abort as a:
-        r.update(status="failed", guard=a.guard, message=a.message)
-        say("search %s %s %s split failed [%s] %s" % (sid, tool, engine, a.guard, a.message))
+    except Exception as x:
+        if isinstance(x, Abort) and x.queue:
+            raise
+        g, msg = (x.guard, x.message) if isinstance(x, Abort) else ("CRASH", "%s: %s" % (type(x).__name__, x))
+        r.update(status="failed", guard=g, message=msg)
+        say("search %s %s %s split failed [%s] %s" % (sid, tool, engine, g, msg))
     write_json(p, r)
     return r["status"] == "ok"
 
@@ -1938,11 +2077,13 @@ def dry_run(q: dict) -> None:
             b = cenvs[name][kind["bin"]] if name in cenvs else "$" + kind["bin"]
             print("sync -f %s; %s >/dev/null   # before each arm, outside its timed window"
                   % (root, j(["cat", staged / "analysis.tdf", staged / "analysis.tdf_bin"])))
-            print("(cd %s && %s >%s 2>&1)   # own session, killed after %s h or when MemAvailable < %d%% (G-V16)"
-                  % (a, j(cmd_dwv(q, b, staged, a, a / "time.log", c["args"])), kind["log"], c["wall_cap_h"],
-                     round(MEM_FLOOR * 100)))
-            print("(cd %s && %s >reencode.log 2>&1 && rm %s)   # G-V17: no numpress term, m/z-sorted, same spectra "
-                  "and RT/precursor values, MS:1000744 everywhere" % (a, j(cmd_reencode(
+            print("(cd %s && TMPDIR=%s %s >%s 2>&1)   # own session, private 0700 TMPDIR (removed after), killed after %s h "
+                  "or when MemAvailable stays < %d%% for %d samples (G-V16)"
+                  % (a, a / "tmp", j(cmd_dwv(q, b, staged, a, a / "time.log", c["args"])), kind["log"], c["wall_cap_h"],
+                     round(MEM_FLOOR * 100), MEM_FLOOR_SAMPLES))
+            print("(cd %s && %s >reencode.log 2>&1 && rm %s)   # G-V17 (both files decoded): no numpress term, an m/z array "
+                  "in every spectrum, m/z-sorted, same spectra, RT/precursor and m/z values, MS:1000744 everywhere; the raw "
+                  "file's unsorted peak lists recorded" % (a, j(cmd_reencode(
                       os.path.join(os.path.dirname(b), REENCODE[0]), a / kind["out"], a / "reencoded.mzML",
                       a / "reencode.time")), kind["out"]))
             if c.get("differs_from"):
@@ -2947,6 +3088,8 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
             return None, "-"
         if not r or r["pair_run"] != p["pair_run"]:
             return None, "pending"
+        if r["status"] == "ok" and ("entrapment" if e == "entrap" else "by_charge") not in r:
+            return None, "pending"          # stopped between the search and its split: the next launch re-runs it
         return (r, None) if r["status"] == "ok" else (None, verdict(r))
 
     def flags(p, t):
@@ -2999,7 +3142,8 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
                     fmt(a, lambda y: num(y["output"]["count"])),
                     ", ".join("z%s %s" % (z, num(k)) for z, k in sorted(st.get("charges", {}).items())) or "-",
                     "%.1f%%" % (100.0 * st["im_zero"] / n) if n else "-", num(st.get("im_missing")) if n else "-",
-                    str(st.get("peaks_median", "-")) if n else "-",
+                    "%s / %s" % (st.get("peaks_min", "-"), st.get("peaks_median", "-")) if n else "-",
+                    "%s (%.1f%%)" % (num(st["unsorted"]), 100.0 * st["unsorted"] / n) if n and "unsorted" in st else "-",
                     fmt(a, lambda y: hms(y["reencode"]["wall_s"])),
                     fmt(a, lambda y: "%d / %d" % (y["spectra_stats"]["numpress_terms"], y["reencoded_stats"]["numpress_terms"])),
                     fmt(a, lambda y: "`%s` / `%s`" % (y["digests"]["semantic"][:12], y["digests"]["content"][:12])),
@@ -3010,6 +3154,7 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
                          "search": {k: v[0] for k, v in S.items()}}
     summary = []
     tot = lambda f: sum(f(g) for g in full.values())
+    ratio2 = lambda a, b: "%.2f" % (a / b) if b else "-"
     for t in tools:
         if not full:
             break
@@ -3021,11 +3166,10 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
         d_sz2 = tot(lambda g: g["search"]["dt", "sage"]["by_charge"]["z2p"]["target_peptides"])
         d_mz2 = tot(lambda g: g["search"]["dt", "msfragger"]["by_charge"]["z2p"]["peptides"])
         rows = [g["arms"][t] for g in full.values()]
-        summary.append("| %s | %d | %d/%d | %s | %.1f | %s | %.2f | %s | %.2f | %s | %.2f | %s | %.2f |" % (
+        summary.append("| %s | %d | %d/%d | %s | %.1f | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             names[t], len(full), sum(g["flagged"] for g in full.values()), len(full), hms(sum(a["wall_s"] for a in rows)),
             statistics.median(a["peak_rss_kb"] for a in rows) / 1e6, num(sum(a["output"]["count"] for a in rows)),
-            sage / d_s, num(s_z2), s_z2 / d_sz2 if d_sz2 else float("nan"), num(msf), msf / d_m, num(m_z2),
-            m_z2 / d_mz2 if d_mz2 else float("nan")))
+            ratio2(sage, d_s), num(s_z2), ratio2(s_z2, d_sz2), num(msf), ratio2(msf, d_m), num(m_z2), ratio2(m_z2, d_mz2)))
     ident = okp[0]["identity"] if okp else {}
     cm = okp[0].get("cells_meta", {}) if okp else {}
     tsha = oks[0]["tools_sha256"] if oks else {}
@@ -3033,14 +3177,17 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
     sh = lambda v: (v or "?")[:16]
     cell_lines = "".join(
         "\n- **%s** (%s, arm `%s`): %s; binary sha256 `%s`, %s sha256 `%s`, %d lib files, %d ceph-resident libraries; "
-        "%s; `-in <staged .d> -out <cell dir> -threads %s%s`, wall cap %s h, killed when MemAvailable < %d%%."
+        "%s; `-in <staged .d> -out <cell dir> -threads %s%s`, wall cap %s h, killed when MemAvailable stays < %d%% for %d "
+        "samples; data tree sha256 `%s`, env.sh sha256 `%s`; a private TMPDIR in the cell directory."
         % (n, c["kind"], c["arm"], (cm.get(n) or {}).get("label", "?"), sh(((ident.get("cells") or {}).get(n) or {}).get("binary_sha256")),
            REENCODE[0], sh(((ident.get("cells") or {}).get(n) or {}).get("reencode_sha256")),
            len(((ident.get("cells") or {}).get(n) or {}).get("lib_sha256") or {}),
            len(build_identity(ident).get("cells", {}).get(n, {}).get("deps_sha256", {})) if ident.get("cells") else 0,
            ", ".join(l for l in (cm.get(n) or {}).get("provenance", []) if l.startswith(("git_sha=", "published=", "compiler=")))
            or "no git_sha/published line",
-           plan["threads"], "".join(" " + x for x in c["args"]), c["wall_cap_h"], round(MEM_FLOOR * 100))
+           plan["threads"], "".join(" " + x for x in c["args"]), c["wall_cap_h"], round(MEM_FLOOR * 100), MEM_FLOOR_SAMPLES,
+           sh(((ident.get("cells") or {}).get(n) or {}).get("data_tree_sha256")),
+           sh(((ident.get("cells") or {}).get(n) or {}).get("env_sha256")))
         for n, c in cells(plan).items())
     head = """# Extractor comparison: %(dtl)s, %(label)s and %(cells)s
 
@@ -3055,11 +3202,14 @@ Generated %(now)s by `harness/corpus.py table` (plan `%(name)s`, records from %(
   within one sample only. A failed cell does not stop the next one; a group with a failed cell re-runs whole.
 - **Re-encode** (cells, before any search, outside the timed window): `%(reencode)s -in pseudo_spectra.mzML -out
   reencoded.mzML %(reargs)s` from the cell's own build. Checked: no numpress term (MS:1002312/13/14, MS:1002746/47/48),
-  every m/z array sorted, the same spectra, the same RT, selected ion m/z, charge, 1/K0 and isolation target values,
-  a selected ion m/z in every spectrum. Searches read the re-encoded file; no selected-ion patch for cells.
+  an m/z array in every spectrum and every one sorted, the same spectra, the same RT, selected ion m/z, charge, 1/K0
+  and isolation target values, the same m/z values per spectrum (raw numpress decoded bit-identically to OpenMS), a
+  selected ion m/z in every spectrum. Searches read the re-encoded file; no selected-ion patch for cells.
 - **No-op check** (G-V18): a cell with `differs_from` is flagged when its order-independent content digest (each
-  spectrum block without id/index, sorted) equals that cell's. The spectrum-list digest (bench/semantic_digest.py) is
-  shown beside it; diaWeaver's final RT sort is unstable, so that digest can differ between two runs of one arm.
+  spectrum block without id/index/spectrumRef/dataProcessingRef, sorted) equals that cell's. The spectrum-list digest
+  (bench/semantic_digest.py) is shown beside it; diaWeaver's final RT sort is unstable, so that digest can differ
+  between two runs of one arm. One-sided: an unflagged cell differs in content, which run-to-run variation of the
+  tool also produces; it does not prove the settings made the difference.
 - **Searches**: Sage `%(sage)s` (config `%(sage_config)s`, FASTA `%(sage_fasta)s`), MSFragger `%(msf)s` (params
   `%(msf_params)s`, database `%(msf_db)s`); diaTracer patched before Sage; `fix_mzml_cvparams.py` before MSFragger for
   every arm; the corpus-v3 read checks (patched = spectra, MSFragger Scans = spectra, Sage >= %(minread)d%% of them).
@@ -3096,9 +3246,9 @@ Generated %(now)s by `harness/corpus.py table` (plan `%(name)s`, records from %(
                      + "\n".join(entrap) + "\n")
     if cells(plan):
         parts.append("\n## Cell outputs (before the re-encode unless noted)\n\n| sample | cell | cell arm | args | spectra "
-                     "| charges | 1/K0 = 0 | 1/K0 missing | peaks per spectrum (median) | re-encode wall | numpress terms "
-                     "(raw / re-encoded) | spectrum-list / content digest (re-encoded) | no-op check |\n"
-                     "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---|---|\n" + "\n".join(cellrows) + "\n")
+                     "| charges | 1/K0 = 0 | 1/K0 missing | peaks per spectrum (min / median) | unsorted peak lists | re-encode wall "
+                     "| numpress terms (raw / re-encoded) | spectrum-list / content digest (re-encoded) | no-op check |\n"
+                     "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|---|\n" + "\n".join(cellrows) + "\n")
     parts.append("\n## Per arm, complete samples only\n\n| arm | n | flagged | wall total | median RSS GB | spectra | Sage vs dT "
                  "| Sage target z>=2 | Sage target z>=2 vs dT | MSFragger | MSFragger vs dT | MSFragger z>=2 "
                  "| MSFragger z>=2 vs dT |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
@@ -3123,10 +3273,10 @@ MEASURED = {
 
 # Extended plans only (plan keys `cells`, `entrapment`): the group runner, the cells, the re-encode, the entrapment search
 # and the per-charge split. A change here re-runs the groups and searches of extended plans and nothing else.
-MEASURED_CELLS = (sorted(CELL_KINDS.items()), REENCODE, NUMPRESS_CV, PREC_CV, ENTRAP_TAG, STRATA, STAGE_FILES, stage_tdf,
-                  cell_env, cmd_dwv,
-                  cmd_reencode, kill_session, run_capped, time_cpu, mzml_scan, reencode, run_cell, noop_check, run_group,
-                  load_module, tsv_iter, entrap_strata, run_entrap, sage_by_charge, msf_by_charge, add_split)
+MEASURED_CELLS = (sorted(CELL_KINDS.items()), REENCODE, NUMPRESS_CV, NUMPRESS_LINEAR, MEM_FLOOR_SAMPLES, PREC_CV, ENTRAP_TAG,
+                  STRATA, STAGE_FILES, stage_tdf, cell_env, cmd_dwv, cmd_reencode, kill_session, run_capped, time_cpu,
+                  numpress_linear, mzml_scan, reencode, run_cell, noop_check, run_group,
+                  load_module, tsv_iter, tsv_charge, entrap_strata, run_entrap, sage_by_charge, msf_by_charge, add_split)
 # The two-extractor pair as of DIAspeXtract 1.3.0 (CORPUS.md). selftest asserts these: an edit to a measured function
 # must change them here on purpose, knowing that every record of a plain plan then re-runs.
 PAIR_MEASURE_1_3_0 = {"pair": "3215b73e62ae", "search": "064af71b2bfe", "score": "4fe0a1cecefb"}
@@ -3216,8 +3366,10 @@ FAKE_SAGE = FAKE_HEAD + r'''
 odir, mz = arg("-o"), sys.argv[-1]
 assert os.path.exists(mz), mz
 zero = hit("FAKE_SAGE_ZERO", mz)
-rows = "".join("%d\tPEPTIDE%d\tsp|P%d|X\t1\tf.mzML\t%d\t1\t1\t%s\t%d\t%.2f\n"
-               % (i, i, i, i, "0.5" if zero else "0.001", 1 if i % 5 == 0 else 2, 1 - i / 100) for i in range(30))
+badz = hit("FAKE_SAGE_BADZ", mz)
+rows = "".join("%d\tPEPTIDE%d\tsp|P%d|X\t1\tf.mzML\t%d\t1\t1\t%s\t%s\t%.2f\n"
+               % (i, i, i, i, "0.5" if zero else "0.001", "x" if badz and i == 3 else 1 if i % 5 == 0 else 2, 1 - i / 100)
+               for i in range(30))
 if not zero:
     rows += "99\tDECOYPEP\trev_sp|P1|X\t1\tf.mzML\t99\t1\t-1\t0.001\t2\t0.1\n"
 if "entrap" in sys.argv[1]:           # the entrapment config: foreign-proteome hits (one at z=1), and a weaker duplicate
@@ -3233,17 +3385,45 @@ n = count(mz)
 print("[INFO sage] - search:       999 ms (%d spectra/s)" % (n // 3 if hit("FAKE_SAGE_SHORT", mz) else n))
 print("[INFO sage] finished in 1s")
 '''
-# Extended plans: a diaWeaver and a FileFilter that write and read real base64 arrays. The diaWeaver fake labels its
-# plain little-endian arrays as numpress (the FileFilter fake reads them as plain), writes peaks unsorted, and shuffles
-# its spectra (equal RTs in pairs) like the real tool's unstable RT sort; ms1_centroid args shift every m/z.
+# Extended plans: a diaWeaver and a FileFilter that write and read real base64 arrays. The diaWeaver fake writes its m/z
+# arrays as real MS-Numpress linear + zlib (the encoder below is MSNumpress encodeLinear; the FileFilter fake decodes
+# them with the harness's own numpress_linear) and labels its plain intensity arrays as numpress slof, writes peaks
+# unsorted, and orders its spectra by a fixed shuffle (equal RTs in pairs) like the real tool's unstable RT sort;
+# ms1_centroid args shift every m/z. The FileFilter fake puts dataProcessingRef on its first spectrum, as OpenMS does.
 FAKE_MZML_LIB = r'''
-import base64, random, struct
-def write_mzml(path, specs, numpress=False):
+import base64, random, struct, zlib
+def np_encode(vals, fp=100000.0):
+    out = bytearray(struct.pack(">d", fp))
+    ints = [0, 0, 0]
+    for k in range(min(2, len(vals))):
+        ints[k + 1] = int(vals[k] * fp + 0.5)
+        out += (ints[k + 1] & 0xFFFFFFFF).to_bytes(4, "little")
+    hb = []
+    for v in vals[2:]:
+        ints[0], ints[1] = ints[1], ints[2]
+        ints[2] = int(v * fp + 0.5)
+        x = (ints[2] - 2 * ints[1] + ints[0]) & 0xFFFFFFFF
+        nib = [(x >> (4 * i)) & 0xF for i in range(8)]
+        top = nib[::-1]
+        if top[0] == 0:
+            l = next((i for i in range(8) if top[i]), 8)
+            hb += [l] + nib[:8 - l]
+        elif top[0] == 0xF:
+            l = next((i for i in range(8) if top[i] != 0xF), 7)
+            hb += [l + 8] + nib[:8 - l]
+        else:
+            hb += [0] + nib
+    if len(hb) % 2:
+        hb.append(0)
+    out += bytes((hb[i] << 4) | hb[i + 1] for i in range(0, len(hb), 2))
+    return zlib.compress(bytes(out))
+def write_mzml(path, specs, numpress=False, dp_first=False, mz_acc=None, drop_mz=(), badz=()):
     with open(path, "w") as f:
         f.write('<?xml version="1.0"?>\n<indexedmzML><mzML><run>\n<spectrumList count="%d">\n' % len(specs))
         for i, s in enumerate(specs):
             enc = lambda fmt, v: base64.b64encode(struct.pack("<%d%s" % (len(v), fmt), *v)).decode()
-            f.write('<spectrum id="scan=%d" index="%d" defaultArrayLength="%d">\n' % (s["id"], i, len(s["mz"])))
+            f.write('<spectrum id="scan=%d" index="%d" defaultArrayLength="%d"%s>\n'
+                    % (s["id"], i, len(s["mz"]), ' dataProcessingRef="dp_sp_0"' if dp_first and i == 0 else ""))
             f.write(' <scanList count="1"><scan>\n  <cvParam cvRef="MS" accession="MS:1000016" name="scan start time" '
                     'value="%r" unitAccession="UO:0000010"/>\n </scan></scanList>\n' % s["rt"])
             f.write(' <precursorList count="1"><precursor>\n  <isolationWindow>\n   <cvParam cvRef="MS" accession="MS:1000827" '
@@ -3251,26 +3431,33 @@ def write_mzml(path, specs, numpress=False):
                     '<selectedIon>\n' % s["sel"])
             if s["sel_ok"]:
                 f.write('   <cvParam cvRef="MS" accession="MS:1000744" name="selected ion m/z" value="%r"/>\n' % s["sel"])
-            f.write('   <cvParam cvRef="MS" accession="MS:1000041" name="charge state" value="%d"/>\n' % s["z"])
+            f.write('   <cvParam cvRef="MS" accession="MS:1000041" name="charge state" value="%s"/>\n'
+                    % ("x" if i in badz else s["z"]))
             f.write('   <cvParam cvRef="MS" accession="MS:1002815" name="inverse reduced ion mobility" value="%r" '
                     'unitAccession="MS:1002814"/>\n  </selectedIon></selectedIonList>\n </precursor></precursorList>\n' % s["im"])
-            f.write(' <binaryDataArrayList count="2">\n  <binaryDataArray encodedLength="0">\n   <cvParam cvRef="MS" '
-                    'accession="MS:1000523" name="64-bit float"/>\n   <cvParam cvRef="MS" accession="%s" name="c"/>\n'
-                    '   <cvParam cvRef="MS" accession="MS:1000514" name="m/z array"/>\n   <binary>%s</binary>\n'
-                    '  </binaryDataArray>\n' % ("MS:1002746" if numpress else "MS:1000576", enc("d", s["mz"])))
+            f.write(' <binaryDataArrayList count="2">\n')
+            if i not in drop_mz:
+                payload = base64.b64encode(np_encode(s["mz"])).decode() if numpress else enc("d", s["mz"])
+                f.write('  <binaryDataArray encodedLength="0">\n   <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/>\n'
+                        '   <cvParam cvRef="MS" accession="%s" name="c"/>\n   <cvParam cvRef="MS" accession="MS:1000514" '
+                        'name="m/z array"/>\n   <binary>%s</binary>\n  </binaryDataArray>\n'
+                        % (mz_acc or ("MS:1002746" if numpress else "MS:1000576"), payload))
             f.write('  <binaryDataArray encodedLength="0">\n   <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float"/>\n'
                     '   <cvParam cvRef="MS" accession="%s" name="c"/>\n   <cvParam cvRef="MS" accession="MS:1000515" '
                     'name="intensity array"/>\n   <binary>%s</binary>\n  </binaryDataArray>\n </binaryDataArrayList>\n'
                     '</spectrum>\n' % ("MS:1002748" if numpress else "MS:1000576", enc("f", s["inten"])))
         f.write('</spectrumList></run></mzML>\n<indexListOffset>1</indexListOffset></indexedmzML>\n')
 def read_mzml(path):
-    specs, cur, kind = [], None, None
+    specs, cur, kind, accs = [], None, None, set()
     for line in open(path):
         if "<spectrum " in line:
             cur = {"mz": [], "inten": [], "sel_ok": False, "id": int(re.search(r'id="scan=(\d+)"', line).group(1))}
+        if "<binaryDataArray" in line:
+            accs = set()
         m = re.search(r'accession="(MS:\d+)"(?:[^>]*?value="([^"]*)")?', line)
         if cur is not None and m:
             a, v = m.groups()
+            accs.add(a)
             if a == "MS:1000016": cur["rt"] = float(v)
             elif a == "MS:1000827": cur["sel"] = float(v)
             elif a == "MS:1000744": cur["sel_ok"] = True
@@ -3279,35 +3466,50 @@ def read_mzml(path):
             elif a in ("MS:1000514", "MS:1000515"): kind = a
         if "<binary>" in line:
             raw = base64.b64decode(line.split("<binary>")[1].split("</binary>")[0])
-            mz = kind == "MS:1000514"
-            cur["mz" if mz else "inten"] = list(struct.unpack("<%d%s" % (len(raw) // (8 if mz else 4), "d" if mz else "f"), raw))
+            if kind == "MS:1000514" and "MS:1002746" in accs:
+                cur["mz"] = numpress_linear(zlib.decompress(raw))
+            else:
+                mz = kind == "MS:1000514"
+                cur["mz" if mz else "inten"] = list(struct.unpack("<%d%s" % (len(raw) // (8 if mz else 4), "d" if mz else "f"), raw))
         if "</spectrum>" in line:
             specs.append(cur)
             cur = None
     return specs
-'''
+#@NUMPRESS_LINEAR@
+'''       # the harness's own decoder is pasted in by _fake() at selftest time: a node runs this file from stdin, where
+          # inspect.getsource cannot work, so nothing at import may need it
 FAKE_DWV = FAKE_HEAD + FAKE_MZML_LIB + r'''
 if "--help" in sys.argv:
     print("diaWeaver -- Extract pseudo spectra from DIA data\nVersion: 3.5.0-pre-fake")
     sys.exit(0)
 line = " ".join(sys.argv)
 out = os.path.join(arg("-out"), "pseudo_spectra.mzML")
+mode = lambda p: "%o" % (os.stat(p).st_mode & 0o777)
 with open(os.path.join(arg("-out"), "staged_files.txt"), "w") as f:
-    f.write("\n".join(sorted(os.listdir(arg("-in")))) + "\n")
+    f.write("".join("%s %s\n" % (x, mode(os.path.join(arg("-in"), x))) for x in sorted(os.listdir(arg("-in")))))
+tmpd = os.environ["TMPDIR"]
+with open(os.path.join(arg("-out"), "tmpdir.txt"), "w") as f:
+    f.write("%s %s\n" % (tmpd, mode(tmpd)))
+open(os.path.join(tmpd, "dwv.tmp"), "w").write("spill")
 if hit("FAKE_DWV_FAIL", line):
     sys.exit(3)
 if hit("FAKE_DWV_SLOW", line):
     time.sleep(30)
+if hit("FAKE_DWV_NAP", line):
+    time.sleep(1)
 shift = 0.25 if "-bruker:ms1_centroid_mz_ppm" in sys.argv else 0.0
 n = 0 if hit("FAKE_DWV_ZERO", line) else 12
 specs = [{"rt": 60.0 + i // 2, "sel": 400.0 + 10 * i, "sel_ok": not hit("FAKE_DWV_NO744", line), "z": 2 + i % 3,
           "im": 0.0 if i % 4 else 0.9, "mz": [300.0 + 7.5 * ((i * 7 + k * 13) % 40) + shift for k in range(8)],
           "inten": [float(1000 + 10 * k) for k in range(8)]} for i in range(n)]
-random.shuffle(specs)
+random.Random(7).shuffle(specs)
+if hit("FAKE_DWV_ALTORDER", line):
+    specs.reverse()
 for i, sp in enumerate(specs):
     sp["id"] = i + 1
+pic = hit("FAKE_DWV_PIC", line)
 if not hit("FAKE_DWV_NOOUT", line):
-    write_mzml(out, specs, numpress=True)
+    write_mzml(out, specs, numpress=not pic, mz_acc="MS:1002313" if pic else None)
 print("Finished processing all windows. Wrote %d pseudo spectra." % (n + 1 if hit("FAKE_DWV_MISCOUNT", line) else n))
 if not hit("FAKE_DWV_NODONE", line):
     print("Done. Output (numpress compressed): %s" % out)
@@ -3315,6 +3517,7 @@ if not hit("FAKE_DWV_NODONE", line):
 FAKE_FILEFILTER = FAKE_HEAD + FAKE_MZML_LIB + r'''
 src, dst = arg("-in"), arg("-out")
 assert sys.argv[5:] == ["-sort"], sys.argv
+open(os.path.join(os.environ["TMPDIR"], "ff.tmp"), "w").write("spill")
 if hit("FAKE_FF_FAIL", src):
     sys.exit(1)
 specs = sorted(read_mzml(src), key=lambda sp: sp["rt"])
@@ -3326,7 +3529,10 @@ if hit("FAKE_FF_DROP", src):
     specs = specs[1:]
 if hit("FAKE_FF_CHARGE", src):
     specs[0]["z"] += 1
-write_mzml(dst, specs, numpress=hit("FAKE_FF_NUMPRESS", src))
+if hit("FAKE_FF_SHIFT", src):
+    specs[0]["mz"][-1] += 0.5
+write_mzml(dst, specs, numpress=hit("FAKE_FF_NUMPRESS", src), dp_first=True,
+           drop_mz=(0,) if hit("FAKE_FF_NOMZ", src) else (), badz=(0,) if hit("FAKE_FF_BADZ", src) else ())
 '''
 FAKE_PATCH = FAKE_HEAD + r'''
 shutil.copy(sys.argv[1], sys.argv[2])
@@ -3492,20 +3698,26 @@ def _bench_tool(name: str):
 
 def _dwv_world(w: Path) -> dict:
     spx, t = w / "ceph" / "spx", w / "ceph" / "spx" / "tools"
-    for arm in ("dwv", "dwv_noff", "dwv_badprov", "dwv_omp"):
+    for arm in ("dwv", "dwv_noff", "dwv_badprov", "dwv_omp", "dwv_badshare", "dwv_nodata"):
         a = spx / arm
-        _exe(a / "bin" / "diaWeaver", FAKE_DWV)
+        _exe(a / "bin" / "diaWeaver", _fake(FAKE_DWV))
         if arm != "dwv_noff":
-            _exe(a / "bin" / "FileFilter", FAKE_FILEFILTER)
+            _exe(a / "bin" / "FileFilter", _fake(FAKE_FILEFILTER))
         (a / "lib").mkdir()
         (a / "lib" / "libOpenMS.so").write_bytes(b"fork " + arm.encode())
+        (a / "share" / "OpenMS" / "CHEMISTRY").mkdir(parents=True)          # the run-time data tree (OPENMS_DATA_PATH)
+        (a / "share" / "OpenMS" / "CHEMISTRY" / "Elements.xml").write_text("<elements/>")
+        (a / "share" / "OpenMS" / "CV").mkdir()
+        (a / "share" / "OpenMS" / "CV" / "psi-ms.obo").write_text("format-version: 1.2")
         (a / "env.sh").write_text("export DWV_BIN=%s\nexport OPENMS_DATA_PATH=%s\n%s" % (
-            a / "bin" / "diaWeaver", a / "share", "export OMP_NUM_THREADS=4\n" if arm == "dwv_omp" else ""))
+            a / "bin" / "diaWeaver", (a / "share") if arm == "dwv_nodata" else (a / "share" / "OpenMS"),
+            "export OMP_NUM_THREADS=4\n" if arm == "dwv_omp" else ""))
         files = [f for f in ("bin/diaWeaver", "bin/FileFilter", "lib/libOpenMS.so") if (a / f).is_file()]
         (a / "PROVENANCE").write_text("arm=%s\ngit_sha=7ed11696fa71b3ac0b8c1a9f62fa2a2cbb39c0a8\nsha256_published:\n%s"
-                                      "published=2026-09-16T22:09:20+02:00\n" % (arm, "".join(
-                                          "  %s  %s\n" % ("0" * 64 if arm == "dwv_badprov" and f == "lib/libOpenMS.so"
-                                                           else sha256(a / f), f) for f in files)))
+                                      "share_OpenMS_files=2\nshare_OpenMS_tree_sha256=%s\npublished=2026-09-16T22:09:20+02:00\n" % (
+                                          arm, "".join("  %s  %s\n" % ("0" * 64 if arm == "dwv_badprov" and f == "lib/libOpenMS.so"
+                                                                        else sha256(a / f), f) for f in files),
+                                          "f" * 64 if arm == "dwv_badshare" else data_tree_sha256(a / "share" / "OpenMS")))
     (spx / "dwv_outside").mkdir()
     (spx / "dwv_outside" / "env.sh").write_text("export DWV_BIN=%s\n" % (spx / "dwv" / "bin" / "diaWeaver"))
     tools = {}
@@ -3537,6 +3749,17 @@ def _xreg(q: dict) -> tuple:
     plan, reg = _reg(q)
     plan.update(cells=q["cells"], entrapment=q["entrapment"], tools=q["tools"])
     return plan, reg
+
+
+def _fake(txt: str) -> str:
+    return txt.replace("#@NUMPRESS_LINEAR@", inspect.getsource(numpress_linear))
+
+
+def _np_refuses(data: bytes) -> None:
+    try:
+        numpress_linear(data)
+    except (ValueError, IndexError):
+        die("G-V17", "numpress array undecodable (as mzml_scan counts it)")
 
 
 def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
@@ -3575,6 +3798,11 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     C.check("COMPAT", "plain table renders without the extended sections",
             "Peptides by precursor charge" not in mdp and "Entrapment by charge" not in mdp and "Cell outputs" not in mdp)
     C.check("COMPAT", "plain identity carries no cells", "cells" not in build_identity(identity(q1, arm_env(q1)[0])))
+    r = subprocess.run([sys.executable, "-", "node-status", base64.b64encode(json.dumps(
+        {"root": str(w / "stdin-root"), "records_only": True}).encode()).decode()], input=SELF.read_bytes(),
+        capture_output=True, cwd=str(w))
+    C.check("COMPAT", "the module imports and serves a node command from stdin (`python3 -`, as remote() runs it)",
+            r.returncode == 0 and b"@@JSON " in r.stdout, r.stderr.decode(errors="replace")[-120:])
 
     # ---- G-V01 extended plan validation
     xq = _xqueue(w, "AB", "x1", xt)
@@ -3621,20 +3849,31 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     C.abort("G-V03", "cell provenance lists another sha256 for a lib file",
             lambda: cells_meta(qb, {"c1": cell_env(qb, "c1")}, {"cells": cells_identity(qb)}), "lib/libOpenMS.so")
     (spx / "dwv_unlisted" / "lib").mkdir(parents=True)
-    for f in ("bin", "env.sh", "PROVENANCE"):
-        (shutil.copytree if f == "bin" else shutil.copyfile)(spx / "dwv" / f, spx / "dwv_unlisted" / f)
+    for f in ("bin", "share", "env.sh", "PROVENANCE"):
+        (shutil.copytree if f in ("bin", "share") else shutil.copyfile)(spx / "dwv" / f, spx / "dwv_unlisted" / f)
     (spx / "dwv_unlisted" / "lib" / "libOpenMS.so").write_bytes(b"fork dwv")
     (spx / "dwv_unlisted" / "lib" / "libextra.so").write_bytes(b"not published")
-    (spx / "dwv_unlisted" / "env.sh").write_text("export DWV_BIN=%s\n" % (spx / "dwv_unlisted" / "bin" / "diaWeaver"))
+    (spx / "dwv_unlisted" / "env.sh").write_text("export DWV_BIN=%s\nexport OPENMS_DATA_PATH=%s\n" % (
+        spx / "dwv_unlisted" / "bin" / "diaWeaver", spx / "dwv_unlisted" / "share" / "OpenMS"))
     qu = one("dwv_unlisted")
     C.abort("G-V03", "a lib file the provenance does not list",
             lambda: cells_meta(qu, {"c1": cell_env(qu, "c1")}, {"cells": cells_identity(qu)}), "lib/libextra.so")
     qn = one("dwv_noprov")
     shutil.copytree(spx / "dwv", spx / "dwv_noprov")
     (spx / "dwv_noprov" / "PROVENANCE").unlink()
-    (spx / "dwv_noprov" / "env.sh").write_text("export DWV_BIN=%s\n" % (spx / "dwv_noprov" / "bin" / "diaWeaver"))
+    (spx / "dwv_noprov" / "env.sh").write_text("export DWV_BIN=%s\nexport OPENMS_DATA_PATH=%s\n" % (
+        spx / "dwv_noprov" / "bin" / "diaWeaver", spx / "dwv_noprov" / "share" / "OpenMS"))
     C.abort("G-V03", "cell arm without PROVENANCE",
             lambda: cells_meta(qn, {"c1": cell_env(qn, "c1")}, {"cells": cells_identity(qn)}), "provenance missing")
+    qs = one("dwv_badshare")
+    C.abort("G-V03", "cell provenance records another data tree (share/OpenMS) than the one in use",
+            lambda: cells_meta(qs, {"c1": cell_env(qs, "c1")}, {"cells": cells_identity(qs)}), "share_OpenMS_tree_sha256")
+    C.abort("G-V03", "cell OPENMS_DATA_PATH is not the arm's share/OpenMS", lambda: cell_env(one("dwv_nodata"), "c1"),
+            "OPENMS_DATA_PATH")
+    C.check("G-V03", "the data tree hash follows the publish step's find|sort|sha256sum formula",
+            data_tree_sha256(spx / "dwv" / "share" / "OpenMS") == hashlib.sha256(b"".join(
+                b"%s  ./%s\n" % (sha256(spx / "dwv" / "share" / "OpenMS" / r).encode(), r.encode())
+                for r in ("CHEMISTRY/Elements.xml", "CV/psi-ms.obo"))).hexdigest())
     cenvs = {n: cell_env(xq, n) for n in xq["cells"]}
     cm = C.ok("G-V03", "cell provenance and label resolve", lambda: cells_meta(xq, cenvs, {"cells": cells_identity(xq)}))
     ce = cenvs["dwv_default"]
@@ -3647,7 +3886,9 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     C.check("G-V11", "extended build identity carries each cell's build",
             set(build_identity(ix).get("cells", {})) == {"dwv_default", "dwv_pickim"})
     for what, f in (("diaWeaver binary", spx / "dwv" / "bin" / "diaWeaver"), ("FileFilter", spx / "dwv" / "bin" / "FileFilter"),
-                    ("cell arm lib", spx / "dwv" / "lib" / "libOpenMS.so")):
+                    ("cell arm lib", spx / "dwv" / "lib" / "libOpenMS.so"),
+                    ("cell data file (OPENMS_DATA_PATH)", spx / "dwv" / "share" / "OpenMS" / "CV" / "psi-ms.obo"),
+                    ("cell env.sh", spx / "dwv" / "env.sh")):
         orig = f.read_bytes()
         f.write_bytes(orig + b"\n# changed\n")
         C.abort("G-V04", "%s changed across an arm" % what, lambda: check_identity(xq, envx, ix, "during dwv_default"), "changed")
@@ -3671,8 +3912,17 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             and a["output"]["path"].endswith("/reencoded.mzML") and not Path(a["raw_output"]["path"]).exists(), a.get("reencoded_stats"))
     C.check("G-V07", "an extended plan stages analysis.tdf + analysis.tdf_bin only (the raw also has a method folder)",
             R["A", "pair"]["stage"]["files"] == list(STAGE_FILES) and (w / "ceph" / "raw" / "run_A.d" / "run.m").is_dir()
-            and (Path(a["cwd"]) / "staged_files.txt").read_text().split() == list(STAGE_FILES)
-            and R["A", "pair"]["stage"]["fingerprint"] == xq["samples"][0]["pin"], R["A", "pair"]["stage"].get("files"))
+            and (Path(a["cwd"]) / "staged_files.txt").read_text().splitlines() == ["%s 600" % f for f in STAGE_FILES]
+            and R["A", "pair"]["stage"]["fingerprint"] == xq["samples"][0]["pin"],
+            (R["A", "pair"]["stage"].get("files"), (Path(a["cwd"]) / "staged_files.txt").read_text()))
+    tdl = (Path(a["cwd"]) / "tmpdir.txt").read_text().split()
+    C.check("G-V14", "cells get a private TMPDIR (0700) inside the cell directory, emptied afterwards; both tools wrote there",
+            tdl == [str(Path(a["cwd"]) / "tmp"), "700"] and a["tmpdir"] == tdl[0] and a["tmp_files"] == 2
+            and not Path(tdl[0]).exists(), (tdl, a.get("tmp_files")))
+    C.check("G-V17", "raw diaWeaver peak order measured: numpress m/z decoded, 12 of 12 unsorted, same m/z after the re-encode",
+            a["spectra_stats"]["undecoded"] == 0 and a["spectra_stats"]["unsorted"] == 12
+            and a["spectra_stats"]["peak_digest"] is not None
+            and a["spectra_stats"]["peak_digest"] == a["reencoded_stats"]["peak_digest"], a.get("spectra_stats"))
     C.check("G-V16", "every arm timed with CPU; the cell's cap recorded and not hit",
             all(R["A", "pair"]["arms"][t]["cpu"]["cpu_s"] == 125.0 for t in tx) and a["wall_cap_s"] == 3600
             and a["stopped"] is None and a["log_count"] == 12)
@@ -3738,11 +3988,23 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
         "differ from the plan")
     C.abort("G-V13", "extended table refuses an ok cell with 0 spectra", mutated(
         lambda m: m["A", "pair", "pair"]["arms"]["dwv_pickim"]["output"].update(count=0)), "count")
+
+    def no_split(m):                                # killed between a search and its split
+        for k, r in m.items():
+            if k[2] in ENGINES:
+                r.pop("by_charge", None)
+    mdp2 = C.ok("G-V13", "extended table renders when ok searches lack their charge split", mutated(no_split))
+    C.check("G-V13", "  those searches render as pending and no sample counts as complete",
+            bool(mdp2) and mdp2[1] == 2 and "| pending |" in mdp2[0], mdp2 and mdp2[1])
     rq = read_json(rec_path(xq["root"], "A", "spx", "sage"))
     write_json(rec_path(xq["root"], "A", "spx", "sage"), dict(rq, peptides=rq["peptides"] + 1))
     C.check("G-V19", "a charge split that does not add up to the count fails the cell",
             not add_split(xq["root"], "A", "spx", "sage", {"measure": mx})
             and read_json(rec_path(xq["root"], "A", "spx", "sage"))["guard"] == "G-V19")
+    write_json(rec_path(xq["root"], "A", "spx", "sage"), dict(rq, status="ok", result_tsv=str(w / "gone.tsv")))
+    C.check("G-V19", "a crash in the split (result TSV gone) fails that search cell as CRASH, never the queue",
+            not add_split(xq["root"], "A", "spx", "sage", {"measure": mx})
+            and read_json(rec_path(xq["root"], "A", "spx", "sage"))["guard"] == "CRASH")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         dry_run(xq)
@@ -3756,10 +4018,12 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     # ---- G-V18: a cell equal in content is flagged although its order and ids differ
     xn = _xqueue(w, "C", "x2", xt, cells_={"dwv_a": dict(DWV_CELLS["dwv_default"]),
                                            "dwv_b": dict(DWV_CELLS["dwv_default"], differs_from="dwv_a")})
+    os.environ["FAKE_DWV_ALTORDER"] = "/dwv_b"        # another order: the re-encode's first spectrum (dataProcessingRef) differs
     node_run(xn)
+    del os.environ["FAKE_DWV_ALTORDER"]
     RN = _records(xn)
     nb = RN["C", "pair"]["arms"]["dwv_b"].get("noop") or {}
-    C.check("G-V18", "no-op cell flagged: content digest equal, spectrum-list digest not (order and ids differ)",
+    C.check("G-V18", "no-op cell flagged: content digest equal, spectrum-list digest not (order, ids, dataProcessingRef differ)",
             nb.get("flag") is True and nb.get("content_equal") and not nb.get("semantic_equal"), nb)
     mdn = render_cells_table("x", *_xreg(xn), list(RN.values()))[0]
     C.check("G-V18", "the no-op flag reaches the status flags and the table",
@@ -3771,8 +4035,21 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     fails = {"FAKE_DWV_FAIL": "/C.d&/dwv_default", "FAKE_DWV_MISCOUNT": "/D.d", "FAKE_DWV_NODONE": "/E.d",
              "FAKE_DWV_NOOUT": "/F.d", "FAKE_DWV_ZERO": "/G.d", "FAKE_DWV_SLOW": "/H.d"}
     os.environ.update(fails)
-    xf = _xqueue(w, "CDEFGH", "x3", xt, cells_=capped)
-    rcf = node_run(xf)
+    for sid in "IJK":
+        if not (w / "ceph" / "raw" / ("run_%s.d" % sid)).exists():
+            _raw(w / "ceph" / "raw", sid)
+    xf = _xqueue(w, "CDEFGHI", "x3", xt, cells_=capped)
+    real_scan = mzml_scan
+
+    def crashing_scan(path, decode=False):          # a non-guard exception inside one cell (sample I, dwv_default)
+        if "/runs/I/" in str(path) and "/dwv_default/" in str(path):
+            raise ValueError("injected crash")
+        return real_scan(path, decode)
+    globals()["mzml_scan"] = crashing_scan
+    try:
+        rcf = node_run(xf)
+    finally:
+        globals()["mzml_scan"] = real_scan
     for k in fails:
         del os.environ[k]
     RF = _records(xf)
@@ -3794,6 +4071,11 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
         C.check("G-V16", "cell %s (both cells of %s)" % (what, sid),
                 all(cell(sid, n).get("guard") == "G-V16" and frag in cell(sid, n).get("message", "") for n in capped)
                 and RF[sid, "pair"]["cells_failed"] == list(RF[sid, "pair"]["order"][2:]), msg(sid, "dwv_default"))
+    C.check("G-V16", "a crash inside one cell (no guard) fails that cell only: CRASH recorded, the next cell ran ok",
+            cell("I", "dwv_default").get("guard") == "CRASH" and "injected crash" in msg("I", "dwv_default")
+            and cell("I", "dwv_pickim").get("status") == "ok" and RF["I", "pair"]["status"] == "ok"
+            and RF["I", "pair"]["cells_failed"] == ["dwv_default"]
+            and (RF.get(("I", "dt.sage")) or {}).get("status") == "ok", msg("I", "dwv_default"))
     C.check("G-V16", "the killed cell tool is gone", not busy([mine]))
     C.check("G-V14", "raw cell output kept after a failed cell (re-runnable), listed for purge",
             any(x.endswith("dwv_default/pseudo_spectra.mzML") for x in leftovers(xf["root"])) and rcf == 1)
@@ -3818,6 +4100,25 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     node_run(xm)
     del os.environ["FAKE_MEMAVAIL"], os.environ["FAKE_DWV_SLOW"]
     RM = _records(xm)
+    fake_snap, seen = globals()["proc_snapshot"], {}
+
+    def blip():                                     # under the floor in every other sample of each caller
+        k = threading.get_ident()
+        seen[k] = seen.get(k, 0) + 1
+        return dict(fake_snap(), memavail_kb=10 if seen[k] % 2 else 900)
+    xb = _xqueue(w, "A", "x6", xt)
+    os.environ["FAKE_DWV_NAP"] = "/A.d"
+    globals()["proc_snapshot"] = blip
+    try:
+        node_run(xb)
+    finally:
+        globals()["proc_snapshot"] = fake_snap
+        del os.environ["FAKE_DWV_NAP"]
+    RB = _records(xb)
+    C.check("G-V16", "MemAvailable under the floor in every other sample only: no kill (the floor must hold %d samples)"
+            % MEM_FLOOR_SAMPLES, all(RB["A", "pair"]["arms"][n].get("status") == "ok" and RB["A", "pair"]["arms"][n]["stopped"]
+                                     is None for n in DWV_CELLS) and max(seen.values()) > 2 * MEM_FLOOR_SAMPLES,
+            [RB["A", "pair"]["arms"][n].get("message") for n in DWV_CELLS])
     C.check("G-V16", "MemAvailable under the floor: the cell session is killed; the reference arms are flagged",
             all("MemAvailable 1.0%" in RM["A", "pair"]["arms"][n].get("message", "") for n in DWV_CELLS)
             and "during" in group_flags(RM["A", "pair"]) and not busy([mine]),
@@ -3825,9 +4126,11 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
 
     # ---- G-V17: the re-encode checks
     ff = {"FAKE_FF_NUMPRESS": "/runs/A/", "FAKE_FF_NOSORT": "/runs/B/", "FAKE_FF_DROP": "/runs/C/",
-          "FAKE_FF_CHARGE": "/runs/D/", "FAKE_DWV_NO744": "/E.d", "FAKE_FF_FAIL": "/runs/F/", "FAKE_SAGE_NOCHARGE": "/runs/F/"}
+          "FAKE_FF_CHARGE": "/runs/D/", "FAKE_DWV_NO744": "/E.d", "FAKE_FF_FAIL": "/runs/F/", "FAKE_SAGE_NOCHARGE": "/runs/F/",
+          "FAKE_FF_NOMZ": "/runs/G/", "FAKE_FF_SHIFT": "/runs/H/", "FAKE_FF_BADZ": "/runs/I/", "FAKE_DWV_PIC": "/J.d",
+          "FAKE_SAGE_BADZ": "/runs/K/"}
     os.environ.update(ff)
-    xr = _xqueue(w, "ABCDEF", "x5", xt, cells_={"dwv_default": DWV_CELLS["dwv_default"]})
+    xr = _xqueue(w, "ABCDEFGHIJK", "x5", xt, cells_={"dwv_default": DWV_CELLS["dwv_default"]})
     node_run(xr)
     for k in ff:
         del os.environ[k]
@@ -3835,7 +4138,11 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     for sid, frag, what in (("A", "numpress term", "numpress left"), ("B", "not m/z-sorted", "peaks unsorted"),
                             ("C", "changed the spectrum count", "a spectrum dropped"),
                             ("D", "changed RT, selected ion m/z, charge", "a charge changed"),
-                            ("E", "carry no selected ion m/z", "no selected ion m/z"), ("F", "failed: time rc=1", "the tool failed")):
+                            ("E", "carry no selected ion m/z", "no selected ion m/z"), ("F", "failed: time rc=1", "the tool failed"),
+                            ("G", "1 without an m/z array", "a spectrum lost its m/z array"),
+                            ("H", "changed the m/z values", "one peak m/z changed (still sorted, same precursors)"),
+                            ("I", "1 precursor values not a number", "a charge that is not a number"),
+                            ("J", "cannot be compared", "raw m/z arrays in a numpress kind the harness does not decode")):
         c = RR[sid, "pair"]["arms"]["dwv_default"]
         C.check("G-V17", "re-encode refused: %s" % what, c.get("guard") == "G-V17" and frag in c.get("message", ""), c.get("message"))
     C.check("G-V17", "the raw output is kept when the re-encode fails",
@@ -3843,6 +4150,10 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     C.check("G-V19", "a Sage TSV without a charge column fails the split and the entrapment search",
             RR["F", "spx.sage"]["guard"] == "G-V19" and RR["F", "spx.entrap"]["guard"] == "G-V19"
             and "charge" in RR["F", "spx.entrap"]["message"], (RR["F", "spx.sage"].get("message"), RR["F", "spx.entrap"].get("message")))
+    C.check("G-V19", "a charge that is not an integer refuses the split and the entrapment search; the other searches ran",
+            RR["K", "spx.sage"]["guard"] == "G-V19" and "not an integer" in RR["K", "spx.sage"]["message"]
+            and RR["K", "spx.msfragger"]["status"] == "ok" and RR["K", "dt.entrap"]["guard"] == "G-V19",
+            (RR["K", "spx.sage"].get("message"), RR["K", "dt.entrap"].get("message")))
     purge = node_purge({"root": xr["root"], "lock": xr["lock"]})
     C.check("G-V14", "purge removes the kept cell outputs", bool(purge["removed"]) and not purge["left"], purge)
 
@@ -3853,6 +4164,32 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     C.abort("G-V19", "MSFragger TSV without a charge column", lambda: msf_by_charge(w / "hdr.tsv"), "lacks columns")
     C.check("G-V19", "MSFragger split keeps msf_peptides' count", msf_by_charge(Path(ms["result_tsv"]))["all"]["peptides"]
             == msf_peptides(Path(ms["result_tsv"]))["peptides"] == 150)
+
+    # ---- G-V17 units: the numpress decoder against the fork's own encoder output, and the fake encoder
+    import zlib
+    vec = zlib.decompress(base64.b64decode("eJxzVPxSxwAEq9gXmtTFdTMzTYldXHBm3QYOvpM5sZY1e1oLnCcqF3GdEi18+C572YaVW+f/5dz7eopAJt+PdQ"
+                                           "DLQxrC"))
+    C.check("G-V17", "numpress_linear decodes a vector written by the fork's FileConverter exactly as its FileFilter does",
+            [repr(v) for v in numpress_linear(vec)] == [
+                "1500.7512352320298", "101.07120069482333", "1999.9990005965826", "250.2500004249164", "250.2500004249164",
+                "3.500000849832838", "874.441100635505", "874.4410003552301", "1200.0", "612.318070335565",
+                "612.318080533559", "1.0"])
+    ns = {}
+    exec(_fake(FAKE_MZML_LIB), ns)
+    vals = [100.0, 99.5, 1500.25, 1500.25, 3.75, 1999.99999, 0.0, 250.125]
+    C.check("G-V17", "numpress_linear inverts the fake's encoder (large, negative and zero residuals)",
+            numpress_linear(zlib.decompress(ns["np_encode"](vals))) == [int(v * 1e5 + 0.5) / 1e5 for v in vals])
+    gm = w / "garbage.mzML"
+    ns["write_mzml"](str(gm), [{"id": 1, "rt": 1.0, "sel": 500.0, "sel_ok": True, "z": 2, "im": 0.0, "mz": [100.0, 200.0],
+                                "inten": [1.0, 2.0]}])
+    txt = gm.read_text()
+    gm.write_text(txt.replace(txt.split("<binary>")[1].split("</binary>")[0], base64.b64encode(b"x" * 30).decode(), 1))
+    sc = C.ok("G-V17", "mzml_scan on an m/z array of 30 bytes (not a multiple of 8): no crash", lambda: mzml_scan(gm, decode=True))
+    C.check("G-V17", "  counted as undecodable, no peak digest", bool(sc) and sc["undecoded"] == 1 and sc["peak_digest"] is None,
+            sc and {k: sc[k] for k in ("undecoded", "peak_digest")})
+    for what, junk in (("9 bytes", b"\0" * 9), ("a cut residual", vec[:-3])):
+        C.abort("G-V17", "a corrupt numpress array is not decoded (%s)" % what, lambda junk=junk: _np_refuses(junk),
+                "undecodable")
     os.environ["FAKE_MSF_SLEEP"] = "0.3"
 
 

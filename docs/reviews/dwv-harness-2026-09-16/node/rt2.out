@@ -1,0 +1,57 @@
+{
+ "intermediate": {
+  "spectra": 101362,
+  "unsorted": 94904,
+  "undecoded": 0,
+  "length_mismatch": 0,
+  "missing_mz": 0,
+  "bad_values": 0,
+  "im_zero": 101362,
+  "im_missing": 0,
+  "charges": {
+   "2": 52694,
+   "4": 20826,
+   "3": 27842
+  },
+  "peaks_min": 30,
+  "peaks_median": 500.0,
+  "numpress_terms": 0
+ },
+ "intermediate_scan_s": 19.5,
+ "final_like": {
+  "spectra": 2000,
+  "unsorted": 0,
+  "undecoded": 0,
+  "numpress_terms": 4000,
+  "missing_mz": 0,
+  "bad_values": 0
+ },
+ "final_like_array_terms": {
+  "MS:1000514": 2000,
+  "MS:1000523": 4000,
+  "MS:1002746": 2000,
+  "MS:1000515": 2000,
+  "MS:1002748": 2000,
+  "MS:1000522": 4000,
+  "MS:1000574": 4000,
+  "MS:1000786": 4000
+ },
+ "reencode": "PASS",
+ "reencoded": {
+  "spectra": 2000,
+  "unsorted": 0,
+  "undecoded": 0,
+  "numpress_terms": 0,
+  "missing_mz": 0,
+  "bad_values": 0,
+  "missing_selected_ion": 0
+ },
+ "peak_digest_equal": true,
+ "prec_digest_equal": true,
+ "trace_pairs": {
+  "spectra_before": 2000,
+  "spectra_after": 2000,
+  "equal": 2000,
+  "sample_after": "[(343.7531515110514, 7517), (438.9199971876199, 18486), (460.2654915441581, 22053), (480.49433242046797, 25070), (495.02905744592965, 27588), (535.8734516835754"
+ }
+}

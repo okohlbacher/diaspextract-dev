@@ -213,10 +213,10 @@ triggered by `--selftest`, which fails if any id never fires.
 | G-V13 | table | more than one build, JDK feature version, thread count, measurement code or search setup across records (or ok records without measurement hashes); pair arms on two hosts; ok record with count, RSS or peptides <= 0; record pin or raw differs from the registry | a table mixing builds, rules, nodes or corrupted records |
 | G-V14 | queue/collect/purge | staged copy not deleted; collect or purge while the lock is held; destination not a `corpus_v3*` results directory; a collected path still group/other-accessible | patient-derived data lingering, or readable on ceph; writing into a published arm |
 | G-V15 | queue/launch | root under `/home`; `jnatmp` not writable; MemAvailable or `/proc` unreadable; python < 3.9; `TIME` not GNU `time -v`; no `java`; JDK feature versions differing across nodes (`preflight`) | the quota-killed "12 h JNA trap"; unrecorded memory state; a queue that crashes after 20 h without a marker |
-| G-V16 | cell | an extra cell's exit != 0 or signal; its wall cap passed or MemAvailable under 5% of MemTotal (the tool's session is killed); time log unparseable; `pseudo_spectra.mzML` missing, stale or unterminated; count <= 0; `Wrote N pseudo spectra` missing or different; the `Done. Output` finalisation line missing | a diaWeaver run of unknown length holding a shared node for a day or pushing it into OOM; an output from before the final RT sort and rewrite accepted |
-| G-V17 | cell | the re-encode failed; a numpress term (MS:1002312/13/14, MS:1002746/47/48) left; an m/z array unsorted or undecodable, or its length differing from `defaultArrayLength`; the spectrum count changed; RT, selected ion m/z, charge, 1/K0 or isolation target values changed; a spectrum without MS:1000744 | Sage 0.14 silently dropping numpress m/z arrays (spectra without peaks); an engine reading unsorted peaks; a rewrite that loses or edits precursors |
-| G-V18 | flag | a cell's order-independent content digest equals the one of the cell named in `differs_from`, or the check could not run | a no-op arm (flags that were already defaults) reported as a treatment; diaWeaver's unstable RT sort hiding a no-op from an order-dependent digest |
-| G-V19 | search | a result TSV without `charge` (or Sage's `sage_discriminant_score`); a charge split that does not add up to the cell's own count; an entrapment FASTA without `ENTRAP_` peptides; 0 target peptides in the entrapment search | a per-charge number from another counting rule than the table's; an entrapment rate against a database with no entrapment |
+| G-V16 | cell | an extra cell's exit != 0 or signal; its wall cap passed or MemAvailable under 5% of MemTotal in 3 consecutive samples (the tool's session is killed); time log unparseable; `pseudo_spectra.mzML` missing, stale or unterminated; count <= 0; `Wrote N pseudo spectra` missing or different; the `Done. Output` finalisation line missing. A crash inside a cell fails that cell (`CRASH`), never the group | a diaWeaver run of unknown length holding a shared node for a day or pushing it into OOM; an output from before the final RT sort and rewrite accepted; one neighbour's memory dip or one parse error costing the other cell |
+| G-V17 | cell | the re-encode failed; a numpress term (MS:1002312/13/14, MS:1002746/47/48) left; a spectrum without an m/z array; an m/z array unsorted or undecodable, or its length differing from `defaultArrayLength`; a precursor value that is not a number; a raw m/z array the harness cannot decode; the spectrum count changed; RT, selected ion m/z, charge, 1/K0 or isolation target values changed; the m/z values of any spectrum changed; a spectrum without MS:1000744 | Sage 0.14 silently dropping numpress m/z arrays (spectra without peaks); an engine reading unsorted peaks; a rewrite that loses or edits precursors or peaks |
+| G-V18 | flag | a cell's order-independent content digest equals the one of the cell named in `differs_from`, or the check could not run | a no-op arm (flags that were already defaults) reported as a treatment; diaWeaver's unstable RT sort hiding a no-op from an order-dependent digest (ids, and the `dataProcessingRef` OpenMS writes on the first spectrum only) |
+| G-V19 | search | a result TSV without `charge` (or Sage's `sage_discriminant_score`), or with a charge that is not an integer; a charge split that does not add up to the cell's own count; an entrapment FASTA without `ENTRAP_` peptides; 0 target peptides in the entrapment search | a per-charge number from another counting rule than the table's; an entrapment rate against a database with no entrapment |
 
 ---
 
@@ -263,8 +263,12 @@ libraries live in `<arm>/lib`; `<arm>/PROVENANCE` lists under `sha256_published:
 binary, `FileFilter` and every `lib/**` file must be listed with the sha256 they have now; `--help` prints
 `diaWeaver -- ...` and `Version: ...` (on the real arm: `diaWeaver 3.6.0-pre-diaWeaver-2-2026-09-12`). The same
 environment rules as the reference arm apply (G-V03: stripped variables, no inherited `LD_LIBRARY_PATH`, env.sh
-exporting none of them, every `ldd` library inside the arm, `/ceph` or the system directories). The build identity
-(G-V04/G-V11/G-V13) of each cell is the binary, `FileFilter`, `lib/**` and the ceph libraries both resolve.
+exporting none of them, every `ldd` library inside the arm, `/ceph` or the system directories). env.sh must point
+`OPENMS_DATA_PATH` at the arm's `share/OpenMS` (the data files the tool reads at run time), and `PROVENANCE` must
+carry `share_OpenMS_tree_sha256=` equal to that tree's hash now (the publish step's
+`find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum`, byte order). The build identity
+(G-V04/G-V11/G-V13) of each cell is the binary, `FileFilter`, `lib/**`, the ceph libraries both resolve, the data
+tree hash and the sha256 of env.sh.
 
 **Phase 1, one group per sample.** One staged copy holding **only `analysis.tdf` and `analysis.tdf_bin`** (the
 patient-data rule of this stage: a raw `.d` also carries sample and acquisition metadata files that no arm reads;
@@ -272,8 +276,11 @@ same fresh `0700` directory, neutral name and pin checks as a plain pair, which 
 the reference pair first (order alternating as before), then
 the cells in plan order, rotated by queue index; each arm synced and pre-warmed outside its timed window; CPU
 (user + system from `time -v`) recorded for every arm. A cell runs
-`time -v $DWV_BIN -in <staged .d> -out <cell dir> -threads <threads> <args>` in its own session. The session is
-killed when `wall_cap_h` passes or MemAvailable falls under 5% of MemTotal (G-V16); a stopped runner kills it too.
+`time -v $DWV_BIN -in <staged .d> -out <cell dir> -threads <threads> <args>` in its own session, with a private
+`TMPDIR` (`<cell dir>/tmp`, 0700, removed afterwards; the shared `jnatmp` is mode 0755 and a tool's spill is
+patient-derived). The staged files are mode 0600. The session is killed when `wall_cap_h` passes or MemAvailable
+stays under 5% of MemTotal for 3 consecutive 10-s samples (G-V16; one neighbour's dip must not cost a 12-h cell);
+a stopped runner (SIGTERM) kills it too.
 The tool writes one `<cell dir>/pseudo_spectra.mzML`; it must log `Wrote N pseudo spectra.` equal to the file's
 count and `Done. Output` (its final RT sort and numpress rewrite finished).
 
@@ -281,23 +288,33 @@ count and `Done. Output` (its final RT sort and numpress rewrite finished).
 `time -v <cell arm>/bin/FileFilter -in pseudo_spectra.mzML -out reencoded.mzML -sort` (the option string lives in
 `REENCODE` only). In the fork at 7ed1169, `-sort` is `sortSpectra(true)`: spectra by RT, every peak list by m/z
 with its data arrays; numpress defaults to none, zlib to off, m/z to 64 bit (`src/topp/FileFilter.cpp`). One
-streaming pass over both files (`mzml_scan`) checks: no numpress term left, every m/z array sorted and as long as
-declared, the same spectrum count four ways (both scans, both `spectrumList` counts), the same multiset of (RT,
-selected ion m/z, charge, 1/K0, isolation target) values, and MS:1000744 in every spectrum, so no selected-ion patch
-is needed. The raw output is then deleted; searches read `reencoded.mzML`. The raw scan's charge distribution,
-1/K0 = 0 count and median peaks per spectrum go into the record and the table.
+streaming pass over each file (`mzml_scan`, both decoded) checks: no numpress term left, an m/z array in every
+spectrum, every one sorted and as long as declared, every precursor value a number, the same spectrum count four
+ways (both scans, both `spectrumList` counts), the same multiset of (RT, selected ion m/z, charge, 1/K0, isolation
+target) values, the same multiset of per-spectrum (precursor values, sorted m/z values), and MS:1000744 in every
+spectrum, so no selected-ion patch is needed. The raw file's MS-Numpress linear m/z arrays are decoded by
+`numpress_linear` (stdlib, bit-identical to the fork's own decode on 240 real spectra and a FileConverter vector;
+about 1 µs per peak, so a D-sized file adds minutes, outside every timed window); a raw m/z array it cannot decode refuses the cell. The raw output is then deleted; searches
+read `reencoded.mzML`. The raw scan's charge distribution, 1/K0 = 0 count, peaks per spectrum (min, median) and the
+number of unsorted peak lists (diaWeaver's own order, finding IO-W8) go into the record and the table.
 
 **No-op flag** (G-V18). A cell with `differs_from: <cell>` is flagged when its content digest equals that cell's.
-The content digest hashes each spectrum block of the re-encoded file without `id`/`index`/`spectrumRef`, sorts
-the block digests and hashes them again: diaWeaver's final RT sort is unstable and renumbers `scan=N`, so the
-order-dependent spectrum-list digest (bench/semantic_digest.py, recorded beside it) differs between two runs of
-one arm and would hide a no-op. The check cannot flag a real difference as a no-op; content that varies run to
-run for other reasons would hide one. A check that cannot run (the reference cell failed) is flagged.
+The content digest hashes each spectrum block of the re-encoded file without `id`/`index`/`spectrumRef`/
+`dataProcessingRef`, sorts the block digests and hashes them again: diaWeaver's final RT sort is unstable and
+renumbers `scan=N`, so the order-dependent spectrum-list digest (bench/semantic_digest.py, recorded beside it)
+differs between two runs of one arm and would hide a no-op; and OpenMS writes `dataProcessingRef` on the first
+spectrum of a file only, so which block carries it depends on that order too (found on real FileFilter output in
+review 2026-09-16: the digest without this strip missed a same-content pair). The check cannot flag a real
+difference as a no-op; content that varies run to run for other reasons would hide one, so an unflagged cell does
+not prove the settings made the difference. A check that cannot run (the reference cell failed) is flagged.
 
 **Failures.** A failed reference arm ends the group before any cell (G-V09). A failed cell is recorded in its arm
 and the next cell still runs (a wall-cap stop of one arm must not hide the other); the group stays `ok` with
-`cells_failed`, every ok arm is searched, and the table prints `FAILED G-V16`/`G-V17` for that arm. A group
-counts as done only when every arm is ok, so the next launch re-runs it whole in a new `pair_run`.
+`cells_failed`, every ok arm is searched, and the table prints `FAILED G-V16`/`G-V17` for that arm. An exception
+that is not a guard (a harness bug, an unexpected file) inside a cell is recorded as `CRASH` for that cell only, as
+is one inside a charge split (for that search). A group counts as done only when every arm is ok, so the next
+launch re-runs it whole in a new `pair_run`: a cell that fails deterministically (e.g. always past its wall cap)
+costs the whole group on every relaunch, so read `cells_failed` before relaunching.
 
 **Phase 2.** Every ok arm of a current group gets Sage and MSFragger as before (`fix_mzml_cvparams.py` and the
 Scans check for the cells too) and, with `entrapment: true`, a third search `entrap`: Sage with `sage_entrap.json`
@@ -308,19 +325,24 @@ counted PSM (Sage: highest `sage_discriminant_score`; MSFragger: the best-hypers
 `bench/entrapment.py` itself: `peptide_ratio()` on the FASTA the config names, and `score()` on the whole TSV
 restricted to each stratum's rows (each non-decoy peptide's best PSM, chosen as `score()` chooses it), so the
 strata `z1` and `z2p` partition `all` exactly (checked). Records keep accepted, target, entrapment, raw %, est.
-FDR % and the bootstrap CI per stratum. The mzML goes once every engine succeeded.
+FDR % and the bootstrap CI per stratum. The mzML goes once every engine succeeded. Sage 0.14 ignores the
+per-peak float arrays (`fragment_trace_id`, `fragment_window_id`) the cells carry: its parser resets the array kind
+after every `<binary>` and maps `MS:1000786` to none (sage-cloudpath `mzml.rs`, 0.14.6 and 0.14.7). MSFragger's
+handling of them is not verified; its Scans check stays.
 
 **Table** (`table` on an extended plan): one row per (sample, arm) with wall, RSS, CPU cores, spectra, Sage
 (target+decoy and target-only), MSFragger, ratios against diaTracer and engine walls; peptides by charge; entrapment
-by stratum; cell outputs (args, charges, 1/K0 = 0, peaks, re-encode wall, numpress terms before/after, both
-digests, no-op result); totals per arm over complete samples, including the z >= 2 ratios (Sage target,
-MSFragger). G-V13 also refuses records whose cells or entrapment setting differ from the plan, or more than one
-cell label or cell build.
+by stratum; cell outputs (args, charges, 1/K0 = 0, peaks min/median, unsorted peak lists, re-encode wall, numpress
+terms before/after, both digests, no-op result); totals per arm over complete samples, including the z >= 2 ratios
+(Sage target, MSFragger; `-` where diaTracer has none). G-V13 also refuses records whose cells or entrapment setting
+differ from the plan, or more than one cell label or cell build. An ok search record without its charge split (a
+runner stopped between the two) renders as `pending`, never as a number.
 
 **Not covered.** `guardtest` refuses extended plans (it proves the pair). The plan's optional runs (MSFragger on
 the unfixed file, determinism repeats, dwv-author) are not implemented. Spectrum statistics exist for the cells
-only; the unsorted share of the raw diaWeaver output is not measured (its m/z arrays are numpress, which the
-stdlib cannot decode).
+only. Whether diaTracer and DIAspeXtract read a `.d` holding only the two tdf files exactly as a full `.d` is taken
+from their readers, not tested (diaWeaver was, on a public HeLa `.d`, review 2026-09-16): compare D's diaTracer
+count with corpus v3 (700,434) and the DIAspeXtract digest with its pin before using the pair.
 
 ### diaWeaver stage 1: plan `dwv_stage1` (local, in the untracked samples.yaml)
 
@@ -470,6 +492,29 @@ copy's selftest fail, 25/25 mutations (corpus.py sha256 `bc6a3a8f`).
 Compatibility, read-only on 2026-09-16 with this `corpus.py`: `dry-run --local` of `corpus_v3` and
 `corpus_v3_selftest_v130` byte-identical to the 1.3.0 harness; `preflight --plan corpus_v3_selftest_v130` gave
 `PREFLIGHT_OK` on ibminode05.
+
+### Review round before the first extended run (2026-09-16/17)
+
+Adversarial review of ba91ac0 + a716b5c (kimi and vibe on one self-contained brief; codex out of credit, so
+incomplete by that reviewer) plus node tests with real OpenMS-written files; record, findings and dispositions in
+`docs/reviews/dwv-harness-2026-09-16/`. Fixed: the G-V18 content digest kept the position-dependent
+`dataProcessingRef` (found on real FileFilter output; a no-op cell would never have been flagged); a non-guard
+exception in one cell failed the whole group; a non-integer charge ended the queue; the cell identity missed the
+run-time data tree and env.sh (now also checked against the provenance); the raw peak order was not measured and
+peaks were not compared across the re-encode (now both, via a stdlib numpress decoder); the cells' TMPDIR was the
+shared 0755 jnatmp; a single low-memory sample killed a cell; the table could crash on a record without its
+split; spectra without an m/z array and non-numeric precursor values passed or raised.
+
+Proof: **258/258** selftest cases, including a module import from stdin as `remote()` runs it (the fix pass itself
+broke that once and caught it with `preflight`); mutation proof 22/22 (each fix reverted alone fails the selftest);
+on data, the review's `gtest.py` 38/38 against the published arm and real FileFilter/FileConverter output (the
+a716b5c harness fails the dataProcessingRef case there), and 2,000 real diaWeaver spectra (a 45-min functional
+smoke on a public HeLa `.d`, tdf-only) pass the re-encode with identical peaks, precursors and trace ids. Pair
+hashes unchanged, plain dry-runs byte-identical, `preflight --plan dwv_stage1` PREFLIGHT_OK on data.
+
+The smoke also showed that diaWeaver processes all DIA windows at once and that its densest window sets the wall
+time: 5 of 24 windows were done after 45 min at 32 threads on an 11.5-min file. Dataset D may reach the 12-h cap;
+read `cells_failed` before relaunching, because a group re-runs whole.
 
 ## Guard test on a real node (`corpus.py guardtest --node data`)
 

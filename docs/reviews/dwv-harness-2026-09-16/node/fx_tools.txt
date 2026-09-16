@@ -1,0 +1,74 @@
+$ FileConverter -in fx/fx.mgf -out fx/np_raw.mzML -lossy_compression
+rc=0
+Progress of 'loading MGF':
+
+-- done [took 0.06 s (CPU), 0.06 s (Wall)] -- 
+Progress of 'storing mzML file':
+
+-- done [took 0.03 s (CPU), 0.03 s (Wall) @ 53.33 MiB/s] -- 
+FileConverter took 0.73 s (wall), 0.21 s (CPU), 0.02 s (system), 0.19 s (user); Peak Memory Usage: 36 MB.
+No source file annotated.
+
+$ FileConverter -in fx/fx.mgf -out fx/plain_raw.mzML
+rc=0
+Progress of 'loading MGF':
+
+-- done [took 0.03 s (CPU), 0.03 s (Wall)] -- 
+Progress of 'storing mzML file':
+
+-- done [took 0.00 s (CPU), 0.01 s (Wall) @ 367.3 MiB/s] -- 
+FileConverter took 0.14 s (wall), 0.14 s (CPU), 0.01 s (system), 0.13 s (user); Peak Memory Usage: 36 MB.
+No source file annotated.
+
+$ FileConverter -in fx/fx_dwv.mzML -out fx/res_numpress.mzML -lossy_compression
+rc=0
+Progress of 'loading mzML':
+  Progress of 'loading spectra list':
+
+  -- done [took 0.01 s (CPU), 0.03 s (Wall)] -- 
+
+-- done [took 0.03 s (CPU), 0.03 s (Wall) @ 70.57 MiB/s] -- 
+Progress of 'storing mzML file':
+
+-- done [took 0.03 s (CPU), 0.03 s (Wall) @ 50.68 MiB/s] -- 
+FileConverter took 0.12 s (wall), 0.12 s (CPU), 0.02 s (system), 0.10 s (user); Peak Memory Usage: 42 MB.
+
+$ FileFilter -in fx/fx_dwv.mzML -out fx/res_drop.mzML -sort -rt :179.108
+rc=0
+Progress of 'loading mzML':
+  Progress of 'loading spectra list':
+
+  -- done [took 0.01 s (CPU), 0.02 s (Wall)] -- 
+
+-- done [took 0.01 s (CPU), 0.02 s (Wall) @ 103.4 MiB/s] -- 
+Progress of 'storing mzML file':
+
+-- done [took 0.01 s (CPU), 0.01 s (Wall) @ 314.7 MiB/s] -- 
+FileFilter took 0.07 s (wall), 0.07 s (CPU), 0.01 s (system), 0.06 s (user); Peak Memory Usage: 42 MB.
+
+$ FileFilter -in fx/fx_dwv.mzML -out fx/res_zero.mzML -sort -rt 0:1
+rc=0
+Progress of 'loading mzML':
+  Progress of 'loading spectra list':
+
+  -- done [took 0.00 s (CPU), 0.01 s (Wall)] -- 
+
+-- done [took 0.00 s (CPU), 0.01 s (Wall) @ 252.1 MiB/s] -- 
+Progress of 'storing mzML file':
+
+-- done [took 0.01 s (CPU), 0.00 s (Wall) @ 4.453 MiB/s] -- 
+FileFilter took 0.05 s (wall), 0.06 s (CPU), 0.01 s (system), 0.05 s (user); Peak Memory Usage: 42 MB.
+
+$ FileFilter -in fx/fx_dwv.mzML -out fx/good.mzML -sort
+rc=0
+Progress of 'loading mzML':
+  Progress of 'loading spectra list':
+
+  -- done [took 0.03 s (CPU), 0.03 s (Wall)] -- 
+
+-- done [took 0.03 s (CPU), 0.03 s (Wall) @ 68.53 MiB/s] -- 
+Progress of 'storing mzML file':
+
+-- done [took 0.02 s (CPU), 0.01 s (Wall) @ 354.8 MiB/s] -- 
+FileFilter took 0.09 s (wall), 0.09 s (CPU), 0.02 s (system), 0.07 s (user); Peak Memory Usage: 42 MB.
+

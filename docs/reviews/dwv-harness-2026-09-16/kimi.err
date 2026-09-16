@@ -1,0 +1,741 @@
+kimi version 0.42.0
+• This is an adversarial review task. The user says "Review only. Do not modify any file and do not run any shell command: everything you need is inline below." So I should just analyze the inline diff carefully. No tools needed — everything is inline.
+
+  I need to answer the 12 numbered questions with findings, each with function/line context, concrete failing input, severity, and whether it bites on this run.
+
+  Let me carefully analyze the diff.
+
+  **Question 1: Plain plans unchanged.**
+
+  Changed functions: `pair_done` -> `ready_arms`, `search_done`, `sweep_outputs`, `rescore`, `identity`, `build_identity`, `busy_patterns`, `load_plan`, `preflight`, `table_guards`, `cmd_status`.
+
+  Look for behavioral differences for plain plans:
+
+  1. `identity()`: for plain plans, `cells(q)` is empty dict → falsy, so no "cells" key. tree_sha256 is identical to old `tree` lambda. OK.
+
+  2. `build_identity`: same keys for plain. OK.
+
+  3. `busy_patterns(env, cenvs=None)`: old: `BUSY_FIXED + [bracketed(SPX_BIN)]`. New with cenvs=None: `extra = sorted({... for e in {}.values()...})` = empty. Same. OK.
+
+  4. `load_plan`: `set(plan) - OPTIONAL_PLAN_KEYS != PLAN_KEYS` — for a plain plan, same as before. But wait: a plain plan that happens to have `cells: {}`? `OPTIONAL_PLAN_KEYS` = {"cells", "entrapment"}. A plan with `cells: {}` would pass `set(plan) - OPTIONAL_PLAN_KEYS == PLAN_KEYS`... but check_extended: `if "cells" not in plan: return` — cells={} is in plan, so cs={} → `not cs` → die "non-empty mapping". OK. A plan with `entrapment: false`: check_extended passes (bool). Then plan_tool_keys(plan): `plan.get("cells")` is None → no CELL_TOOL_KEYS; `plan.get("entrapment")` False → no entrap tools. So tools = TOOL_KEYS. db_keys same. extended(q) = bool({} or False) = False. So `entrapment: false` is a no-op. Fine.
+
+  5. `preflight`: `search_dbs(..., q["tools"].get("sage_entrap"))` — plain plan has no sage_entrap → None → same. Return dict uses db_keys(q) = DB_KEYS for plain. Same.
+
+  6. `search_done`: added `m.get("cells") == ctx["measure"].get("cells")`. For a plain plan, measure_sha256() (extended=False) returns dict without "cells" key → ctx["measure"].get("cells") = None. Old records (written before the change) have measure_sha256 = {"pair","search","score"} → m.get("cells") = None. Equal. OK for plain. But wait — the pinned hashes: MEASURED now... `measure_sha256(extended=False)` uses `parts = MEASURED` — same items, same order? `for part, items in parts.items()` — MEASURED dict order pair, search, score. Same as before. OK.
+
+  7. `rescore`: `for tool in ctx.get("tools", TOOLS)` — plain ctx has no "tools" → TOOLS. Same. `for e in ENGINES` — always ENGINES even for extended?? In rescore, `for e in ENGINES:` not `ctx.get("engines")`. For extended plans rescore doesn't consider entrap records. Hmm, that's intentional? Entrapment records' measure_sha256 includes "cells" and score... run_entrap rec measure includes search, score, cells. rescore loops over ENGINES = ("sage","msfragger") presumably. So entrap search records never rescored if score hash changes — they'd just... search_done requires m.get("score") == ctx["measure"]["score"], so an entrap record with old score hash is not done → re-run whole entrapment search. But run_entrap needs the mzML — which may have been swept. Hmm, sweep_outputs deletes mzML only when all engines done. If score hash changed, entrap search_done false → mzML kept → re-run possible. OK actually.
+
+     Also rescore's condition now includes `m.get("cells") == ctx["measure"].get("cells")` — for plain, both None. Same.
+
+  8. `sweep_outputs`: plain → TOOLS, ENGINES. Same.
+
+  9. `table_guards` extracted from render_table: `one(build_identity(...))` etc. — same logic but note: old code `if {a["host"] for a in p["arms"].values()} != {p["node"]}` → new: `if {a["host"] for a in p["arms"].values() if "host" in a} != {p["node"]}`. For a plain plan, arms always have host (run_arm sets host before any die? Let's check: run_arm rec.update includes host=hostname() early, before guard failures. So for plain pairs arms always have "host". Hmm, but what about a failed pair? table_guards only runs over okp (status ok). For plain ok pairs, both arms have host. So same behavior... unless an ok pair record's arm lacks "host" — can't happen in plain. OK.
+
+     But there's a subtle change: old code `one(p["measure_sha256"] for p in okp)`... kept. And `if any(a["output"]["count"] <= 0 or a["peak_rss_kb"] <= 0 for a in p["arms"].values())` → new uses `arms` filtered to status ok. For plain, all arms ok (pair status ok implies both arms ok). Same.
+
+     New checks: `p.get("cells") != plan.get("cells")` — plain: both None → equal. OK.
+
+  10. `pair_done` → `ready_arms`: Old pair_done: for each tool in TOOLS: if output ok AND all searches done → continue; else check file on disk; if bad → return False. Old returned True only if every tool passes. New ready_arms returns list of ready arms; pair_done = ready == full list. Semantics for plain: old logic returned False if any arm not ok/file-mismatched. New: `continue` skips appending, so ready != full list → pair_done False. Equivalent.
+
+      BUT: `a.get("status", "ok") != "ok"` — old records (plain, pre-change) have no "status" key in arms → default "ok". Fine.
+
+      One difference: in new code, the search_done check uses `ctx.get("engines", ENGINES)`. Plain → ENGINES. Same.
+
+      Another: old code, when searches all done, `continue` (arm counts as done even if file gone). New: if all searches done, skip the file check and append. Same.
+
+  11. `cmd_status`: uses q_tools(plan)/q_engines(plan) — plain → same columns. Formatting: `wd = max([15] + [len(c)+1 ...])` — for plain, columns like "spx.msfragger" (13 chars) → wd stays 15 → same output. Pair cell: `ok` vs new `"ok" if not r.get("cells_failed")` — plain records have no cells_failed → "ok". Same. `group_flags` vs `pair_flags`: group_flags calls pair_flags then adds noop flags of arms — plain arms have no "noop" → noop_flag returns "" → filtered. Same output. But pair_flags change: `names.get(t, t)` — wait, old code: `names[t]`. New: `names.get(t, t)`. Where is names passed? pair_flags(p, names=None). If names None... there's probably a default. The diff shows `def pair_flags(p: dict, names=None)` unchanged signature; the diff shows only `names[t]` → `names.get(t, t)`. If names is None, `names[t]` would crash... presumably there's a default inside not shown. Not a plain-plan difference anyway.
+
+      Hmm wait, one more: in cmd_status, extra lines `for n in (pair or {}).get("cells_failed") or []` — plain → none. OK.
+
+  12. `measure_sha256()` with extended=False: `parts = dict(MEASURED, cells=MEASURED_CELLS) if extended else MEASURED`. For plain, iterates MEASURED directly — same as before. But the pinned hash check: `PAIR_MEASURE_1_3_0` asserted in selftest. Fine.
+
+      But — MEASURED includes `run_pair`, `run_arm`, `stage` etc. — unchanged. And run_pair itself unchanged. Good.
+
+      However! `MEASURED` includes `cmd_dt`, `cmd_spx`, `run_logged`, `parse_time_log`, `check_exit`, `verify_mzml`, `log_count` — the diff added `cmd_dwv`/`cmd_reencode` near cmd_msf but didn't change cmd_* existing ones. parse_time_log unchanged. OK.
+
+      One subtle thing: `MEASURED` "search" includes `run_search` — unchanged. "score" = sage_peptides, msf_peptides — unchanged. Good.
+
+  So question 1: any input where plain plan behaves differently?
+
+  - `load_plan` error message changed (tools need exactly %s with tk) — trivial.
+  - Wait, what about `node_busy`: for plain, cells(q) empty → cenvs = {} → busy_patterns(env, {}) → extra empty. Same.
+
+  Hmm, actually check `busy_patterns` more carefully:
+
+  ```python
+  extra = sorted({bracketed(e[v]) for e in (cenvs or {}).values() for v in e if v in {k["bin"] for k in CELL_KINDS.values()}})
+  ```
+
+  `for v in e` iterates keys of env dict; checks if key is in {"DWV_BIN"}. For plain, cenvs={} → empty. OK.
+
+  What about `render_table` for plain — table_guards same checks plus `p.get("cells") != plan.get("cells")` → None != None false. OK.
+
+  One more: `sweep_outputs` — plain same.
+
+  `search_done` for plain: m.get("cells") — old records written by pre-change code have measure_sha256 without "cells". ctx["measure"] from measure_sha256(False) has no "cells". None == None. OK.
+
+  Potential difference: `ready_arms` requires `rec.get("cells") != ctx.get("cells")` — plain rec has no "cells" key → None; ctx plain has no "cells" → None. OK.
+
+  What about `rec["sample"].get("raw_sha256")` — unchanged.
+
+  Hmm — one actual difference: In old `pair_done`, the loop was `for tool in TOOLS:` and file check `p.stat().st_mtime != o["mtime"]`. New `ready_arms` same. OK.
+
+  What about `identity()`: for plain plans, no "cells" key, and out dict identical. ldd_deps(env, arm) — new signature default binary=None → env["SPX_BIN"]. Same.
+
+  BUT: ldd_deps error message changed slightly (basename). Not behavior.
+
+  What about `node_status`/`cmd_status`... `cols` uses q_tools(plan) = TOOLS for plain. Same.
+
+  OK so for Q1, likely answer: no behavioral difference found for plain plans; the one nuance: a plain plan that carries `entrapment: false` in the registry would previously have been REJECTED by load_plan (unknown key), now accepted silently and treated as plain. That's a behavior change on that input! Old: `set(plan) != PLAN_KEYS` → die G-V01 "unknown keys". New: `set(plan) - OPTIONAL_PLAN_KEYS != PLAN_KEYS` → passes; check_extended: entrapment False is bool → ok. So a registry typo `entrapment: false` (e.g. user intended to enable but wrote false, or leftover key) is now silently accepted. Also `cells: {}` → rejected (non-empty). So finding: plan with `entrapment: false` now loads where it used to abort. Severity: nit/should-fix. Wouldn't bite this run (dwv_stage1 has entrapment: true).
+
+  Also check `search_done` docstring... fine.
+
+  Another: `_guardtest` now refuses extended plans — fine.
+
+  Also: plain plan behavior in `run_pair` — the `for old in (root / "runs" / s["id"]).glob("*/*/*.mzML")` — for extended groups, cell outputs live at runs/sid/pair_run/cellname/reencoded.mzML — that's 3 levels: runs/sid/pair_run/tool/file.mzML → glob `*/*/*.mzML` matches runs/*/*/*.mzML relative to runs/sid → pair_run/tool/file. Yes matched.
+
+  **Question 2: mzml_scan.**
+
+  Line-based parser. Issues:
+
+  a) The spectrum start detection: `if b"<spectrum " in line or line.lstrip().startswith(b"<spectrum>")`. OpenMS writes `<spectrum index="0" id="..." defaultArrayLength="...">` on one line. OK.
+
+  b) `h.update(ids_re.sub(b"", line) if b"spectrumRef" in line else line)` — wait, when decode=True, h updates with each line, but only strips ids_re when "spectrumRef" in line?? Look:
+
+  ```python
+  if h is not None:
+      h.update(ids_re.sub(b"", line) if b"spectrumRef" in line else line)
+  ```
+
+  Hmm, that strips id/index/spectrumRef only on lines containing "spectrumRef"! The first line of the spectrum block was hashed with ids_re.sub applied (`h = hashlib.sha256(ids_re.sub(b"", line))`). But subsequent lines are hashed raw unless they contain "spectrumRef". Where do id=/index= appear? `<spectrum index="0" id="controllerType=... scan=1" defaultArrayLength="...">` — first line, stripped. But also `<referenceableParamGroupRef ref="..."/>`, `<scan ...>`, and crucially `<precursor spectrumRef="...">` (in the spectrumRef case stripped). What about `<selectedIonList>`, no ids. Hmm, but actually — does anything else inside a spectrum carry id=? `<userParam name="..."`? No id. But `ids_re` = `\s(?:id|index|spectrumRef)="[^"]*"`. Applied to the first line only, plus any line with spectrumRef.
+
+      Wait — is that conditional a bug? If OpenMS writes the `<spectrum ...>` opening tag across multiple lines? OpenMS writes each element on its own line per the facts. The `<spectrum` tag is one line. OK.
+
+      But here's the thing: the intent is "each spectrum block hashed without its id/index/spectrumRef". Lines like `<scanList count="1">` don't have ids. So probably fine for OpenMS output. But the conditional `if b"spectrumRef" in line` is wrong in intent: it should be applied to every line (id= could appear on other lines, e.g. `<product id=...>`? not in spectra). Minor.
+
+      Actually wait, more important: does the digest really make two runs of the same arm identical? diaWeaver renumbers scan=1..n after an UNSTABLE sort — so two runs can differ in spectrum ORDER and ids. Order-independent because blocks sorted. ids stripped on the first line. But `index="..."` also stripped. What else differs between runs? The `<cvParam ... MS:1000016 scan start time>` same values. Binary data same. Hmm, but the re-encoded file is written by FileFilter — deterministic given input content? FileFilter sorts by RT (sortSpectra(true) — also std::sort unstable on equal RTs!). diaWeaver spectra with equal RTs: pseudo spectra from different windows could have same RT? The scan start time is the MS1 frame time probably; different windows different frame → distinct RTs. Probably distinct. OK.
+
+  c) FIRST occurrence of each PREC_CV inside a spectrum: `if acc in PREC_CV and acc not in prec`. MS:1002815 (1/K0) can appear at scan level (cvParam in scan) and in selectedIon. Which comes first in file order? OpenMS writes scanList before precursorList. So scan-level MS:1002815 would be captured FIRST, and the selectedIon one ignored. Is that right? For diaWeaver output, MS:1002815 is per-spectrum... fact says "Each spectrum carries ... MS:1002815 (1/K0; 0 on the default .d path)". Does diaWeaver write it at scan level or selectedIon? Unknown; the fake writes it in selectedIon. If both present with different values, first wins — potentially wrong (scan-level 1/K0 of the MS1 frame vs selected ion's). Also MS:1000016 (scan start time) appears at scan level — good, that's where we want it; but it could also appear... fine. MS:1000827 isolation target appears in isolationWindow; only one. MS:1000744 in selectedIon; only one. MS:1000041 charge in selectedIon; but could also appear... only there. So the MS:1002815 ambiguity is real: if diaWeaver writes 1/K0 both at scan level (e.g. the frame's 1/K0) and in selectedIon, and reencode/FileFilter keeps both, then the digest uses scan-level — consistent before/after, so G-V17 comparison still passes. But the semantic value could be wrong. And im_zero counting uses it. Not a run-blocker but a correctness nuance. Severity: should-fix/nit. Actually the bigger question asked: "Is taking the FIRST occurrence right?" — answer: for MS:1002815, if the file has scan-level and selectedIon-level occurrences with different values, first wins; OpenMS writes scanList first, so scan-level wins. diaWeaver writes per-spectrum 1/K0 — need to know where. The facts say spectrum carries MS:1002815; the fake puts it in selectedIon. If the real tool puts it ONLY in selectedIon, fine.
+
+  d) mzml_scan miscounts: `<spectrum ` search uses `b"<spectrum " in line` — but `<spectrumList count=...` contains "<spectrumList" — does `b"<spectrum " in line` match "<spectrumList"? "<spectrum " has trailing space; "<spectrumList" has no space after "spectrum". So no. But `<spectrumList count="5">`... contains "<spectrum" without space. OK not matched. Good.
+
+      What about `</spectrum>` end detection: `elif b"</spectrum>" in line` — fine. But note the `elif` chain: `if b"<binaryDataArray " ... elif b"<binary>" ... elif b"</spectrum>"`. If a line contains `<binaryDataArray ` AND `<binary>`? OpenMS writes binaryDataArray open tag on own line. OK.
+
+  e) numpress detection: `if acc in NUMPRESS_CV: out["numpress_terms"] += 1` — counted anywhere in the file, including outside spectra (e.g., in a `<software>`? no; cvParams in `<dataProcessing>`? unlikely). Also counted inside `<referenceableParamGroup>` at file level! OpenMS can write referenceableParamGroups containing cvParams... diaWeaver probably doesn't use them. Also the m/z array numpress term MS:1002746 counted → G-V17 checks after["numpress_terms"] on the REENCODED file, which FileFilter writes without numpress. OK.
+
+  f) `arr[acc] = True` for EVERY cvParam while inside — arr accumulates accessions for the current binaryDataArray; reset on `<binaryDataArray `. But note: arr is also used for prec detection? No, prec separate. But arr accumulates ALL cvParams in the spectrum until first `<binaryDataArray`. Then at `<binary>`, checks `b"MS:1000514" in arr`. Fine.
+
+      Bug: `<binaryDataArray>` without trailing space variant handled. But what about the closing `</binaryDataArray>`? Not needed since reset at next open.
+
+      Real bug candidate: base64 `<binary>` content can be long — OpenMS writes each `<binary>...</binary>` on ONE line (per facts). OK good, they verified.
+
+  g) Decode checks: `if any(t in arr for t in NUMPRESS_CV) or not (MS:1000523 or MS:1000521)` → undecoded++. Then zlib check MS:1000574. m/z array 64-bit: MS:1000523 = 64-bit float. FileFilter default m/z precision 64. OK.
+
+      `values != sorted(values)` — float comparisons, NaN would... whatever.
+
+      `length_mismatch` uses n_decl from defaultArrayLength of the SPECTRUM — but each binaryDataArray can have its own... defaultArrayLength is spectrum-level, arrays share length. OK.
+
+  h) zlib error handling: `zlib.decompress(raw)` can raise zlib.error → in reencode, mzml_scan(dst, decode=True) raises → caught where? reencode is called in run_cell, called in run_group's inner try around run_cell which catches only Abort! Look:
+
+  ```python
+  for name in order[len(ref):]:
+      a = rec["arms"][name] = {}
+      try:
+          run_cell(...)
+          a["status"] = "ok"
+      except Abort as x:
+          ...
+  ```
+
+  A zlib.error from mzml_scan propagates as Exception → caught by run_group's OUTER `except Exception as x:` → the whole group fails with guard "CRASH", the second cell never runs. That answers Q5: a non-Abort exception in a cell kills the whole group (other cell doesn't run), contradicting "a failed cell does not stop the next one". Also base64.b64decode can raise binascii.Error. array.frombytes raises ValueError if length not multiple. float(prec[k]) can raise ValueError. These are all plausible on corrupt output. Severity: should-fix. Would it bite this run? Only if diaWeaver/FileFilter output is malformed — unlikely but the "plausible wrong" scenario is instead a crashed group after 12h and the second cell not run — costs the run a day. Realistic: yes-ish.
+
+  i) `peaks.append(n_decl)` — n_decl = -1 if defaultArrayLength missing. peaks_median then skewed. Minor.
+
+  j) prec_digest stability between two files with identical spectra: keys built from `repr(float(prec[k]))`. Float repr of "0.9" → '0.9'. If FileFilter rewrites value with different string ("0.900000") → float same → repr same. Good. But MS:1000016 RT: diaWeaver writes, FileFilter preserves. float parse fine. BUT: what if value has unit conversion? FileFilter -sort doesn't convert. OK.
+
+      prec_digest issue: MS:1002815 first-occurrence — if raw file has it in selectedIon only, fine.
+
+      Another: `val_re = re.compile(rb'\svalue="([^"]*)"')` — if cvParam has no value attribute (valueless cvParams — MSFragger fix exists because OpenMS writes valueless cvParams!) → prec[acc] = "". So a valueless MS:1000744 → missing_selected_ion++. For G-V17 comparing before/after: both "" → equal. OK.
+
+  k) Two files with identical spectra producing different prec_digest: repr(float(...)) — float("0.9") == float("0.90"), repr same. But float("1e-3") vs float("0.001"): equal floats → same repr. OK. What about charge "2" → repr(2.0) = '2.0' consistent. RT in seconds vs minutes? Both files same. OK.
+
+      Different prec_digest for identical spectra: if one file carries MS:1002815 only at scan level and the other only at selectedIon — same spectra semantically, both capture a value; if values same string → same. Actually first-occurrence: file A: scan-level 1/K0 = 0.9, no selectedIon → prec gets 0.9. File B: scan-level 0.9 AND selectedIon 0.9 → first is scan-level 0.9. Same. Only differs if scan and selectedIon values differ.
+
+  l) Crash: `float(im)` — im from fl() already repr(float) — fine. `float(prec[k])` in fl — if value is "4.5e-01" fine.
+
+  m) `out["unsorted"] += values != sorted(values)` — adds bool. Fine.
+
+  n) Multiline tags: OpenMS writes cvParam on own line; `<spectrum ...>` opening tag — could OpenMS wrap it? Facts say each cvParam on its own line and binary on one line. The `<spectrum` tag with defaultArrayLength on same line — presumably yes.
+
+  o) Content digest collision between different arms (Q6): blocks hashed per spectrum with ids stripped, sorted, concatenated. Two different arms (dwv_default vs dwv_pickim) differ in m/z values (shift) → different binary → different blocks. Could collide only astronomically. But: two runs of SAME arm — do they produce identical blocks? diaWeaver unstable RT sort → order differs → sorted handles. ids stripped from first line and spectrumRef lines. BUT WAIT: the re-encoded file is produced by FileFilter from the raw output. Raw output spectrum ids are scan=1..n in unstable-sorted order. FileFilter -sort re-sorts by RT (sortSpectra(true)) — std::sort unstable again. If two spectra share RT, their relative order in the re-encoded file could differ between runs — but content digest sorts blocks, so fine. Block content: does FileFilter renumber ids? FileFilter doesn't renumber scan= ids (it preserves ids). The ids are stripped anyway. What about `defaultArrayLength`? Same. So same-arm runs: content digest equal — good, G-V18 won't false-flag... UNLESS diaWeaver itself is nondeterministic in peak content (multithreaded, 100 threads!). If peak picking/centroiding is thread-order-dependent, two runs differ in binary content → G-V18 would NOT flag a real no-op... wait no — G-V18 flags when the two DIFFERENT cells' digests are EQUAL. False flag happens if dwv_pickim output equals dwv_default output in content. With -bruker:ms1_centroid args = 0, if those args are no-ops (the flag being tested), outputs identical → flag fires → correct. Could two runs of same arm differ in content digest (making a no-op never flagged because digest of A-run differs from B-run)? The comparison is between two cells in the SAME run. If diaWeaver is nondeterministic, dwv_default and dwv_pickim (same run) could differ by noise even if the flag is a no-op → no flag → the no-op goes unreported. That's inherent to the tool, not the harness. Fine.
+
+      Real Q6 issue: `ids_re` strips `id="..."` — also matches within... `<spectrum id="scan=1" index="0" defaultArrayLength="8">` → stripped both. But the FIRST line hash: `h = hashlib.sha256(ids_re.sub(b"", line))` — applied. Subsequent lines: only if b"spectrumRef" in line. What other lines contain id=? `<userParam>`? no. OK.
+
+      Hmm wait, actually there's a subtle digest bug: the first line of the NEXT spectrum... no, h is per-spectrum; blocks appended at </spectrum>.
+
+      Another: the digest includes the `<binary>` lines with base64 — line content includes exact base64; identical bytes → identical. Fine.
+
+  p) mzml_scan accepts unsorted array? No — checks. But: it only decodes the m/z array (MS:1000514). "a float array reordered independently of m/z" (Q3): FileFilter sorts data arrays with m/z. If a bug reordered intensity array independently, mzml_scan wouldn't detect — it never decodes intensity. The content_digest WOULD change though — but G-V17 compares only prec_digest (RT/precursor), not content between before/after! before = mzml_scan(src) with decode=False → no content_digest computed for before. So a reencode that scrambles intensities passes G-V17. Indeed: `before, after = mzml_scan(src), mzml_scan(dst, decode=True)`. before has no content digest. So G-V17 cannot detect peak-data corruption in reencode (only count, RT/precursor, sortedness, numpress). That's a real gap relative to its stated purpose? The header says checks: no numpress, sorted, same spectra, same RT/precursor values. Peak data integrity not checked. Is that a plausible wrong number? FileFilter is trusted (sha pinned). Theoretical. Should-fix/nit.
+
+      Also: "a spectrum with no m/z array" (Q3): if a spectrum has only intensity array, no MS:1000514 → no decode check, no unsorted check; count same; passes G-V17. Then Sage would... probably fail. Edge.
+
+      "truncated array": length_mismatch catches if defaultArrayLength differs; if array truncated AND defaultArrayLength matches the truncated length... then undetected. If binary truncated, frombytes length != n_decl → caught. OK mostly.
+
+      "compressed array not labelled MS:1000574": if zlib-compressed but labelled "no compression" → zlib not applied → frombytes on compressed bytes → likely length mismatch → caught (unless coincidentally multiple of 8 and wrong values — unsorted check might catch; values garbage but could be sorted!). Combined probability low. Partially fails open.
+
+  q) mzml_scan: `if b"<cvParam" in line:` — counted `numpress_terms` even OUTSIDE any spectrum (inside is False) — e.g. referenceableParamGroup at run level → G-V17 would refuse a reencoded file that legitimately has a numpress term in a referenceableParamGroup... but FileFilter with numpress=none wouldn't write any. Fine.
+
+  r) IMPORTANT: `mzml_scan` numpress check on `before` (raw diaWeaver output): raw has numpress terms — expected, not checked against before. Only after. OK.
+
+  s) The `acc_re` uses `\saccession=` — requires whitespace before accession. `<cvParam cvRef="MS" accession=...` fine.
+
+  t) Crash risk in mzml_scan on `prec` floats: `repr(float(prec[k]))` — MS:1000041 charge value "2" → 2.0. If a cvParam MS:1000041 appears at scan level?? no.
+
+  u) Bigger: `mzml_scan` spectrum detection `line.lstrip().startswith(b"<spectrum>")` vs `b"<spectrum " in line`. If OpenMS writes `<spectrum index=...` with a newline inside tag? Verified one line per element.
+
+  v) Line-length: a `<binary>` line can be huge (each spectrum ≥30 peaks, fine — but MS1? pseudo spectra only). Reading line by line fine.
+
+  w) Actually — critical: mzml_scan hashes block lines including `<binary>` base64 of m/z and intensity AND float data arrays (fragment_trace_id etc.). Two runs of same arm: if diaWeaver assigns fragment_trace_id differently per run (nondeterministic trace numbering with 100 threads?), content digest differs → for G-V18 comparison between two cells, both computed same-run. Fine.
+
+  **Question 4: run_capped / G-V16.**
+
+  ```python
+  p = subprocess.Popen(..., start_new_session=True)
+  while p.poll() is None:
+      m = proc_snapshot()
+      if elapsed > cap: why = ...
+      elif m and memavail < floor: why = ...
+      if why: kill_session(p.pid); break
+      try: p.wait(timeout=MON_S)
+      except TimeoutExpired: pass
+  ```
+
+  Issues:
+
+  a) Wall cap check granularity: MON_S poll interval — fine.
+
+  b) kill_session: `os.killpg(pid, SIGKILL)` — killpg with the process group; start_new_session makes pgid == pid. TIME (GNU time) is the direct child; diaWeaver is the grandchild in same session/group → killed too. But diaWeaver could itself fork setsid'd grandchildren (OpenMS doesn't typically). Also TIME might... OK.
+
+  c) The memory floor: `m["memavail_kb"] < MEM_FLOOR * m["memtotal_kb"]` — MEM_FLOOR presumably 0.05. On a 224-core shared node with dt's -Xmx400G... the pair arms (dt, spx) run via run_logged WITHOUT the memory floor — only cells. But dt with 400G heap could push MemAvailable under floor and trigger a kill of... no, run_capped only monitors its own cell process. But a CELL could be killed because the REFERENCE arms... no, cells run after the pair, sequentially. But OTHER tenants on the shared node could push MemAvailable low → cell killed at hour 11 → group fails → re-run whole group (26h lost). The guard aborts instead of retrying/waiting. That's by design (G-V16 aborts), but on a shared 224-core node, MemAvailable under 5% due to a neighbor is plausible → kills the run. It's "fail safe" though — produces refusal not wrong number. Design intent. Note it.
+
+  d) "Is the stopped check ordered correctly relative to parse_time_log/check_exit?" In run_cell:
+
+  ```python
+  rc, stopped = run_capped(...)
+  rec.update(end=..., time_rc=rc, stopped=stopped, ...)
+  check_identity(...)
+  if stopped:
+      die("G-V16", ...)
+  rec.update(parse_time_log(tl, "G-V16"), cpu=time_cpu(tl))
+  check_exit(rec, rc, "G-V16", name)
+  ```
+
+  Stopped checked first — good, because a killed process yields garbage time log (GNU time on SIGKILL of its child: time writes exit status 137? Actually GNU time reports "Command terminated by signal 9" and exit status 0? The FAKE_TIME notes "Command terminated by signal 7 comes with Exit status: 0". So check_exit would catch signal... but parse_time_log would succeed if time wrote its lines. Order fine: stopped → die before parse. But subtle: if the cap fires at the exact moment the tool finished successfully — p.poll() None, cap exceeded, kill session of an exiting process → killpg may hit ProcessLookupError (handled) or kill the tool mid-write → output truncated → subsequent checks catch. Marginal race: tool finished, wrote everything, exited; runner kills session between exit and poll — killpg ProcessLookupError → pass. Then `p.wait()` → returncode 0, but why is set → die "killed: wall cap" even though the tool completed fine. Slight over-abort, fails safe. Fine.
+
+  e) Can diaWeaver outlive the kill? killpg SIGKILL — no. Unless diaWeaver spawned a NEW session (setsid) — e.g., OpenMS doesn't. TIME's own process group — start_new_session on `time`, children inherit. OK.
+
+  f) Runner's SIGTERM: `except BaseException: kill_session; p.wait(); raise` — KeyboardInterrupt/SystemExit → killed. Good. But SIGTERM default handler terminates the process WITHOUT raising... unless the runner installs a SIGTERM handler raising SystemExit (the pair doc mentions "SIGTERM (sys.exit)"). Assuming so. If the runner gets SIGKILL, the cell session survives → diaWeaver keeps running; on relaunch, busy_patterns includes diaWeaver pattern → load_gate waits 20 min then proceeds "contended"! The busy gate doesn't abort after wait — it records contended and proceeds. So an orphaned diaWeaver from a SIGKILLed runner would run CONCURRENTLY with the re-run — both reading the same staged... no, staged copy deleted? remove_tree happens in finally of run_group — but if runner SIGKILLed, no finally → staged copy lingers, orphan keeps running, new launch stages a fresh copy, orphan contends CPU → contention measured by ArmMonitor, flagged. Numbers plausible but flagged. Also busy_patterns detection: orphan's argv contains "diaWeaver -in" → busy → gate waits load_wait_min=20min then proceeds anyway with contended flag. Hmm, G-V06 proceeds after wait — design. Not a wrong number per se (flagged). Note it.
+
+  g) proc_snapshot(): if /proc unreadable, m=None → memory check skipped silently (m and ...). Preflight requires /proc readable. OK.
+
+  h) MON_S sleep via p.wait(timeout=MON_S) — efficient. But note: between iterations, `m = proc_snapshot()` — called every MON_S. Fine.
+
+  i) `run_capped` on cap: breaks, then `p.wait()` (no timeout) — SIGKILL → dies promptly. OK.
+
+  j) What if MEM_FLOOR check fires due to the cell itself legitimately using memory: design.
+
+  **Question 5: run_group exception handling** — covered above: non-Abort exceptions in a cell (ValueError from mzml_scan float(), zlib.error, binascii.Error, struct errors) propagate past the per-cell `except Abort` to the outer `except Exception` → whole group "CRASH", remaining cells unrun. Contradicts stated semantics "a failed cell does not stop the next one". Concrete input: a truncated pseudo_spectra.mzML where the m/z binary base64 decodes to bytes whose length isn't a multiple of 8 → `mz.frombytes` ValueError during G-V17 scan → group CRASH after dwv_default; dwv_pickim never runs; group record failed → full 26h re-run. Severity: should-fix (would bite only on malformed output — but malformed output is exactly what G-V17 exists for; G-V17 should catch it as a clean cell failure). Wait — verify_mzml catches unterminated output first. A well-terminated but weird file (e.g. valueless defaultArrayLength... `int(m.group(1))` fine). `float(prec[k])` — diaWeaver writes "0" etc. zlib.error: raw output has numpress arrays; mzml_scan(src) with decode=False doesn't decode! Only dst. dst comes from FileFilter. If FileFilter writes corrupt zlib → zlib.error → CRASH. Theoretical-ish. Also `statistics.median` fine.
+
+  Also: BaseException (KeyboardInterrupt) inside a cell → outer BaseException handler → group KILLED, staged deleted, record written, re-raised → queue stops. For SIGTERM that's intended.
+
+  Another Q5 sub-point: "what happens to the reference arms' results" — they're in rec["arms"], record status failed/CRASH → pair_done false → next launch re-runs whole group including the reference pair. Expensive but safe.
+
+  **Question 6: no-op digest.** Covered: content digest order-independent; can two runs of same arm differ? The reencoded file's block content: diaWeaver writes float data arrays (fragment_trace_id, fragment_window_id) — if trace ids are assigned in thread-completion order, they may differ run to run → but G-V18 compares dwv_default vs dwv_pickim in the SAME run — if the flag is a no-op, outputs should be identical only if diaWeaver is deterministic. If nondeterministic, a genuine no-op may show content differ → NOT flagged → the no-op is silently accepted as "differs". The selftest only tests the equal case with a deterministic fake. The reverse (false flag when arms genuinely differ but collide) is cryptographically implausible. The interesting failure: real no-op NOT flagged because of run-to-run nondeterminism — but that's a true positive miss, and the digest comparison is between two arms, so any nondeterminism masks it. Also: could two different arms collide? Only via hash collision. Nit.
+
+  Another subtle one: noop_check: `a["digests"]["content"]` — KeyError if status ok but digests missing? digests set in reencode before status ok. OK. But `noop_check` runs even when... it iterates rec["cells"] = plan cells config: `for name, c in (rec.get("cells") or {}).items()` — c is the CELL CONFIG (kind/arm/args), and `ref = c.get("differs_from")`. OK.
+
+  If dwv_default failed and dwv_pickim ok → flag True with why — intended.
+
+  **Question 7: identity/provenance for cell arm.**
+
+  cells_identity hashes: binary, FileFilter, lib/**, ldd deps of both binaries. NOT hashed:
+  - `env.sh` itself! If env.sh changes (e.g. adds LD_LIBRARY_PATH pointing elsewhere, or exports OPENMS_DATA_PATH to a different tree) between launches, deps_sha256 might change (caught if lib paths change) but OPENMS_DATA_PATH change: share/OpenMS is NOT hashed at all! The tool reads 258 data files at run time (per prompt). PROVENANCE carries share_OpenMS_tree_sha256= but cell_provenance only checks sha256_published entries against binary/FileFilter/lib — it does NOT verify share_OpenMS_tree_sha256 against the actual tree. So a change in share/OpenMS (e.g., CV file, unimod, or the Bruker SDK configs) between launches changes results with no guard noticing. Wait — does anything check it? cell_provenance builds `want` from binary, FileFilter, lib — not share. PROVENANCE carries share_OpenMS_tree_sha256= but nothing compares it to a computed tree hash. And build_identity's cells entry: binary_sha256, lib_sha256, reencode_sha256, deps_sha256 — no share tree. So: G-V04/G-V11/G-V13 blind to share/OpenMS content. Given the tool reads those 258 files at runtime, this is a genuine gap. Severity: should-fix (would bite only if someone touches share/OpenMS between launches; on ceph, possible).
+
+  - env.sh content not hashed; but cell_env re-sources it each launch and strips striped vars; if env.sh edited to add e.g. `-some default`? env.sh only sets env vars. It could export e.g. OMP_NUM_THREADS — wait, strip_var catches OMP_* presumably (STRIP_PREFIX includes OMP?). The selftest checks "cell env.sh exports an OpenMP knob" → refused. So env.sh changes that matter are caught by strip_var; but e.g. changing PATH or OPENMS_DATA_PATH target not caught except through deps. OPENMS_DATA_PATH: recorded in cells_meta["openms_data_path"] but table_guards only checks labels of cells_meta, not openms_data_path. So change OPENMS_DATA_PATH → label same, identity same → undetected. Same finding as share tree.
+
+  - Also `arm_env`-style INHERIT_DROP handling: cell_env drops strip_var and INHERIT_DROP from base env — same.
+
+  - PROVENANCE parsing: `if not line[:1].isspace(): block = ...` — lines not starting with whitespace reset block. Entries parsed `re.fullmatch(r"\s+([0-9a-f]{64})\s+(\S+)\s*", line)`. If PROVENANCE lists a file not in `want`, it's not checked (only `want` keys compared). E.g., provenance lists bin/diaWeaver with wrong hash but... no, want covers bin + FileFilter + lib. Files in arm outside those (share/, etc.) not covered. Same finding.
+
+  - ldd_deps for cell: LIB_ROOTS check — fine.
+
+  - env.sh is re-sourced at each cell_env call; but cell_env is called once per launch (in _node_run: `cenvs = {n: cell_env(q, n) ...}`) and identity computed once. check_identity compares ident0 built at start. Between launches, node_busy... fine.
+
+  **Question 8: counting rules consistency.**
+
+  `sage_by_charge` vs `sage_peptides`: 
+  - sage_peptides: rank==1 AND peptide_q <= 0.01, distinct peptide set, target = label != "-1".
+  - sage_by_charge: rows with rank==1 and q<=0.01; per peptide keep row with highest sage_discriminant_score; charge from that row; target = label != "-1".
+
+  Differences:
+  1. sage_peptides counts distinct peptides (set) — includes decoy in `peptides`. sage_by_charge: `peptides` = count of best entries per peptide — same set. target_peptides: sage_peptides adds to target set if label != "-1" for ANY qualifying row of that peptide... careful: in sage_peptides, for each qualifying row, adds peptide to decoy set if label=="-1" else target set. A peptide with both a decoy row and a target row ends in BOTH sets; target_peptides counts it as target, peptides counts once. In sage_by_charge, ONE row per peptide (best score) — if the best-scoring row is the decoy row, the peptide counts as decoy (not target) even if a target row exists. So target counts can differ between sage_peptides and sage_by_charge! add_split checks only: z1+z2p == all and all == r[k] for k in ("peptides","target_peptides") if k in by["all"]... `for k in [k for k in ("peptides", "target_peptides") if k in by["all"]]` — both keys exist in by. So it checks target_peptides too: by["all"]["target_peptides"] must equal r["target_peptides"]. Can they differ? sage_peptides target set: any row rank1 q<=0.01 with label != -1. sage_by_charge: target if the BEST row (by discriminant) among qualifying rows is target. Scenario: peptide X has decoy row (label -1) with score 0.9 and target row with score 0.8, both rank 1 q<=0.01. sage_peptides: X in both decoy and target sets → target_peptides includes X. sage_by_charge: best is decoy → not target. → mismatch → G-V19 abort. Fail-closed — good, aborts rather than wrong number. But could they differ WITHOUT tripping? by["all"]["target_peptides"] != r["target_peptides"] → die. So no silent wrong. But wait — could a peptide appear ONLY as decoy in the qualifying rows: sage_peptides target excludes; by_charge best decoy → excludes. Same. Only the both-rows case differs, caught. OK fail-closed.
+
+     Also float parse: sage_peptides `float(row[iq])` may raise ValueError on bad row → crash (uncaught in run_search? caught by except Exception → CRASH record). sage_by_charge: `float(row[iq])` unguarded too, `float(row[isc])` unguarded, `int(row[iz])` unguarded → CRASH in add_split → caught by except Abort only! Look:
+
+  ```python
+  def add_split(...):
+      try:
+          by = (sage_by_charge if engine == "sage" else msf_by_charge)(Path(r["result_tsv"]))
+          ...
+      except Abort as a:
+          r.update(status="failed", ...)
+      write_json(p, r)
+      return r["status"] == "ok"
+  ```
+
+     A ValueError in sage_by_charge escapes add_split → propagates into one_search → into unit() → uncaught → crashes phase 2 worker/queue?! one_search: `ok = run_search(...); return add_split(...) if ok and ext else ok`. ValueError from add_split propagates up through `unit`, through the search loop — the queue crashes. Record r written? add_split's write_json not reached on ValueError → record stays ok WITHOUT by_charge and WITHOUT cells hash in measure. Then next launch: search_done requires m.get("cells") == ctx cells → record's measure lacks cells → not done → re-run search. But the mzML was deleted? unit(): `if all(oks)` — the exception propagated before unlink. OK so mzML kept. But the queue crashed mid-phase-2 — a day lost, not a wrong number. Concrete trigger: a Sage TSV row with non-numeric charge? Sage writes integer charges. Or empty charge. Theoretical. Should-fix: catch Exception in add_split like Abort.
+
+     Also rank: `row[ir] == "1"` same as sage_peptides. q: `float(row[iq]) <= 0.01` same. Charge: `int(row[iz])` — Sage charge column is integer. z1 stratum = charge 1; but diaWeaver never produces z=1 spectra... but charge here is the PSM's charge from the search, fine.
+
+     Edge: same peptide best-score tie between two rows with different charges → first-seen wins (`sc > best` strict) → stratum depends on row order. Deterministic per file. Fine.
+
+  `msf_by_charge` vs `msf_peptides`:
+  - msf_peptides: `key = (peptide, modification_info or assigned_modifications)`; best hyperscore; then `sorted(best.values(), reverse=True)` — sorts TUPLES (hs, dec) descending: ties broken by dec (True > False → decoy first on tie!). Then t/d counting: `if t and d/t <= 0.01: acc = t` — acc = TARGET count; final peptides = acc (number of targets at deepest prefix).
+
+    Note msf_peptides peptides = t (targets only!), i.e. "count targets" per rules.
+
+  - msf_by_charge: key via `get(row, "peptide")` etc. — careful: msf_by_charge reads columns via header map `col`, with fallback `get` returning "" for missing. It requires only {"peptide","hyperscore","charge"} — "charge" REQUIRED (G-V19) whereas msf_peptides doesn't need charge. Fine.
+
+    Sorting: `ranked = sorted(best.values(), key=lambda v: (v[0], v[1]), reverse=True)` — best.values() are (hs, dec, z); key (hs, dec) — matches msf_peptides' tuple sort (hs, dec) reverse — same ordering. Good.
+
+    Prefix: `for i,(hs,dec,z): d, t = d+dec, t+(not dec); if t and d/t <= 0.01: cut = i+1`. msf_peptides: `acc = t` at deepest prefix where d/t<=0.01. msf_by_charge cut = i+1 = number of KEYS in the prefix (targets+decoys!), then counts `not dec` in ranked[:cut]. Are these equal? msf_peptides acc = t at that point = number of targets in prefix. msf_by_charge counts targets in ranked[:cut] = t. Equal. 
+
+    Then "deepest prefix": msf_peptides keeps updating acc as long as condition holds — acc = t at the LAST i where d/t<=0.01. msf_by_charge cut = i+1 last time condition holds. Same i. Equal counts. Then stratum assignment uses the best PSM's charge per key. Split sums checked vs r["peptides"]: by["all"]["peptides"] must equal r["peptides"]. Equality holds by construction... unless int(get(row,"charge")) crashes (ValueError) → uncaught in add_split (only Abort caught) → crash as above.
+
+    One difference: msf_peptides uses DictReader — rows with missing modification_info → row.get returns None → `or row.get("assigned_modifications", "")` → could be None → key contains None. msf_by_charge get() returns "" for missing. If TSV has NO modification_info and NO assigned_modifications columns: msf_peptides key = (pep, ""), msf_by_charge key = (pep, "" or "") = (pep,"") — wait `get(row,"modification_info") or get(row,"assigned_modifications")` → "" or "" → "". Same.
+
+    Another: msf_by_charge `prots` split regex same. dec same. OK consistent.
+
+  `entrap_strata` vs score(): score() picks best PSM per peptide by sage_discriminant_score among non-decoy rows (all(p.startswith("rev_")) skipped), ent = all proteins startswith tag or rev_tag. entrap_strata: same best-PSM choice (sc > best), prots split ";", skip if all rev_. Then writes joined line per peptide to stratum TSV and calls est.score on each stratum TSV. Consistency: score() on the stratum TSV re-parses the joined lines — the joined line is "\t".join(row) — original field text preserved, so re-parse identical. Stratum of best PSM charge — same rows → same peptide set per stratum. Partition checked. `out["all"]["target"] <= 0` → die. 
+
+    But subtle: score() computes q per peptide from the BEST row's q? score(): best[pep] = (s, q, ent) — q from best-score row; then accepted = q <= q_cut presumably (the truncated source ends at best assignment; presumably accepted = peptides with q<=0.01). entrap_strata passes whole rows; score does its own q filter. Consistent between strata and all. The equality checks: accepted/target/entrap partition — checked. Good.
+
+    BUT: entrap_strata picks best per peptide with `sc > best[...]` tie → first row wins; score() same tie behavior (`s > best[pep][0]`) — but order of rows in the stratum TSV is dict order of best.values() = insertion order = first-seen order, NOT original file order! If two PSMs for the same peptide tie on score with different charges... best row chosen during first pass over original order — same as score() on whole TSV (same original order). Then stratum TSVs contain one row per peptide — re-running score on them re-derives same best (only one row). Consistent.
+
+    However: entrap_strata's `best` includes rows regardless of q; score() also builds best regardless of q then filters by q of best row. Same.
+
+    Also `int(row[iz])` — ValueError if charge column has non-int → uncaught (entrap_strata called inside run_entrap's try which catches Exception → CRASH record, clean). OK.
+
+    One more: `fin = lambda v: round(v,4) if v==v else None` — NaN CI → None. Fine.
+
+    Potential mismatch: score() counts peptide as entrapment iff ALL proteins startswith tag or rev_tag. entrap_strata relies on score() for that. The stratum assignment uses the best PSM row's charge — score() on the stratum file re-parses proteins from that same line. Same.
+
+  **Question 9: resume logic.**
+
+  - `search_done` now requires `m.get("cells") == ctx["measure"].get("cells")`. run_search writes measure_sha256 with keys ("search","score") only: `"measure_sha256": {k: ctx["measure"].get(k) for k in ("search", "score")}` — run_search is UNCHANGED (in "unchanged functions" listing!). So a search record written by run_search lacks "cells" in measure → search_done false for extended plans → search never considered done → mzML never deleted?? Wait: add_split sets `r["measure_sha256"] = dict(r["measure_sha256"], cells=ctx["measure"]["cells"])` — so after add_split, the record gains cells hash → search_done true. Order in one_search: run_search then add_split (if ok and ext). So the intended flow: run_search ok → add_split adds cells hash + by_charge.
+
+    Crash between run_search and add_split: record ok, measure lacks cells → search_done False → next launch re-runs the search (mzML still there since unit() unlink happens only when all oks... in the crashed launch, the exception—no crash here, just process died between). On resume, pending() true → run_search re-runs: `shutil.rmtree(sdir); sdir.mkdir` — re-run fine. No wrong number. But does the TABLE crash on a record without by_charge? render_cells_table: `bc = lambda g,z,k: fmt(S[t,g], lambda r: num(((r.get("by_charge") or {}).get(z) or {}).get(k)))` — None → num(None) → "-". OK no crash. But wait — the summary: `s_z2 = tot(lambda g: g["search"][t,"sage"]["by_charge"]["z2p"]["target_peptides"])` — full groups only; a group is "complete" only if all searches ok; a search record ok without cells hash... complete = `all(v[0] for v in S.values())` — S values are (r, None) if r["status"]=="ok" — regardless of by_charge! So a record ok-but-no-by_charge counts complete → summary KeyError 'by_charge'! When can that happen? If the queue crashed between run_search and add_split and the table is rendered before re-running. Records collected from ceph/scratch — render_cells_table → complete → `g["search"][t,"sage"]["by_charge"]` → KeyError crash. Severity: should-fix; realistic during the 26h run if anyone renders the table mid-run after a crash. Also G-V19-related: a record could be "adopted" for the table without its split. Answer to Q9: yes — table can crash (KeyError) on ok search records lacking by_charge, and nothing in render requires the cells hash on search records (table_guards requires one(measure_sha256) across oks — a record missing cells hash has DIFFERENT measure dict → "different harness code" abort actually! one(r["measure_sha256"] for r in oks) — dict {"search":x,"score":y} vs {"search":x,"score":y,"cells":z} → not equal → G-V13 die. So the table ABORTS rather than wrong number... but only if another ok record WITH cells exists. If ALL records lack cells (crash right after first search), one() trivially true (≤1 distinct) → proceeds → KeyError on by_charge in summary... wait summary requires full non-empty; complete requires pair ok and searches ok. If the only sample has all searches ok-without-cells → full → KeyError. But also `search(sid,t,g)` requires r["pair_run"] == p["pair_run"]. Yes. So KeyError. Also row-level: bc lambda handles missing by_charge gracefully ("-").
+
+    Hmm wait, also `run_entrap` writes measure with cells included directly: `{k: ctx["measure"].get(k) for k in ("search","score","cells")}` — good.
+
+  - Can a group be adopted with a failed or stale cell? ready_arms: `a.get("status","ok") != "ok" or not o ... → continue` — failed cell not in ready; pair_done requires ready == full tools list → group with failed cell not "done" → re-run whole. But searches of ok arms DO run (units from ready_arms). Then the group re-runs whole on next launch → new pair_run → old search records stale (pair_run mismatch) → re-searched. Wasteful but consistent. However: the re-run of the group runs the pair AND cells again — the ok arms' outputs overwritten. Fine.
+
+    Stale cell adoption: ready_arms checks output file size/mtime. For a cell arm, output = reencoded.mzML; raw_output deleted (src.unlink()). If reencode succeeded, output path = reencoded. OK.
+
+    Subtle: run_group writes rec BEFORE running (status running) and after. If runner SIGKILLed mid-group, record stays "running" → ready_arms: status != ok → None → re-run. OK.
+
+    Another: `for old in (root/"runs"/s["id"]).glob("*/*/*.mzML"): old.unlink()` at group start — deletes previous attempts' mzMLs — including reencoded.mzML of a group whose searches are pending?! If the previous group was ok but a search failed, next launch: pair_done false (not all searches... wait pair_done doesn't check searches; ready_arms returns arms whose searches done OR file intact; pair_done requires ALL arms ready. If a search failed but mzML intact → arm ready → pair_done true → skip re-run, re-run search. Good. But if pair_done false for another reason (e.g. measure hash changed), run_group deletes ALL old mzMLs at start → searches of the new group fine. OK.
+
+    But: crash between group ok and searches: on next launch pair_done → checks each arm: searches pending → verify file on disk (size+mtime). The reencoded file still there → ready. Good.
+
+  - `search_done` for entrap records in `pending()` etc. — engines include "entrap"; rec_path(root, sid, tool, "entrap"). run_entrap writes to rec_path(root, s["id"], tool, "entrap") — consistent.
+
+  - units built from ready_arms — but `pending(s, tool, e)` for e in engines — if a search record exists but stale pair_run → pending → re-run. Good.
+
+  - One issue: `unit()` unlinks the mzML when all engines ok — for cell arms, `pairs[s["id"]]["arms"][tool]["output"]["path"]` = reencoded.mzML. Good. raw_output already deleted.
+
+  - rescore: loops `for e in ENGINES` (not entrap) — entrap records never rescored; if score hash changes, entrap search_done false → whole entrap search re-run (needs mzML — kept because sweep_outputs requires all engines incl. entrap done before unlink... sweep uses ctx.get("engines") — includes entrap for ext. OK). But rescore re-counts sage/msfragger from TSV and calls add_split — fine. However rescore's condition `m.get("cells") == ctx["measure"].get("cells")` — for a record written before add_split (no cells key), rescore skips it (m.get("cells") None != cells hash) — fine, it will be re-run anyway.
+
+    Wait, actually there's a real ordering bug in rescore+add_split: rescore updates record counts and calls add_split(root, s["id"], tool, e, ctx) AFTER write_json(p, r) — add_split re-reads, recomputes, writes. OK.
+
+  - Another resume wrinkle: `_node_run` phase 1 loops samples; `if pair_done(...)` skip. pair_done for ext requires ready == ctx["tools"] — the tools order: q_tools = TOOLS + tuple(cells(q)) — plan order. ready built in same order. OK.
+
+  - `run_group` returns `rec["status"] == "ok" and not rec["cells_failed"]` — failed cell → False → failed += 1 → exit code nonzero. Good.
+
+  **Question 10: stage_tdf.**
+
+  - sroot 0700, d 0700, dst.mkdir(0700), copyfile two files. copyfile copies content with default perms (umask). Files inside a 0700 dir — fine. Nothing beside raw — yes, reads only. Deletion: run_group finally remove_tree(sd), checks sd.exists() → G-V14. On SIGTERM: BaseException → finally runs. On SIGKILL: nothing runs — staged copy lingers; next launch: `_node_run` start: "leftover staged copies could not be deleted" → die_queue G-V14? There's a check at start (leftovers). It deletes them? The diff references `die_queue("G-V14", "leftover staged copies could not be deleted...")` — presumably attempts removal first. OK.
+
+  - One gap: `stage_tdf` doesn't verify that the raw directory contains ONLY analysis.tdf+analysis.tdf_bin needed... The check `rec["stage"]["files"]` records what's staged. Fine.
+
+  - Missing: the neutral name `dst = d / (s["id"] + ".d")` — s["id"] could contain path separators? load_plan validates sample ids? Presumably. Raw path in error messages? stage_tdf messages use s["id"] only — fingerprint(what="raw of %s") — good, no raw paths in records... except `die("G-V07", "staging copy of %s failed" % s["id"])` fine. But `check_pin`/`fingerprint` errors on the RAW: "no analysis.tdf + analysis.tdf_bin in raw of S30" — fine.
+
+    Wait: `rec["stage"]["dir"]` — str(d) — node-local scratch path with sample id — not specimen id (id is registry id like S30). OK. But run_cell rec has cmd with staged path — includes s["id"].d name — "neutral name" — id is not specimen id. OK per existing convention.
+
+  - Hmm: `fingerprint(dst)` on staged copy — reads analysis.tdf sqlite — fine.
+
+  - Potential: `shutil.copyfile` follows symlinks — if analysis.tdf_bin in the raw is a symlink to elsewhere, copies target content — fine for containment.
+
+  - One real miss: stage_tdf does NOT chmod the copied files but dir is 0700 — OK. And it copies only two files — diaWeaver needs nothing else? The facts say the two files every extractor reads. OK.
+
+  - Deletion on failure AND SIGTERM — yes via finally. On success — yes.
+
+  **Question 11: render_cells_table.**
+
+  - `p["node"] if p else "-"` fine.
+  - `main.append(...)`: uses `fmt(a, lambda x: hms(x["wall_s"]))` — a is (arm_record, None) tuple? `A[t] = arm(sid,t)` returns (dict|None, err). fmt(x, f) = f(x[0]) if x[0] else x[1] — x[0] is the arm dict. lambda x: hms(x["wall_s"]) — x is the arm dict. OK.
+  - `cores = lambda x: ... if (x.get("cpu") or {}).get("cpu_s") is not None and x["wall_s"] > 0` — wall_s present for dt/spx (parse_time_log) and cells. If wall_s == 0 → "-". OK.
+  - KeyError risks: `S[t,"sage"][0]["peptides"]` in ratio lambda guarded by S[..][0] truthy. OK.
+  - entrap rows: `(r or {}).get("entrapment", {}).get(st) or {}` — if r exists but "entrapment" key... run_entrap sets rec["entrapment"]=... only on success path before status ok. If entrap_strata died, status failed → r excluded from oks but search() returns verdict failed → r None in S? search() returns (r,None) if status ok else (None, verdict). So r ok → has entrapment. OK.
+  - cellrows: `c, x = plan["cells"][t], p["arms"].get(t) if p else None`; st from x["spectra_stats"]. `n = st.get("spectra") or 0`; `fmt(a, lambda y: num(y["output"]["count"]))` — a ok arm has output. `"%.1f%%" % (100*st["im_zero"]/n) if n else "-"` — st.get("im_zero")... st could lack keys if spectra_stats present but partial? spectra_stats = mzml_scan output — has all keys. OK.
+  - `fmt(a, lambda y: hms(y["reencode"]["wall_s"]))` — reencode present for ok cells. OK.
+  - `fmt(a, lambda y: "%d / %d" % (y["spectra_stats"]["numpress_terms"], y["reencoded_stats"]["numpress_terms"]))` — present. OK.
+  - summary: `g["search"][t,"sage"]["by_charge"]["z2p"]["target_peptides"]` — KeyError if a complete group has a search record without by_charge (the crash-between case, or a record adopted from an older harness where add_split didn't exist? measure cells hash pins prevent cross-version adoption... but the crash window remains). Also `g["search"]["dt","sage"]` — dt searches also need by_charge; dt is searched with add_split too (one_search for all tools incl. dt/spx). OK but same crash-window issue.
+  - `sage / d_s` — ZeroDivision if d_s == 0! dt peptides 0 can't happen (ok requires peptides > 0 via run_search G-V10 and table_guards checks peptides <= 0 die). d_s is sum over complete groups of dt sage peptides > 0 each. OK. `s_z2 / d_sz2 if d_sz2 else float("nan")` — nan formatted %.2f → "nan" in table — plausible-looking? It's flagged as nan. Minor.
+  - `statistics.median` fine.
+  - "any number shown that was not produced by a guarded path": ratio uses dt peptides — guarded. cellrows show spectra_stats from mzml_scan (G-V17 path). OK.
+  - `flags(p, t)`: `a.get("status","ok")=="ok" or "during" in a` — for failed cell arms a may lack "during" → skip. OK.
+  - Bug candidate: `names = dict({"dt": dtl, "spx": label}, **{n: n for n in cells(plan)})` — a cell named... cell names can't be dt/spx (reserved). OK.
+  - `label = okp[0]["label"] if okp else "extractor"` — spx label used for "spx" name. OK.
+  - In `arm()`: if p ok but arm missing entirely ({}): `a.get("status","ok")=="ok" and a.get("output")` → output None → returns (None, "FAILED None") — verdict string "FAILED None" — cosmetic.
+  - `complete` requires all arms and searches present; partial → not in full → totals skip. main rows still render with "pending"/"-". OK.
+
+  - One more: `render_cells_table` head: `"cells": ", ".join(cells(plan))` — plan keys. `cell_lines` uses `build_identity(ident).get("cells", {})` — if okp empty ident={} → cell_lines shows "?" labels. Fine.
+
+  - KeyError: `p["node"]` — pair records have node. `e["acq_min"]` — registry samples have acq_min. OK.
+
+  **Question 12: other.**
+
+  - `tool_label` runs `binary --help` with the cell env — fine.
+
+  - `cell_env`: sources env.sh with `env -0` output parsed on "\0" — good. But `env.update(LC_ALL="C", TMPDIR=q["jnatmp"])` — jnatmp is 0755 (per plan notes!) — "the TMPDIR every cell gets is mode 0755" — diaWeaver writes temp files there? Patient-derived data in a world-readable directory! G-V15 checks jnatmp writable but not PRIVATE. For the pair, jnatmp is for java/diaTracer temp. For cells, TMPDIR=jnatmp 0755 → any temp files diaWeaver/FileFilter writes (OpenMS writes tmp files?) land world-readable on /scratch. Patient data rule: staged copy 0700 — but TMPDIR 0755. Finding! Severity should-fix; bites this run potentially (depends whether diaWeaver writes TMPDIR temp files containing spectra). The prompt flags jnatmp mode 0755 deliberately — this is the planted issue. Yes: "jnatmp (/scratch/kohlbach/jnatmp, the TMPDIR every cell gets) is mode 0755." G-V15 checks "jnatmp not writable" but nothing checks it's 0700/private. The staging rules say staged copy in 0700 — but cell TMPDIR leaks. Should-fix.
+
+  - `cmd_dwv` passes `-out adir` — diaWeaver writes pseudo_spectra.mzML there; run_cell checks out.is_file.
+
+  - `run_cell`: `adir.mkdir(parents=True)` — fine. `check_identity(q, env, ident0, ...)` — note it passes `env` (reference arm env) not cenv; check_identity compares identity(q, env) recomputed? check_identity signature: (q, env, ident0, when) — recomputes identity(q, env) — which includes cells_identity (q-based, re-derives cell_env internally). So cell binaries checked too. OK — but it re-runs ldd + tree hashing of 258... whatever, perf fine.
+
+  - run_capped MON_S: the loop `while p.poll() is None` then inner `p.wait(timeout=MON_S)` — after kill_session + break, `p.wait()` — good.
+
+  - `time_cpu`: parse "Percent of CPU this job got: (\d+)%" — GNU time prints "200%" fine.
+
+  - Wall cap: cap_s = c["wall_cap_h"]*3600 — 12h each, two cells → 24h + pair — the "~26h". OK.
+
+  - `run_group`: `for old in (root/"runs"/s["id"]).glob("*/*/*.mzML")` — deletes old mzML BEFORE staging — including search inputs of pending searches?? If previous group ok, searches pending, mzML intact → pair_done true → skip run_group entirely. run_group only runs when pair_done false. When pair_done false due to changed measure hash, old search records stale anyway. When false due to failed cell: ok arms' searches may have RUN already (units built from ready_arms even with failed cell) — records exist with pair_run of failed group; re-run group → new pair_run → old searches stale. Deleting old mzMLs fine. But the old SEARCH TSVs are kept (records/ and runs/.../search/...). OK.
+
+  - `noop_check` iterates `rec["cells"]` — plan config — and accesses `rec["arms"].get(name)`. If a cell never ran (queue abort mid-cells) — arms.get(name) None → a={} → a.get("status") != "ok" → continue. OK.
+
+  - `run_group` order rotation: `k = idx % len(names)` — idx is queue index i from _node_run enumerate — consistent with dry_run. OK.
+
+  - `busy_patterns` extra: iterates `for v in e if v in {k["bin"] for k in CELL_KINDS.values()}` — env dict keys; DWV_BIN → bracketed(env["DWV_BIN"]) — pattern "diaWeave[r] -in". But the actual process is run via TIME argv — cmd line "/usr/bin/time -v -o ... diaWeaver -in ..." — busy() presumably greps ps args — matches. OK.
+
+  - `install_tools` / tool_dest: plan_tool_keys includes "digest" etc. for ext. dest paths by name. OK.
+
+  - `check_fasta` includes entrap fasta — checks sha — fine.
+
+  - `q_engines`: `ENGINES + (("entrap",) if ...)` — that's `ENGINES + ("entrap",)` — double parens fine.
+
+  - `STRATA` all=(0,999), z1=(1,1), z2p=(2,999) — "all" includes charge 0? Sage charges ≥1. Fine. But careful: add_split checks z1+z2p == all — if a PSM had charge 0 or >999, all would exceed z1+z2p → die fail-closed. Good.
+
+  - `entrap_strata`: `if not ratio > 0: die` — ratio>0 check. `tsv_iter` yields h then rows — `h = next(rows)` — rows generator yields header first. OK. `best[row[ip]] = (sc, int(row[iz]), ...)`. q unused except parse — note: entrap_strata parses iq but score() does the q filtering. OK.
+
+  - entrap_strata float parse: `sc, _ = float(row[isc]), float(row[iq])` — try/except ValueError continue. But `int(row[iz])` OUTSIDE try → ValueError uncaught → in run_entrap caught as CRASH. Fine-ish.
+
+  - `run_entrap`: `step("engine", cmd_sage(dict(tp, sage_config=tp["sage_entrap"]), inp, sdir, sdir/"engine.time"), "sage.log")` — wait, `step` here is the local one: `def step(name, argv, log): tl = Path(argv[3])` — argv[3] is the time output path (TIME, -v, -o, path → index 3). cmd_sage returns [TIME, "-v", "-o", str(tl), ...] — argv[3] = tl string. OK. cmd_patch(tp, mz, inp, sdir/"patch.time") — argv[3] = patch.time. OK.
+
+  - run_entrap: `n_out = rec["mzml_count"] = o["count"]` — count from pair record; file size/mtime checked. engine_spectra check with SAGE_MIN_READ. tsv check. entrap_strata. `rec["peptides"] = entrapment all target` — G-V13 requires peptides > 0 — G-V19 ensures target > 0. OK.
+
+  - run_entrap finally: deletes *.mzML/mzBIN junk in sdir — patched.mzML deleted. result_tsv kept. OK.
+
+  - BIG ONE — `run_entrap` runs `cmd_sage` with `env` = reference arm env. Sage binary is a tool, env fine.
+
+  - `one_search` for entrap: `run_entrap(...)` — no add_split. Good.
+
+  - Now Q4 deeper: "can diaWeaver outlive wall-cap kill?" — killpg SIGKILL. But what about `TIME`? The direct child is GNU time; diaWeaver is child of time, same process group (time doesn't setsid). SIGKILL to group kills both. OK. But `p.wait()` after break — reaps time. diaWeaver reaped by init. OK.
+
+  - G-V16 check ordering: `if stopped: die` BEFORE parse_time_log — a wall-capped run's time log may be missing/incomplete — correct order. Good. But: `check_exit(rec, rc, ...)` — rec contains parse_time_log result — wait: `rec.update(parse_time_log(tl, "G-V16"), cpu=time_cpu(tl))` then `check_exit(rec, rc, "G-V16", name)` — check_exit reads t["exit_status"], t["signal"] — rec has them. OK.
+
+  - `run_cell` doesn't check `log_count` None vs count: `if n != o["count"]` — n None → None != count → die "log count None != ..." good fail-closed.
+
+  - `reencode`: verify_mzml(dst, t0) — t0 = time.time() before run_logged — freshness check. parse_time_log BEFORE check... `t = parse_time_log(tl, "G-V17")` — if FileFilter crashed, time log may still parse; check_exit catches rc. Order: parse_time_log could die on missing log — fine fail-closed.
+
+  - reencode `counts = {before["spectra"], after["spectra"], o["count"], rec["raw_output"]["count"]}` — o["count"] from verify_mzml on dst. Good. But FileFilter "always removes empty spectra" — diaWeaver spectra have ≥30 peaks, so no drops expected. If diaWeaver wrote an empty spectrum, FileFilter drops → count mismatch → die. Good.
+
+  - `prec_digest` comparison before vs after: before decode=False — prec values captured regardless of decode. Good.
+
+  - Potential G-V17 hole: after["charges"] vs before["charges"] — covered by prec_digest (MS:1000041 in keys). RT MS:1000016 included. Note: `prec_digest` sorts keys — order-independent — intended.
+
+  - mzml_scan: MS:1000016 at scan level — first occurrence — but could MS:1000016 appear also... only scan. OK.
+
+  - A spectrum with multiple scans (MS/MS with combined scans)? diaWeaver one scan. OK.
+
+  - Now the `inside` state machine: cvParam handling occurs before the inside check (`if b"<cvParam" in line:` at top, applies when inside). But also when NOT inside: numpress_terms incremented even outside spectra — e.g., in `<fileDescription>`? Unlikely. OK.
+
+  - arr reset: `arr = {}` on binaryDataArray open; but arr is ALSO assigned at spectrum start. However — bug: `arr[acc] = True` for every cvParam while inside — including precursor cvParams BEFORE the first binaryDataArray — irrelevant since reset at first binaryDataArray. But what about cvParams AFTER the last binaryDataArray (e.g., userParams at spectrum end)? They'd pollute arr of the last array — no further `<binary>` → harmless.
+
+  - Multiple m/z arrays per spectrum? No.
+
+  - `elif b"<binary>" in line and b"MS:1000514" in arr:` — if the intensity array's `<binary>` line appears while arr has MS:1000514? arr reset per array — intensity array block has MS:1000515 not 0514. OK.
+
+  - What if `<binaryDataArray` and `<binary>` are on the SAME line? OpenMS writes separate lines (verified). OK.
+
+  - Base64 with whitespace? One line. OK.
+
+  - Q2 "silently miscounts": spectra counted at `</spectrum>`. If a file has `<spectrum .../>` self-closed (empty spectrum) — `<spectrum ` matched → inside=True; `</spectrum>` never comes; next `<spectrum ` → inside already True... `if not inside:` guard → the self-closed line doesn't re-enter; but `</spectrum>` never seen → spectra undercounted AND inside stuck True → everything after treated as inside one spectrum → prec of multiple spectra merged (first-occurrence) → silent miscount. Does OpenMS write self-closed `<spectrum/>`? FileFilter removes empty spectra; a spectrum with zero peaks could be written as `<spectrum ...>...</spectrum>` with empty arrays normally. Self-closing is possible in XML writers for elements with no children — but a spectrum always has children (scanList etc.). Theoretical. Severity nit.
+
+  - Q2 prec_digest collision between different files: keys only contain the 5 precursor values — two files with identical precursor metadata but different PEAKS have equal prec_digest. By design (G-V17 uses it only for precursor values). Fine.
+
+  - Now Q3 "compressed array not labelled MS:1000574": numpress-labelled arrays counted as undecoded (skipped) → G-V17 checks `after["undecoded"]` → die. Good. zlib array WITHOUT MS:1000574 label: decode path — `if b"MS:1000574" in arr: raw = zlib.decompress` — not labelled → frombytes on compressed bytes → len(raw)%8 likely !=0 → ValueError → CRASH (not clean G-V17) — Q5 finding again. If it IS a multiple of 8: garbage floats, unsorted probably → caught; could coincidentally sort → plausible wrong? Astronomical.
+
+  - Float array reordered independently of m/z: not checked (only m/z decoded) — content_digest of after exists but no before content digest to compare. Gap (noted above). To fix would need decode=True on before and compare per-spectrum... can't pair spectra across unstable order easily. They chose not to. Document as theoretical.
+
+  - "a spectrum with no m/z array": passes G-V17 silently (count, prec ok). Sage would then fail/panic? Sage reading mzML without m/z array — crash → G-V10 fails the search → refusal. OK-ish.
+
+  Now Q1 deeper hunt — plain-plan behavior differences:
+
+  - `node_busy`: plain — same.
+  - `cmd_preflight`: plain — `pre.get("cells")` none; ENTRAP_DB not in pre["search_db"] — same.
+  - `dry_run` plain: guarded by extended(q) — same output? They changed the staging print into if/else — plain branch prints the SAME text as before? Old: `"# copy data only, folders 0700 ... \ncopy %s %s"`. New plain branch: identical string. Selftest checks dry-run. OK.
+  - `load_plan` message change — fine.
+  - `_node_run` plain: `ctx` without tools/engines; `digest=None`; patterns busy_patterns(env, {}) — wait: `cenvs = {n: cell_env(q, n) for n in cells(q)}` — {} for plain → busy_patterns(env, {}) → same as busy_patterns(env). OK. `engines = ctx.get("engines", ENGINES)`. units: `if ext: ... else: ...` — same as before. `unit()`: `oks = [one_search(s, tool, e) if pending else True for e in engines]` — one_search for plain: `ok = run_search(...); return add_split(...) if ok and ext else ok` — ext False → returns ok. Same as old behavior? Old: `run_search(...) if pending else True`. New wraps — same result. OK.
+  - rescore plain: same. sweep plain: same.
+  - `pair_flags` signature/behavior: `names.get(t, t)` — when names is None? Need the top of pair_flags (unchanged portion) — presumably `names = names or {"dt": ..., "spx": ...}`. If names was None and old code did names[t], it would've crashed; so names defaulting exists. Same.
+  - `cmd_status`: for plain plan, same columns; but `pair` cell now `"ok" if not r.get("cells_failed")` — old plain records lack cells_failed → "ok". Same. Extra for loop over cells_failed — none. group_flags = pair_flags + noop — none. Same output.
+
+  So Q1: the one genuine input difference: a registry plan with key `entrapment: false` (or with cells key... cells:{} rejected) — previously G-V01 "unknown keys", now silently accepted as plain. Also a plan with `entrapment: false` AND missing nothing else — accepted. Edge but real. Also: `check_extended` runs before PLAN_KEYS check — a plan with cells + unknown extra key: still caught. Fine.
+
+  Also subtle: `load_plan` for plain plan now requires `set(plan) - OPTIONAL_PLAN_KEYS != PLAN_KEYS` → a plan MISSING a required key but having "cells"... still caught. OK.
+
+  Another Q1 candidate: `identity()` for plain plans — `tree_sha256` identical. `ldd_deps` message change only.
+
+  And `search_done` docstring claims plain has none on either side — true.
+
+  Hmm — one more: `measure_sha256()` called with extended flag from _node_run: `measure_sha256(ext)` where ext = extended(q). For plain, MEASURED — BUT the diff added `cmd_dwv` and `cmd_reencode` FUNCTIONS — not in MEASURED. And MEASURED items unchanged → hashes pinned. Selftest asserts. OK.
+
+  Q7 additions: `cells_meta` records openms_data_path/ld_library_path but table_guards compares only labels — noted.
+
+  Also `build_identity` for cells doesn't include... wall_cap? No — that's config compared via rec["cells"] != ctx["cells"]. OK.
+
+  Q10 more: `stage_tdf` records `"files": sorted(...)` — fine. One thing: `stage_tdf` does NOT delete on SIGKILL (same as stage). And: `run_group` deletes sd in finally; but cell OUTPUTS (runs/.../dwv_default/pseudo_spectra.mzML kept on failure — patient-derived pseudo-spectra on scratch — that's results data, kept deliberately, listed for purge. The staged RAW is what must be deleted. OK.
+
+  Another Q12 candidate: `run_group` writes `write_json(rec_path... "%s.pair.json")` — same record file as plain pair — table recs distinguish by content. OK.
+
+  `leftovers()` after failed cell lists raw cell output — purge removes. OK.
+
+  `time_cpu` on time.log — the FAKE_TIME writes those lines — real GNU time -v writes "User time (seconds)" etc. OK.
+
+  `ArmMonitor(load_max(q))` for cells — fine.
+
+  One more Q4 nuance: `run_capped` memory check `m["memavail_kb"] < MEM_FLOOR * m["memtotal_kb"]` — if proc_snapshot returns None (transient /proc read fail) → `m and ...` → skipped → could sail under floor. Preflight ensures /proc readable. Fine.
+
+  Q4: "Is the stopped check ordered correctly?" — yes, but note: `run_capped` returns rc possibly 0 if... kill_session then break; p.wait() returns -9; rc=-9 ≠ 0. stopped die anyway. OK. Also subtle: cap check happens BEFORE wait, so a tool finishing within cap but polled late (MON_S granularity) can't exceed cap by much. MON_S presumably seconds. fine.
+
+  Q8 one more check — sage_by_charge tie-break difference: sage_peptides doesn't use scores at all (set) — count identical. Only stratum placement tie nuance. And float(row[iq]) in by_charge vs sage_peptides both unguarded. Consistent.
+
+  Also add_split check `by["all"][k] != r[k]` — r[k] exists for sage (peptides, target_peptides) and msf (peptides only — msf records lack target_peptides; `if k in by["all"]` — by["all"] for msf has only "peptides" → checks peptides only. Good.
+
+  Now severity & "bites this run" assessment for each finding. Let me compile the final answer.
+
+  Key findings list:
+
+  1. (Q5/Q3) Non-Abort exceptions inside a cell (zlib.error, ValueError from array.frombytes/float/int in mzml_scan, binascii.Error) bypass the per-cell `except Abort` in run_group and CRASH the whole group: the second cell never runs, contradicting the documented "a failed cell does not stop the next one", and the entire ~26 h group re-runs. Same in add_split (only Abort caught) → crashes phase-2 worker mid-queue. Severity: should-fix (blocker-ish for robustness, but produces refusal not wrong numbers; realistic over 26h? only on malformed output).
+
+  2. (Q7) share/OpenMS (OPENMS_DATA_PATH, 258 files read at runtime) is not hashed anywhere: not in cells_identity, not verified against PROVENANCE's share_OpenMS_tree_sha256 (cell_provenance only checks sha256_published entries for bin/FileFilter/lib), not in build_identity. env.sh itself not hashed either; an env.sh change pointing OPENMS_DATA_PATH elsewhere is invisible to G-V04/G-V11/G-V13. Should-fix; theoretical for this run unless someone touches the arm between launches (two launches at least: initial + any resume).
+
+  3. (Q12/Q10) TMPDIR=jnatmp mode 0755: cell_env sets TMPDIR=q["jnatmp"]; G-V15 checks writability but not privacy. Patient-derived temp files (if diaWeaver/FileFilter write any) land world-readable, violating the patient-data rule that everything else enforces. Should-fix; bites this run if the tools use TMPDIR.
+
+  4. (Q1) Plain-plan behavior change: plan with `entrapment: false` now accepted (was G-V01 unknown key). Nit. Also harmless.
+
+  5. (Q9) Crash window between run_search writing ok record and add_split: record ok without by_charge/cells hash. Resume re-runs the search (search_done false) — fine; but render_cells_table's complete-group summary can KeyError on ["by_charge"] if ALL ok search records lack it (table_guards' one() passes with a single distinct measure). Should-fix/nit; bites if table rendered mid-run after an interrupted phase 2.
+
+  6. (Q2) mzml_scan first-occurrence of PREC_CV: MS:1002815 at scan level vs selectedIon — first wins; if diaWeaver writes both with different values, digest/im stats use scan-level. Also self-closing `<spectrum/>` would silently break counting (theoretical; OpenMS always writes children). Also prec valueless cvParam → "" treated as missing — consistent before/after. Nit/should-fix depending on real output; verified facts say diaWeaver writes MS:1002815 per spectrum — location matters; the fake puts it in selectedIon. If the real file also has scan-level MS:1002815 (OpenMS's TDF loader often writes 1/K0 at scan level!), then... it's still consistent before/after for G-V17, and im_zero stats just reflect scan-level. Not a blocker.
+
+  Wait, actually for diaWeaver output: mzml_scan(raw) — im_zero stat counts "1/K0 = 0 on the default .d path" — shown in cell table. If it reads scan-level instead of selectedIon-level... consistent. Fine.
+
+  7. (Q3) G-V17 does not compare peak data before/after (before scanned with decode=False → no content_digest): FileFilter reordering a float array independently of m/z, or corrupting intensities, passes. Spectrum without m/z array passes G-V17 (fails later at Sage). Truncated array caught via length_mismatch; mislabelled compression caught via undecoded or crash (finding 1). Should-fix (documented gap) / theoretical since FileFilter is the pinned, trusted tool.
+
+  8. (Q4) run_capped: kill semantics sound (session SIGKILL, BaseException cleanup). Residuals: (a) runner SIGKILL leaves orphan diaWeaver + staged copy; next launch's busy gate only WAITS 20 min then proceeds contended — orphan contention is measured/flagged, not aborted. (b) Memory-floor kill can be triggered by OTHER tenants on the shared 224-core node → kills a healthy 11-h cell → whole group re-runs (fail-safe, but a real availability risk for this run). (c) Race: tool finishes exactly as cap fires → recorded as killed despite success (fail-safe). Assessment: (b) worth noting; all fail-closed.
+
+  9. (Q6) No-op digest: two runs of same arm → equal digest requires diaWeaver determinism; with 100 threads, if peak/trace assignment is thread-order dependent, dwv_default and dwv_pickim differ by noise → a REAL no-op is never flagged (the check can only false-negative, not false-positive). Conversely collision across different arms is impossible modulo sha256. So: G-V18 flags only if outputs are byte-content-equal; nondeterminism masks no-ops. Should be stated in the report (it partially is). Nit.
+
+  Also ids_re conditional `if b"spectrumRef" in line` — id= on non-spectrumRef lines would leak into digest; in OpenMS output ids appear only on the spectrum open line and precursor spectrumRef... fine, nit.
+
+  10. (Q8) sage_by_charge target_peptides can differ from sage_peptides target_peptides when a peptide has both target and decoy qualifying rows and the decoy row has the higher discriminant → G-V19 aborts (fail-closed, equality checked) — so inconsistency exists but is caught. Ties in best-score pick first row → deterministic. msf_by_charge ordering replicates msf_peptides tuple sort including decoy-first tie-break — consistent. entrap_strata partition enforced. So Q8: consistent, with the one caught exception.
+
+  11. (Q11) render_cells_table: `s_z2 / d_sz2 if d_sz2 else float("nan")` → prints "nan" — cosmetic. KeyError risk as in finding 5. `arm()` returns "FAILED None" for missing arm — cosmetic. Numbers all from guarded records. Also summary `break` when not full — fine.
+
+  Also check: `render_cells_table` per-row ratio `S["dt", g][0]["peptides"]` — dt peptides >0 guaranteed. OK.
+
+  12. (Q10) stage_tdf: 0700 everywhere, two files only, deletion in finally incl. SIGTERM (BaseException), G-V14 escalation. Missed: nothing significant; note raw-side: nothing written beside raw (fingerprint reads ro). One nit: `shutil.copyfile` doesn't preserve... irrelevant. And umask — files created 0644&~umask inside 0700 dir — fine.
+
+  One more check on run_group: `rec["gate"] = load_gate(q, patterns)` — gate BEFORE ref arms only; cells run hours later without re-gating? In run_pair the gate is once per pair; group same. By design (contention monitored during arms).
+
+  Also `run_group` for old mzML deletion glob `*/*/*.mzML` — misses `runs/sid/pair_run/search/tool_sage/patched.mzML`? That's 4 levels deep: runs/sid/pair_run/search/tool_engine/file → glob runs/sid/*/*/*.mzML = runs/sid/pair_run/tool/file — search junk files are deleted by run_search finally anyway. And reencoded at runs/sid/pair_run/cell/reencoded.mzML → matched. OK.
+
+  Also, phase-2 `unit` deletes mzML after all engines — for cells that's reencoded.mzML; raw pseudo_spectra deleted at reencode success. On failed cell, raw kept → leftovers/purge. OK.
+
+  Another possible Q9 hole: `ready_arms` for a cell arm whose searches are all done — `continue` → appended without file check — good since mzML deleted. For a cell whose sage done but msfragger pending: file check on reencoded.mzML. OK.
+
+  And: pair record for extended plan has rec["cells"] = plan cells dict — `rec.get("cells") != ctx.get("cells")` — dict equality — config change (wall_cap 12→13) → re-run. Selftest covers. Good.
+
+  Q2 also: "accepts an unsorted or numpress array" — numpress on after → `undecoded` because `any(t in arr for t in NUMPRESS_CV)` → die via undecoded count AND numpress_terms check. Sorted check solid. But `values != sorted(values)` with equal values fine.
+
+  What about MS:1000521 32-bit m/z? decoded as "f" — allowed (not flagged). FileFilter writes 64-bit m/z by default. A 32-bit m/z passes G-V17 — fine for Sage.
+
+  `mzml_scan` `import array, zlib` at top of function — fine. base64, hashlib, statistics, re, sys, time — module-level presumably.
+
+  One more potential real bug: in `mzml_scan`, `n_decl` for peaks.append(n_decl) — appended at EVERY </spectrum>, good. `out["peaks_total"] = sum(peaks)` — with -1 if missing defaultArrayLength — skews; nit.
+
+  Also `mzml_scan` — `<spectrum ` detection when inside already True: `if not inside:` guard → nested spectra impossible. But `</spectrum>` sets inside False; next spectrum fine. Also the digest h created at spectrum start; if decode=False, h=None — `if h is not None: h.update` skipped — and `blocks.append` skipped. But `h = hashlib.sha256(...) if decode else None` — fine.
+
+  Wait, actually there's a bug in the digest hashing: the FIRST line is hashed via `h = hashlib.sha256(ids_re.sub(b"", line))` — but this happens in the `if not inside:` branch... then `continue`. Next lines: `if h is not None: h.update(...)`. But the cvParam handling at top of loop happens BEFORE — fine, doesn't touch h.
+
+  But note: the `if b"<cvParam" in line:` block runs for the spectrum opening line too (no cvParam there). OK.
+
+  Digest includes the closing `</spectrum>` line (updated before the elif? order: `if h is not None: h.update(...)` comes BEFORE the binaryDataArray/binary//spectrum elifs — yes h.update runs for every line while inside, including </spectrum>. Good, symmetric.
+
+  Hmm, one thing: h.update for the first line happens at creation; lines between <spectrumList> and first <spectrum> not hashed — fine.
+
+  ids_re also strips `index="..."` — applied to first line and spectrumRef lines. `<scan ...>` no index. OK.
+
+  Now severity assignments and "bites this run":
+
+  - Finding A (run_group/add_split exception handling): should-fix. Bites: only on malformed FileFilter output or unexpected TSV cell — low probability, but the entire point of guards is the unexpected; cost = lose second cell + full re-run. Would produce refusal, not wrong numbers.
+
+  - Finding B (share/OpenMS unpinned): should-fix. Bites if the arm tree on ceph is touched between the two launches (the run is one launch, ~26h; resume scenario if it crashes). Provenance carries share_OpenMS_tree_sha256= but nothing verifies it — the check to add is trivial. Real risk moderate-low.
+
+  - Finding C (jnatmp 0755 TMPDIR): should-fix (privacy). Bites this run if diaWeaver/FileFilter write temp files (OpenMS tools do write temp files on some paths). The prompt deliberately mentions mode 0755 — this is likely the intended catch.
+
+  - Finding D (memory-floor kill by neighbors on shared node): should-fix/accepted-risk. On a shared 224-core node with dt -Xmx400G running on the SAME node earlier... cells run after pair sequentially, but neighbors could trigger. Fails safe (abort + rerun), costs a day. Maybe should-fix: retry instead of abort? It aborts the cell, group re-runs whole — 26h. Realistic bite.
+
+  - Finding E (G-V17 peak data not compared): nit/theoretical (FileFilter pinned).
+
+  - Finding F (resume crash window → table KeyError): nit/should-fix. Only if table rendered mid-crash-window.
+
+  - Finding G (entrapment:false accepted for plain): nit.
+
+  - Finding H (mzml_scan first-occurrence MS:1002815 / self-closing spectrum): nit/theoretical.
+
+  - Finding I (G-V18 masked by tool nondeterminism): nit, inherent.
+
+  Also Q4 ordering question answer: correct.
+
+  Also Q11 answer: no unguarded numbers; nan formatting; KeyError caveat (F).
+
+  Let me also double-check `entrap_strata` G-V19 "0 target peptides" — `out["all"]["target"] <= 0` die — good; and run_entrap rec["peptides"] = all target → G-V13 peptides>0 satisfied.
+
+  And `entrap_strata` — `fin` rounding; strata scored by score() on stratum TSVs — the "all" stratum TSV contains all rows — equals score(whole)? Partition check ensures z1+z2p == all. And selftest checks all == score(whole TSV). But note: the stratum TSV rows are the BEST row per peptide only — score() on the original TSV also reduces to best per peptide — identical set. One subtlety: score()'s best selection sees ALL rows including DECOY rows? No — score skips decoy rows before best. entrap_strata also skips (all rev_). But "proteins" split: score uses x["proteins"].split(";"); entrap_strata same. But what about proteins containing "rev_ENTRAP_" → startswith("rev_") → row skipped as decoy! A peptide matched ONLY to rev_ENTRAP_ proteins (a decoy entrapment hit) is skipped in both. Consistent.
+
+  Another: in entrap_strata the best-row choice uses `sc > best[...][0]` — score() same. Consistent.
+
+  Now double-check `run_search` unchanged writes measure without cells — and `table_guards` requires `one(r["measure_sha256"] for r in oks)` — entrap records have cells key; sage/msf records get cells via add_split. If one search's add_split failed (G-V19 die → status failed → excluded from oks). OK.
+
+  What about `run_entrap` when tool == "dt": patch step; cells: no patch. spx: no patch (spx mzML has 0744). OK.
+
+  `run_entrap` uses `engine_spectra(log, "sage")` — fine.
+
+  Check `q_engines` returns ENGINES + ("entrap",) — ENGINES presumably ("sage","msfragger"). In `pending`/`unit` — engines iterated; run_search handles sage/msfragger; entrap via run_entrap. `one_search` dispatch correct.
+
+  MSFragger-first gating: `if not msf_ok and pending(u[0], u[1], "msfragger")` — unchanged logic works with entrap added.
+
+  Now Q1 one more sweep — `preflight` return now `"search_db": {k: ... for k in db_keys(q)}` — plain: DB_KEYS — same.
+
+  `install_tools`: `dest.get("sage_entrap")` — plain: None → search_dbs without entrap. Same.
+
+  `check_db_pins(q, shas)`: db_keys(q) — plain DB_KEYS. Same.
+
+  `tool_dest`: plan_tool_keys(q) — plain TOOL_KEYS. Same.
+
+  `resolve_queue`: `q.update({k: plan[k] for k in OPTIONAL_PLAN_KEYS if k in plan})` — plain plan without those keys → nothing. Plain queue dict identical. Except if plan has entrapment:false → q gets entrapment=False → extended(q) False → behaves plain; record would carry "entrapment": False in run_group? No — run_group only for ext. Plain pair record unchanged. But the q has extra key — nothing downstream iterates q keys except... measure? No. OK so only load-time acceptance differs.
+
+  `dry_run` plain — verified same text via selftest check.
+
+  `_node_run` plain — the say() line: `+ (...) if ext else ""` — same for plain.
+
+  `cmd_table`: `(render_cells_table if extended(plan) else render_table)` — plain → render_table. Same.
+
+  `node_status` unchanged presumably.
+
+  OK. Also the selftest pins PAIR_MEASURE_1_3_0 — good.
+
+  Now, one more careful look at `ready_arms` vs old `pair_done` for a subtle difference: old pair_done checked `rec["sample"].get("pin") != s["pin"]` etc. — same. Old returned False on `not o or o["count"] <= 0 or o["mtime"] <= a["start_epoch"]`. New: `a.get("status","ok") != "ok" or not o or ... → continue`. Same effect.
+
+  New subtlety: old code `if all(search_done(...) for e in ENGINES): continue` — i.e., arm OK if searches done EVEN IF file gone. New: `if not all(...): file check; if bad → continue (not appended)`. Wait — logic inversion check:
+
+  ```python
+  if not all(search_done(...) for e in engines):
+      p = Path(o["path"])
+      if not p.is_file() or size != or mtime !=:
+          continue
+  ready.append(tool)
+  ```
+
+  If all searches done → skip file check → append. If not all done → verify file; bad → not appended. Same as old semantics. Good.
+
+  BUT — `search_done` now includes cells-hash equality. For an extended plan resuming: search records from run_search+add_split have cells hash. OK.
+
+  And `pair_done` = ready == list(ctx.get("tools", TOOLS)) — plain: TOOLS list equality — order: ready built in TOOLS order. OK.
+
+  One more potential issue: `run_group`'s `rec["cells"] = cells(q)` and table_guards `p.get("cells") != plan.get("cells")` — plan from load_plan (yaml) vs rec from json — dict equality across yaml/json: yaml safe_load produces same types (lists, strings, floats). wall_cap_h 12 (int from yaml) vs json int — equal. args list — equal. OK.
+
+  Now Q3 more: "every check fail closed?" — `reencode` catches Abort from verify_mzml and re-dies G-V17. parse_time_log guard G-V17. check_exit. mzml_scan exceptions NOT wrapped → CRASH not G-V17 (finding A). `digest()` SystemExit caught. src.unlink() only after all checks. raw kept on failure. Good.
+
+  Also `reencode`: `rec.update(output=o, ...)` — output path reencoded.mzML — the file searches read. run_search checks size/mtime vs record. OK.
+
+  One more: `verify_mzml(out, t0)` in run_cell uses t0 from BEFORE run_capped — freshness: mtime > start. diaWeaver rewrites the file at the end — mtime fresh. OK.
+
+  `log_count(log, kind["count"])` — rb"Wrote (\d+) pseudo spectra" — matches fact's log line. `kind["done"]` b"Done. Output" — log line "Done. Output (numpress compressed): <path>" — contains. N==0 case: no Done line → but earlier o count <=0 dies first. Good.
+
+  Now compose the final answer, organized by the 12 questions. Keep it reasonably concise but complete. Include severity and bite assessment.
+
+  Also mention what's fine briefly.
+
+  Let me also double check the `bracketed` busy pattern for cells: pattern "diaWeave[r] -in" — the cmd is `[TIME, -v, -o, tl, dwv_bin, -in, staged...]` — ps line contains "diaWeaver -in" — matches. But ALSO FileFilter reencode runs "FileFilter -in pseudo_spectra.mzML" — not in busy patterns (only bin var, not REENCODE tool) — FileFilter is ours but runs seconds; not gating-relevant. Fine.
+
+  Also `busy_patterns` extra comprehension: `for v in e if v in {k["bin"] for k in CELL_KINDS.values()}` — e is env dict; iterating keys; v = key; e[v] = value. OK.
+
+  One more Q12: `run_capped` writes log via `open(log, "wb")` held during Popen — fine.
+
+  `time_cpu` regex "Percent of CPU this job got: (\d+)%" — GNU time prints e.g. "Percent of CPU this job got: 99%". OK.
+
+  `run_cell` rec["wall_cap_s"] recorded. OK.
+
+  `noop_check` KeyError: `a["digests"]["content"]` — a ok → reencode set digests. OK. `a["output"]["count"]` present.
+
+  `group_flags`: `out = [f for f in [pair_flags(p, names)] if f != "-"]` then appends noop flags; join or "-". OK.
+
+  `cmd_status` wd calc fine.
+
+  Also for Q9: "Can a search record be adopted without its charge split?" — search_done requires cells hash which is only added by add_split — so for resume/search-adoption, no. But render path: `complete` doesn't check cells hash per search... table_guards one(measure_sha256) across oks — mixed with/without cells → abort; uniform without → KeyError. Covered.
+
+  "Can a crash between run_search writing its record and add_split leave a record that the table then crashes on?" — yes, exactly (finding F). Confirmed answer.
+
+  Also `add_split` writes r even on Abort — status failed — good; but on non-Abort exception nothing written and exception propagates → unit() crashes the phase-2 loop → queue dies. Finding A covers.
+
+  Now `run_entrap` G-V19 die → status failed → entrap record failed → search_done false → mzML kept → retry next launch. OK.
+
+  Final answer structure: go through 1-12, findings with location, failing input, severity, bites-this-run. Keep tight.
+
+  Length: substantial but focused. Use headings per question number.Planning to review the inline diff for an adversarial task, beginning by noting unchanged plans and the modified functions such as ‘pair_’.Examining how the tiny changes affect plain plans, I’ll check that `identity()` no longer outputs a “cells” key, that `build_identity` still produces the same keys, and then compare the new `busy_patterns(env, cenvs=None)` logic to the older version.Checking key consistency in load_plan…Handling plan tool logic...Confirming that the new measure_sha256 omits the 'cells' key without altering hash consistency and that the MEASURED dict order is unchanged before proceeding to inspect the rescore loop.Observing that plain contexts omit “tools” so default to TOOLS, noting the rescore loop always uses ENGINES, and concluding entrapped records aren’t rescored when their hash changes, likely by design.Checking entrapment logic...Same as before...It observes that for plain OK pairs both arms have a host, the same measure_sha256 logic remains, and a new check ensures the two plans’ cells values are equal—which they are for plain.I examined the shift from pair_done to ready_arms and found the logic is effectively equivalent on plain records.Ich sehe, dass Plain‑Aufträge ohne Statusstandardmäßig „ok“ bekommen. Der neue Code zieht die verwendeten Engines aus dem Kontext (bei Plain ist das der globale Wert), und beide Varianten überspringen die Dateiprüfung, sobald alle Suchen abgeschlossen sind. Die Befehls‑Status‑Anzeige zeigt weiterhin dieselben Tool‑Spalten; die Spaltenbreite wird aus dem längsten Tool‑Namen plus einem kleinen Puffer berechnet.Ich prüfe, dass „wd“ 15 bleibt und vergleiche die alte und neue **pair_flags**‑Logik, wobei die Änderung auf `names.get(t, t)` hinweist.Changed flag lookup to use names.get(t, t) and noted that None names are handled by a default; added a loop to process cells_failed in cmd_status, but it’s empty for plain plans; the overall measure_sha256 logic and the MEASURED entries remain unchanged.I note that the scores for sage_peptides and msf_peptides remain unchanged. I plan to see if any input causes a different behavior for the plain plan, including the updated error message for tools and how node_busy handles empty cells. I'll also examine the busy_patterns logic more closely to confirm it behaves as expected.Vergleichslogik prüfen...The new code behaves the same for plain records: cells stay None, raw_sha256 and pair logic are unchanged, identity ignores a “cells” key for plain, ldd_deps’ default assignment is still equivalent, and the node/status helpers stay identical. The only change is that a plain plan with an unrecognized `entrapment` key no longer raises an error; it is now silently treated as plain.Ich plane zu prüfen, ob Schlüsselunterschiede weiterhin durchgelassen werden, dass `entrapment: false` jetzt stillabgewiesen wird, leere `cells:{}` abgelehnt wird und das als „nit“ klassifiziert wird; zusätzlich soll ich bestätigen, dass `search_done` und die glob‑Pattern in `run_pair` korrekt funktionieren und gleichzeitig potenzielle Fehler in der Zeilenbasierten `mzml_scan`‑Implementierung erkennen.He's checking that the hash routine strips IDs only from lines containing 'spectrumRef', especially when decoding is active, and noting how this influences the hash updates.Evaluating how lines containing “spectrumRef” trigger removal of ID attributes before hashing and determining which XML tags carry those IDs.Ich prüfe, ob der Regex `ids_re` die `id`, `index` und `spectrumRef` Attribute aus den Zeilen entfernt, um den Hash zu berechnen.I realize the `if b"spectrumRef" in line` check only applies to the first line, so `id=` attributes on other lines may be missed. I also question whether the digest truly normalizes two runs, given diaWeaver's scan renumbering and possible order differences, and what other variations might still persist.I observe that the `<cvParam ... MS:1000016 scan start time>` values and binary data remain identical. I’m exploring whether FileFilter’s re‑encoding, which sorts spectra by RT using `sortSpectra(true)` (potentially unstable for equal RTs), could affect determinism, though the RTs are likely distinct across windows. I’m also checking how the first occurrence of each PREC_CV is handled within a spectrum.He’s checking that the MS:1002815 (1/K0) CV term can appear both at scan level and in the selectedIon, and that OpenMS writes scanList before precursorList, so the scan‑level value would be seen first and the selectedIon one ignored. He notes that diaWeaver attaches it per spectrum but isn’t sure whether it’s emitted at scan or selectedIon level.When 1/K0 appears at both the scan level and in the selected ion, the digest takes the first occurrence (the scan‑level value), which may be semantically wrong. This follows OpenMS’s order but is a correctness nuance that should be addressed.Scan‑level data supersede, di Weaver’s 1/K0 may be per‑spectrum, mzml_scan correctly skips spectrumList entries, and numpress terms are counted globally.I’m noting that referenceableParamGroups are counted at the file level but diaWeaver likely ignores them, and that the second‐level Numpress term is also tallied and stripped by the FileFilter. I review how the parser accumulates cvParam accessions in a dictionary for each binaryDataArray, resetting appropriately and checking for Numpress flags. I also flag potential issues with long base64 binary data and the handling of <binaryDataArray> closing tags.Das nächste Glied prüft die Decodierung von CV-Werten, erkennt aber, dass ein zlib‑Error im mzml_scan‑Aufruf nicht abgefangen wird und somit das gesamte Zell-Group‑Processing zum Absturz bringt.A non‑Abort exception in a cell can halt the entire group, and decoding faults such as base64 errors, array length mismatches, or float conversion issues can similarly break execution; this is critical but unlikely unless the DIA forerunner output is malformed. A missing default array length leads to a minor skew in the median, while the digest construction using `repr(float(prec[k]))` remains stable across identical spectra.I’m reviewing the prec_digest logic, noting how valueless cvParams are handled, how float values are normalized for hashing, confirming that sorting and ID stripping yield identical blocks across runs, examining multilevel tags, and considering collision possibilities between different processing arms.Same‑arm runs produce identical content digests because FileFilter re‑sorts by RT but preserves ids that are subsequently stripped, and the digest sorts blocks so any ordering instability is neutralized.I’m evaluating whether nondeterminism in diaWeaver’s peak picking could make two runs produce different binary content, even though G‑V18 flags when distinct cells share identical digests. If the –bruker:ms1_centroid arguments are truly no‑ops, identical outputs will trigger the flag, but I’m still unsure if repeated runs of the same arm could actually diverge in digest.Ich überlege, dass ein Wa‑Inhalt die Flag‑Auslöschung nicht falsifiziert, weil die Prüfziffern der beiden Zellen im selben Lauf unterschiedlich sein könnten. Weiterhin prüfe ich die Regex‑Entfernung der `id=`‑Attribute, ob sie nur in der ersten Zeile gilt, und ob dadurch ein leichtes Hash‑Problem entsteht. Dann denke ich darüber nach, ob die bereits vorhandene Digest‑Logik tatsächlich alle relevanten Zeilen normalisiert und vergleichbare Ergebnisse liefert.I realized G‑V17 only checks the precursor digest, so changes to peak data would go undetected, and I’ll also flag spectra that lack an m/z array.Examining how missing decode flags, truncated arrays, and mislabelled compression affect validation and noting that numpress terms in global groups can trigger false negatives.Inspecting post‑check numpress, regex whitespace, float parsing, and spectrum start conditions.I’m checking whether a `<spectrum>` tag ever splits across lines, noting that `<binary>` data can be very long, and considering that different fragment‐trace IDs may be assigned in separate runs, which could change the hash of the mzML scan blocks.I’m reviewing the subprocess monitoring loop that checks elapsed time and memory against limits and kills the process if exceeded, noting the poll‑interval granularity and the incomplete kill_session call.Assessing that killpg will terminate all in the session—including diaWeaver—and checking that the memory‑floor heuristic may be bypassed for certain pair runs.I notice that `run_capped` only watches the cell’s own process, but a cell can still be killed if other tenants bring down MemAvailable; the guard then aborts instead of retrying. I also observe that in `run_cell` the stopped flag is examined before calling `parse_time_log` or `check_exit`, which prevents processing of corrupted timing data from a killed job.Considering how GNU time reports a SIGKILL exit status and the possibility of timing conflicts when the cap triggers right as a tool finishes, I’ll need to handle a potential ProcessLookupError during the session kill.Accounting for a race where the tool finishes just before the kill triggers, causing a ProcessLookupError but resulting in a “killed: wall cap” status.Verifying that a new time session starts correctly and reviewing how SIGTERM and SIGKILL impact process termination and cleanup.Gate waits 20 min, flags the run as contended, and an orphaned diaWeaver can still execute concurrently, causing CPU contention that the monitor records.I’m checking the busy‑patterns logic: an orphan process with “diaWeaver -in” is considered busy, so the gate waits 20 minutes before proceeding, and the run is marked as contended—this is intended. I note that `proc_snapshot()` will skip the memory test if /proc is unreadable, which is acceptable, and that the monitor loop sleeps with `p.wait(timeout=MON_S)` while calling `proc_snapshot()` every cycle. I’ll next look into the `run_…` routine.Sie prüft, ob Nicht‑Abort‑Ausnahmen in einer Zelle die gesamte Gruppe zum Absturz bringen und damit gegen die vorgesehenen Semantik verstoßen.Examining a truncated mzML that throws a ValueError in G‑V17, causing the entire group to crash before later steps.Considering numeric conversion and zlib decoding errors.Exploring how reference arm outcomes affect `pair_done` and noting that diaWeaver’s fragment trace IDs can differ between runs, potentially altering the no‑op digest.V18 compares dwv_default versus dwv_pickim within the same run; a genuine no‑op will be ignored if diaWeaver is nondeterministic, letting differing outputs slip through. The self‑test only covers a deterministic fake, so a real nondeterministic no‑op can go unflagged.Because digest comparison is only between the two arms, nondeterminism in the output can hide a genuine difference, resulting in a false negative.  
+  The noop_check iterates over cell configurations and examines the pre‑set digests; a KeyError would only arise if those digests were missing, but they are normally established before the status is marked ok.  
+  Additionally, cell_provenance does not compare the hash of the shared OpenMS data tree, so changes to that directory can pass unnoticed.build_identity records only binary_sha256, lib_sha256, reencode_sha256 and deps_sha256, so G‑V04/G‑V11/G‑V13 ignore share/OpenMS content—a fix is required. env.sh is not hashed; while changes to OpenMP knobs are stripped, modifications to PATH or OPENMS_DATA_PATH are not caught, so differences may go undetected.arm_env still drops strip_var and INHERIT_DROP from the base environment like before.  
+  The provenance parser resets a block when a line doesn’t start with whitespace and extracts SHA‑path pairs; it only verifies files that appear in the `want` set (bin, FileFilter, lib), so mismatches for other files are ignored.I’m inspecting the omitted share/ directory, confirming that ldd_deps and env.sh handling are fine, and comparing how the sage_by_charge and sage_peptides rules count peptides, especially the treatment of decoys versus targets.Ich prüfe, wie Peptide zwischen Ziel- und Decoy‑Sätzen gezählt werden: sage_peptides zählt jede Zeile, während sage_by_charge nur die beste Zeile verwendet, sodass ein Peptid als Decoy gezählt werden kann, obwohl es auch eine Ziel‑Zeile gibt. Außerdem kontrolliert add_split lediglich, ob die Summen der Sets übereinstimmen, ohne die tatsächliche Belegung der Ziel‑ und Decoy‑Gruppen zu prüfen.Explaining how target peptide sets from sage_peptides and sage_by_charge can differ due to tie‑breaking rules on best row.I concluded the peptide‑count logic is fail‑closed: any mismatch between `sage_by_charge` and `sage_peptides` triggers an abort, so no silent wrong numbers, and noted an incomplete float‑parsing line.The next thought points out that malformed rows can trigger a ValueError and crash, and that unguarded numeric conversions in sage_by_charge likewise cause crashes that are handled by an Abort, marking the operation as failed.A ValueError in sage_by_charge bypasses add_split, propagates up the call stack into unit() and the search loop, crashing the phase‑2 worker queue. Because add_split’s write_json never runs, the record remains OK but lacks by_charge and cells hash in the measure, so the next launch will hit a search_done error requiring m.Dercell-Informationen prüfen, wenn `cells` nicht übereinstimmt, löst ein erneutes Suchverfahren aus. Ein Ausnahmefall verhindert das Löschen der mzML, sodass die Datei erhalten bleibt. Beim Parsen werden Integer‑Charges verwendet, bei Gleichstand gewinnt die zuerst gelesene Zeile, was bei jeder Ausführung deterministisch bleibt.Analyzing the msf peptide‑counting logic: tuples of (score, decoy) are sorted descending with ties broken in favor of decoys; then targets are counted only when the decoy ratio is ≤ 1 %; msf_peptides records only targets, while msf_by_charge retrieves data via a header map that supplies empty strings for missing columns.Die Sortier‑ und Abgrenzlogik für Peptide wird geprüft, wobei insbesondere die Pflicht für das `charge`‑Feld und die Übereinstimmung mit der msf_peptides‑Logik ins Blickfeld rückt.Ich vergleiche Ziel- und Decoy‑Zählungen von msf_peptides und msf_by_charge, finde gleiche Ergebnisse, prüfe die Tiefen‑Präfix‑Logik, die Stratum‑Zuweisung anhand der besten PSM‑Ladung und vergleiche die Teilungssummen mit r["peptides"].Equality holds by construction, but a ValueError can arise if the “charge” field cannot be converted, which is not caught and terminates add_split.  
+  Between msf_peptides and msf_by_charge, the construction of the key differs when modification_info is absent, yet both normally yield the same empty‑string key.  
+  The entrap_strata routine behaves like score()—it selects the best PSM per peptide by discriminant score (ignoring decoys), splits the protein list, writes the result to a stratum TSV, and then calls the estimator.Reviewing how score() processes each stratum TSV, I see that it re‑parses the joined lines, so the peptide set remains consistent, and it checks the target count and terminates if it’s zero. A subtle risk is that when two PSMs tie in score, both score() and entrap_strata will pick the first encountered row, but because the stratum TSV records are stored in insertion order rather than the original file order, a tie with different charges could lead to non‑deterministic best‑peptide selection.Ich prüfe, wie fehlende Zell‑Hashes die Suche beeinflussen und unbeabsichtigte Wiederholungen verhindern.An ‘ok’ record with no by_charge entry could raise a KeyError when the summary table renders—particularly if a crash interrupted add_split—allowing a record to be adopted for the table without its split.The table can crash with a KeyError when an ok search record lacks a `by_charge` field.  
+  While rendering itself doesn’t need a `cells` hash, the guard checks that every ok record’s `measure_sha256` dictionary is identical.  
+  If one record is missing that hash (its dict has no `cells` entry), the guard aborts the entire table rather than producing an incorrect count, but this happens only when another ok record contains the hash.Bei Datensätzen ohne „cells“ durchläuft die one()-Prüfung, führt aber zu einem KeyError bei „by_charge“ im Summary, weil dort Vollständigkeit erwartet wird. Auf Zeilenebene behebt die Lambda‑Funktion fehlende Werte mit „-“, und die Funktion `search()` verlangt zusätzlich die Übereinstimmung von „pair_run“. Außerdem speichert `run_entrap` die Messung mit explizit enthaltenen „cells“.Extracting search, score, and cells from ctx["measure"] is fine.  
+  If any cell is failed or stale it never appears in ready_arms, so pair_done never returns true and the group isn’t adopted. Only the ok arms run; on the next launch the whole group reruns, invalidating stale search records and re‑searching them. This behavior is wasteful but deterministic.The group is re‑executed entirely, so successful pair and cell outputs are overwritten.  Stale cells are detected by comparing output file size and modification time; if a run is killed mid‑group it stays as “running” and will be retried when ready_arms checks.  Finally, a loop iterates over old run directories, probably for cleanup or status inspection.Inspecting .mzML cleanup at group start, pair_done logic for failed searches or hash changes, crash‑between‑ok handling, search_done for entrap and unit construction from ready_ arms...I observe that pending logic triggers a re‑run when the pair_run is stale, while unit() removes the mzML file after all engines finish. In rescoring, only the ENGINES list is processed, so entrap records are not rescored; a changed score hash for an entrap cell forces the entire entrap search to restart.Suspecting an ordering issue: rescore may run before add_split, so records lack the "cells" hash and are skipped, leading to a re‑run.Re-examining add_split’s reread, resume logic in _node_run, status evaluation in run_group, and the stage_tdf permissions, copy, cleanup, and signal handling that promotes leftovers to G‑V14.I notice that `stage_tdf` doesn’t confirm the raw directory contains only the required `analysis.tdf` and `analysis.tdf_bin` files; it simply records whatever is staged. There’s also no guard against a sample ID that includes path separators, which could make the plain destination name problematic. The fingerprint routine only hashes the staged copy, not the original raw directory.Ich prüfe zunächst, ob das Einlesen von \texttt{analysis.tdf} korrekt funktioniert und ob \texttt{shutil.copyfile} auf Symlinks richtig reagiert – dabei stelle ich sicher, dass nur die beiden vom extractor benötigten Dateien kopiert werden und die Berechtigungen (0700) beibehalten bleiben, während bei Fehlern oder SIGTERM sämtliche Kopien entfernt werden. Danach gehe ich zu \texttt{render\_cells\_table}: dort kontrolliere ich die Nutzung von \texttt{p["node"]}, die Verarbeitung des \texttt{main.append}‑Aufrufs mit der \texttt{fmt}‑Funktion, die korrekte Berechnung von \texttt{cores} und die potenziellen \texttt{KeyError}-Gefahren beim Zugriff auf \texttt{S[t,"sage"][0]["peptides"]}.I'm checking the truthiness of the first element, then confirming that entrap rows only appear when a record has an “entrapment” key and a successful status; after that I inspect each cell row for the output count, the percentage of zero‐intensity spectra, the re‑encode wall time, and the numpress term counts, making sure each value exists for OK arms.Ich prüfe mögliche KeyErrors ohne **by_charge**, Division‑durch‑Null bei **d_s**, Statistikwerte und die Logik der Flags.Reviewing that complete only counts full pairs, ensuring render_cells_table displays cells correctly, confirming node and acq_min keys exist, and noting a plan for a tool_label help test.Concern about world‑readable TMPDIR for cell temp files.I notice the cell temp directory is world‑accessible at 0755, violating the 0700 privacy rule and potentially leaking data.I’m reviewing how cmd_dwv writes mzML, how run_cell creates the output directory and verifies identity, how the monitoring loop works, CPU parsing logic, wall‑time caps, and the pre‑staging cleanup loop in run_group.If all mzML files exist, pair_done is true and run_group is skipped; otherwise stale or failed searches cause the group to be replayed, with old TSVs left behind.I’m verifying that `noop_check` correctly skips cells that never ran, that `run_group` rotates arm order via `idx % len(names)` as in dry‑run, and that `busy_patterns` only uses env keys matching the `CELL_KINDS` binary names (e.g., `DWV_BIN`).Verifying process detection, tool installation, fasta integrity, engine list, and STRATA definitions.Checking charge limits, ratios, and parsing safety in split and entrap logic, and confirming step argument positions.I’m reviewing the run_entrap routine: it records the mzML count from the pair output, verifies file sizes and timestamps, checks spectra numbers against SAGE_MIN_READ and the TSV, gathers peptide counts from the entrapment data, and deletes temporary MZML/MZBIN files while keeping the result TSV. It executes cmd_sage using the reference arm’s environment, treating Sage as a tool. Next I plan to use one_search for the entrap step.run_entrap ohne add_split prüfen – prüfen, ob diaWeaver bei killpg nicht überlebt, SIGKILL eliminiert beide Prozesse; `p.wait()` reaps time, diaWeaver wird von init erledigt; G‑V16 prüft gestoppt vor parse_time_log, um fehlende Logdateien abzuwehren.Ich prüfe, ob `run_cell` den Log‑Zähler korrekt abgleicht, ob der Reencode‑Schritt die MzML‑Datei frisch prüft, die Spektra‑Anzahlen vor und nach der Filterung vergleicht, und ob der `prec_digest`‑Vergleich die Konsistenz zwischen Ursprung und erneuerter Datei sicherstellt.I’m checking that prec values are gathered before the decode flag is applied, that any G‑V17 charge‑list mismatch is caught by the sorted prec_digest (which also includes the RT field), that mzml_scan only records the first MS:1000016 at scan level (and that diaWeaver’s single‑scan spectra avoid the multiscans issue), and that the inside state machine processes cvParam entries before performing the inside check.Checking cvParam tags, counting Numpress terms, and resetting the array on opening a binaryDataArray...I see that a missing second `<binary>` inside the last array is harmless, there are no extra m/z arrays in a spectrum, and the intensity‑array matching logic remains correct.I’m concerned that self‑closing `<spectrum/>` tags could cause spectra to be undercounted, but OpenMS likely never writes them. The prec_digest uses only precursor metadata, so different peak data won’t affect it.Fehlende Labels bei Numpress‑Arrays blinken an der Prürefunktion an; zlib‑Arrays ohne Marker führen zu Laufzeitfehlern, während korrekt gelabelte Arrays zwar als unerkannt gelten, aber durch unsortierte Daten absichtlich kritisiert werden könnten.Not checking the “before” content_digest leaves a gap; a spectrum without an m/z array slips past G‑V17 yet crashes Sage, and I’ll probe the plain‑plan behavior differences next.Ich prüfe, dass `node_busy` unverändert bleibt, `cmd_preflight` keine Zellen findet und keinen `ENTRAP_DB` in `pre["search_db"]` setzt, dass `dry_run` die gleiche Staging‑Ausgabe wie zuvor liefert, dass `load_plan` eine neue Nachricht anzeigt, und dass `_node_run` im Plain‑Modus ohne Tools/Engines arbeitet, `digest` auf `None` setzt und `busy_` nutzt.I’m checking that the updated logic for plain plans—patterns, engines, unit execution, rescore/sweep, pair_flags defaults, and cmd_status—continues to match the original behaviour.No failures, same output.Check that plans lacking required keys but with “cells” are still rejected; confirm identical identity hashes for plain plans and the changed ldd_deps message; verify the search_done docstring; note that measure_sha256 is called with extended flags, and that the new cmd_dwv and cmd_reencode functions are not included in MEASURED.Checking that MEASURED hashes remain stable, noting which metadata cells_meta records, ensuring build_identity skips wall_cap, and observing that stage_tdf doesn’t trash files on SIGKILL while run_group cleans up its state.Betrachte, wie pseudo‑Spektren bei einem Fehler behalten und später entfernt werden, wie `run_group` die Paar‑JSON‑Datei erzeugt und ob dies mit dem Privateschema stimmt, wie `leftovers()` im Fehlerfall die Rohdaten listet und löschen wird, und vergleiche die Zeit‑Ausgabe von FAKE_TIME gegen echte GNU time.Ich prüfe, ob die Speicher‑Flur‑Kontrolle von run_capped sowie die Abbruch‑Logik zuverlässig bleiben, auch wenn /proc zum Lesen misslingt.I see that the cap check runs before the wait, so a tool that finishes just within its time limit can’t exceed it by much. The tie‑breaking logic in sage_by_charge matches‐the‑peptides logic in sage_peptides aside from score‑based ordering, and the `add_split` comparison correctly limits itself to the fields present for each arm. However, unhandled exceptions other than Abort (e.g., zlib.error, ValueError, binascii.Error) escape the cell‑level try/except and crash the whole group, so a single failing cell stops the next one.Possible bugs: unhandled non‑Abort errors can bust an entire 26‑hour run; OpenMS data in share/ and env.sh are never hashed, so changes there go undetected; and the TMPDIR used by cells is world‑readable, violating privacy.The use of a shared TMPDIR can cause the run to fail.  
+  Plain plans now accept an `entrapment: false` flag, which is effectively ignored.  
+  If an ok record is written without a `by_charge` or `cells` hash, the table‑summary can raise a KeyError when it expects that key.Checking whether the first MS:1002815 value wins, the impact of theoretical self‑closing `<spectrum/>` tags, and how empty cvParams are treated—considering fixes based on actual diaWeaver output.Die Lage des CV‑Parameters MS:1002815 beeinflusst nur den Speicherort in der Datei, aber G‑V17 behandelt beides gleich und die „im_zero“-Statistik berücksichtigt den scan‑level‑Wert, sodass kein Problem entsteht. Für diaWeaver‑Ausgaben zählt mzml_scan die Null‑1/K0‑Werte ebenfalls scan‑level‑basiert, und G‑V17 vergleicht bis jetzt keine Peak‑Daten.I zie daran, dass bei deaktiviertem Decodieren FileFilter noch Float‑Arrays reordern oder zerschlagen kann und trotzdem von G‑V17 durchgeht; spektren ohne mZ‑Array passieren den ersten Test, scheitern aber später, während verkürzte Arrays per Länge‑Check und falsch gelabelte Kompression durch einen Decodierungsfehler entdeckt werden. run_capped nutzt eine Sitzung‑SIGKILL‑Beendigung und BaseException‑Aufräumung, sodass nur geringe Restreserven bleiben.I’m noting that a SIGKILL can leave orphan diaWeaver processes, prompting the busy gate to simply wait 20 minutes before proceeding, while a memory‑floor kill may force an entire group to rerun and a finish‑at‑cap race can mislabel a successful run as killed. I observe that true no‑op detection relies on diaWeaver’s determinism; if peak assignments vary with thread order, identical‑content runs will never be flagged, though hash collisions between different arms remain impossible. The digest check only flags exact byte equality, so nondeterminism can mask real no‑ops.I noted that the digest check only looks for `b"spectrumRef"` in a line, so an `id=` on a different line would not be stripped, but OpenMS actually puts the IDs only on the spectrum opening and precursor `spectrumRef` lines, so the hash stays consistent.  
+  I also saw that the `sage_by_charge` and `sage_peptides` functions can disagree on the target peptide count when a peptide has both target and decoy rows and the decoy has the higher discriminant score; the system aborts in that case, catching the inconsistency.  
+  When the discriminant scores tie, the first row is chosen, making the resolution deterministic.Überprüfung der Übereinstimmung von msf_by_charge mit msf_peptides (Decoy‑erste Reihenfolge) und der Appell‑Aufteilung in entrap_strata; fast alles konsistent, mit einer einmal gemachten Ausnahme.  
+  Beim Rendern der Zell‐Tabelle werden mögliche `nan`‑Ausgaben, potenzielle `KeyError`‑Gefahren und leere Arm‑Strings („FAILED None“) bemerkt, während alle Zahlen aus gesicherten Datensätzen stammen und kurze Schleifendurchbrüche bei unvollständiger Zusammenfassung als akzeptabel gelten.I'm checking that the peptides list has more than zero entries. For the stage_tdf step, permissions are set to 0700, only two files are handled, with cleanup on exception including SIGTERM, and no extra data is written next to the raw. Also, a quick review of run_group shows the gate is loaded before reference arms, while cell execution occurs later.Ich prüfe, ob das Gates‑Timing in run_pair sinnvoll ist und ob das Glob‑Pattern */*/*.mzML eventuelle *.mzML‑Dateien übersehe – insbesondere die im Search‑Ordner.Ich prüfe, ob bei erfolgreich reencodierten Zellen die Roh‑Pseudo‑Spektren gelöscht werden und bei fehlgeschlagenen Zellen erhalten bleiben, um die Aufräumlogik zu beachten. Außerdem prüfe ich den Einsatz von `ready_arms` für vollständig gelaufene Sucharmaturen sowie bei laufenden Sage‑, aber noch nicht gestarteten MSFragger‑Arms, und vergleiche die `rec["cells"]`‑Werte der erweiterten Pläne auf Dictionary‑Gleichheit.Verifying that increasing the wall‑cap triggers a re‑run, ensuring numpress arrays are only accepted when sorted (otherwise flagged undecoded), confirming 32‑bit m/z values are allowed as FileFilter writes 64‑bit by default, and noting that mzml_scan starts by importing array and zlib.Reviewing mzML parsing: confirming peaks use defaultArrayLength, preventing nested spectra, and checking digest logic when decode is off.I’m reviewing the digest routine, noting that when decoding is enabled, only the first line’s `id=` is stripped, which could let extra IDs slip through. The hash object is created on the first non‑inside line, then never updated for subsequent lines, and the `<cvParam>` block that also runs at the spectrum start doesn’t affect the hash. This indicates a possible bug in the ID‑removal logic.Checked that hashes cover closing spectrum tags, first‑line hashing, and index stripping on relevant lines.Ich finde zwei Risiken: add_split‑Exceptions lassen die zweite Zelle nicht laufen; Änderungen im OpenMS‑Tree zwischen beiden Läufen könnten die Laufzeit stören.There's a provenance SHA for the OpenMS tree that isn’t checked, giving a moderate‑low risk.  
+  The temporary directory is world‑accessible (0755) and should be fixed for privacy.  
+  The memory‑floor kill on a shared node is also noted as a risk that needs to be addressed.It’s noted that if a cell fails after a pair is finished, the whole 26‑hour group is aborted and restarted, which might be worth changing to just retry that cell. Other observations: G‑V17 doesn’t compare peak data, a crash in the resume window can produce a KeyError only when a table is rendered mid‑crash, entrapment:false is silently accepted for plain plans, and mzml_scan only uses the first MS:1002815 entry.Ich prüfe, ob selbstschließende Spektren als Fehler behandelt werden, G‑V18 durch Werkzeugnondeterminismus maskiert wird, die Reihenfolge korrekt ist, Q11 ohne ungeprüfte Zahlen auskommt, KeyError‑Risiken bestehen, entrap_strata bei Null‑Zielpeptiden abbricht und run_entrap die Zielzahl übernimmt, während die Scoring‑Logik konsistent bleibt.Ich prüfe, dass bei Entsprung‑Hits mit rev_ENTRAP_ das Decoy‑Skipping korrekt verläuft und in beiden Fällen die Zeile übersprungen wird.  
+  Die Auswahl des besten Eintrags in entrap_strata erfolgt mit `sc > best[…][0]`, was mit der score()‑Logik übereinstimmt.  
+  Darüber hinaus schreibt run_search keine cells‑Informationen, während table_guards diese benötigen; ein fehlgeschlagenes add_split könnte also ein Problem darstellen.Noting V19 failure handling, patch logic in `run_entrap`, the engine list returned by `q_engines`, and the G–Fragger gating condition that checks `not msf_ok` and pending status.The logic stays the same—preflight for a plain plan simply builds a search database using the ordinary DB_KEYS; entrapment is ignored in plain queues, tool resolution follows the standard TOOL_KEYS, and only optional plan keys get copied when they exist.Ich prüfe, dass ein Plan mit entrapment:false nur beim Laden als „plain“ behandelt wird – run_group bleibt unverändert; die Ausgaben von dry_run und _node_run sind gleich, und cmd_table rendert die Zellentabelle nur, wenn der Plan als erweitert gilt.Vergleich von `ready_arms` und `pair_done` zeigt keine wesentliche Änderung; Self‑Test für PAIR_MEASURE_1_3_0 bestätigt.Verifying file integrity only when searches haven’t all finished, appending an arm only if the file exists with matching size and modification time, and ensuring that a pair is ready only when every expected tool is present.Intwerte aus YAML und JSON stimmen überein, ebenso die Argumentliste. In Bezug auf Fehlerbehandlung fängt `reencode` Abruptabbruch von `verify_mzml` und ruft G‑V17 auf, `parse_time_log` ist durch G‑VVerifiziere, dass die MZML nach `run_capped` neu denzeitwert hat und prüfe, ob die Logzeilen „Wrote … pseudo spectra“ sowie „Done. Output (numpress compressed)“ erfasst werden.  
+  Stelle sicher, dass die Busy‑Pattern‑Prüfung „diaWeaver -in“ trifft, aber FileFilter‑Aufträge nicht blockieren.  
+  Noted, dass weitere Busy‑Patterns noch geprüft werden, aber keine zusätzliche Analyse erfolgt.I see that the environment entries are wired up, `run_capped` opens log files safely, the GNU time regex matches the “Percent of CPU this job got” line, `run_cell` stores wall‑cap timing, a possible KeyError could arise in `noop_check` when the content digest is missing, and `group_flags` pulls pair flags from a predefined list.I’m reviewing flag assembly and the command‑status calculation, and confirming that a search record cannot be adopted without a charge split—since its cells hash (added by add_split) is missing, table guards abort or raise a key error when some records contain cells and others do not.Split leaves a record that crash the table (Finding F).  
+  `add_split` records even on Abort, but non‑Abort exceptions aren’t written and propagate, causing `unit()` to crash the phase‑2 loop (Finding A).  
+  When `run_entrap` fails at G‑V19, the record is marked failed, `search_done` is false, the mzML remains, and the job retries next launch. The plan is to summarise findings 1‑12 with location, input, severity, and impact.
+
+To resume this session: kimi -r session_2d2796d8-2ef9-4bb8-9b5e-ec64648de83a

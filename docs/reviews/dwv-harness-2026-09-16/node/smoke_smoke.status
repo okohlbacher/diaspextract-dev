@@ -1,0 +1,15 @@
+start 2026-09-16T23:27:35+02:00 host data load 1.65
+staged 2026-09-16T23:27:41+02:00 files analysis.tdf analysis.tdf_bin 
+end 2026-09-17T00:12:41+02:00 rc=124
+total 842658
+drwx------ 2 kohlbach abistaff          3 Sep 16 23:29 .
+drwx------ 4 kohlbach abistaff          7 Sep 16 23:27 ..
+-rw------- 1 kohlbach abistaff 1873982710 Sep 17 00:05 pseudo_spectra.mzML
+total 28
+drwx------ 4 kohlbach abistaff     7 Sep 16 23:27 .
+drwx------ 8 kohlbach abistaff    21 Sep 16 23:53 ..
+-rw------- 1 kohlbach abistaff 31892 Sep 17 00:09 dwv.log
+drwx------ 2 kohlbach abistaff     4 Sep 16 23:27 hela2731.d
+drwx------ 2 kohlbach abistaff     3 Sep 16 23:29 out
+-rw------- 1 kohlbach abistaff   362 Sep 17 00:12 smoke.status
+-rw------- 1 kohlbach abistaff     0 Sep 16 23:27 time.log

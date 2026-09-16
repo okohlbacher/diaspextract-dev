@@ -1,0 +1,38 @@
+corpus.py bc6a3a8f9b3f
+PASS  G-V03 real arm: provenance lists binary, FileFilter, lib/**                                          passed
+PASS  G-V03 real arm label                                                                                 diaWeaver 3.6.0-pre-diaWeaver-2-2026-09-12
+PASS  scan raw fixture: every m/z array numpress (undecoded == spectra), 3 numpress terms per spectrum     {'spectra': 240, 'undecoded': 240, 'numpress_terms': 720}
+PASS  scan raw fixture: 1/K0 = 0 in 3 of 4, charges tallied, >= 30 peaks                                   {'im_zero': 180, 'im_missing': 0, 'charges': {'2': 96, '3': 96, '4': 43, '1': 5}, 'peaks_median': 500.0}
+PASS  scan plain unsorted file: 2 of 3 spectra unsorted, all decoded, lengths ok                           {'spectra': 240, 'unsorted': 160, 'undecoded': 0, 'length_mismatch': 0}
+PASS  scan: prec digest equal for the numpress and the plain file (same precursors)                        
+PASS  G-V17 harness re-encode (real FileFilter -sort) on the numpress/unsorted fixture: passes             passed
+PASS    re-encoded: 0 numpress, 0 unsorted, 0 undecoded, 0 length mismatch, same count, raw deleted        {'spectra': 240, 'numpress_terms': 0, 'unsorted': 0, 'undecoded': 0, 'length_mismatch': 0, 'missing_selected_ion': 0, 'im_zero': 180, 'im_missing': 0, 'charges': {'3': 96, '2': 96, '4': 43, '1': 5}, 'prec_digest': 'fb995570b351edf7c294d0debd01763ccbac0a61be82687dd18168615d478e95', 'peaks_total': 113
+PASS    independent parser: 0 unsorted, no numpress, float arrays moved with their peaks (trace ids ascend {'spectra': 240, 'unsorted_spectra': 0, 'numpress_terms': {}, 'zlib_arrays': 0, 'no_compression_arrays': 960}
+PASS    slof float array (fragment_window_id) decoded to zeros                                             {0.0}
+PASS  G-V17 un-fixed file passed off as the re-encode (numpress, unsorted)                                 [G-V17] 720 numpress term(s) remain after the re-encode of dwv_default
+PASS  G-V17 numpress residue (FileConverter -lossy_compression)                                            [G-V17] 960 numpress term(s) remain after the re-encode of dwv_default
+PASS  G-V17 unsorted plain arrays                                                                          [G-V17] re-encoded dwv_default: 160 spectra not m/z-sorted, 0 m/z arrays undecodable, 0 with a length mismatch
+PASS  G-V17 spectra dropped                                                                                [G-V17] re-encode of dwv_default changed the spectrum count: 240 -> 120 (spectrumList 240 -> 120)
+PASS  G-V17 a charge changed                                                                               [G-V17] re-encode of dwv_default changed RT, selected ion m/z, charge, 1/K0 or isolation target values
+PASS  G-V17 zero spectra                                                                                   [G-V17] spectrumList count missing or <= 0: /scratch/kohlbach/dwv_review/gt1b/re/zero/reencoded.mzML
+PASS  G-V17 truncated output                                                                               [G-V17] output not terminated (truncated?): /scratch/kohlbach/dwv_review/gt1b/re/half/reencoded.mzML
+PASS  G-V17 tool exit 1                                                                                    [G-V17] re-encode of dwv_default failed: time rc=1 exit=1 signal=None
+PASS  G-V17 tool wrote nothing                                                                             [G-V17] output missing: /scratch/kohlbach/dwv_review/gt1b/re/none/reencoded.mzML
+PASS  G-V17 harness re-encode of a plain unsorted input: passes                                            passed
+PASS  G-V18 input: same spectra, other order and ids: re-encode passes                                     passed
+PASS  G-V18 input: one m/z moved: re-encode passes                                                         passed
+FAIL  G-V18 real files: same content in another order and ids is flagged (content equal, list digest not)  {'vs': 'a', 'computed': True, 'flag': False, 'content_equal': False, 'semantic_equal': False, 'count_equal': True}
+PASS  G-V18 real files: one moved m/z is not flagged                                                       {'vs': 'a', 'computed': True, 'flag': False, 'content_equal': False, 'semantic_equal': False, 'count_equal': True}
+PASS  G-V16 cell ok (wrapper writes the numpress fixture), re-encoded by the real FileFilter               passed
+PASS    cell record: log count, CPU, cap, not stopped, output is reencoded.mzML                            {'log_count': 240, 'stopped': None, 'cpu': {'cpu_s': 0.0, 'cpu_pct': 100}, 'wall_s': 0.0}
+PASS  G-V16 no pseudo_spectra.mzML                                                                         [G-V16] dwv_default wrote no pseudo_spectra.mzML
+PASS  G-V16 zero spectra (OpenMS file with count 0, no Done line)                                          [G-V16] spectrumList count missing or <= 0: /scratch/kohlbach/dwv_review/gt1b/root/runs/zero/pseudo_spectra.mzML
+PASS  G-V16 exit 3                                                                                         [G-V16] dwv_default failed: time rc=3 exit=3 signal=None
+PASS  G-V16 log count differs                                                                              [G-V16] dwv_default: log count 241 != spectrumList count 240
+PASS  G-V16 no Done line                                                                                   [G-V16] dwv_default log lacks 'Done. Output': the final rewrite did not finish
+PASS  G-V16 wall cap (7 s)                                                                                 [G-V16] dwv_default killed: wall cap 7 s exceeded
+PASS  G-V16 wall cap: the tool's session is gone                                                           []
+PASS  G-V16 memory floor                                                                                   [G-V16] dwv_default killed: MemAvailable 1.0% of total
+PASS  G-V16 memory floor: the tool's session is gone                                                       []
+PASS  G-V16 SIGTERM to the runner: tool was running, runner exits 143, session gone                        (['3360006'], 143, [])
+35/36 cases pass

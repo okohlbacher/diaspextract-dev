@@ -1,0 +1,286 @@
+Bruker .d file detected. Loading via BrukerTimsFile...
+TIMS calibration: rational (TimsCalibration table, 1 segment for 6482 frames)
+Progress of 'Loading DIA-PASEF MS1 frames':
+  15.67 %                 19.97 %                 22.61 %                 24.97 %                 27.05 %                 28.99 %                 30.79 %                 32.59 %                 34.40 %                 36.06 %                 37.73 %                 39.39 %                 41.05 %                 42.72 %                 44.38 %                 46.05 %                 47.57 %                 49.10 %                 50.62 %                 52.29 %                 53.81 %                 55.34 %                 56.87 %                 58.39 %                 59.92 %                 61.44 %                 63.11 %                 64.63 %                 66.16 %                 67.68 %                 69.35 %                 70.87 %                 72.40 %                 74.06 %                 75.73 %                 77.39 %                 79.06 %                 80.72 %                 82.39 %                 84.19 %                 85.99 %                 87.79 %                 89.74 %                 91.54 %                 93.07 %                 94.45 %                 95.98 %                 97.78 %               -- done [took 48.89 s (CPU), 48.90 s (Wall)] -- 
+Progress of 'Loading DIA-PASEF MS2 frames':
+  1.27 %                 6.75 %                 15.00 %                 22.21 %                 28.61 %                 36.00 %                 43.67 %                 51.37 %                 57.02 %                 64.88 %                 72.53 %                 78.88 %                 86.21 %                 94.46 %               -- done [took 13.81 s (CPU), 13.82 s (Wall)] -- 
+Determined 24 unique DIA windows from 18004 spectra.
+Ion mobility filtering enabled. MS1 IM index: 0, MS2 IM index: 0
+Loaded 24 DIA windows from Bruker .d file.
+<Ion mobility filtering enabled. MS1 IM index: 0, MS2 IM index: 0> occurred 3 times
+Processing 24 DIA windows using 32 thread(s) with on-disc random access...
+Bruker built-in IM centroiding was applied during .d loading. Skipping PeakPickerIM mobilogram method — spectra are already centroided.
+Output: /scratch/kohlbach/dwv_review/smoke/out/pseudo_spectra.mzML
+Using 32 threads for window processing (no nested parallelism).
+Progress of 'mass trace detection':
+  Progress of 'mass trace detection':
+    Progress of 'mass trace detection':
+      Progress of 'mass trace detection':
+        Progress of 'mass trace detection':
+          Progress of 'mass trace detection':
+            Progress of 'mass trace detection':
+              Progress of 'mass trace detection':
+                Progress of 'mass trace detection':
+                  37.05                  6.86 %                                 2.45 %                %                                 6.87 %                                 Progress of 'mass trace detection':
+                    8.96 %                                   Progress of 'mass trace detection':
+                      Progress of 'mass trace detection':
+                        30.89 %                                       25.57 %                                       20.06 %                                       73.35 %                                       Progress of 'mass trace detection':
+                        -- done [took 8.10 s (CPU), 0.38 s (Wall)] -- 
+                        Progress of 'elution peak detection':
+                          Progress of 'mass trace detection':
+                            Progress of 'mass trace detection':
+                              Progress of 'mass trace detection':
+                                Progress of 'mass trace detection':
+                                  Progress of 'mass trace detection':
+                                    Progress of 'mass trace detection':
+                                      Progress of 'mass trace detection':
+                                        Progress of 'mass trace detection':
+                                          Progress of 'mass trace detection':
+                                            Progress of 'mass trace detection':
+                                              Progress of 'mass trace detection':
+                                              -- done [took 16.56 s (CPU), 0.76 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 19.10 s (CPU), 0.87 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 24.68 s (CPU), 1.11 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                                                                                                                                                                16.09 %                                                               86.24 %                                                               11.50 %                                                               36.39 %                                                               66.82 %               62.22 %               24.27 %                                                               14.58 %                                                               31.52 %                                                               46.11 %               15.63 %                                                               42.55 %                                                               16.12 %                                                               25.12 %                                                               20.21 %                                                               19.88 %                                                               21.89 %                                                               47.19 %                                                               61.81 %                                                               21.41 %                                                             -- done [took 45.33 s (CPU), 2.11 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                                                                                                                45.56 %               62.6649.85 %                %                                                               40.21 %                                                               35.48 %                                                               55.70 %                                                               70.02 %                                                               66.32 %                                                               37.96 %                                                               86.43 %                                                               83.28 %                                                               37.09 %                                                               29.71 %                                                               33.45 %                                                               31.97 %                                                             -- done [took 53.71 s (CPU), 2.57 s (Wall)] -- 
+                                              33.20 %                                                             Progress of 'elution peak detection':
+                                                30.13 %                                                             -- done [took 53.70 s (CPU), 2.58 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                89.96 %                                                             -- done [took 57.81 s (CPU), 2.78 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                74.41 %                                                               46.06 %                                                               49.38 %                                                               48.23 %                                                               49.24 %                                                               90.57 %                                                               45.03 %                                                               70.06 %                                                             -- done [took 01:07 m (CPU), 3.18 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                75.31 %                                                               66.30 %                                                               66.91 %                                                               67.39 %                                                               64.88 %                                                             -- done [took 01:17 m (CPU), 3.64 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                59.81 %                                                               60.66 %                                                               57.73 %                                                             -- done [took 01:23 m (CPU), 3.90 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                                                                93.72                                                92.60 %                %               78.59                                                64.72 %                                                               82.93 %                %                                                               70.12 %                                                               61.17 %                                                               59.23 %                                                               51.40 %                                                               54.54 %                                                               54.61 %                                                               51.67 %                                                               53.33 %                                                             -- done [took 01:43 m (CPU), 4.72 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 01:43 m (CPU), 4.74 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                                                                                                                73.28 %               75.31                                                82.62 %               75.21 %                                                               73.40 %                                                               68.36 %                %                                                               96.17 %                                                             -- done [took 01:54 m (CPU), 5.21 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                94.31 %                                                             -- done [took 01:59 m (CPU), 5.42 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                88.25 %                                                               91.18 %                                                               87.73 %                                                               85.07 %                                                             -- done [took 02:14 m (CPU), 6.08 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 02:21 m (CPU), 6.36 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                                85.54 %                                                               80.54 %                                                               78.00 %                                                             -- done [took 02:24 m (CPU), 6.52 s (Wall)] -- 
+                                              80.33 %                                                             78.55 %                                                             Progress of 'elution peak detection':
+                                                79.50 %                                                             -- done [took 02:32 m (CPU), 6.86 s (Wall)] -- 
+                                                                                                                                          93.06 %               81.75                                              86.52 %                                                             85.80 %                                                             83.74 %                %               83.67 %                                                             Progress of 'assembling mass traces to features':
+                                              -- done [took 02:38 m (CPU), 7.08 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 02:43 m (CPU), 7.31 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 02:44 m (CPU), 7.33 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 02:46 m (CPU), 7.42 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 02:45 m (CPU), 7.35 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 02:52 m (CPU), 7.68 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 04:06 m (CPU), 10.75 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 05:51 m (CPU), 15.09 s (Wall)] -- 
+                                            -- done [took 05:51 m (CPU), 15.09 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 07:22 m (CPU), 18.73 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 08:53 m (CPU), 22.40 s (Wall)] -- 
+                                            -- done [took 09:18 m (CPU), 23.45 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 09:57 m (CPU), 25.07 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 12:11 m (CPU), 30.59 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 12:46 m (CPU), 32.02 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 13:44 m (CPU), 34.47 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 14:53 m (CPU), 37.34 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 15:58 m (CPU), 40.08 s (Wall)] -- 
+                                            -- done [took 15:54 m (CPU), 39.89 s (Wall)] -- 
+                                          -- done [took 16:31 m (CPU), 41.42 s (Wall)] -- 
+                                          Progress of 'assembling mass traces to features':
+                                            Progress of 'assembling mass traces to features':
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 18:48 m (CPU), 47.12 s (Wall)] -- 
+                                            -- done [took 19:02 m (CPU), 47.68 s (Wall)] -- 
+                                          -- done [took 19:19 m (CPU), 48.38 s (Wall)] -- 
+FFMetabo: 198898 traces -> 195186 features
+                                          Progress of 'assembling mass traces to features':
+MS2 FeatureFinderPeptide: 195186 features -> 195186 monoisotopic fragment traces
+                                            Progress of 'mass trace detection':
+                                              76.93 %                                                           -- done [took 3.70 s (CPU), 0.15 s (Wall)] -- 
+                                            Progress of 'elution peak detection':
+                                            -- done [took 20:16 m (CPU), 50.77 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                            -- done [took 58.12 s (CPU), 2.42 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                            -- done [took 20:52 m (CPU), 52.24 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 23:10 m (CPU), 58.01 s (Wall)] -- 
+                                            -- done [took 23:17 m (CPU), 58.29 s (Wall)] -- 
+                                          -- done [took 23:41 m (CPU), 59.32 s (Wall)] -- 
+                                        -- done [took 23:39 m (CPU), 59.20 s (Wall)] -- 
+                                      -- done [took 24:20 m (CPU), 01:00 m (Wall)] -- 
+                                      Progress of 'assembling mass traces to features':
+                                        Progress of 'assembling mass traces to features':
+                                          Progress of 'assembling mass traces to features':
+                                            Progress of 'assembling mass traces to features':
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 01:48:33 h (CPU), 04:31 m (Wall)] -- 
+FFMetabo: 313144 traces -> 305681 features
+MS2 FeatureFinderPeptide: 305681 features -> 305681 monoisotopic fragment traces
+                                              Progress of 'mass trace detection':
+                                                53.08 %                                                             -- done [took 5.11 s (CPU), 0.21 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 01:31:44 h (CPU), 03:49 m (Wall)] -- 
+FFMetabo: 81625 traces -> 12593 features
+                                              -- done [took 01:24 m (CPU), 3.53 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+                                              -- done [took 01:55:33 h (CPU), 04:48 m (Wall)] -- 
+FFMetabo: 434167 traces -> 418569 features
+MS2 FeatureFinderPeptide: 418569 features -> 418569 monoisotopic fragment traces
+                                              Progress of 'mass trace detection':
+                                                96.65 %                                                             -- done [took 7.93 s (CPU), 0.33 s (Wall)] -- 
+                                              Progress of 'elution peak detection':
+                                              -- done [took 01:53 m (CPU), 4.72 s (Wall)] -- 
+                                              Progress of 'assembling mass traces to features':
+Filtered 179991 fragments that were assigned to more than 50 precursors (kept top 50 by combined score)
+Assigned 194791 (out of 195186) MS2 fragments to 12590 (out of 12593) precursors
+Created 12222 pseudo spectra with more than 30 fragment ions.
+Processed window 1/24 (m/z: 975-1000)
+                                            -- done [took 02:22:48 h (CPU), 05:59 m (Wall)] -- 
+FFMetabo: 458485 traces -> 439189 features
+MS2 FeatureFinderPeptide: 439189 features -> 439189 monoisotopic fragment traces
+                                            Progress of 'mass trace detection':
+                                            -- done [took 7.75 s (CPU), 0.34 s (Wall)] -- 
+                                            Progress of 'elution peak detection':
+                                            -- done [took 01:54 m (CPU), 4.98 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                            -- done [took 03:24:06 h (CPU), 08:39 m (Wall)] -- 
+FFMetabo: 546537 traces -> 525079 features
+MS2 FeatureFinderPeptide: 525079 features -> 525079 monoisotopic fragment traces
+                                            Progress of 'mass trace detection':
+                                              99.72 %                                                           -- done [took 7.13 s (CPU), 0.31 s (Wall)] -- 
+                                            Progress of 'elution peak detection':
+                                            -- done [took 02:02 m (CPU), 5.31 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                            -- done [took 04:42:32 h (CPU), 12:04 m (Wall)] -- 
+FFMetabo: 669967 traces -> 633539 features
+MS2 FeatureFinderPeptide: 633539 features -> 633539 monoisotopic fragment traces
+                                            Progress of 'mass trace detection':
+                                            -- done [took 9.57 s (CPU), 0.42 s (Wall)] -- 
+                                            Progress of 'elution peak detection':
+                                            -- done [took 04:46:47 h (CPU), 12:15 m (Wall)] -- 
+                                          -- done [took 02:18 m (CPU), 6.04 s (Wall)] -- 
+                                          Progress of 'assembling mass traces to features':
+FFMetabo: 682553 traces -> 650814 features
+MS2 FeatureFinderPeptide: 650814 features -> 650814 monoisotopic fragment traces
+                                            Progress of 'mass trace detection':
+                                            -- done [took 04:49:43 h (CPU), 12:22 m (Wall)] -- 
+                                            92.99 %                                                         -- done [took 9.95 s (CPU), 0.43 s (Wall)] -- 
+                                          Progress of 'elution peak detection':
+FFMetabo: 737648 traces -> 697823 features
+                                          -- done [took 02:19 m (CPU), 6.06 s (Wall)] -- 
+                                          Progress of 'assembling mass traces to features':
+MS2 FeatureFinderPeptide: 697823 features -> 697823 monoisotopic fragment traces
+                                            Progress of 'mass trace detection':
+                                            -- done [took 10.38 s (CPU), 0.45 s (Wall)] -- 
+                                            Progress of 'elution peak detection':
+                                            -- done [took 02:28 m (CPU), 6.47 s (Wall)] -- 
+                                            Progress of 'assembling mass traces to features':
+                                            -- done [took 03:38:27 h (CPU), 09:28 m (Wall)] -- 
+FFMetabo: 118569 traces -> 16074 features
+Filtered 287590 fragments that were assigned to more than 50 precursors (kept top 50 by combined score)
+Assigned 304999 (out of 305681) MS2 fragments to 16060 (out of 16074) precursors
+Created 15769 pseudo spectra with more than 30 fragment ions.
+Processed window 2/24 (m/z: 950-975)
+                                          -- done [took 06:01:11 h (CPU), 16:00 m (Wall)] -- 
+FFMetabo: 161485 traces -> 27729 features
+                                          -- done [took 08:27:14 h (CPU), 22:09 m (Wall)] -- 
+FFMetabo: 905058 traces -> 857964 features
+MS2 FeatureFinderPeptide: 857964 features -> 857964 monoisotopic fragment traces
+                                        -- done [took 06:39:24 h (CPU), 17:40 m (Wall)] -- 
+                                        Progress of 'mass trace detection':
+FFMetabo: 153686 traces -> 21452 features
+                                        -- done [took 12.03 s (CPU), 0.55 s (Wall)] -- 
+                                        Progress of 'elution peak detection':
+                                          -- done [took 02:44 m (CPU), 7.46 s (Wall)] -- 
+                                          Progress of 'assembling mass traces to features':
+Filtered 404939 fragments that were assigned to more than 50 precursors (kept top 50 by combined score)
+Assigned 417487 (out of 418569) MS2 fragments to 21444 (out of 21452) precursors
+Created 21213 pseudo spectra with more than 30 fragment ions.
+Processed window 3/24 (m/z: 925-950)
+                                        -- done [took 09:35:25 h (CPU), 25:17 m (Wall)] -- 
+FFMetabo: 954004 traces -> 895466 features
+MS2 FeatureFinderPeptide: 895466 features -> 895466 monoisotopic fragment traces
+                                      Progress of 'mass trace detection':
+                                        58.19 %                                                     -- done [took 11.44 s (CPU), 0.54 s (Wall)] -- 
+                                      Progress of 'elution peak detection':
+                                      -- done [took 02:35 m (CPU), 7.41 s (Wall)] -- 
+                                      Progress of 'assembling mass traces to features':
+Filtered 430766 fragments that were assigned to more than 50 precursors (kept top 50 by combined score)
+Assigned 439101 (out of 439189) MS2 fragments to 27723 (out of 27729) precursors
+Created 27457 pseudo spectra with more than 30 fragment ions.
+Processed window 4/24 (m/z: 400-425)
+                                      -- done [took 10:49:18 h (CPU), 28:57 m (Wall)] -- 
+FFMetabo: 1026415 traces -> 956045 features
+MS2 FeatureFinderPeptide: 956045 features -> 956045 monoisotopic fragment traces
+                                      Progress of 'mass trace detection':
+                                      -- done [took 8.92 s (CPU), 0.45 s (Wall)] -- 
+                                      Progress of 'elution peak detection':
+                                      -- done [took 01:53 m (CPU), 5.67 s (Wall)] -- 
+                                      Progress of 'assembling mass traces to features':
+                                      -- done [took 08:23:41 h (CPU), 23:12 m (Wall)] -- 
+FFMetabo: 178141 traces -> 24906 features
+                                      -- done [took 12:10:30 h (CPU), 33:01 m (Wall)] -- 
+FFMetabo: 1079695 traces -> 1017442 features
+MS2 FeatureFinderPeptide: 1017442 features -> 1017442 monoisotopic fragment traces
+                                      Progress of 'mass trace detection':
+                                        71.30 %                                                     -- done [took 11.89 s (CPU), 0.59 s (Wall)] -- 
+                                      Progress of 'elution peak detection':
+                                      -- done [took 02:38 m (CPU), 7.92 s (Wall)] -- 
+                                      Progress of 'assembling mass traces to features':
+                                      -- done [took 12:35:38 h (CPU), 34:17 m (Wall)] -- 
+FFMetabo: 1152632 traces -> 1071641 features
+MS2 FeatureFinderPeptide: 1071641 features -> 1071641 monoisotopic fragment traces
+                                      Progress of 'mass trace detection':
+                                      -- done [took 9.10 s (CPU), 0.46 s (Wall)] -- 
+                                      Progress of 'elution peak detection':
+                                      -- done [took 02:04 m (CPU), 6.24 s (Wall)] -- 
+                                      Progress of 'assembling mass traces to features':
+Filtered 513675 fragments that were assigned to more than 50 precursors (kept top 50 by combined score)
+Assigned 524764 (out of 525079) MS2 fragments to 24899 (out of 24906) precursors
+Created 24702 pseudo spectra with more than 30 fragment ions.
+Processed window 5/24 (m/z: 900-925)
+                                    -- done [took 09:11:44 h (CPU), 26:16 m (Wall)] -- 
+FFMetabo: 200142 traces -> 34696 features
+                                    -- done [took 14:05:48 h (CPU), 38:59 m (Wall)] -- 
+FFMetabo: 1220849 traces -> 1130394 features
+                                  -- done [took 14:09:54 h (CPU), 39:12 m (Wall)] -- 
+MS2 FeatureFinderPeptide: 1130394 features -> 1130394 monoisotopic fragment traces
+                                  Progress of 'mass trace detection':
+                                  -- done [took 9.43 s (CPU), 0.50 s (Wall)] -- 
+                                  Progress of 'elution peak detection':
+FFMetabo: 1186033 traces -> 1106849 features
+                                  -- done [took 02:07 m (CPU), 6.70 s (Wall)] -- 
+                                  Progress of 'assembling mass traces to features':
+MS2 FeatureFinderPeptide: 1106849 features -> 1106849 monoisotopic fragment traces
+                                    Progress of 'mass trace detection':
+                                    -- done [took 10.93 s (CPU), 0.58 s (Wall)] -- 
+                                    Progress of 'elution peak detection':
+                                    -- done [took 02:38 m (CPU), 8.34 s (Wall)] -- 
+                                    Progress of 'assembling mass traces to features':
