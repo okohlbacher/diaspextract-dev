@@ -43,8 +43,8 @@ The registry is read with a loader that refuses duplicate keys (PyYAML's `safe_l
 without a word), and no two samples of a plan may share a raw path or a pin (G-V01).
 
 A plan is a top-level section (`corpus_v3`, and the proof plans `corpus_v3_selftest`,
-`corpus_v3_selftest_r2`, `corpus_v3_selftest_v120`, `corpus_v3_selftest_v130`; the extended plan `dwv_stage1`)
-with exactly these keys, plus the optional `cells` and `entrapment` of an extended plan:
+`corpus_v3_selftest_r2`, `corpus_v3_selftest_v120`, `corpus_v3_selftest_v130`; the extended plans `dwv_stage1` and
+`dwv_pxd029836`) with exactly these keys, plus the optional `cells`, `entrapment` and `engines` of an extended plan:
 
 | key | meaning |
 |---|---|
@@ -61,6 +61,7 @@ with exactly these keys, plus the optional `cells` and `entrapment` of an extend
 | `queues` | `{node: {samples: [...], search_workers: N}}`; a sample may be in one queue only |
 | `cells` (optional) | `{name: {kind: dwv, arm, args: [...], wall_cap_h, differs_from?}}`: extra extractors, see below |
 | `entrapment` (optional) | `true`: a third search per output; `search_db_sha256` then also pins `entrap_fasta` |
+| `engines` (optional) | a non-empty list of `sage`/`msfragger` in that order, e.g. `[sage]`: only these searches run (default both); makes the plan extended |
 
 ---
 
@@ -198,7 +199,7 @@ triggered by `--selftest`, which fails if any id never fires.
 
 | id | level | refuses | failure it prevents |
 |---|---|---|---|
-| G-V01 | launch | unknown plan key, missing sample field or pin, sample in two queues, unknown sample/node, duplicate YAML key, two samples sharing a raw path or pin, sample count != `n_samples`, malformed `search_db_sha256` | a typo that parses and silently drops or duplicates a file |
+| G-V01 | launch | unknown plan key, missing sample field or pin, sample in two queues, unknown sample/node, duplicate YAML key, two samples sharing a raw path or pin, sample count != `n_samples`, malformed `search_db_sha256`; `engines` not a non-empty list of `sage`/`msfragger` in that order without repeats | a typo that parses and silently drops or duplicates a file; an engine name that silently runs nothing |
 | G-V02 | cell | raw or staged copy differs from the pin (tdf sizes, acquisition time, serial); the raw's acquisition length differs from `acq_min` | a row labelled with the wrong acquisition (FAILURE 1 of bench.py); a mistyped `acq min` in the table |
 | G-V03 | queue | env.sh missing/failing; SPX_BIN unset, not executable, or outside the arm directory; env.sh itself exporting a stripped variable (probe, allocator, OpenMP, JVM options); provenance missing or its `binary_sha256` differing; no label from `--help`; a library unresolved, or resolved outside the arm, `/ceph` and the system library directories | a dev build, a probe knob, a tcmalloc preload or a node-local OpenMS build tree measured as "the release" (critique C7, F7) |
 | G-V04 | queue | SPX_BIN, `lib/**`, a resolved library, the jar, `ext/bruker/` or the JDK changing across an arm | republish under a running chain (SIGBUS, silent empty run); a conda or JDK update between two arms |
@@ -210,7 +211,7 @@ triggered by `--selftest`, which fails if any id never fires.
 | G-V10 | cell | patch count != spectra; fix without `done:`; Sage without `finished in`, or searching < 50% (or > 100%) of the spectra; MSFragger without `TOTAL TIME`, or `Scans` != spectra; exit != 0; TSV missing, header-only or lacking columns; 0 peptides | the silent `Sage: 0` of unpatched diaTracer output; `Scans = 0` MSFragger runs; a partial read that lowers one tool's count |
 | G-V11 | cell | (resume) records of another build identity, JDK feature version, measurement code, thread count, pin, raw or pair_run; extractor output changed since its pair | skipping a run because an old mzML exists; a table mixing two verification or counting rules after a mid-run harness fix |
 | G-V12 | queue | run-local tool copy differs from its source (tools changed between launches); a database differs from the plan pin (preflight, queue start) or changed during the run | cells of one table searched with different configs or databases, found only when the table refuses after the run |
-| G-V13 | table | more than one build, JDK feature version, thread count, measurement code or search setup across records (or ok records without measurement hashes); pair arms on two hosts; ok record with count, RSS or peptides <= 0; record pin or raw differs from the registry | a table mixing builds, rules, nodes or corrupted records |
+| G-V13 | table | more than one build, JDK feature version, thread count, measurement code or search setup across records (or ok records without measurement hashes); pair arms on two hosts; ok record with count, RSS or peptides <= 0; record pin or raw differs from the registry; an ok search record of an engine (or the entrapment search) the plan does not run | a table mixing builds, rules, nodes or corrupted records; a plan whose `engines`/`entrapment` changed after the run |
 | G-V14 | queue/collect/purge | staged copy not deleted; collect or purge while the lock is held; destination not a `corpus_v3*` results directory; a collected path still group/other-accessible | patient-derived data lingering, or readable on ceph; writing into a published arm |
 | G-V15 | queue/launch | root under `/home`; `jnatmp` not writable; MemAvailable or `/proc` unreadable; python < 3.9; `TIME` not GNU `time -v`; no `java`; JDK feature versions differing across nodes (`preflight`) | the quota-killed "12 h JNA trap"; unrecorded memory state; a queue that crashes after 20 h without a marker |
 | G-V16 | cell | an extra cell's exit != 0 or signal; its wall cap passed or MemAvailable under 5% of MemTotal in 3 consecutive samples (the tool's session is killed); time log unparseable; `pseudo_spectra.mzML` missing, stale or unterminated; count <= 0; `Wrote N pseudo spectra` missing or different; the `Done. Output` finalisation line missing. A crash inside a cell fails that cell (`CRASH`), never the group | a diaWeaver run of unknown length holding a shared node for a day or pushing it into OOM; an output from before the final RT sort and rewrite accepted; one neighbour's memory dip or one parse error costing the other cell |
@@ -338,6 +339,20 @@ terms before/after, both digests, no-op result); totals per arm over complete sa
 differ from the plan, or more than one cell label or cell build. An ok search record without its charge split (a
 runner stopped between the two) renders as `pending`, never as a number.
 
+**Engines** (optional plan key `engines`, 2026-09-17). `engines: [sage]` runs Sage only (`[msfragger]` MSFragger
+only; the list must name `sage`/`msfragger` in that order without repeats, G-V01; the entrapment search keeps its own
+key). The key makes a plan extended (the plain queue always runs both engines), so a Sage-only plan without cells runs
+the group runner with the pair alone. It changes no measured function: the pair, search and score hashes stay
+`3215b73e`/`064af71b`/`4fe0a1ce` and the cells hash stays `c586f871` (selftest pins both, `CELLS_MEASURE_DWV`), so
+`dwv_stage1` records stay valid under this harness. What it changes: which search cells exist (`q_engines`: status
+columns, pending searches, when an output is deleted, resume); the MSFragger-first serial phase of phase 2 runs only
+when the plan runs MSFragger (a Sage-only plan searches with `search_workers` from the start); `dry-run` prints only
+the engines' commands and names the restriction; the table names it in its legend, prints `-` in every column of an
+engine the plan does not run (main rows, per-charge rows, per-arm totals), and refuses ok search records of such an
+engine (G-V13); a group of a plan without cells (`cells: {}`) matches the plan's absent key. The MSFragger jar, params
+and `msfragger_db` pin stay required and are copied and checked as for every
+plan, and never run.
+
 **Not covered.** `guardtest` refuses extended plans (it proves the pair). The plan's optional runs (MSFragger on
 the unfixed file, determinism repeats, dwv-author) are not implemented. Spectrum statistics exist for the cells
 only. Whether diaTracer and DIAspeXtract read a `.d` holding only the two tdf files exactly as a full `.d` is taken
@@ -374,6 +389,32 @@ python3 harness/corpus.py purge   --plan dwv_stage1 --node data
 ```
 If `preflight` shows `data` busy or loaded above 24 at launch time, rename the queue key to `ibminode05` in
 samples.yaml and use `--node ibminode05` throughout. The group can take up to ~26 h (two 12-h caps plus the pair).
+
+### PXD029836 three-arm benchmark: plan `dwv_pxd029836` (local, in the untracked samples.yaml)
+
+User request 2026-09-16: diaTracer, DIAspeXtract and diaWeaver on the three PXD029836 files, searched with Sage, with
+runtime and RSS. Samples `pxd_1418`, `pxd_1420`, `pxd_1422`: the public 200-ng P1 (SDC) HeLa triplicate of Demichev et
+al. 2022 (timsTOF Pro 2, 120.0-min acquisition, 16 window groups of 2 x 26 Th, m/z 100-1700, 1/K0 0.6-1.6; tdf_bin
+6.39-6.44 GB; about 0.82e9 MS1 and 1.49e9 MS2 peaks per file), from `/ceph/ibmi/abi/data/PXD029836/raw_d/` (SHA-1
+checked against PRIDE; the two tdf files' sha256 equal the laptop copy), scheme `PXD029836 HeLa 200ng SDC`, pins read
+with `node-pin` on ibminode05. Node `ibminode05` (128 cores, 995 GB; stage 1 holds `data`), `threads: 100`,
+`load_wait_min: 20`, `search_workers: 1`, `engines: [sage]`, no entrapment, results
+`/ceph/ibmi/abi/oliver/spextract/corpus_v3_dwv_pxd029836`, report `harness/dwv-pxd029836.md`. Arms: `dt` (diaTracer
+2.2.1, the corpus-v3 invocation), `spx` (arm `v1.3.0`) and one cell `dwv_default` (arm `diaweaver-7ed1169`, no args,
+`wall_cap_h: 16`). Tools and database pins as `corpus_v3`, plus `digest`. Worst case about 49 h: three 16-h caps plus
+three pairs (diaTracer about 5 min and up to 400 GB heap on a 120-min HeLa file, DIAspeXtract about 5 min) and nine
+Sage searches. diaWeaver's wall is set by its densest window (stage-1 smoke: 5 of 24 windows after 45 min on an
+11.5-min file), so a cell may reach its cap; a group with a failed cell re-runs whole on the next launch.
+
+```
+python3 harness/corpus.py preflight --plan dwv_pxd029836 --node ibminode05   # PREFLIGHT_OK; cell label and shas
+python3 harness/corpus.py dry-run   --plan dwv_pxd029836 --node ibminode05
+python3 harness/corpus.py launch    --plan dwv_pxd029836 --node ibminode05   # LAUNCH_OK
+until python3 harness/corpus.py status --plan dwv_pxd029836 --node ibminode05 | grep -q "lock free"; do sleep 900; done
+python3 harness/corpus.py collect --plan dwv_pxd029836 --node ibminode05
+python3 harness/corpus.py table   --plan dwv_pxd029836 --source ceph
+python3 harness/corpus.py purge   --plan dwv_pxd029836 --node ibminode05
+```
 
 ## Reading the table
 
@@ -515,6 +556,28 @@ hashes unchanged, plain dry-runs byte-identical, `preflight --plan dwv_stage1` P
 The smoke also showed that diaWeaver processes all DIA windows at once and that its densest window sets the wall
 time: 5 of 24 windows were done after 45 min at 32 threads on an 11.5-min file. Dataset D may reach the 12-h cap;
 read `cells_failed` before relaunching, because a group re-runs whole.
+
+### Engines option (2026-09-17)
+
+The plan key `engines` (above) with G-V01 and G-V13 checks. Selftest **284/284** (258 before): seven G-V01 refusals
+(a string, an empty list, an unknown engine, a repeat, the wrong order, `entrap`, null) and three accepted lists; the
+queue sees Sage (and the entrapment search) only; engines alone make a plan extended and add nothing else; a
+Sage-only queue with one cell and no entrapment (two samples) runs Sage for every arm with its charge split, never
+MSFragger (no run, record, fix step or directory), runs its searches concurrently, deletes every output and resumes
+without re-running anything; its table is complete with Sage numbers and ratios and `-` for MSFragger in the main,
+per-charge and per-arm rows, names the restriction and has no entrapment section; the table refuses an MSFragger or an
+entrapment record for that plan; its dry-run prints no MSFragger or fix command; a Sage-only plan without cells runs
+the pair and Sage only and its table renders; the cells hash equals the one `dwv_stage1` was launched with
+(`c586f871`). Found while reading the change back: G-V13 compared a group record's `cells: {}` with the plan's absent
+`cells` (None) unnormalised, so it would have refused every table of an extended plan without cells (also an
+entrapment-only plan, before this change); both now mean no cells, and a plan that names a cell still refuses such
+records. Mutation proof (scratchpad `mutate_engines.py`): 13 of 13 mutations killed, each new check broken alone in a
+copy of the final corpus.py (sha256 `d944dff1`) fails that copy's selftest on exactly that check; the unmutated
+control passes 284/284. Differential
+proof: the 0d8532d harness and this one render byte-identical tables (plain; extended with two cells and entrapment;
+one cell with entrapment off; a partial extended table with pending rows) and dry-runs from the same records, and
+`dry-run --local` of `corpus_v3` (spock, data, ibminode05), `corpus_v3_selftest_v130` and `dwv_stage1` is
+byte-identical.
 
 ## Guard test on a real node (`corpus.py guardtest --node data`)
 

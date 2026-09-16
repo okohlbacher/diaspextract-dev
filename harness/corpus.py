@@ -68,6 +68,9 @@ Extended plans (optional plan keys `cells`, `entrapment`; harness/CORPUS.md "Ext
         does not add up to the cell's count, an entrapment FASTA without ENTRAP_ peptides, 0 target peptides
         in the entrapment search
   (G-V03 for cells also: OPENMS_DATA_PATH not the arm's data tree, the provenance's data tree hash differs)
+  Optional plan key `engines` (a subset of sage/msfragger, e.g. a Sage-only plan; it makes a plan extended):
+  G-V01 refuses a value that is not a non-empty list of those names in that order without repeats; G-V13 refuses
+  a table whose ok search records name an engine (or the entrapment search) the plan does not run.
 """
 from __future__ import annotations
 
@@ -111,8 +114,9 @@ BUSY_FIXED = [r"diaTracer-2\.2\.[1]\.jar", r"MSFragger-4\.4\.[1]\.jar", r"/sag[e
 
 # ---- Extended plans: optional plan keys `cells` (extra extractors run after the reference pair, on the same staged
 # copy) and `entrapment` (a third search per output). A plan without either is the two-extractor pair above: the same
-# functions run and measure it, and its three measurement hashes do not move (selftest pins them).
-OPTIONAL_PLAN_KEYS = {"cells", "entrapment"}
+# functions run and measure it, and its three measurement hashes do not move (selftest pins them). `engines` (a subset
+# of ENGINES) restricts which searches run; it changes no measured function, only which search cells exist.
+OPTIONAL_PLAN_KEYS = {"cells", "entrapment", "engines"}
 CELL_KEYS = {"kind", "arm", "args", "wall_cap_h"}                 # plus optional differs_from
 CELL_NAME = r"[a-z][a-z0-9_]{0,23}"
 # One kind so far: diaWeaver (alhigaylan/diaWeaver, branch diaWeaver-2). Its env.sh exports `bin` and points
@@ -496,7 +500,8 @@ def cells(q: dict) -> dict:
 
 
 def extended(q: dict) -> bool:
-    return bool(cells(q) or q.get("entrapment"))
+    """`engines` makes a plan extended too: the plain queue (run_pair, phase 2) always runs both engines."""
+    return bool(cells(q) or q.get("entrapment") or "engines" in q)
 
 
 def q_tools(q: dict) -> tuple:
@@ -504,7 +509,7 @@ def q_tools(q: dict) -> tuple:
 
 
 def q_engines(q: dict) -> tuple:
-    return ENGINES + (("entrap",) if q.get("entrapment") else ())
+    return tuple(q.get("engines") or ENGINES) + (("entrap",) if q.get("entrapment") else ())
 
 
 def cell_env(q: dict, name: str) -> dict:
@@ -1997,7 +2002,7 @@ def _node_run(q: dict, root: Path) -> int:
                  for t in TOOLS if any(pending(s, t, e) for e in ENGINES)]
     rest, msf_ok = [], False
     for u in units:      # alone until one MSFragger search succeeded: a failed first one built no .pepindex (F8)
-        if not msf_ok and pending(u[0], u[1], "msfragger"):
+        if not msf_ok and "msfragger" in engines and pending(u[0], u[1], "msfragger"):
             failed += unit(u)
             msf_ok = not pending(u[0], u[1], "msfragger")
         else:
@@ -2044,8 +2049,10 @@ def dry_run(q: dict) -> None:
           % (" ".join(p + "*" for p in STRIP_PREFIX), " ".join(sorted(STRIP_EXACT)), q["spx_root"], q["arm"], q["jnatmp"]))
     if extended(q):
         print("# extended plan: cells %s (each: the same env rules on <spx_root>/<cell arm>/env.sh), entrapment %s; "
-              "measurement hashes pair/search/score/cells" % (", ".join("%s=%s" % (n, c["arm"]) for n, c in cells(q).items())
-                                                               or "none", "on" if q.get("entrapment") else "off"))
+              "measurement hashes pair/search/score/cells%s" % (", ".join("%s=%s" % (n, c["arm"]) for n, c in cells(q).items())
+                                                                 or "none", "on" if q.get("entrapment") else "off",
+                                                                 "; engines %s only (plan `engines`)" % ", ".join(q["engines"])
+                                                                 if "engines" in q else ""))
     names = list(cells(q))
     for i, s in enumerate(q["samples"]):
         order = list(TOOLS) if i % 2 == 0 else list(reversed(TOOLS))
@@ -2098,13 +2105,15 @@ def dry_run(q: dict) -> None:
             mz = pdir / tool / {"spx": "pseudo.mzML", "dt": s["id"] + "_diatracer.mzML"}.get(tool, "reencoded.mzML")
             sd = pdir / "search" / ("%s_sage" % tool)
             inp = mz
-            if tool == "dt":
-                inp = sd / "patched.mzML"
-                print("(cd %s && %s)" % (sd, j(cmd_patch(tp, mz, inp, sd / "patch.time"))))
-            print("(cd %s && %s)" % (sd, j(cmd_sage(tp, inp, sd, sd / "engine.time"))))
+            if "sage" in q_engines(q):
+                if tool == "dt":
+                    inp = sd / "patched.mzML"
+                    print("(cd %s && %s)" % (sd, j(cmd_patch(tp, mz, inp, sd / "patch.time"))))
+                print("(cd %s && %s)" % (sd, j(cmd_sage(tp, inp, sd, sd / "engine.time"))))
             sd = pdir / "search" / ("%s_msfragger" % tool)
-            print("(cd %s && %s && ln -s fixed.mzML in.mzML && %s)"
-                  % (sd, j(cmd_fix(tp, mz, sd / "fixed.mzML", sd / "fix.time")), j(cmd_msf(tp, sd / "engine.time"))))
+            if "msfragger" in q_engines(q):
+                print("(cd %s && %s && ln -s fixed.mzML in.mzML && %s)"
+                      % (sd, j(cmd_fix(tp, mz, sd / "fixed.mzML", sd / "fix.time")), j(cmd_msf(tp, sd / "engine.time"))))
             if not extended(q):
                 print("rm -f %s   # only after both engines succeeded" % mz)
                 continue
@@ -2569,9 +2578,14 @@ def load_plan(name: str, reg_path=REG) -> tuple:
 
 def check_extended(name: str, plan: dict) -> None:
     """G-V01 for the optional keys: `entrapment` a boolean; `cells` a mapping of names to exactly CELL_KEYS (plus
-    differs_from naming another cell of the same kind). A cell name is a path component and a record key."""
+    differs_from naming another cell of the same kind). A cell name is a path component and a record key. `engines`
+    a non-empty list of ENGINES names in ENGINES order, without repeats (the entrapment search has its own key)."""
     if "entrapment" in plan and not isinstance(plan["entrapment"], bool):
         die("G-V01", "plan %s: entrapment must be true or false, not %r" % (name, plan["entrapment"]))
+    eng = plan.get("engines")
+    if "engines" in plan and (not isinstance(eng, list) or not eng or [e for e in ENGINES if e in eng] != eng):
+        die("G-V01", "plan %s: engines must be a non-empty list of %s in that order without repeats, not %r"
+            % (name, list(ENGINES), eng))
     if "cells" not in plan:
         return
     cs = plan["cells"]
@@ -2890,6 +2904,10 @@ def table_guards(okp: list, oks: list, reg: dict, plan: dict) -> None:
         die("G-V13", "search records used different engines, configs or FASTAs")
     if any(not (r.get("measure_sha256") or {}).get("search") for r in oks) or not one(r["measure_sha256"] for r in oks):
         die("G-V13", "search records run or counted by different harness code (or without measurement hashes)")
+    other = sorted({r["engine"] for r in oks} - set(q_engines(plan)))
+    if other:
+        die("G-V13", "search records of %s, which the plan does not run: its `engines`/`entrapment` changed after the run"
+            % other)
     for p in okp:
         arms = [a for a in p["arms"].values() if a.get("status", "ok") == "ok"]
         if {a["host"] for a in p["arms"].values() if "host" in a} != {p["node"]}:
@@ -2899,7 +2917,8 @@ def table_guards(okp: list, oks: list, reg: dict, plan: dict) -> None:
             die("G-V13", "pair %s: record pin or raw path differs from samples.yaml" % p["id"])
         if any(a["output"]["count"] <= 0 or a["peak_rss_kb"] <= 0 for a in arms):
             die("G-V13", "pair %s: ok record with a spectrum count or RSS <= 0" % p["id"])
-        if p.get("cells") != plan.get("cells") or bool(p.get("entrapment")) != bool(plan.get("entrapment")):
+        # a group of a plan without cells records `cells: {}`; the plan has no key (None): both mean no cells
+        if (p.get("cells") or {}) != (plan.get("cells") or {}) or bool(p.get("entrapment")) != bool(plan.get("entrapment")):
             die("G-V13", "pair %s: record cells or entrapment differ from the plan" % p["id"])
     for r in oks:
         if r.get("peptides", 0) <= 0:
@@ -3106,22 +3125,23 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
     for sid in ids:
         e, p = reg["samples"][sid], pairs.get(sid)
         S = {(t, g): search(sid, t, g) for t in tools for g in engines}
+        SG = lambda t_, g: S.get((t_, g), (None, "-"))          # an engine the plan does not run (`engines`): "-"
         A = {t: arm(sid, t) for t in tools}
         complete = all(A[t][0] for t in tools) and all(v[0] for v in S.values())
         for t in tools:
             a = A[t]
-            ratio = lambda g: "%.2f" % (S[t, g][0]["peptides"] / S["dt", g][0]["peptides"]) \
-                if t != "dt" and S[t, g][0] and S["dt", g][0] else "-"
-            swall = lambda g: fmt(S[t, g], lambda r: hms(r["steps"]["engine"]["wall_s"]))
+            ratio = lambda g: "%.2f" % (SG(t, g)[0]["peptides"] / SG("dt", g)[0]["peptides"]) \
+                if t != "dt" and SG(t, g)[0] and SG("dt", g)[0] else "-"
+            swall = lambda g: fmt(SG(t, g), lambda r: hms(r["steps"]["engine"]["wall_s"]))
             cores = lambda x: "%.1f" % (x["cpu"]["cpu_s"] / x["wall_s"]) if (x.get("cpu") or {}).get("cpu_s") is not None and x["wall_s"] > 0 else "-"
             main.append("| " + " | ".join([
                 str(e.get("label", sid)), "%.1f" % e["acq_min"], p["node"] if p else "-", names[t], flags(p, t) if p else "-",
                 fmt(a, lambda x: hms(x["wall_s"])), fmt(a, lambda x: "%.1f" % (x["peak_rss_kb"] / 1e6)), fmt(a, cores),
                 fmt(a, lambda x: num(x["output"]["count"])),
-                fmt(S[t, "sage"], lambda r: num(r["peptides"])), fmt(S[t, "sage"], lambda r: num(r.get("target_peptides"))),
-                ratio("sage"), fmt(S[t, "msfragger"], lambda r: num(r["peptides"])), ratio("msfragger"),
+                fmt(SG(t, "sage"), lambda r: num(r["peptides"])), fmt(SG(t, "sage"), lambda r: num(r.get("target_peptides"))),
+                ratio("sage"), fmt(SG(t, "msfragger"), lambda r: num(r["peptides"])), ratio("msfragger"),
                 swall("sage"), swall("msfragger")]) + " |")
-            bc = lambda g, z, k="peptides": fmt(S[t, g], lambda r: num(((r.get("by_charge") or {}).get(z) or {}).get(k)))
+            bc = lambda g, z, k="peptides": fmt(SG(t, g), lambda r: num(((r.get("by_charge") or {}).get(z) or {}).get(k)))
             charge.append("| " + " | ".join([str(e.get("label", sid)), names[t], bc("sage", "z1"), bc("sage", "z2p"),
                                              bc("sage", "z1", "target_peptides"), bc("sage", "z2p", "target_peptides"),
                                              bc("msfragger", "z1"), bc("msfragger", "z2p")]) + " |")
@@ -3155,16 +3175,18 @@ def render_cells_table(name, plan, reg, recs, source="scratch") -> tuple:
     summary = []
     tot = lambda f: sum(f(g) for g in full.values())
     ratio2 = lambda a, b: "%.2f" % (a / b) if b else "-"
+    # a total over an engine the plan does not run is None: num() and ratio2() print "-"
+    sm = lambda t_, g, f: tot(lambda x: f(x["search"][t_, g])) if g in engines else None
+    pep = lambda r: r["peptides"]
+    s_z2p = lambda r: r["by_charge"]["z2p"]["target_peptides"]
+    m_z2p = lambda r: r["by_charge"]["z2p"]["peptides"]
     for t in tools:
         if not full:
             break
-        sage, msf = tot(lambda g: g["search"][t, "sage"]["peptides"]), tot(lambda g: g["search"][t, "msfragger"]["peptides"])
-        s_z2 = tot(lambda g: g["search"][t, "sage"]["by_charge"]["z2p"]["target_peptides"])
-        m_z2 = tot(lambda g: g["search"][t, "msfragger"]["by_charge"]["z2p"]["peptides"])
-        d_s = tot(lambda g: g["search"]["dt", "sage"]["peptides"])
-        d_m = tot(lambda g: g["search"]["dt", "msfragger"]["peptides"])
-        d_sz2 = tot(lambda g: g["search"]["dt", "sage"]["by_charge"]["z2p"]["target_peptides"])
-        d_mz2 = tot(lambda g: g["search"]["dt", "msfragger"]["by_charge"]["z2p"]["peptides"])
+        sage, msf = sm(t, "sage", pep), sm(t, "msfragger", pep)
+        s_z2, m_z2 = sm(t, "sage", s_z2p), sm(t, "msfragger", m_z2p)
+        d_s, d_m = sm("dt", "sage", pep), sm("dt", "msfragger", pep)
+        d_sz2, d_mz2 = sm("dt", "sage", s_z2p), sm("dt", "msfragger", m_z2p)
         rows = [g["arms"][t] for g in full.values()]
         summary.append("| %s | %d | %d/%d | %s | %.1f | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             names[t], len(full), sum(g["flagged"] for g in full.values()), len(full), hms(sum(a["wall_s"] for a in rows)),
@@ -3218,7 +3240,7 @@ Generated %(now)s by `harness/corpus.py table` (plan `%(name)s`, records from %(
   prefix with decoy/target <= 1%%, targets. Ratios are arm / %(dtl)s.
 - **Per charge**: each counted peptide in the stratum of its best counted PSM (Sage: highest
   sage_discriminant_score; MSFragger: the best-hyperscore PSM of its key); z1 + z2p equals the count (checked).
-%(entrap_line)s- **Measurement code**: pair `%(mpair)s`, search `%(msearch)s`, peptide rule `%(mscore)s`, cells `%(mcells)s`.
+%(engines_line)s%(entrap_line)s- **Measurement code**: pair `%(mpair)s`, search `%(msearch)s`, peptide rule `%(mscore)s`, cells `%(mcells)s`.
 - `FAILED G-Vxx` = a guard refused the cell (never a zero); `pending` = no current record; `-` = no arm or search.
 
 | sample | acq min | node | arm | flags | wall | RSS GB | CPU cores | spectra | Sage | Sage target | Sage vs dT | MSFragger | MSFragger vs dT | Sage wall | MSFragger wall |
@@ -3235,6 +3257,9 @@ Generated %(now)s by `harness/corpus.py table` (plan `%(name)s`, records from %(
                        "z1 + z2p equals all (checked). Never quote the `all` row without the strata.\n"
                        % (Path(plan["tools"]["sage_entrap"]).name, sh(tsha.get("sage_entrap")), sh(tsha.get(ENTRAP_DB)),
                           sh(tsha.get("entrapment")))) if plan.get("entrapment") else "",
+       "engines_line": ("- **Engines**: this plan runs %s only (plan `engines`); the columns of an engine it does not run "
+                        "print `-` (its tools stay installed and pinned, never run).\n" % " and ".join(plan["engines"]))
+                       if "engines" in plan else "",
        "mpair": str(pm.get("pair"))[:12], "msearch": str(pm.get("search"))[:12], "mscore": str(pm.get("score"))[:12],
        "mcells": str(pm.get("cells"))[:12]}
     parts = [head + "\n".join(main) + "\n",
@@ -3280,6 +3305,9 @@ MEASURED_CELLS = (sorted(CELL_KINDS.items()), REENCODE, NUMPRESS_CV, NUMPRESS_LI
 # The two-extractor pair as of DIAspeXtract 1.3.0 (CORPUS.md). selftest asserts these: an edit to a measured function
 # must change them here on purpose, knowing that every record of a plain plan then re-runs.
 PAIR_MEASURE_1_3_0 = {"pair": "3215b73e62ae", "search": "064af71b2bfe", "score": "4fe0a1cecefb"}
+# The extended-plan code the reviewed harness (0d8532d) measured dwv_stage1 with; dwv_pxd029836 reuses it. Same rule:
+# an edit that moves it re-runs every group and search of an extended plan, so change it here on purpose only.
+CELLS_MEASURE_DWV = "c586f8716617"
 
 
 def measure_sha256(extended=False) -> dict:
@@ -3365,6 +3393,7 @@ else:
 FAKE_SAGE = FAKE_HEAD + r'''
 odir, mz = arg("-o"), sys.argv[-1]
 assert os.path.exists(mz), mz
+time.sleep(float(os.environ.get("FAKE_SAGE_SLEEP", "0")))     # lets concurrent searches overlap (search_overlaps)
 zero = hit("FAKE_SAGE_ZERO", mz)
 badz = hit("FAKE_SAGE_BADZ", mz)
 rows = "".join("%d\tPEPTIDE%d\tsp|P%d|X\t1\tf.mzML\t%d\t1\t1\t%s\t%s\t%.2f\n"
@@ -3779,6 +3808,8 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             {k: v[:12] for k, v in m0.items()} == PAIR_MEASURE_1_3_0, {k: v[:12] for k, v in m0.items()})
     C.check("COMPAT", "an extended plan adds a fourth hash (cells) and keeps the other three",
             set(mx) == {"pair", "search", "score", "cells"} and {k: mx[k] for k in m0} == m0)
+    C.check("COMPAT", "the cells measurement code is the dwv_stage1 code (CELLS_MEASURE_DWV; update on purpose only)",
+            mx["cells"][:12] == CELLS_MEASURE_DWV, mx["cells"][:12])
     plan_p = {k: q1[k] for k in PLAN_KEYS if k != "queues"}
     plan_p["queues"] = {"n1": {"samples": ["A"]}}
     qp = resolve_queue("pp", plan_p, {"samples": {s["id"]: s for s in q1["samples"]}}, "n1")
@@ -3806,7 +3837,7 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
 
     # ---- G-V01 extended plan validation
     xq = _xqueue(w, "AB", "x1", xt)
-    xplan = {k: xq[k] for k in (PLAN_KEYS | OPTIONAL_PLAN_KEYS) - {"queues"}}
+    xplan = {k: xq[k] for k in (PLAN_KEYS | OPTIONAL_PLAN_KEYS) - {"queues"} if k in xq}
     xplan["queues"] = {"n1": {"samples": ["A", "B"]}}
     samples = {s["id"]: {k: s[k] for k in SAMPLE_KEYS} for s in xq["samples"]}
 
@@ -3832,10 +3863,26 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             ("entrapment without its tools", lambda pl: pl["tools"].pop("sage_entrap"), "tools need exactly"),
             ("cells without the digest tool", lambda pl: pl["tools"].pop("digest"), "tools need exactly"),
             ("entrapment without an entrap_fasta pin", lambda pl: pl["search_db_sha256"].pop("entrap_fasta"), "search_db_sha256"),
-            ("empty cells", lambda pl: pl.update(cells={}), "non-empty")):
+            ("empty cells", lambda pl: pl.update(cells={}), "non-empty"),
+            ("engines: sage (a string, not a list)", lambda pl: pl.update(engines="sage"), "engines must be"),
+            ("engines: [] (no engine)", lambda pl: pl.update(engines=[]), "engines must be"),
+            ("engines naming an unknown engine", lambda pl: pl.update(engines=["sage", "comet"]), "engines must be"),
+            ("engines with a repeat", lambda pl: pl.update(engines=["sage", "sage"]), "engines must be"),
+            ("engines out of ENGINES order", lambda pl: pl.update(engines=["msfragger", "sage"]), "engines must be"),
+            ("engines naming the entrapment search", lambda pl: pl.update(engines=["sage", "entrap"]), "engines must be"),
+            ("engines: null", lambda pl: pl.update(engines=None), "engines must be")):
         pl = json.loads(json.dumps(xplan))
         mut(pl)
         C.abort("G-V01", "extended plan refused: %s" % what, lambda pl=pl: load_plan("xp", pf(pl)), frag)
+    for eng in (["sage"], ["msfragger"], ["sage", "msfragger"]):
+        C.ok("G-V01", "extended plan with engines %s loads" % eng, lambda eng=eng: load_plan("xp", pf(dict(xplan, engines=eng))))
+    qe = resolve_queue("xp", *load_plan("xp", pf(dict(xplan, engines=["sage"]))), "n1")
+    C.check("G-V01", "engines reach the queue: Sage and the entrapment search only", q_engines(qe) == ("sage", "entrap")
+            and extended(qe) and q_engines(dict(qe, engines=None)) == ENGINES + ("entrap",), q_engines(qe))
+    qpe = resolve_queue("pe", dict(plan_p, engines=["sage"]), {"samples": {s["id"]: s for s in q1["samples"]}}, "n1")
+    C.check("G-V01", "engines alone make a plan extended (the plain queue always runs both engines), nothing else added",
+            extended(qpe) and q_tools(qpe) == TOOLS and q_engines(qpe) == ("sage",) and plan_tool_keys(qpe) == TOOL_KEYS
+            and db_keys(qpe) == DB_KEYS and not cells(qpe))
     C.abort("G-V01", "guardtest refused for an extended plan", lambda: _guardtest(dict(xq, plan="x_selftest"), Path(xq["root"])),
             "two-extractor pair only")
 
@@ -4190,6 +4237,81 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     for what, junk in (("9 bytes", b"\0" * 9), ("a cut residual", vec[:-3])):
         C.abort("G-V17", "a corrupt numpress array is not decoded (%s)" % what, lambda junk=junk: _np_refuses(junk),
                 "undecodable")
+
+    # ---- plan key `engines`: a Sage-only plan with one cell and no entrapment (the dwv_pxd029836 shape)
+    so = _xqueue(w, "AB", "x7", xt, cells_={"dwv_default": DWV_CELLS["dwv_default"]})
+    so.pop("entrapment")
+    so.update(engines=["sage"], tools={k: v for k, v in so["tools"].items() if k not in ENTRAP_TOOL_KEYS},
+              search_db_sha256={k: v for k, v in so["search_db_sha256"].items() if k != ENTRAP_DB})
+    n_msf = len((w / "msf_times.log").read_text().splitlines())
+    os.environ["FAKE_SAGE_SLEEP"] = "0.4"
+    try:
+        rcs = node_run(so)
+    finally:
+        del os.environ["FAKE_SAGE_SLEEP"]
+    RS = _records(so)
+    ts = list(q_tools(so))
+    C.check("G-V10", "Sage-only plan: every arm searched by Sage and split by charge; no MSFragger run, record or fix step",
+            rcs == 0 and ts == ["dt", "spx", "dwv_default"]
+            and all(RS[s, "%s.sage" % t]["status"] == "ok" and "by_charge" in RS[s, "%s.sage" % t] for s in "AB" for t in ts)
+            and sorted(k[1] for k in RS if k[0] == "A") == ["dt.sage", "dwv_default.sage", "pair", "spx.sage"]
+            and len((w / "msf_times.log").read_text().splitlines()) == n_msf
+            and not list(Path(so["root"]).rglob("*_msfragger")) and not list(Path(so["root"]).rglob("*_entrap")),
+            (rcs, sorted(k[1] for k in RS)))
+    C.check("G-V10", "Sage-only plan: the searches run concurrently (search_workers 2): no MSFragger-first serial phase",
+            len(search_overlaps(list(RS.values()))) >= 2, sorted(search_overlaps(list(RS.values()))))
+    C.check("G-V14", "Sage-only plan: each output deleted once its only engine succeeded; no staged copy left",
+            not list(Path(so["root"]).rglob("*.mzML")) and not any((Path(so["root"]) / "stage").iterdir()))
+    starts = {k: r["started"] for k, r in RS.items()}
+    node_run(dict(so, nonce="sresume"))
+    C.check("G-V11", "Sage-only resume: groups and Sage searches verified and skipped (the outputs are gone)",
+            {k: r["started"] for k, r in _records(so).items()} == starts)
+    splan, sreg = _reg(so)
+    splan.update(cells=so["cells"], tools=so["tools"], engines=["sage"])
+    md, inc, tot = C.ok("G-V13", "Sage-only table renders", lambda: render_cells_table("s", splan, sreg, list(RS.values()))) \
+        or ("", -1, -1)
+    cols = lambda l: [c.strip() for c in l.strip().strip("|").split("|")]
+    sec = {x.split("\n", 1)[0]: x for x in md.split("\n## ")}
+    mrows = [cols(l) for l in md.split("\n## ")[0].splitlines() if l.startswith(("| A ", "| B "))]
+    crows = [cols(l) for l in sec.get("Peptides by precursor charge", "").splitlines() if l.startswith(("| A ", "| B "))]
+    srows = [cols(l) for l in sec.get("Per arm, complete samples only", "").splitlines()[4:] if l.startswith("| ")]
+    C.check("G-V13", "Sage-only table: 2/2 complete; 6 arm rows with Sage numbers and ratios, MSFragger `-`; per-charge "
+                     "and per-arm rows likewise; the engines line; no entrapment section",
+            inc == 0 and tot == 2 and len(mrows) == 6 and len(crows) == 6 and len(srows) == 3
+            and all(r[9] not in ("-", "0") and (r[11] == "-") == (r[3] == "diaTracer-2.2.1")
+                    and r[12] == r[13] == r[15] == "-" and r[14] != "-" for r in mrows)
+            and all(r[2] != "-" and r[6] == r[7] == "-" for r in crows)
+            and all(r[9] == r[10] == r[11] == r[12] == "-" and r[7] != "-" for r in srows)
+            and "this plan runs sage only" in md and "## Entrapment" not in md,
+            (inc, tot, mrows[:1], crows[:1], srows[:1]))
+    for what, eng in (("an MSFragger record (engines narrowed after the run)", "msfragger"),
+                      ("an entrapment record of a plan without entrapment", "entrap")):
+        more = json.loads(json.dumps(list(RS.values()))) + [dict(json.loads(json.dumps(RS["A", "spx.sage"])), engine=eng)]
+        C.abort("G-V13", "Sage-only table refuses %s" % what, lambda more=more: render_cells_table("s", splan, sreg, more),
+                "does not run")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        dry_run(so)
+    out = buf.getvalue()
+    C.check("DRY", "Sage-only dry-run: engines named, a Sage command for every arm, no MSFragger or fix command",
+            "engines sage only" in out and all("%s_sage" % t in out for t in ts) and "patched.mzML" in out
+            and "_msfragger" not in out and "fix_mzml_cvparams" not in out and "MSFragger-4.4.1.jar" not in out, out[-300:])
+    se = _queue(w, "C", root="x8", engines=["sage"])
+    rce = node_run(se)
+    RE = _records(se)
+    C.check("G-V10", "engines alone (no cells, no entrapment): the group runner runs the pair, then Sage only",
+            rce == 0 and RE["C", "pair"]["status"] == "ok" and "cells_failed" in RE["C", "pair"]
+            and sorted(RE["C", "pair"]["arms"]) == ["dt", "spx"] and sorted(k[1] for k in RE) == ["dt.sage", "pair", "spx.sage"],
+            sorted(k[1] for k in RE))
+    eplan, ereg = _reg(se)
+    eplan.update(tools=se["tools"], engines=["sage"])
+    mde = C.ok("G-V13", "Sage-only table without cells renders (the group's `cells: {}` equals the plan's absent key)",
+               lambda: render_cells_table("e", eplan, ereg, list(RE.values())))
+    C.check("G-V13", "  complete, two arm rows with Sage numbers, no cell section",
+            bool(mde) and mde[1] == 0 and "no cells" in mde[0] and "## Cell outputs" not in mde[0]
+            and len([l for l in mde[0].split("\n## ")[0].splitlines() if l.startswith("| C ")]) == 2, mde and mde[1])
+    C.abort("G-V13", "  but not against a plan that names a cell", lambda: render_cells_table(
+        "e", dict(eplan, cells={"dwv_default": DWV_CELLS["dwv_default"]}), ereg, list(RE.values())), "differ from the plan")
     os.environ["FAKE_MSF_SLEEP"] = "0.3"
 
 
