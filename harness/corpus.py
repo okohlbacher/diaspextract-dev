@@ -69,7 +69,7 @@ Extended plans (optional plan keys `cells`, `entrapment`; harness/CORPUS.md "Ext
         in the entrapment search
   (G-V03 for cells also: OPENMS_DATA_PATH not the arm's data tree, the provenance's data tree hash differs)
   Optional plan key `engines` (a subset of sage/msfragger, e.g. a Sage-only plan; it makes a plan extended):
-  G-V01 refuses a value that is not a non-empty list of those names in that order without repeats; G-V13 refuses
+  G-V01 refuses a value that is not a non-empty, strict subset list of those names in that order; G-V13 refuses
   a table whose ok search records name an engine (or the entrapment search) the plan does not run.
 """
 from __future__ import annotations
@@ -2579,13 +2579,17 @@ def load_plan(name: str, reg_path=REG) -> tuple:
 def check_extended(name: str, plan: dict) -> None:
     """G-V01 for the optional keys: `entrapment` a boolean; `cells` a mapping of names to exactly CELL_KEYS (plus
     differs_from naming another cell of the same kind). A cell name is a path component and a record key. `engines`
-    a non-empty list of ENGINES names in ENGINES order, without repeats (the entrapment search has its own key)."""
+    a non-empty list of ENGINES names in ENGINES order, without repeats, and not all of them (the default; the key
+    makes a plan extended); the entrapment search has its own key."""
     if "entrapment" in plan and not isinstance(plan["entrapment"], bool):
         die("G-V01", "plan %s: entrapment must be true or false, not %r" % (name, plan["entrapment"]))
     eng = plan.get("engines")
     if "engines" in plan and (not isinstance(eng, list) or not eng or [e for e in ENGINES if e in eng] != eng):
         die("G-V01", "plan %s: engines must be a non-empty list of %s in that order without repeats, not %r"
             % (name, list(ENGINES), eng))
+    if eng == list(ENGINES):          # review 2026-09-17 (kimi 4, vibe 1): a no-op spelling that re-runs a plain plan whole
+        die("G-V01", "plan %s: engines %r names every engine, the default: omit the key (it makes a plan extended, so a "
+                     "finished plain plan would re-run every pair)" % (name, eng))
     if "cells" not in plan:
         return
     cs = plan["cells"]
@@ -3870,11 +3874,13 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             ("engines with a repeat", lambda pl: pl.update(engines=["sage", "sage"]), "engines must be"),
             ("engines out of ENGINES order", lambda pl: pl.update(engines=["msfragger", "sage"]), "engines must be"),
             ("engines naming the entrapment search", lambda pl: pl.update(engines=["sage", "entrap"]), "engines must be"),
-            ("engines: null", lambda pl: pl.update(engines=None), "engines must be")):
+            ("engines: null", lambda pl: pl.update(engines=None), "engines must be"),
+            ("engines naming every engine (the default: omit the key)", lambda pl: pl.update(engines=["sage", "msfragger"]),
+             "omit the key")):
         pl = json.loads(json.dumps(xplan))
         mut(pl)
         C.abort("G-V01", "extended plan refused: %s" % what, lambda pl=pl: load_plan("xp", pf(pl)), frag)
-    for eng in (["sage"], ["msfragger"], ["sage", "msfragger"]):
+    for eng in (["sage"], ["msfragger"]):
         C.ok("G-V01", "extended plan with engines %s loads" % eng, lambda eng=eng: load_plan("xp", pf(dict(xplan, engines=eng))))
     qe = resolve_queue("xp", *load_plan("xp", pf(dict(xplan, engines=["sage"]))), "n1")
     C.check("G-V01", "engines reach the queue: Sage and the entrapment search only", q_engines(qe) == ("sage", "entrap")

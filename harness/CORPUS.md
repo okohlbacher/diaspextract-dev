@@ -61,7 +61,7 @@ A plan is a top-level section (`corpus_v3`, and the proof plans `corpus_v3_selft
 | `queues` | `{node: {samples: [...], search_workers: N}}`; a sample may be in one queue only |
 | `cells` (optional) | `{name: {kind: dwv, arm, args: [...], wall_cap_h, differs_from?}}`: extra extractors, see below |
 | `entrapment` (optional) | `true`: a third search per output; `search_db_sha256` then also pins `entrap_fasta` |
-| `engines` (optional) | a non-empty list of `sage`/`msfragger` in that order, e.g. `[sage]`: only these searches run (default both); makes the plan extended |
+| `engines` (optional) | `[sage]` or `[msfragger]`: only that engine's searches run (without the key both run; naming both is refused, omit the key); makes the plan extended |
 
 ---
 
@@ -199,7 +199,7 @@ triggered by `--selftest`, which fails if any id never fires.
 
 | id | level | refuses | failure it prevents |
 |---|---|---|---|
-| G-V01 | launch | unknown plan key, missing sample field or pin, sample in two queues, unknown sample/node, duplicate YAML key, two samples sharing a raw path or pin, sample count != `n_samples`, malformed `search_db_sha256`; `engines` not a non-empty list of `sage`/`msfragger` in that order without repeats | a typo that parses and silently drops or duplicates a file; an engine name that silently runs nothing |
+| G-V01 | launch | unknown plan key, missing sample field or pin, sample in two queues, unknown sample/node, duplicate YAML key, two samples sharing a raw path or pin, sample count != `n_samples`, malformed `search_db_sha256`; `engines` not a non-empty list of `sage`/`msfragger` in that order without repeats, or naming both (the default: omit the key) | a typo that parses and silently drops or duplicates a file; an engine name that silently runs nothing; a no-op `engines` spelling that turns a finished plain plan extended and re-runs every pair |
 | G-V02 | cell | raw or staged copy differs from the pin (tdf sizes, acquisition time, serial); the raw's acquisition length differs from `acq_min` | a row labelled with the wrong acquisition (FAILURE 1 of bench.py); a mistyped `acq min` in the table |
 | G-V03 | queue | env.sh missing/failing; SPX_BIN unset, not executable, or outside the arm directory; env.sh itself exporting a stripped variable (probe, allocator, OpenMP, JVM options); provenance missing or its `binary_sha256` differing; no label from `--help`; a library unresolved, or resolved outside the arm, `/ceph` and the system library directories | a dev build, a probe knob, a tcmalloc preload or a node-local OpenMS build tree measured as "the release" (critique C7, F7) |
 | G-V04 | queue | SPX_BIN, `lib/**`, a resolved library, the jar, `ext/bruker/` or the JDK changing across an arm | republish under a running chain (SIGBUS, silent empty run); a conda or JDK update between two arms |
@@ -340,8 +340,9 @@ differ from the plan, or more than one cell label or cell build. An ok search re
 runner stopped between the two) renders as `pending`, never as a number.
 
 **Engines** (optional plan key `engines`, 2026-09-17). `engines: [sage]` runs Sage only (`[msfragger]` MSFragger
-only; the list must name `sage`/`msfragger` in that order without repeats, G-V01; the entrapment search keeps its own
-key). The key makes a plan extended (the plain queue always runs both engines), so a Sage-only plan without cells runs
+only; the list must name `sage`/`msfragger` in that order without repeats and not both, G-V01; the entrapment search
+keeps its own key). Both is the default and is refused as a value (review 2026-09-17): because the key makes a plan
+extended, adding `engines: [sage, msfragger]` to a finished plain plan would re-run every pair. The key makes a plan extended (the plain queue always runs both engines), so a Sage-only plan without cells runs
 the group runner with the pair alone. It changes no measured function: the pair, search and score hashes stay
 `3215b73e`/`064af71b`/`4fe0a1ce` and the cells hash stays `c586f871` (selftest pins both, `CELLS_MEASURE_DWV`), so
 `dwv_stage1` records stay valid under this harness. What it changes: which search cells exist (`q_engines`: status
@@ -560,7 +561,8 @@ read `cells_failed` before relaunching, because a group re-runs whole.
 ### Engines option (2026-09-17)
 
 The plan key `engines` (above) with G-V01 and G-V13 checks. Selftest **284/284** (258 before): seven G-V01 refusals
-(a string, an empty list, an unknown engine, a repeat, the wrong order, `entrap`, null) and three accepted lists; the
+(a string, an empty list, an unknown engine, a repeat, the wrong order, `entrap`, null; both engines, since the review
+below) and two accepted lists; the
 queue sees Sage (and the entrapment search) only; engines alone make a plan extended and add nothing else; a
 Sage-only queue with one cell and no entrapment (two samples) runs Sage for every arm with its charge split, never
 MSFragger (no run, record, fix step or directory), runs its searches concurrently, deletes every output and resumes
@@ -578,6 +580,17 @@ proof: the 0d8532d harness and this one render byte-identical tables (plain; ext
 one cell with entrapment off; a partial extended table with pending rows) and dry-runs from the same records, and
 `dry-run --local` of `corpus_v3` (spock, data, ibminode05), `corpus_v3_selftest_v130` and `dwv_stage1` is
 byte-identical.
+
+Review of 2d2f93d (2026-09-17; kimi and vibe on one self-contained brief, both isolated in worktrees and left them
+clean; codex out of credit until 17:41, so incomplete by that reviewer; record in `docs/reviews/engines-2026-09-17/`).
+No HIGH finding. Both reviewers found that `engines: [sage, msfragger]`, a no-op spelling, makes a finished plain plan
+extended and so re-runs every pair (a re-run, not a wrong number): fixed, G-V01 refuses naming both (one more selftest
+refusal in place of an accepted list, still 284/284; mutation E15 killed; the control, E1 and E2 re-run on the fixed
+file, sha256 `fb75a37a`; the other mutations' code is unchanged). Kimi's claim that an ok search stopped before its
+charge split stays `pending` forever is refuted: `run_search` writes only the search and score hashes, `add_split`
+adds the cells hash, and `search_done` requires it, so such a search re-runs. Open, LOW: the table legend still names
+the MSFragger tools and checks in a Sage-only table (the engines line states they never ran); `status` shows no column
+for records of an engine the plan no longer runs (the table refuses them); `rescore` re-counts such records.
 
 ## Guard test on a real node (`corpus.py guardtest --node data`)
 

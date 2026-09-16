@@ -1,0 +1,554 @@
+kimi version 0.42.0
+• This is an adversarial review task. Review only — no shell, no file edits. Everything is inline. I need to carefully analyze the diff and unchanged context for bugs related to the `engines` option.
+
+  Let me work through the questions carefully.
+
+  Key data structures:
+  - `ENGINES` = presumably `("sage", "msfragger")`.
+  - `q_engines(q)` = `tuple(q.get("engines") or ENGINES) + (("entrap",) if q.get("entrapment") else ())`.
+  - `extended(q)` now true if `"engines" in q`.
+
+  Question 1: paths where plan with `engines: [sage]` still runs/waits/counts MSFragger.
+
+  Look at `_node_run`: `engines = ctx.get("engines", ENGINES)`. For an extended plan, ctx gets `engines=list(q_engines(q))` — which includes "entrap" if entrapment. The `pending` uses `search_done`. Phase 2 unit loop: `oks = [one_search(s, tool, e) ... for e in engines]` — engines includes "entrap"; `one_search` handles "entrap" via run_entrap. OK.
+
+  Serial phase: `if not msf_ok and "msfragger" in engines and pending(...)` — fine.
+
+  Plain (non-extended) branch of units: uses `for e in ENGINES` and `pair_done`... but wait — a plan with `engines: [sage]` is now always extended, so the plain branch never sees it. OK.
+
+  `rescore`: iterates `for e in ENGINES` — hardcoded ENGINES, not ctx["engines"]. For a Sage-only plan, rescore checks records for msfragger too — but there are no msfragger records, `read_json` returns None, `r` is None, so the condition `if not (r and pair and ...)` → continue. Harmless. But wait — what about a plan run with both engines then narrowed to [sage]? rescore would still consider msfragger records and re-count them if score changed... That's question 4 territory. Also `add_split` in rescore: `if "cells" in ctx["measure"] and r["status"] == "ok"` — fine.
+
+  `sweep_outputs`: uses `ctx.get("engines", ENGINES)` — for extended plans ctx["engines"] = q_engines list. Includes "entrap" — sweep deletes output only when all configured engines (incl entrap) done. Fine.
+
+  `pair_done`/`ready_arms`: uses `ctx.get("engines", ENGINES)`. Fine.
+
+  `status`: cols = `["pair"] + ["%s.%s" % (t, e) for t in q_tools(plan) for e in q_engines(plan)]` — plan-level q_engines (plan dict, not queue). q_engines(plan) uses plan.get("engines") — plan has "engines" key, so OK. Note: `q_tools(plan)` for cells — fine.
+
+  Hmm wait — in `cmd_status`, `q_engines(plan)` is called on the raw plan dict. Fine.
+
+  `dry_run`: diff shows sage block gated on `"sage" in q_engines(q)` and msfragger gated on `"msfragger" in q_engines(q)`. But what about entrap in dry-run? Not shown; presumably existing. Hmm, the dry_run loop prints `rm -f %s # only after both engines succeeded` — for non-extended continue. For extended plans with engines... the dry-run comment says "only after both engines succeeded" — minor wording, but for Sage-only plans it prints... wait, for extended plans it doesn't print rm at all? Looking at the diff: `if not extended(q): print("rm -f ..."); continue`. For extended, presumably later cell/entrap printing. Not shown. Fine.
+
+  Wait — in dry_run, the patch step for dt: `if "sage" in q_engines(q)` gates both patch and sage. For an msfragger-only plan `[msfragger]`, the dt patch is not printed (correct — patch is only for Sage). OK.
+
+  Now question 2: can the change alter anything for plans WITHOUT engines?
+
+  `table_guards`: new check `other = sorted({r["engine"] for r in oks} - set(q_engines(plan)))`. For a plain plan, q_engines(plan) = ENGINES (+ entrap if entrapment). Plain plan records have engines sage/msfragger — subset, no refusal. For dwv_stage1 (cells + entrapment, no engines key): q_engines = ("sage","msfragger","entrap") — records fine.
+
+  The `or {}` normalisation: `(p.get("cells") or {}) != (plan.get("cells") or {})`. For plain plans p has no "cells" key (run_pair record — does it store "cells"? run_group stores `"cells": cells(q)`; run_pair presumably doesn't). p.get("cells") → None → {} ; plan.get("cells") → None → {}. Equal. OK. For dwv_stage1: p["cells"] is the dict; plan["cells"] same dict — equal. But wait: could `or {}` mask a real difference? If p.get("cells") is a falsy non-dict like `0` or `""` or `[]` — records are harness-written, so not realistic. But: a plan with `cells` where the record has `cells: {}`... `{} != {dwv...}` → still refuses. Good. What about record `cells: None` vs plan `cells: {}` — plan with `cells: {}` is refused by G-V01 ("non-empty"). OK.
+
+  Hmm — one subtle issue: the `or {}` normalisation means a record with `cells: {}` and a plan with no cells key now pass — intended fix. But also: a record with `cells` falsy-but-nonempty impossible. Fine.
+
+  New G-V13 engine check for dwv_stage1 under the NEW harness: records written by OLD harness. Old records include entrap records. q_engines(plan) includes entrap since plan has entrapment. Fine.
+
+  But wait — question: `entrap` in records vs plan. For a plan that HAS entrapment, old harness ran entrap; fine. What about `q_engines` including "entrap" but `extended()` for engines-only plans: ctx["engines"] = list(q_engines(q)) — includes "entrap" when entrapment set. In `ready_arms`, `search_done(... for e in ctx.get("engines"))` — for entrap, records written by run_entrap must satisfy search_done: `m.get("search")`, `m.get("score")`, `m.get("cells")`, peptides > 0. That's pre-existing behavior for extended plans with entrapment; unchanged.
+
+  Question 3: `extended()` returns True when engines present. Callers:
+
+  - `_node_run`: ext = extended(q) → uses run_group even with no cells. run_group with empty names: `k = idx % len(names) if names else 0` — guards division by zero. `order = ref + []` = ref. Records `"cells": cells(q)` = {} — the G-V13 fix handles. noop_check(rec) — with no cells, presumably iterates over cells — fine. So engines-only plan runs run_group — matches the selftest check ("engines alone (no cells...): the group runner runs the pair"). OK.
+
+  - `measure_sha256(ext)`: extended → adds "cells" hash. For an engines-only plan, measure includes cells hash c586f871. Records carry it. Consistent between runner and table since both compute extended the same way. But — subtle: dwv_stage1 was launched with old harness where extended = cells or entrapment. New harness: dwv_stage1 has cells → extended both ways. Fine. A plan with engines-only is new; no legacy records.
+
+  - `noop_check`: iterates cells with differs_from; no cells → no-op. Fine.
+
+  - `render_cells_table`: called when extended. For engines-only plan: `cells(plan)` empty → "no cells" in title, no cell section. Selftest covers.
+
+  - `guardtest`: refuses extended plans — selftest checks `_guardtest(dict(xq, plan=...))` aborts "two-extractor pair only". For engines-only plan, guardtest refuses too. Is that misbehavior? Documented: "guardtest refuses extended plans". Fine.
+
+  - dry_run: extended prints the extended header; for engines-only plan: cells "none", entrapment off, engines line appended. Fine.
+
+  - `add_split` in one_search: `if ok and ext` — for engines-only plan ext=True → add_split runs. Good: by_charge needed for table's `search()` which requires "by_charge" in r for extended tables. For a plain plan, add_split isn't run and render_table doesn't need it. OK.
+
+  - What about `rescore` add_split condition: `if "cells" in ctx["measure"]` — for engines-only extended plan, "cells" in measure → add_split. Fine.
+
+  Now the interesting bit: `q_engines` uses `q.get("engines") or ENGINES`. What if plan has `engines: [sage]` and also entrapment? q_engines = ("sage", "entrap"). Fine.
+
+  Question 4: resume/staleness — plan run with both engines, then narrowed to [sage].
+
+  Scenario A: plan `engines` absent initially (both engines), all done. Then plan edited to `engines: [sage]` and relaunched.
+
+  - measure: extended now True → ctx["measure"] = measure_sha256(True) includes "cells" hash. Old pair records have measure_sha256 without "cells" key... wait, plain plan records: meta measure = measure_sha256(False) = {pair, search, score}. New ctx measure = {pair, search, score, cells}. `pair_done` → `ready_arms` checks `m.get("pair") == ctx["measure"]["pair"]` (same) and `m.get("cells") == ctx["measure"].get("cells")` — old record m.get("cells") = None, new ctx measure.get("cells") = "c586..." → mismatch → record not ready → pair re-runs. Hmm! So narrowing engines after a completed plain run re-runs the whole pair (all extraction) because extended flips and the cells hash appears in ctx. Is that a silently wrong number? No — it's a re-run, which is safe (not silent). But is it intended? The commit says records stay valid... For dwv_stage1 (already extended) no change. For narrowing a plain corpus_v3 — re-run is conservative, not silent. OK, acceptable; but note the reverse: widening from [sage] back to both.
+
+  Scenario B: plan ran with `engines: [sage]` (extended), completed; outputs deleted after sage done. Now widen to both engines (remove key or set [sage, msfragger]).
+
+  - New ctx measure: if key removed → extended may become False (if no cells/entrapment) → ctx measure = {pair, search, score}, no cells key. Old records have cells hash → m.get("cells") != ctx.measure.get("cells") (None) → records stale → full re-run. Safe.
+  - If plan keeps extended (cells present), engines widened to both: ctx["engines"] = both. Old pair record measure matches (cells hash same). ready_arms: for each tool, checks all engines' search_done; msfragger record missing → search_done False → checks output file still exists... but the output was DELETED once sage succeeded! `p.is_file()` False → `continue` → tool not ready → pair_done False → group re-runs whole. Good — re-run, not silent. MSFragger searches then run. And old sage records: search_done checks pair_run equality — new group has new pair_run → sage re-run too. OK.
+
+  - Widening via `engines: [sage]` → `engines: [sage, msfragger]`: same, extended stays True, cells hash same, pair records match measure... ready_arms: msfragger search missing → need output file → deleted → re-run group. Fine. But what if the outputs were NOT yet deleted (sweep happens at start of _node_run; deletion in unit after all oks)? If run completed, outputs deleted. Re-run. Safe.
+
+  Now narrowed: both → [sage], mid-run or after.
+
+  Scenario C: plan without engines ran fully (plain, corpus_v3-like but it's an extended plan with cells). Take dwv_stage1-like: cells + entrapment, both engines, completed. Now add `engines: [sage]`. ctx measure unchanged (cells hash still there since extended both ways). Old records: pair record matches (identity, threads, cells, measure cells hash — same). ready_arms per tool: engines = ["sage", "entrap"]; sage search_done ok, entrap ok → all done → arm ready. units = arms with any pending — none pending → no searches. sweep_outputs: deletes outputs where all configured engines done — already deleted. So narrowing after completion: nothing re-runs, msfragger records remain on disk in records/. status: cols built from q_engines(plan) → msfragger columns gone; msfragger records exist but not shown. table: G-V13 new check — oks includes msfragger records! `render_cells_table` collects `oks = [r for r in srch.values() if r["status"] == "ok"]` from ALL records passed. `table` command reads records from source (scratch/ceph) — all record files, including old msfragger ones. Then table_guards: `other = {r["engine"]} - q_engines(plan)` = {"msfragger"} → die G-V13. Refusal, not silent. Good — that's the designed behavior ("engines narrowed after the run" refusal, tested in selftest).
+
+  But status: msfragger records silently dropped from columns. Question 2/4: is that "silently wrong"? Status is a progress display, not the source of truth; the table refuses. Hmm, but also `collect` — does collect copy all records? Not shown. Probably copies everything. OK.
+
+  Scenario D: narrowing mid-run: both engines plan, phase 1 done, some sage done, some msfragger pending. Edit plan to [sage]. Relaunch: ready_arms — arms whose sage done and output... for tools where msfragger pending: output still present; new ctx engines = sage+entrap; if sage done → search_done true for all configured → arm ready, and sweep_outputs will DELETE the output even though msfragger record pending. units: any pending for e in [sage, entrap] → none → msfragger never run. Output deleted. Records keep a stale/absent msfragger. Status shows no msfragger column. Table refuses if old ok msfragger records exist; if none, table renders sage-only. That's per design (narrowing means you don't want msfragger). Records deleted? No — pending msfragger has no record. Fine.
+
+  Now a subtler one: resume where `engines` narrowed and the msfragger search had a *failed* record (status failed). Table's oks only includes ok records; failed msfragger record wouldn't trigger G-V13 `other` check. Status: not shown (column gone). Table renders. Is that silently wrong? The failed record is invisible — but msfragger isn't in the table at all, so no number printed. OK.
+
+  Another: narrowed plan, old ok msfragger records exist → table refuses entirely (G-V13 abort, not skip). The user must delete records or keep both engines. Deliberate per commit message. Fine.
+
+  Question 5: G-V01 validation completeness: `[e for e in ENGINES if e in eng] != eng`.
+
+  ENGINES = ("sage", "msfragger") presumably tuple. Check: eng must be list, non-empty, and filtering ENGINES by membership in eng must equal eng exactly (order + content + no repeats... wait, repeats: `[sage, sage]` → filtered = [sage] != [sage, sage] → refused. Good).
+
+  Holes:
+  - `engines: ["sage", "sage"]` refused. Good.
+  - Nested list: `engines: [["sage"]]` — `[e for e in ENGINES if e in eng]` → "sage" in [["sage"]] → False → filtered [] != [["sage"]] → refused. Good.
+  - Boolean: `engines: [true]` (YAML) — True in eng... "sage" in [True] → False → refused. Good. But `engines: yes`? YAML `yes` → True (PyYAML safe_load, YAML 1.1) → not a list → refused. Good.
+  - `engines: [Sage]` → "Sage" not equal "sage" → filtered [] != ["Sage"] → refused. Good.
+  - What about unhashable/weird types like `engines: [sage, 1]`? filtered = ["sage"] != ["sage", 1] → refused.
+  - Subtle: `e in eng` uses `==` comparison. What if eng contains an object equal to "sage"? Only strings from YAML. Fine.
+  - What about a subclass of str? Not from YAML.
+  - Tuple instead of list? YAML gives lists. `("sage",)` — isinstance tuple not list → refused. Slightly strict but fine.
+
+  Hmm, one: `engines: [sage, msfragger]` — equals ENGINES order — accepted, and behaves like no key except plan becomes extended! That's a behavior change: `engines: [sage, msfragger]` on a plan without cells/entrapment makes it extended → runs run_group instead of run_pair, measure includes cells hash, records differ from plain-plan records (kind pair but with cells fields...). It's documented ("The key makes a plan extended"). But note: a plan with engines: [sage, msfragger] produces records whose measure includes cells hash — incompatible with the same plan without the key. Not silent wrong; just re-run. And G-V01 allows it. Fine, documented.
+
+  Also check_extended validates `engines` but the value reaches the queue via resolve_queue `q.update({k: plan[k] for k in OPTIONAL_PLAN_KEYS if k in plan})`. Good.
+
+  But — `check_extended` is called in load_plan; is it called everywhere plans load? `plan-check`/`preflight` use load_plan presumably. OK.
+
+  Question 6: summary rows of render_cells_table.
+
+  `sm = lambda t_, g, f: tot(lambda x: f(x["search"][t_, g])) if g in engines else None`.
+
+  `engines = list(q_engines(plan))` — includes "entrap". For g in ("sage","msfragger") fine.
+
+  `tot = lambda f: sum(f(g) for g in full.values())` — full only contains complete samples: `complete = all(A[t][0] for t in tools) and all(v[0] for v in S.values())` where S only spans configured engines. So for a Sage-only plan, complete doesn't require msfragger. Good.
+
+  Potential confusion: a real total of 0. `ratio2 = lambda a, b: "%.2f" % (a/b) if b else "-"` — if d_s (denominator) is 0 → "-" even though it's a real zero. But G-V13 refuses ok records with peptides <= 0, and full only contains ok complete records, so totals ≥ 1 per record... sum ≥ n ≥ 1. Denominator can't be 0 unless full empty — but loop breaks `if not full`. So ratio2's falsy check only triggers for None (missing engine). And `num(None)` → "-"; num(0) → "0" — real zero would print "0", distinct. OK, no confusion. Actually wait: `ratio2(sage, d_s)` — if sage is None (msfragger-only plan), prints "-". Good.
+
+  Hmm, but one thing: for the summary, `sm(t, "sage", s_z2p)` accesses `r["by_charge"]["z2p"]["target_peptides"]` — KeyError if missing? by_charge guaranteed by search() requiring "by_charge" in r, and add_split writes z1/z2p presumably. Pre-existing.
+
+  Question 7: anything else.
+
+  Let me hunt for real bugs.
+
+  **Bug candidate 1: `_node_run` plain branch and the phase-2 units for extended plans.** Fine.
+
+  **Bug candidate 2: `status` columns for a plan with engines use q_engines(plan) — includes "entrap" — fine.
+
+  **Bug candidate 3: dry_run for extended plan with engines — the diff shows the search section inside a loop over tools; it prints patch+sage gated, fix+msf gated. But note the diff context: this appears to be in a section for ALL tools (pair tools and cells?). For cells, `cmd_patch` only for dt. The gating uses q_engines(q) which includes entrap — "sage" in q_engines — fine.
+
+  **Bug candidate 4: the `SG` lambda and `S` — S only has keys for configured engines; `SG(t, "msfragger")` returns (None, "-") → fmt → "-". Good. But `complete = ... all(v[0] for v in S.values())` — S values for configured engines only. Good.
+
+  **Bug candidate 5 — the `search_overlaps` and `swall` "†": not in render_cells_table. Skip.
+
+  **Bug candidate 6 — BIG ONE?: `run_group` for engines-only plan writes record `"cells": cells(q)` = {} and `"entrapment": bool(q.get("entrapment"))`. The G-V13 comparison `(p.get("cells") or {}) != (plan.get("cells") or {})`. Plan has no cells → {} == {} ✓.
+
+  But `ready_arms` checks `rec.get("cells") != ctx.get("cells")` — ctx["cells"] = cells(q) = {} for extended; rec["cells"] = {} ✓. For dwv_stage1 old records: rec["cells"] = actual dict; ctx["cells"] same ✓.
+
+  Wait — here's a potential issue: **old records of dwv_stage1 written by the OLD harness: does `run_group` in the old harness also store "cells": cells(q)?** Presumably yes (unchanged function). And ctx.get("cells") in old harness was also set. Unchanged.
+
+  **Bug candidate 7: `rescore` iterates ENGINES hardcoded — for a narrowed plan with leftover ok msfragger records and a score-rule change, rescore would re-count msfragger records (update their measure/score). Harmless — table refuses them anyway. Also `add_split` call `if "cells" in ctx["measure"]` — fine. Minor.
+
+  **Bug candidate 8: `pending`/`unit` — `oks.count(False)` — fine.
+
+  **The serial MSFragger-first phase subtlety:** The condition `if not msf_ok and "msfragger" in engines and pending(u[0], u[1], "msfragger")`. Consider a plan WITH msfragger where the first unit's msfragger is already done (pending False) but other units have msfragger pending: first unit goes to else → rest. Second unit with pending msfragger → enters serial branch, runs unit (all engines), sets msf_ok. Fine, unchanged.
+
+  For Sage-only: `"msfragger" in engines` False always → all units to rest → concurrent. ✓ (tested).
+
+  **Question 1 re-check — `add_split`:** `one_search` for e in engines — engines from ctx includes "entrap". For engines-only plan without entrapment, no entrap. ✓.
+
+  **`status` when plan has engines but records contain msfragger (narrowed):** columns omit msfragger; the record exists; `s["records"]` includes it but recs lookup only for cols. No display. Acceptable? It hides a stale record, but table refuses. I'd call it LOW/by design.
+
+  **Now, the `engines_line` in render_cells_table header — `" and ".join(plan["engines"])` — plan["engines"] exists when key present ✓. But render_table (plain) — unchanged, no engines line. Plain plan never has engines (would make it extended → render_cells_table). Where is the dispatch table → render_cells_table vs render_table? Presumably `if extended(plan)`. For engines-only plan → render_cells_table ✓.
+
+  **A real one? `render_cells_table` title: `"cells": ", ".join(cells(plan)) or "no cells"` ✓.
+
+  **Check `q_engines` in `cmd_status` uses `plan` (raw plan dict) — plan.get("engines") is the validated list ✓.
+
+  **Check table_guards new check interacts with `dwv_stage1` mixed old/new records:** old harness records for entrap — engine "entrap" in q_engines(plan) since plan has entrapment: true ✓.
+
+  **Potential hole in G-V13 `other` check: it only checks oks (ok records). What about a plan where engines widened and old records... no, widening doesn't leave foreign engines.
+
+  **Now the deep one — question 2, `table_guards` shared with plain `render_table`:** For a plain plan, could there be ok search records with engine "entrap" while plan has no entrapment? Only if entrapment was removed after run — then refusal (intended). ✓.
+
+  **Byte-identical claim check — `render_table` untouched except table_guards and the `or {}` change:** For plain plans p.get("cells") is None (run_pair records don't have "cells"?). Actually does run_pair store "cells"? Not shown; if run_pair records have no cells key, None or {} both → {}. Plan plain → {}. Equal — same as before (None == None was equal before too). So no change for plain. For dwv_stage1: record cells dict vs plan cells dict — `or {}` passes through non-empty dicts unchanged → same comparison as before. Byte-identical claim holds. ✓
+
+  **Hmm — one more: `(p.get("cells") or {})` — what if p["cells"] is a non-empty dict but plan["cells"] ordering differs?** Dict equality is order-insensitive ✓.
+
+  **G-V01 check placement:** `check_extended` runs before the PLAN_KEYS check in load_plan. If plan has `engines` plus an unknown key, both caught. ✓
+
+  **YAML oddity: `engines: [sage, msfragger, sage]`?** filtered = [sage, msfragger] != 3-list → refused ✓.
+
+  **`engines: 1`? not a list → refused. `engines: {sage: true}`? not list → refused ✓.
+
+  **Now question 3 callers — `busy_patterns(env, cenvs)`: cenvs = {} for no cells — fine.
+
+  **`_node_run`: `say("QUEUE_START ...")` — `if ext else ""` — prints cells + entrapment marker; engines not named in QUEUE_START. Cosmetic.
+
+  **Wait, a potentially real issue in `install_tools` / tools check:** Invariant 4 says MSFragger jar/params and msfragger_db pin stay required and checked. `plan_tool_keys(plan)` — doesn't depend on engines ✓ (selftest: plan_tool_keys(qpe) == TOOL_KEYS ✓). install_tools installs all — ✓.
+
+  **Now — the dry-run of an engines-only plan with cells: `if not extended(q): print rm; continue` — extended → falls through to cell dry-run section (not shown). Presumably prints per-cell reencode etc. Then maybe prints rm after searches for extended? Not shown, can't assess.
+
+  **One more careful look at `unit()` and output deletion for Sage-only plan with entrapment:** engines = (sage, entrap); both must succeed before unlink ✓.
+
+  **`sweep_outputs` leftover check for msfragger-only plan `[msfragger]`:** engines = (msfragger,) — after msf done, output deleted even though sage record absent ✓ intended.
+
+  **Now think about `search_done` and `rescore` for entrap records in engines-only + entrapment plan: unchanged from before.
+
+  **Potential real bug: `render_cells_table` entrapment rows when engines excludes sage but entrapment on:** `engines: [msfragger]` + `entrapment: true`. q_engines = (msfragger, entrap). Entrap search is run by run_entrap — presumably Sage-based with sage_entrap config. Does run_entrap depend on sage being in engines? It runs regardless since "entrap" in engines. Table: `if plan.get("entrapment"): r, v = S[t, "entrap"]` ✓ present. Main rows: sage columns "-", msfragger numbers ✓. Summary: sm(t, "sage", ...) → None → "-" ✓. Seems fine.
+
+  But wait — does the entrapment search require the sage search's output dir or the patched mzML? run_entrap(q, s, tool, pair, tools, env, ctx) — not shown; pre-existing behavior: entrapment searches existed for extended plans where both engines also ran. If run_entrap patches its own copy (like sage does for dt), independent. Can't verify; note as theoretical.
+
+  **Now the FAKE_SAGE_SLEEP / search_overlaps selftest — fine.
+
+  **Look for the real subtle bug: `engines` in `ctx` for `ready_arms` — `ctx.get("engines", ENGINES)`. For extended: `engines=list(q_engines(q))` includes "entrap". search_done for entrap requires `m.get("score")` match and peptides > 0 — does an entrap record have "peptides"? run_entrap writes record with accepted/target/entrap counts... `search_done` requires `rec.get("peptides", 0) > 0`. Hmm — does the entrap record have a "peptides" field? In `search()` of render_cells_table, entrap record requires "entrapment" key, not peptides. G-V13's final loop `for r in oks: if r.get("peptides", 0) <= 0: die` — oks includes entrap records! So entrap records must have peptides > 0, meaning run_entrap records do have "peptides" (probably accepted count). Pre-existing (dwv_stage1 runs entrap and tables rendered before). ✓ Not new.
+
+  **A genuine candidate — `status` for narrowed plan hides stale msfragger records (LOW, by design).
+
+  **Another candidate — `dry_run` rm comment: for extended Sage-only plan, is there a later `rm` print "only after both engines succeeded"? Not shown in diff; the unchanged part may print something for extended plans. Can't assess; skip.
+
+  **Now a REAL potential bug hunt in `_node_run` serial phase for msfragger-only plan `[msfragger]`:** units loop: `if not msf_ok and "msfragger" in engines and pending(...)` — first unit serial, rest concurrent ✓.
+
+  **Threading: `unit` deletes mzML after all oks — for concurrent Sage searches of the same tool? Each unit is (s, tool) pair — one unit per tool; searches of its engines sequential within unit. Two units of different tools don't share mzML ✓.
+
+  **Question 5 deep: `[e for e in ENGINES if e in eng] != eng` — ENGINES is a tuple of strings. What if `eng` contains True and "sage"? `[True, "sage"]` — wait YAML `sage` unquoted is string "sage". `engines: [sage, on]` → ["sage", True] → filtered ["sage"] ≠ → refused ✓.
+
+  Edge: duplicate via equality weirdness — floats? `engines: [sage, 1.0]` refused ✓.
+
+  What about non-str like `engines: [sage, {msfragger: null}]`? `e in eng` — "msfragger" == dict? False → refused ✓. But `in` on list with dict uses ==, fine, no hashability issue ✓.
+
+  So G-V01 looks complete. One nitpick: error message says "in that order without repeats" — the check enforces. ✓
+
+  **Now — the one I should scrutinize hardest: invariant 1, dwv_stage1 RUNNING with old harness; new harness later runs status/collect/table and relaunch adopts records.**
+
+  Relaunch adoption: `pair_done`/`ready_arms` compare `rec.get("cells") != ctx.get("cells")`. ctx["cells"] = cells(q) — same. measure cells hash — pinned c586f871 ✓. harness_sha256 — is harness_sha256 part of adoption checks? ready_arms doesn't check harness_sha256 (only measure hashes) ✓ — that's the design (harness file changed, but measured functions didn't).
+
+  **collect**: not shown; presumably copies records. Does collect re-verify with new harness? Unknown — can't assess.
+
+  **status for dwv_stage1 under new harness: cols include entrap ✓.
+
+  **Now, `q_engines` order dependency in `search_done` all() — fine.
+
+  **Hmm, actually let me look again at one thing in `table_guards`: `other = sorted({r["engine"] for r in oks} - set(q_engines(plan)))`. For an engines-only plan with cells — dwv_pxd029836: oks = sage records only → {} ✓. But what about the **pair record's** arms? Not engine-tagged. ✓
+
+  **What about `render_table` (plain) receiving records from a plan that used to have engines? Plain plans can't have had engines (engines makes extended). ✓
+
+  **OK here's another angle — `resolve_queue` puts `engines` into q. `node_run` → `_node_run`. But `dry_run(q)` — q from resolve_queue has engines ✓. `q_engines(q)` works on both plan and queue dicts ✓.
+
+  **`preflight`** — not shown; uses load_plan presumably; does it check engines? G-V01 covers.
+
+  **Potential issue: plan with `engines: [msfragger]` — dry_run: sage block skipped, including the dt patch. Correct since patch is for Sage only. But the header "diaTracer mzML is patched..." in table legend — `render_cells_table` head still says "diaTracer patched before Sage; fix_mzml_cvparams.py before MSFragger for every arm" — for msfragger-only plan, patch never happens but legend claims it does. Legend inaccuracy: MEDIUM/LOW? The engines_line says plan runs msfragger only. The "**Searches**" bullet still describes both engines' prep, including Sage sha etc. For Sage-only plan (dwv_pxd029836 — the actual use), the legend says "MSFragger `%(msf)s` (params..., database...); diaTracer patched before Sage; fix_mzml_cvparams.py before MSFragger for every arm" — claiming fix ran for every arm when it never ran. The tsha dict comes from oks[0]["tools_sha256"] — the run-local copies, which exist (installed even if unused). So the legend prints MSFragger pins as if used. Misleading but engines_line clarifies. LOW. Bites: no (cosmetic), maybe worth noting.
+
+  **Now the summary-row question 6 carefully:** `sm` for g in engines — `engines = list(q_engines(plan))` includes "entrap"; sm only called with "sage"/"msfragger" ✓.
+
+  `num(sum(...))` — spectra sum fine.
+
+  `ratio2(sage, d_s)`: for sage-only, msf None → ratio2(None, None) → b=None falsy → "-" ✓; num(None) → "-" ✓. Real 0 totals impossible (guards) ✓.
+
+  **One more possible real bug: `complete` in render_cells_table includes `all(v[0] for v in S.values())` — S keys = tools × engines (plan engines only) ✓. But `S[t, "entrap"]` access when entrapment: engines includes entrap ✓.
+
+  **`full[sid]["search"] = {k: v[0] for k, v in S.items()}` — keys (t, g) for configured engines. `sm(t, "msfragger", pep)` for sage-only → None guard prevents `x["search"][t, "msfragger"]` KeyError ✓ — that's exactly why the `if g in engines else None` exists ✓.
+
+  **Now — the phase-2 `engines` variable in `_node_run` for a NON-extended plan: `engines = ctx.get("engines", ENGINES)` — plain plan ctx has no "engines" key → ENGINES ✓ unchanged behavior.
+
+  Wait, actually check: `if ext: ctx.update(... engines=list(q_engines(q)) ...)`. For plain, ctx lacks engines → default ENGINES ✓.
+
+  **A subtle one in `unit`: `oks = [one_search(...) if pending(...) else True for e in engines]` — for narrowed plan with leftover PENDING msfragger... not in engines → skipped ✓.
+
+  **Race with deletion: none new.
+
+  **Let me reconsider question 4's "narrowed then status": status reads `s["records"]` from node-status and prints row cells for cols only. msfragger record invisible. But there's the `mzml_left` print — sweep at next run start would delete outputs whose configured engines done — could delete an output that a pending msfragger still needs — but plan no longer runs msfragger, so fine.
+
+  **Widening mid-run: both outputs present (not yet deleted since msfragger pending)... covered.
+
+  **One more: narrowed plan where msfragger ok records exist AND user runs `collect` then `table --source ceph`: table refuses (G-V13) — user cannot render ANY table until records removed. Is there a purge path for single records? Unknown. Operational annoyance, by design (commit message says "refuses").
+
+  **Now let me think about whether `engines` key in queue dict affects `busy_patterns` or `arm_env` — no.
+
+  **`guardtest` with engines-only plan: refuses "two-extractor pair only" — tested ✓.
+
+  **`noop_check(rec)` — iterates cells with differs_from; empty ✓.
+
+  **BIG remaining question: `measure_sha256(extended=False)` for plain vs engines-only extended — the engines-only plan's search records carry measure with cells hash. Selftest COMPAT: `set(mx) == {"pair","search","score","cells"}` ✓.
+
+  **Now what about `search_done` ctx["measure"].get("cells") for plain: measure(False) has no "cells" → None; rec m.get("cells") — plain search records have no cells key → None == None ✓ unchanged.
+
+  **Potential finding: `rescore` hardcodes ENGINES (not ctx engines) AND doesn't skip engines the plan doesn't run — for a Sage-only plan with a score-rule change, msfragger records don't exist → no-op ✓. But narrowed plan with leftover ok msfragger records: rescore re-counts them (wasted work, mutates records the table will refuse anyway). Harmless. LOW/theoretical.
+
+  **Actually wait — there's a more interesting one in rescore for the plain→? No, rescore is pre-existing, hardcodes ENGINES — for msfragger-only plan `[msfragger]`, rescore iterates sage too — no sage records → skip ✓.
+
+  **Hmm, `add_split` in rescore: `if "cells" in ctx["measure"] and r["status"] == "ok": add_split(...)` ✓.
+
+  **Now — let me reconsider the phase-1/phase-2 boundary for engines-only plan with FAILED group. If group failed (pair arm failed), record status failed → ready_arms None → no units ✓. If a cell failed but pair ok (cells_failed non-empty): group status "ok", ready_arms returns only ok arms (failed cell skipped: `a.get("status", "ok") != "ok"` → continue) → searches run for ok arms ✓ (comment says so). And msfragger-first serial phase — fine.
+
+  **Output deletion when cell failed: unit deletes mzML after all engines ok for that tool — failed cell has no output entry? `o = a.get("output")` missing → unit would KeyError? `Path(pairs[s["id"]]["arms"][tool]["output"]["path"])` — units only include ready arms (which require o present) ✓.
+
+  **OK — now think about whether there's a finding regarding `q_engines` including "entrap" in `ctx["engines"]` and the new G-V13 check direction: G-V13 checks records ⊆ plan engines. But the reverse — plan runs entrap but a table has no entrap records — renders pending ✓.
+
+  **What about a plan that has `engines: [sage]` AND entrapment, run, then entrapment removed: q_engines loses "entrap" → entrap ok records trigger G-V13 refusal ✓ (tested in selftest: "an entrapment record of a plan without entrapment").
+
+  **I think the main findings so far are modest. Let me look harder for a HIGH.**
+
+  Re-examine `_node_run` phase 2 units for extended:
+
+  ```python
+  units = [(s, t) for s in q["samples"] for t in (ready_arms(pairs[s["id"]], s, ctx, root) or [])
+           if any(pending(s, t, e) for e in engines)]
+  ```
+
+  `ready_arms` checks: for each tool, if not all search_done for ctx engines → output file must still exist, else skip tool. For a Sage-only plan RESUMED after completion: outputs deleted, all sage done → all(search_done) True → arm ready (without needing file) ✓. units: pending false → no units ✓ (selftest resume check ✓).
+
+  Now consider **crash between search ok record and add_split** for Sage-only plan: search record ok but no by_charge. search_done → True (search_done doesn't check by_charge!). pending → False. So unit won't re-run it; output deleted (all oks). Table's `search()` sees missing by_charge → renders "pending" forever, comment says "the next launch re-runs it" — but pending() says done! Wait — is that pre-existing? `search_done` requires status ok, pair_run match, hashes, peptides>0 — no by_charge check. `pending` in _node_run = not search_done. So a search record ok without by_charge is never re-run, and renders pending in the extended table forever. But the comment in `search()` says "stopped between the search and its split: the next launch re-runs it". Hmm — is there something else that re-runs it? `add_split` in one_search: `return add_split(...) if ok and ext else ok`. If runner crashed during add_split after run_search wrote ok record... next launch: pending → False → skipped. Unless... G-V10 search record validation requires by_charge? The selftest for Sage-only plan asserts `"by_charge" in RS[...]` — runner writes it same launch.
+
+  Is this pre-existing? Yes — add_split and this logic predate the change (extended plans already had add_split). Not introduced by this commit. But does the engines change make it worse? No. Out of scope-ish, but question 7 says "anything else that would bite on real data". It's pre-existing; could mention as theoretical. Actually wait — maybe there IS a mechanism: `search_done` — hmm, let me re-read. No by_charge requirement. But maybe run-side: records without by_charge are caught by... the selftest's Sage-only check requires by_charge in record. For dwv_pxd029836, if the runner dies between run_search and add_split, table shows pending forever and resume won't fix. Pre-existing though — the commit didn't touch this. Hmm, but wait — actually let me check `add_split` — maybe it's idempotent and called elsewhere... `rescore` calls add_split only when score changed. Not a fix. So pre-existing gap; mention as LOW/pre-existing, theoretical (crash window small).
+
+  Hmm wait, actually — is it? `one_search` returns `add_split(...) if ok and ext else ok`. If add_split itself fails/aborts? Then unit returns False (exception?) — add_split raising Abort would propagate... In `unit`, oks list comprehension — if one_search raises, the exception propagates out of unit, through ex.map... For the serial phase `failed += unit(u)` — exception propagates to _node_run → queue dies. Record status: search ok but by_charge missing → next launch pending=False → never fixed. Table pending forever. Pre-existing, theoretical.
+
+  **Now, let me check `num`/`fmt` in main rows for Sage-only: `fmt(SG(t, "msfragger"), lambda r: num(r["peptides"]))` — SG returns (None, "-") → prints "-" ✓ never calls lambda ✓.
+
+  **Check the selftest's mrows assertion column indexes — not our problem.
+
+  **README/CORPUS.md consistency:** README says extended guards "G-V16 to G-V19" while engines adds G-V01/G-V13 changes — the README sentence now mentions engines option ✓ fine.
+
+  **CORPUS.md G-V13 row updated ✓. G-V01 row updated ✓.
+
+  **Now a sharper look at `check_extended`: it returns early `if "cells" not in plan: return` — engines validation happens before that ✓.
+
+  **`load_plan` G-V01: `set(plan) - OPTIONAL_PLAN_KEYS != PLAN_KEYS` — OPTIONAL_PLAN_KEYS now includes engines ✓ so engines allowed.
+
+  **What about `plan-check` (bench2.py) — uses load_plan? presumably ✓.
+
+  **Now think about `status` wd computation and stale display for engines plan: records of engine not in plan → invisible (not "stale"). Minor.
+
+  **One more potential real bite: `dwv_pxd029836` worst case "about 49 h" with `search_workers: 1` — Sage-only, searches serial. Phase 2: all units go to `rest` → ThreadPoolExecutor(1) → serial ✓. No issue.
+
+  **Load gate / busy patterns — unaffected.
+
+  **Question 2 one more: the new G-V13 check `set(q_engines(plan))` for dwv_stage1 — plan has entrapment true → includes entrap ✓. But what about a table of dwv_stage1 where some entrap records failed (status failed)? oks excludes them ✓ no refusal ✓.
+
+  **And plain corpus_v3 records: engines sage/msfragger ⊆ ✓.
+
+  **Edge: an old extended record with engine "entrap" in a table for a plan that HAS entrapment but engines: [msfragger]: q_engines = (msfragger, entrap) ✓ includes both.
+
+  **What about `engines` order enforcement interacting with q_engines: engines [sage] → tuple(["sage"]) ✓.
+
+  Alright — is there anything about **`sweep_outputs` docstring** "whose two searches are done" — comment now stale for Sage-only. Cosmetic; sweep code uses ctx engines ✓. LOW nit: comment says "two searches".
+
+  Also `unit` comment "# every engine succeeded: the mzML goes" fine.
+
+  **dry-run header comment "# only after both engines succeeded"** — printed only for non-extended (plain) plans, which always run both ✓ accurate.
+
+  **Hmm — wait. For the plain branch in dry_run, `if not extended(q): print rm...; continue` — plain plans never have engines ✓.
+
+  Now **the extended branch of dry_run after the diff hunk** — not shown; presumably prints cell re-encode and entrap commands and an rm per output. If that trailing rm text says "both engines" it'd be stale for engines plans — can't see it. Skip.
+
+  **One more: `q_engines` returns tuple; `engines = ctx.get("engines", ENGINES)` in _node_run is a list for ext. `"msfragger" in engines` ✓.
+
+  **Check `cmd_status` for plan with engines [sage]: cols = pair + dt.sage, spx.sage (+ cells) (+ entrap if). Records of msfragger invisible — fine.
+
+  **Now severity ranking. Findings:**
+
+  1. (MEDIUM→ actually let me evaluate) **Table legend for restricted-engine plans still describes the un-run engine's pipeline as if performed.** render_cells_table head: "**Searches**: Sage ... MSFragger ...; diaTracer patched before Sage; fix_mzml_cvparams.py before MSFragger for every arm; the corpus-v3 read checks (patched = spectra, MSFragger Scans = spectra, Sage >= ...)" — for dwv_pxd029836 none of the MSFragger statements happened, yet the legend asserts them and prints MSFragger pins (from installed-but-unused copies). engines_line mitigates ("columns of an engine it does not run print `-` (its tools stay installed and pinned, never run)"). Bites on real data: no (cosmetic/interpretive), LOW. The engines_line does say "never run" — arguably adequate. LOW.
+
+  2. **Narrowing engines leaves stale ok records that make `table` refuse forever** — by design (refusal not silent) ✓; but status silently hides them. LOW.
+
+  3. **`rescore` iterates hardcoded ENGINES** — for a narrowed plan, leftover ok records of the dropped engine get re-counted (wasted, mutates refused records). Theoretical/LOW.
+
+  4. **Pre-existing: ok search record missing by_charge is never re-run** (search_done doesn't require it) while extended table renders "pending" forever — pre-existing, not introduced; theoretical (small crash window). Mention under Q7.
+
+  5. **`engines: [sage, msfragger]` accepted and silently converts a plain plan to extended** (different runner, different measure set, records incompatible with key-less twin). Documented in commit message/CORPUS.md ("The key makes a plan extended"). LOW/by design. Hmm — could bite: someone adds engines: [sage, msfragger] thinking it's a no-op on corpus_v3; relaunch then re-runs everything because measure gains cells hash. Actually wait — would it re-run? Plan corpus_v3 + engines [sage,msfragger]: extended True → measure includes cells hash → old records lack cells → ready_arms None → full re-run of pair (extraction!) — 20+ h re-run for a "no-op" key. That's a real operational bite potential. Severity MEDIUM, bites on real data: yes if someone does it (the planned usage is [sage], so theoretical for the stated plan). Also the reverse: removing the key from dwv_pxd029836 after the run → re-run everything (outputs deleted, groups re-run) — but that's widening, expected.
+
+  Hmm wait, actually let me double check the narrowing case for dwv_pxd029836 → remove engines key entirely after completion: extended still True (cells present) → measure unchanged ✓ → records adopted, engines = both → msfragger pending for every arm, outputs deleted → ready_arms: arms not ready (file gone, msfragger not done) → groups re-run whole (16-h caps again!) → then msfragger runs. That's a correct-but-expensive widening; also pair re-runs so sage re-runs too (pair_run changes). Not silent. Fine.
+
+  6. **G-V01 acceptance of `[sage, msfragger]`** — same as 5.
+
+  7. **Question 3 check: `extended()` for engines-only plan and `run_group`'s `rec["order"] = ref + names[k:] + names[:k]`** — names empty → order = ref ✓. `noop_check` ✓. selftest covers ✓.
+
+  8. Anything about **`plan_tool_keys`** requiring msfragger tools for engines-only plan — invariant 4 deliberate ✓.
+
+  9. **`search_workers` thread pool when rest empty**: ex.map over empty → 0 ✓.
+
+  10. **What about `dry_run` printing the Sage patch for cells?** cells don't get patch (re-encode instead) — pre-existing logic `.get(tool, "reencoded.mzML")` and `if tool == "dt"` ✓.
+
+  11. **Interesting: for `[msfragger]`-only plan, dt output gets fix but not patch ✓; but does MSFragger on diaTracer output require... pre-existing.
+
+  12. **`table_guards` new check uses `plan` — but `render_cells_table`/`render_table` receive plan from load_plan ✓ validated.
+
+  13. **Q5 hole check: `engines` list containing equal-but-different-type, e.g. `engines: [sage, sage]` refused ✓; `engines: [msfragger]` ✓ accepted; `engines: [sage, msfragger]` ✓. What about bytes? YAML won't. What about `engines: [sage, sage, msfragger]`? filtered [sage, msfragger] != → refused ✓. Complete.
+
+  Hmm, one more subtle G-V01 thing: the check `[e for e in ENGINES if e in eng] != eng` — if eng contains an unhashable... `in` on list is linear ==, fine. If eng = ["sage", ["sage"]]: "sage" in eng → True (=="sage" matches first), filtered ["sage"] != → refused ✓.
+
+  14. **A plan with engines AND entrapment, engines [msfragger]: the entrap search uses Sage (sage_entrap) even though "sage" not in engines — intended ("the entrapment search keeps its own key") ✓ documented.
+
+  15. **`status` for engines plan shows entrap column only if entrapment ✓.
+
+  16. Let me reconsider **Q1 for `dry_run` with engines [msfragger]**: `"sage" in q_engines(q)` False → no patch, no sage ✓; msf block printed ✓. But entrap dry-run? not shown.
+
+  17. **Q1: `add_split`** — called per engine in one_search; not for skipped engines ✓.
+
+  18. **Q1: `pair_done`** — uses ready_arms with ctx engines ✓.
+
+  19. **Q1: `pending`** ✓.
+
+  20. **Anything counting MSFragger in table for Sage-only: all SG/bc/sm guarded ✓. `search_overlaps` — operates on records; no msfragger records ✓.
+
+  21. `render_cells_table` `S = {(t, g): search(...) for g in engines}` — engines = q_engines includes entrap; S has entrap entries; `complete` includes entrap search ok — for Sage-only+entrapment, complete requires entrap ✓ same as before.
+
+  22. Now **the charge rows**: `bc("msfragger", ...)` → SG None → "-" ✓.
+
+  23. **Header row count**: main header still has MSFragger columns (prints "-") — deliberate ✓.
+
+  Now let me also double check **the table_guards fix doesn't weaken dwv_stage1 protection**: record cells dict vs plan cells dict — equality as before ✓; the `or {}` only collapses None/{} — a record with `cells: {}` (written by old-harness entrapment-only plan) vs plan WITH cells: {} != {…} → refused ✓; reverse: record with cells vs plan without → refused ✓. Only None↔{} merged — both mean no cells ✓ correct.
+
+  But hold on — `p.get("cells") or {}`: what if a record stores `cells: {"dwv_default": ...}` and plan has `"cells": {"dwv_default": ...}` with a nested difference in e.g. wall_cap_h type int vs float (16 vs 16.0)? dict equality 16 == 16.0 True — pre-existing semantics, unchanged.
+
+  24. **Q2: does anything else change for plans without engines? The `xplan` selftest change `if k in xq`** — selftest only. The `render_cells_table` SG refactor — differential proof byte-identical ✓ trust.
+
+  25. **`extended()` change affects `dry_run` for plain plans? No (no engines key → same). ✓
+
+  26. One more possible bite: **`cmd_status` column list for a plan where engines key present but node queue from OLD harness still RUNNING (dwv_stage1 has no engines key — fine). For dwv_pxd029836 no old harness. ✓
+
+  27. **collect/purge G-V14** — not engines-sensitive.
+
+  Let me also verify the claim "existing plans unchanged" re **`q_engines` change**: old: `ENGINES + (("entrap",) if ...)`. New: `tuple(q.get("engines") or ENGINES) + ...`. For plans without engines key: identical ✓. `extended()`: adds `or "engines" in q` — False for old plans ✓.
+
+  **status columns for dwv_stage1**: q_engines(plan) same as before ✓ byte-identical.
+
+  Now, one more: **`_node_run` log line `say("QUEUE_START ...")` doesn't name engines restriction** — observability nit; the dry-run names it. LOW/theoretical-no.
+
+  **And `install_tools` copies msfragger jar etc. for Sage-only plan** — deliberate invariant 4 ✓ (also BUSY_FIXED patterns, G-V12 checks unchanged → pins still checked ✓).
+
+  Let me think about **question 4 wording: "the mzML outputs (deleted once all *configured* engines succeeded)"** — verified in sweep_outputs and unit ✓.
+
+  **One more possible finding — `ready_arms` and `ctx["engines"]` includes "entrap": for a Sage-only + entrapment plan, output deleted only after entrap done too ✓ good.
+
+  **What about `engines: [sage]` + entrapment + narrowing engines... fine.
+
+  Potential **MEDIUM: `table` refuses the whole table when stale engine records exist, with no flag to exclude them** — operational: after narrowing, the user must manually delete record files on scratch/ceph; is there a documented path? commit says deliberate refusal. The selftest expects refusal. By design — note it.
+
+  Now the **by_charge pre-existing gap**: actually wait, let me re-read `search_done`... it's quoted in full above — no by_charge. And the comment in render_cells_table.search: "stopped between the two: the next launch re-runs it" — that comment claims re-run, but pending() would say done. Hmm — unless G-V10 in run-side validates... Actually maybe `add_split` failing leaves record status ok; pending False; the mzML gets deleted (unit oks all True → unlink!). So the table would render pending forever AND the data is gone — a silently missing number (pending, not wrong). This is pre-existing though — NOT introduced by this commit; the same path existed for dwv_stage1. The review scope is this commit; I can mention it as pre-existing observed while reviewing, theoretical (requires crash in a narrow window — add_split is pure local TSV parsing, fast). Actually wait — is it really pre-existing? Yes, add_split and search() by_charge logic are in the unchanged context and the selftest's "partial with pending rows" differential proof covers rendering. I'll note it briefly as pre-existing, LOW.
+
+  Hmm, but actually — does the engines change interact? For Sage-only plan the window is the same. No interaction. OK.
+
+  One more scan of the diff hunks for introduced bugs:
+
+  - `xplan = {... if k in xq}` — selftest fix, fine.
+  - The `C.check("G-V01", ... q_engines(dict(qe, engines=None)) == ENGINES + ("entrap",))` — q_engines with engines=None → `None or ENGINES` → ENGINES ✓. Interesting: a queue dict with engines=None behaves as both engines — but G-V01 refuses engines: null in plans, so None can only appear artificially ✓.
+
+  - In the Sage-only selftest: `so.update(engines=["sage"], tools=..., search_db_sha256=...)` — removes entrap tools ✓ consistent with plan_tool_keys (no entrapment key).
+
+  - `render_cells_table` header for Sage-only: `"tgt"` not in cells table — fine.
+
+  - `summary.append` format: `num(msf)` where msf None → "-" ✓; `ratio2(msf, d_m)` → "-" ✓.
+
+  Now, is `sm`'s None propagating into `"%.1f"` formatting anywhere? summary format string: `%s` for ratio2 results and num results ✓ strings. `%.1f` only for median RSS ✓.
+
+  - `engines_line`: `" and ".join(plan["engines"])` — for [sage] → "sage" → "this plan runs sage only" ✓ matches selftest.
+
+  - **README/CORPUS docs claim G-V13 refuses "an ok search record of an engine the plan does not run"** — matches code ✓.
+
+  One more thing — **Q3: `guardtest`** — `_guardtest(dict(xq, plan="x_selftest"), ...)` — the selftest abort check existed before for extended plans; engines-only plans hit the same refusal ✓ (documented "guardtest refuses extended plans").
+
+  And **`dry_run` for engines-only plan without cells**: extended True → prints extended header "cells none, entrapment off; engines sage only..." ✓; loop over tools = q_tools = TOOLS ✓.
+
+  Now — one genuinely worth-checking: **`_node_run` for engines-only plan: `if cells(q): meta["cells"] = cells_meta(...)` — skipped; run_group record `"cells_meta": meta.get("cells", {})` → {} ✓; table_guards `cells_meta` one() check ✓.
+
+  **`busy_patterns(env, cenvs)` with empty cenvs ✓.
+
+  **`ident0 = identity(q, env)`** — includes cells identities? `ident0["cells"]` used in QUEUE_START only for cells(q) ✓.
+
+  OK. Also **preflight**: "preflight --plan dwv_pxd029836 PREFLIGHT_OK" claimed. Not shown; can't attack.
+
+  Let me now also double-check **`q_engines` vs `ENGINES` type in `pending` for plain plans**: `any(pending(s, t, e) for e in ENGINES)` hardcoded in plain units branch — plain always both ✓.
+
+  And **the serial-phase for plain plans**: `"msfragger" in engines` — engines = ENGINES ✓ contains msfragger → unchanged ✓ (differential proof byte-identical dry-runs; runtime behavior same).
+
+  Now compile findings. Honest assessment: the change looks quite tight. Findings:
+
+  1. LOW (cosmetic/misleading legend): render_cells_table "Searches" bullet asserts MSFragger pipeline steps (fix for every arm, Scans check) even when MSFragger never ran; pins printed from installed-but-unused copies. engines_line partially mitigates. Bites: no.
+
+  2. LOW/MEDIUM (operational): after narrowing engines, stale ok records make `table` refuse with no built-in way to exclude/archive them; `status` silently stops showing those records (no "stale" marker because columns are gone). Refusal is by design (good), but the status invisibility could confuse. Bites: theoretical (only if plan edited post-run).
+
+  3. LOW: `rescore` iterates hardcoded ENGINES — a narrowed plan's leftover ok records of the dropped engine get wastefully re-counted if the score rule changes. Theoretical.
+
+  4. MEDIUM (operational, by-design but worth flagging): `engines: [sage, msfragger]` (or adding/removing the key with both engines) silently switches a plan between plain and extended runners, changing the measurement-hash set; relaunching the same plan then re-runs all extraction (records not adopted). Not a wrong number — an expensive surprise. For the stated dwv_pxd029836 usage ([sage] from the start): theoretical. Wait — is this actually true? Adding engines [sage,msfragger] to corpus_v3: extended True → measure includes cells → old records invalid → re-run. Yes. And G-V01 accepts [sage, msfragger]. It's documented ("The key makes a plan extended"), but the docs recommend... The CORPUS.md says "e.g. [sage]". Fine, MEDIUM/theoretical.
+
+  5. Pre-existing (not this commit): ok search record missing by_charge never re-run, renders pending forever; the mzML is deleted since search_done is True. The comment in search() claims "the next launch re-runs it" — that claim is false (pending() is False). Theoretical (narrow crash window), pre-existing.
+
+  Wait, I should double-check #5's claim about deletion: unit oks = [True (pending False)] → all True → unlink. Yes. And sweep_outputs: search_done True → delete. So the output is gone and the table shows pending permanently. Also actually — hmm, is this maybe handled because add_split is called in `one_search` *in the same unit*, so a crash between run_search and add_split means... record ok written by run_search at its end; add_split then updates the record with by_charge. If add_split crashes mid-parse, record stays without by_charge. Next launch: skipped. Yes, pre-existing gap. I'll flag it as pre-existing LOW with the note that the engines change neither causes nor worsens it — actually it slightly widens exposure? No. Same.
+
+  6. Q6: no confusion — `num(0)` prints "0", `num(None)` prints "-"; totals of complete ok records can't be 0 (G-V13 refuses peptides ≤ 0, and spectra counts > 0); `ratio2(a, 0)` → "-" only reachable if denominator 0, impossible for complete rows. No finding. Wait — one: `ratio2(s_z2, d_sz2)` where s_z2 is a real 0 (zero target z>=2 peptides while peptides > 0 overall — plausible! target_peptides could be 0 in z2p stratum while total peptides > 0). Then `num(0)` → "0" ✓ correct, and ratio2(0, d_sz2) → "%.2f" % (0/b) = "0.00" ✓ correct since b truthy. And ratio2(s_z2, d_sz2) with d_sz2 = 0 → "-" — a real denominator of zero prints "-" instead of "inf" — acceptable, pre-existing semantics. No confusion between missing-engine (None) and real zero ✓.
+
+  7. Q5: G-V01 complete? One more exotic YAML case: `engines: [sage, msfragger,]` trailing comma — same list ✓. `engines: ["sage"]` quoted ✓. What about `engines: [sage, Sage]`? refused ✓. `engines:  [msfragger, msfragger]` refused ✓. What about a YAML merge or anchor producing list ✓ fine. I judge it complete. Only nit: error message lists expected but the check also enforces order — message says so ✓.
+
+  Also `engines` interacts with `PLAN_KEYS` check: `set(plan) - OPTIONAL_PLAN_KEYS != PLAN_KEYS` — a plan with engines but missing some required key still caught ✓.
+
+  8. Q3: callers of extended() — all covered by selftest; run_group handles empty names; noop_check iterates nothing; render_cells_table handles no-cells; guardtest refuses (documented). No finding. One check — `dry_run` for engines-only plan prints extended header with "cells none" ✓.
+
+  9. Q1: no path runs/waits/counts MSFragger for [sage]. Checked: phase-2 loop (engines var), pending, ready_arms (ctx engines), pair_done, sweep_outputs (ctx engines), rescore (hardcoded ENGINES but no records → no-op; only touches existing records — can't create), add_split (per engine run), status (columns from q_engines), table (SG/None), dry_run (gated). One residual: rescore hardcodes ENGINES — for a Sage-only plan it's a no-op scan; for a narrowed plan it can still *modify* leftover msfragger records — finding #3.
+
+  10. Q2: plain/dwv_stage1 unaffected: q_engines identical for key-less plans; extended() identical; table_guards new check is a subset check that passes for both-engines records; `or {}` only merges None with {}; the SG refactor proven byte-identical. No finding. Except — hmm, one: the new G-V13 check `other` for dwv_stage1 — records include engine "entrap"; q_engines(plan) includes entrap only if `plan.get("entrapment")`. dwv_stage1 plan has entrapment: true ✓. But suppose a dwv_stage1-like plan had `entrapment: false` explicitly with old entrap records → refusal — intended.
+
+  Everything else fine. Also confirm invariant: measured functions untouched — diff shows no changes to run_pair/run_search/score functions ✓ (only _node_run, dry_run, render, guards, selftest — none in MEASURED tuples, assuming MEASURED = (run_pair-ish functions...) as stated).
+
+  One more possible issue — **`search_overlaps(recs)` in render_cells_table? It's in render_table. For Sage-only plan with search_workers 1, no overlaps ✓.
+
+  Also **the ` engines` key in queue dict and `busy_patterns`**... done.
+
+  Also **CORPUS.md says "the plain queue always runs both engines"** — consistent.
+
+  One more on Q4: "widened back" — covered: outputs deleted → group re-runs whole → correct numbers, expensive. "Is any outcome silently wrong or missing rather than refusal or re-run?" — the status-column invisibility of stale records (#2) is the closest to silent; table refuses. No silently wrong number found.
+
+  Also: **narrowing from both to [sage] where msfragger records are FAILED (not ok)** — table's oks excludes them → no refusal → table renders Sage-only while failed msfragger records linger; status hides them. Not wrong (msfragger not shown at all). ✓
+
+  And **narrowing where msfragger ok records exist for only SOME samples** — G-V13 refuses whole table ✓.
+
+  Severity ranking for #4: The commit message and CORPUS.md explicitly document "The key makes a plan extended". The user's plan uses [sage] from the start. I'd call it LOW/theoretical with documentation present.
+
+  For #1 legend: actually re-read the bullet: "**Searches**: Sage `%(sage)s` (config..., FASTA...), MSFragger `%(msf)s` (params..., database...); diaTracer patched before Sage; `fix_mzml_cvparams.py` before MSFragger for every arm; the corpus-v3 read checks (patched = spectra, MSFragger Scans = spectra, Sage >= x% of them)." For dwv_pxd029836 table this prints MSFragger jar sha and claims fix ran for every arm — false statements in a published benchmark table. The engines_line does say "its tools stay installed and pinned, never run". So a careful reader is told. LOW, bites: no (but should be fixed eventually).
+
+  Also the per-charge header still has MSFragger columns — prints "-" ✓ fine, deliberate.
+
+  Also **`workers` in render_table only. Fine.
+
+  Let me also sanity check finding candidates in dry_run for Sage-only: assertion `"fix_mzml_cvparams" not in out` — but wait, the extended header or other sections might mention fix? Selftest passes per claim. OK.
+
+  Now format: numbered findings with severity, location, concrete failing input, "bites on real data: yes/no/theoretical". Then one line per question 1-7 if no finding.
+
+  Findings list (final):
+
+  1. LOW — render_cells_table legend asserts the MSFragger pipeline ran. Location: render_cells_table `head` "**Searches**" bullet (corpus.py ~3240s region). Failing input: plan dwv_pxd029836 table — legend prints MSFragger jar/params/db shas and "fix_mzml_cvparams.py before MSFragger for every arm; MSFragger Scans = spectra" although neither ran; only the engines_line ("never run") contradicts it. Bites: no (cosmetic; engines_line mitigates).
+
+  2. LOW — status hides stale records of a dropped engine instead of marking them. Location: cmd_status cols built from q_engines(plan). Failing input: run plan with both engines, edit to engines: [sage], run `status` — msfragger ok records vanish from display; `table` then refuses (G-V13) with no in-harness way to see which records to remove (the refusal message names engines, not files). Bites: theoretical (only on post-run plan edit).
+
+  3. LOW — rescore scans hardcoded ENGINES, not q_engines. Location: rescore (`for e in ENGINES`). Failing input: plan narrowed to [sage] with leftover ok msfragger records + a score-rule change → rescore re-counts the msfragger records the table will refuse; wasted work, mutates stale records. No wrong number. Bites: theoretical.
+
+  4. LOW — `engines: [sage, msfragger]` (or adding/removing the key with both engines listed) flips a plan between plain and extended, changing the measure hash set, so a relaunch re-runs all extraction. Location: extended() + G-V01 accepting the full list. Failing input: corpus_v3 completed; add `engines: [sage, msfragger]`; relaunch → every pair record fails ready_arms (m.get("cells") None ≠ c586f871) → full re-run of extraction, not just searches. Documented ("the key makes a plan extended") but the full-list spelling looks like a no-op and isn't. Bites: theoretical for the stated plan ([sage] from the start).
+
+  5. LOW (pre-existing, surfaced while checking Q1/Q4) — an ok search record without by_charge is treated as done by pending()/search_done and its mzML is deleted, while the extended table renders it "pending" forever; the comment in render_cells_table.search ("the next launch re-runs it") is not true. Location: search_done vs render_cells_table.search. Not introduced or worsened by this commit. Failing input: runner killed between run_search's record write and add_split (Sage-only plan included). Bites: theoretical (narrow window; add_split is local TSV parsing).
+
+  Then question lines:
+
+  1. No — every runtime path follows q_engines/ctx["engines"]: phase-2 units, pending, ready_arms, pair_done, sweep_outputs, add_split, status columns, table, dry_run. Only rescore hardcodes ENGINES (finding 3); it cannot launch or wait for MSFragger.
+  2. No — for plans without the key, q_engines and extended() are unchanged; the new G-V13 subset check passes (records ⊆ {sage, msfragger, entrap?}); the `or {}` merge only equates None with {}, both meaning "no cells", and a real cell dict mismatch still refuses.
+  3. No — run_group handles empty cell list (rotation guarded), noop_check iterates nothing, render_cells_table renders with "no cells", guardtest refuses as documented; selftest covers the engines-only shape end to end.
+  4. Narrowing: stale ok records of the dropped engine → G-V13 refusal (not silent); pending searches of the dropped engine are abandoned and outputs deleted once configured engines succeed — per design. Widening: outputs already deleted → ready_arms fails → group re-runs whole → correct numbers, expensive. No silently wrong/missing number; only status invisibility (finding 2).
+  5. Yes, complete — the filter-against-ENGINES equality enforces membership, order, and no repeats in one comparison; strings, empties, nulls, booleans, nested lists, wrong case all refused. (Also note finding 4: the full list is accepted.)
+  6. No confusion — num(0) → "0" vs num(None) → "-"; complete-row totals can't be 0 (G-V13 refuses peptides ≤ 0); a real zero numerator prints "0.00", missing engine prints "-".
+  7. Covered above; findings 1-5 ranked.
+
+  Actually let me double-check finding 4's mechanism once more. corpus_v3 plain: records' measure_sha256 = measure_sha256(False) = {pair, search, score} (no "cells" key). After adding engines: [sage, msfragger]: extended → ctx measure = measure_sha256(True) includes cells. ready_arms: `m.get("cells") != ctx["measure"].get("cells")` → None != "c586..." → None return → pair_done False → run_group re-runs extraction. Yes. And conversely dwv_pxd029836 removing engines key: still extended (cells) → measure same → records adopted but msfragger pending & outputs gone → re-run groups. Both re-runs, not silent errors.
+
+  Also one more sanity check on Q1: `unit()` deletes output when all(oks) — oks over configured engines ✓. And in the serial phase for a both-engines plan nothing changed ✓.
+
+  Also check: `_node_run` plain-branch units use ENGINES hardcoded — plain plans can't have engines ✓.
+
+  Also `cmd_status` — for plan WITHOUT engines but WITH entrapment (dwv_stage1): cols include entrap ✓ unchanged.
+
+  One more possible edge in table_guards new check: `r["engine"]` KeyError if a search record lacks "engine"? Records always have it; oks from srch which keys by r["engine"] already (srch comprehension uses r["engine"] earlier) — would have failed earlier ✓.
+
+  Also `other` check runs even when oks empty ✓ no-op.
+
+  Now, also the question asks "concrete failing input" per finding — I have them.
+
+  Write the final answer: findings numbered, then per-question lines. Keep it reasonably concise but complete.Planning an inline review of the diff, focusing on the `engines` option by examining its data structures and intended behavior.Examining node logic for engines, confirming entrap handling and MSFragger failure conditions.Planning to inspect how the rescore loop’s hard‐coded “ENGINES” list could affect a plan that starts with multiple engines but is later narrowed to only sage.Rescore keeps msfragger entries if scores change (Question 4 territory) and only adds a split when “cells” are measured and the status is OK. The sweeper, pair‑done, ready‑arms, and status routines all reference the plan’s engines list—including entrap—ensuring outputs are removed only once every configured engine completes.I check how the plan-level engine list is used, note sage/msfragger gating, and question entrapped handling in dry‑run.Examining whether the run loop prints the ‘rm –f’ command for extended versus non‑extended plans, noting the comment about printing only after both engines succeed, and observing that the dry‑run patch step is gated by the presence of the “sage” engine.Checking that a [msfragger]‑only plan skips the dt patch, then considering whether the new table_guards logic alters behaviour for plans without an engines key, and reviewing how plain plans and the dwv_stage1 case enumerate their engine lists.I’m double‑checking the `(p.get("cells") or {}) != (plan.get("cells") or {})` comparison, noting that for plain plans both sides become empty dicts because they lack a “cells” key, while for dwv_stage1 they compare equal since both hold the same dict. I’m concerned that using `or {}` could mask a real difference if the stored value is a falsy non‑dict such as 0, "", or [].I’m still double‑checking the cell‑comparison logic—normalizing with `or {}` can let records with empty cells slip through, but it also masks real mismatches. I’m also revisiting how entrapment is handled: `q_engines` will list “entrap” for plans with entrapment, so `ready_arms` must look for run_entrap records, and the new G‑V13 check must process old‑harness records correctly.Reviewing how extended() flags plans with engines and how run_group handles empty engine lists and cell data.He confirms that an engines‑only plan correctly runs `run_group`, matches the self‑test expectation, and notes that `measure_sha256` consistently adds the cells hash for such plans. He comments on a subtle difference in how the older `dwv_stage1` harness handled extended hashing and ends with an incomplete remark about plans that include engines.`noop_check` skips processing because the plan contains no cells, and the `dry_run` step prints the extended header for the engines‑only plan.They confirm that for an engines‑only plan add_split runs when both ok and ext are true, which requires the by_charge flag for extended table searches; the same logic applies in rescore when the measure contains cells. They examine q_engines, noting it defaults to all engines and includes entrapment if enabled. They consider a resume scenario where a plan initially run with both engines is later edited to only sage, observing how the measure hash changes when cells are present.Changing the engines after a plain run adds the cells hash to the measurement, so the ready_arms check sees a mismatch and triggers a full re‑run of the pair extraction.Considering a plan that originally ran with only sage and was extended, then later widened to include msfragger, and noting the resulting new context measure.If the key is removed, the plan may lose its “extended” flag and the cells hash disappears from the context measure, making old records stale and forcing a full re‑run. If the plan stays extended while widening its engines list, the measure stays the same, and ready_arms will notice any missing msfragger entries and check whether the corresponding output files exist.The review notes that when sage finishes, its output file is deleted, so `p.is_file()` fails, the tool is marked not ready, `pair_done` is false and the whole group is rerun, which then triggers the MSFragger searches. Because the old sage record’s `pair_run` no longer matches the new one, sage is re‑run as well. When the plan is widened from `engines: [sage]` to `engines: [sage, msfragger]`, the plan stays extended, the cells hash is unchanged, but the missing MSFragger search causes a re‑run of that part.Considering output deletion timing, narrowing engines mid‑run, and adding engines to a previously plain plan while tracking context measures.The pair record matches on all key attributes, so the ready‑arms logic marks both “sage” and “entrap” as finished and no new searches are queued. With outputs for the completed engines already deleted, narrowing the plan after completion does nothing; msfragger data remains on disk but is omitted from the apparent status because the engine list no longer includes it.The new G‑V13 check pulls all “ok” records, including msfragger, but the guard sees msfragger listed in the plan’s engine set and aborts with a refusal. Status queries drop msfragger entries from the output columns silently.질문 2/4에서는 "침묵적으로 잘못된" 경우에 대해 검토하며 Status는 진척 표시일 뿐 실제 데이터 근원이 아니고, collect가 모든 기록을 복사할 가능성을 짚었다. 시나리오 D에서는 계획을 중간에 [sage]만 남길 때 남은 msfragger의 출력이 존재하고, 새 context에는 sage + entrap가 포함된 상황을 간단히 서술했다.모든 엔진이 완료되면 arm이 준비되고 sweep_outputs는 msfragger가 아직 실행되지 않아도 출력을 삭제한다. 이는 설계대로이며, 기존 ok msfragger 기록이 없으면 테이블은 sage 전용으로 표시된다.실패한 msfragger 레코드가 테이블에서 보이지 않아 silent‑error가 발생하는지 검토하고 있으며, 엔진 목록이 좁힐 때 기존 ok 레코드가 남아 있으면 G‑V13이 abort되므로 삭제하거나 모두 유지해야 함을 확인 중입니다.Validating the `engines` list by filtering the allowed tuple and requiring the filtered result to equal the original list, which rejects empty lists, duplicated engines, and nested structures such as `[[“sage”]]`.I verified that many malformed engines lists—like non‑list values, wrong casing, or mixed types—are correctly rejected. The filtering logic removes any entry not exactly “sage”, so outputs like `[True]` or `[sage, 1]` fail. I also noted a subtle point: the membership test uses `==`, so an object that compares equal to “sage” would pass the filter.Considering a strict string‑only engines list, tuples are rejected, and the engines list `[sage, msfragger]` is accepted but causes a plain plan to become extended, changing its behavior.I see that adding an `engines` list turns a plan into an extended one, and the resulting records include a cells‑hash measurement that differs from the same plan without the key, so it simply triggers a re‑run rather than a silent failure – this is already documented and supported by G‑V01. The `check_extended` function validates the engine list, and its result is passed into the queue via `resolve_queue` before being used in `load_`.I’m confirming that every part of the harness loads the plan, since both plan‑check and preflight call load_plan.  
+  The focus turns to question 6: the render_cells_table row generation uses a helper that sums values per engine only if that engine appears in the plan’s engine list, and then totals over the set of fully completed samples. The “full” set includes only samples that pass a completeness check on all tools and the configured engines.Nachprüfen, dass ein Sage‑nur‑Plan keine MSFragger erfordert, die Ratio2‑Funktion korrekt zwischen Null und None unterscheidet und keine falschen „‑“ ausgibt, dabei bemerkt, dass ein möglicher KeyError bei r['by_charge'] entsteht, und einen Bug‑Kandidaten in _node_ kennzeichnet.Examining the plain and phase‑2 logic for extended plans, reviewing how status columns use `q_engines` (including “entrap”), and inspecting the dry‑run gating for these extended plans.Checked bug 4: the SG lambda returns “-” for msfragger as expected, and the “complete” flag uses only the engines in S. Bug 5 is irrelevant here. Bug 6 suggests a possible mismatch if old dwv_stage1 records omitted the “cells” key, but likely the old harness did store it, so ready_arms logic remains consistent.이전 harness에서도 `ctx.get("cells")`가 동일하게 설정돼 있었고, 버그 후보 7은 `rescore`가 하드코드된 ENGINES를 반복해 남은 msfragger 레코드를 재계산할 수 있다고 보이지만, 결과는 테이블에서 거부되므로 무해하다. `add_split`에서 `"cells"` 존재 여부를 확인하는 로직도 정상이다. 버그 후보 8은 `pending`/`unit`에서 `oks.count(False)`를 사용하는 것이 올바르다. 마지막으로 MSFragger-우선 단계의 조건 `if not msf_` 부분이 아직 완성되지 않은 상태이다.Examining when the msfragger branch runs: for plans that include msfragger, if a unit’s msfragger is already finished the others go to “rest” logic; if any msfragger remains pending, the unit runs serially and sets msf_ok; for Sage‑only plans the msfragger condition is always false,엔진만 있는 계획에서 'entrap'가 포함되는지와 status 출력 시 msfragger가 열에 나타나지 않는 현상을 검토 중이다.  
+  또한 render_cells_table 헤더 구성, q_engines 처리, 그리고 table_guards가 dwv_와 어떻게 상호작용하는지 점검하고 있다.이 검토에서는 오래된 엔트로프 기록이 계획에 포함돼 있을 때 `q_engines`가 “entrap”를 표시하는지 확인하고, G‑V13의 `other` 검사가 오직 `ok` 레코드만 살펴본다는 잠재적 취약점을 지적했습니다. 또한 테이블 가드가 일반 렌더링과 공유될 때, 엔트로프가 제거되었음에도 불구하고 “entrap” 엔진이 `ok` 기록에 남아 있을 가능성을 검토했습니다.or {} 변화를 적용해도 플레인 플랜과 dwv_stage1 플랜의 셀 비교 결과는 기존과 동일합니다.The byte‑identical claim holds, and the equality of cell dictionaries is order‑insensitive so differing order does not affect the check. The extended‑plan validation runs before generic key checks, catching unknown keys, and the engines list is rejected whenever it contains duplicate entries, is not a list, or is otherwise malformed.질문 3의 `busy_patterns` 호출을 확인했고, `_node_run`에서 QUEUE_START 메시지 형식과 엔진이 표시되지 않는 점을 점검했다. 엔진 전용 계획의 드라이런 동작, Sage + entrap 처리 전용 출력 삭제 및 msfragger 전용 남은 출력 체크를 검토했다.I see that `search_done` and `rescore` behave the same for an engines‑only plan that also has entrapment. However, there may be a bug in `render_cells_table` when the engines list excludes sage but `entrapment: true` is set, since `q_engines` then contains both the requested engine and an “entrap” entry, and I'm unsure whether the `run_entrap` routine requires sage to be listed in the engines.엔트랩이 엔진에 포함되어 있으므로 실행되고, 테이블에서 'entrap' 항목이 처리되는 것을 확인했습니다.I'm checking how the engines list is handled in ready_arms and whether entrap records contain peptide counts.엔트랩 기록이 `peptides` 필드를 가져야 G‑V13의 검사를 통과하고, 계획을 축소하면 오래된 msfragger 기록이 상태에서 숨겨질 가능성이 있다는 것을 확인했습니다.dry_run 단계에서 Sage만 있는 확장 계획에서 두 엔진이 모두 끝난 뒤에만 rm 명령이 찍히는지 확인하고, 이어서 msfragger만 사용하는 계획에서 _node_run の 직렬 루프를 살펴본다. 여기서는 첫 유닛이 직렬로 실행되고 나머지는 병렬되며, 모든 OK가 끝나면 unit 스레드가 mzML 파일을 삭제하도록 되어 있다.검색 단위는 (시드, 도구) 쌍으로 구성되고 엔진은 그 안에서 순차적으로 실행되어야 합니다.  
+  YAML에서 `engines: [sage, on]` 처럼 참/거짓 값이 포함된 경우, 엔진 필터링(`[e for e in ENGINES if e in eng]`)이 정상 문자열인 `sage`만 남겨서 리스트가 달라지면 계획이 거부됩니다.  
+  중복 항목이나 부동소수점 같은 비교 이슈가 필터링 결과에 영향을 줄 수 있으므로 검토할 예정입니다.engines에 비문자형 항목을 넣으면 거절되는 것을 확인했고 G‑V01의 완전성을 검토했으며, 오래된 하시에서 실행 중인 dwv_stage1와 새 하시가 상태/수집/표를 실행해 기록을 채택하는 보장 1을 살펴볼 예정이다.Pair‑done and ready‑arms compare the same cell hashes, and ready‑arms intentionally ignores the harness SHA256 value, relying only on measure hashes. Collect appears to copy records without re‑verifying against a new harness. Status for the dwv_stage1 plan now includes an “entrap” column.이제 `q_engines`의 순서 의존성, `table_guards`에서 다른 엔진 목록을 필터링하는 방법, 그리고 평범한 플랜에서도 엔진이 없는데도 `render_table`이 어떻게 동작하는지 확인하고 있어요.Noting that resolve_queue propagates the engines list to the queue, dry_run and q_engines handle it, preflight loads plans, and a msfragger‑only plan bypasses sage logic (hence its patch) while the table header still mentions the patch.The cells_table header still claims that diaTracer is patched before Sage and that fix_mzml_cvparams.py runs for every arm, even when the plan uses only MS‑Fragger; this is a cosmetic inconsistency that does not affect execution. The engines_line correctly reflects the engines in the plan, so the legend’s misleading note is harmless. In the summary row logic “sm” is invoked only for sage and msfragger, confirming that the code processes the intended engines.Checking ratio outputs and possible bug in render_cells_table's completion logic.현재 sage‑only 인스턴스에서 KeyError 방지를 위해 ‘engines’ 확인하고, 비확장 계획에서는 기본 ENGINES를 사용하도록 하고, unit 단계에서 ‘oks’ 리스트를 구성하는 과정을 점검 중이다.I'm reviewing whether a left‑over pending MSFragger run that has been dropped from the engine list will be skipped correctly and whether the sweep that deletes outputs based on visible nodes might unintentionally remove a file that the now‑missing MSFragger still needs.I'm noting that when a plan no longer runs msfragger it's fine, and I’ve confirmed that mid‑run widening is handled correctly. However, if the plan is narrowed after msfragger OK records exist and a user runs `collect` followed by `table --source ceph`, the table is refused per G‑V13 until those records are purged—no single‑record cleanup path is provided. I’m also checking whether the `engines` key in the queue dict affects the `busy_*` logic.검사 결과 guardtest와 noop_check는 문제 없었고, measure_sha256에서 plain plan과 engines-only plan 간의 세포 해시 차이를 확인해 호환성 검증을 통과했습니다. search_done에서도 세포 필드 비교가 정상이며, rescore가 엔진 목록을 하드코딩해 실행되지 않은 엔진을 무시하지 않는 잠재적인 프리코딩 이슈가 있지만 실제 영향은 이론적 저위험 수준입니다. 다만, rescore에서 plain plan 관련 추가 연구가 남아 있는 것으로 보입니다.Rescore는 엔진을 하드코딩해 마스프레그만 있으면 sage도 반복하지만 기록 없으므로 건너뛰고, add_split은 cells가 있을 때만 add_split을 수행하며, 엔진 전용 플랜에서 실패한 그룹은 ready_arms가 없으므로 유닛이 존재하지 않고, 셀 실패 시 준비된 arm만 실행되고, 출력 삭제는 출력 경로가 있는 arm만 포함하므로 KeyError가 발생하지 않는다.이제 G‑V13 검증에서 plan에 entrap이 없는데 entrap 기록이 있으면 거부되는 상황을 확인하려고 한다.검색_done가 by_charge를 검사하지 않아 단위가 재실행되지 않으며 출력이 삭제된 뒤 테이블은 by_charge 부족으로 'pending'이 계속 표시됩니다.검색 성공 기록이 by_charge 없이 남으면 재실행이 없고, 확장 테이블에서 pending 상태를 영구적으로 유지한다.Pending becomes False so it's skipped, but the by_charge check was there before this commit and isn’t new, so it likely won’t bite real data.잠재적으로 `search_done`에 by_charge 검사가 없고, add_split이 적절히 호출되지 않으면 table이 영원히 pending 상태가 될 수 있음을 검토함.점수 변화 시만 분할을 수행하고, add_split 실패 시 예외가 전파될 수 있음.node_run에서 큐가 사라져 by_charge 없이 검색이 성공해 다음 실행이 pending=False로 넘어가고 테이블이 계속 pending 상태가 된다. Sage 전용 행에서 num/fmt 로직은 SG(t,"msfragger")가 (None,"-")를 반환해 람다가 실행되지 않고 "-"만 출력된다. 세부 테스트 인덱스 검사는 필요 없으며 README와 CORPUS.md의 확장 가드 범위(“G‑V16~G‑V19” 등)가 일치하지 않는다.I’m checking that the README now notes the engines option, confirming the CORPUS.md rows for G‑V13 and G‑V01 are updated, and verifying that `check_extended` short‑circuits when no cells are present, while `load_plan` allows an engines key via OPTIONAL_PLAN_KEYS. I’ll examine how `plan‑check` (bench2.py) loads the plan, review `status`’s handling of stale engine entries, and test the long‑running Sage‑only case (`dwv_pxd029836`) to ensure serial execution behaves as expected. Finally, I’ll inspect the new G‑V13 guard that includes “entrap” when entrapment is true, noting any nuances with failing entrap records.Checking that failed status lines drop out of the ‘oks’ list and that there’s no prevention error, then confirming plain records contain all supported engine pairs, noting that old entries with an “entrap” engine still list both engines in q_engines, verifying the engine‑order mapping works, and flagging that the sweep_outputs docstring may no longer apply to Sage‑only runs.The rm‑command is only printed for plain (non‑extended) plans, matching the comment about “two searches.” The unit comment about mzML removal is correct. The extended dry‑run section, not shown, is assumed to log cell‑related diagnostics.왜 rm 명령이 “both engines”라고 표시될까 고민 중… q_engines가 튜플이고 _node_run에서 engines는 기본 리스트다. msfragger가 포함돼 있는지 확인했고, 엔진이 단일인 [sage] 계획에서 cmd_status 컬럼은 pair + dt.sage, spx.sage(및 cells/entrap) 로 구성돼, msfragger 기록은 보이지 않음. 이제 결과를 심각도 순으로 정리할 예정이다.표 제목이 Sage 전용 계획에서도 MSFragger 파이프라인을 언급하며 실행되지 않은 MSFragger 핀을 표시하고 있는 점을 확인하고 있다.Columns for engines never run show “-”; narrowing engines keeps stale “ok” records (which cause table refusal while status hides them); and the rescore routine still loops over the hard‑coded ENGINES list, re‑counting left‑over entries from dropped engines.이론적으로 낮은 위험으로, by_charge 없이 ok 기록이 재실행되지 않아 확장 테이블이 영원히 pending 표시되는 기존 이슈와, `engines: [sage, msfragger]` 인 엔진 리스트가 무심코 평범한 계획을 확장한 상태로 변환되는 현상을 확인했습니다. 이는 커밋 메시지와 CORPUS.md에서 문서화되었습니다.엔진 목록에 Sage, MS‑Fragger를 추가하면 measure에 cells 해시가 포함돼 기존 기록이 일치하지 않으므로 전체 재실행이 발생할 수 있다. 이는 실제 데이터에 영향을 미치는 중간 위험 이슈다.After dropping the engines key from an extended plan after it has finished, the plan still retains its “extended” flag (cells remain), so its measure hash doesn’t change and the old records are reused. Because the engines list defaults to both engines, msfragger is queued for every arm, the old output files are removed, and ready_arms remains incomplete since the necessary files have disappeared.I note that widening the engine list triggers a full group re‑run (with the 16‑hour cap) and then MSFragger executes, so the wider plan isn’t silent. G‑V01 also accepts a `[sage, msfragger]` engines list, matching the earlier rule set. I confirm that for an engines‑only plan `extended()` works, `run_group` builds the order correctly with an empty name list, and the plan‑tool‑keys logic requires the MSFragger tools whenever engines are specified.다음 단계에서는 빈 rest일 때 thread pool 동작, dry_run 시 Sage 패치 출력 여부, msfragger 전용 계획에서 dt 출력 처리 등을 검토한다.Ich prüfe die Liste `engines`: ein Duplikat oder ein nicht‑einzigartiger Eintrag führt zur Ablehnung; eine reine `msfragger`‑Liste ist zulässig und die Kombination aus `sage` und `msfragger` funktioniert. Fügt man ein Repetiert‑`sage` ein, bekommt man nach der Filterung eine andere Liste, was zum Ablehnen führt. Dabei bemerke ich, dass die Filterung ein lineares `in`‑Konstrukt am Basis‑engines‑Array nutzt.I verified that a nested “[sage, [sage]]” engine list is rejected by the filter. A plan with engines “msfragger” plus entrapment still runs the Sage‐based entrapping search, shows an entrap column only when entrapment is enabled, and skips Sage‑specific patching during a dry‑run because Sage is not present.I’ve verified that when the plan omits “sage”, the MSFragger block is still printed, though the entrapped dry‑run isn’t shown. `add_split` runs for each engine in `one_search`; `pair_done` depends on `ready_arms`, `pending` is set correctly, and MSFragger only appears in a Sage‑only table under the SG/bc/sm guards. The `search_overlaps` routine only processes existing records, and `render_cells_table` builds its search map from `q_engines`, which includes any entrapped entry.Reviewing that complete includes entrap OK for Sage‑only+entrapment, charge rows show “‑” for msfragger, header still prints MSFragger columns, and table_guards still safely compare cell dicts using or {} to collapse None/{} values.cells 비교가 정확하고, 16과 16.0 같은 int‑float 차이는 같은 값으로 처리된다. `extended()`와 `render_cells_table`의 변경은 엔진이 없는 계획에 영향을 주지 않아 기존 동작과 동일하다. `cmd_status`는 엔진이 있는 경우에도 정상으로 동작하며, G‑V14 관련 수집·삭제는 엔진 여부와 관계없이 그대로 유지된다.검토 내용은 q_engines의 새 로직과 기존 dwv_stage1 상태 컬럼 유지, _node_run 로그에서 엔진 이름 누락, install_tools가 msfragger JAR을 복사한다는 점이다.Sage‑only 계획에서 설정된 엔진이 모두 끝난 뒤 mzML 출력이 정리되는지 확인하고, entrap‑용 파트에서도 출력을 올바르게 삭제하도록 ready_arms가 동작하는지 검토한다. 이후 엔진 열이 좁혀진 후 남아 있는 오래된 엔진 기록 때문에 전체 표가 거부되는 상황과 그에 대한 문서화 여부를 점검하고, search_done에 by_charge 검사가 없다는 점을 확인한다.테이블이 지속적으로 pending 표시되고 mzML이 삭제될 수 있으나, 이는 기존 동작이며 이번 커밋에 새로 도입된 문제는 아니다.Recognizing that add_split and search()’s by_charge logic are unchanged and likely a pre‑existing low‑risk issue, I note that the engines change does not interact with the Sage‑only case. A brief diff scan will follow to catch any new bugs.자신의 테스트가 수정되었고, q_engines에서 engines=None이면 ENGINES 패턴이 그대로 반환돼 G‑V01에서는 plan에 null 값을 거부한다는 점을 확인했다. Sage‑전용 테스트에서는 entrap 도구가 제거되며, 이는 plan_tool_keys와 일치한다.Ich überprüfte die `render_cells_table`-Header für Pläne ohne Sage‑Engine – dort fehlt lediglich der `"tgt"`‑Eintrag, was erwartungsgemäß ist.  
+  Die Zusammenfassung nutzt Platzhalter `" - "` bei `None` für `num(msf)` und `ratio2(msf, d_m)`, und das `%.1f`‑Format wird ausschließlich für Median‑RSS verwendet, sodass keine unerwarteten `None`‑Konvertierungen auftreten.  
+  Die Zeichenkette `" and ".join(plan["engines"])` erzeugt bei `[sage]` exakt `"sage"`, was zu der im Self‑Test geforderten Textzeile führt, während die README‑ und CORPUS‑Dokumente noch erwähnen, dass G‑V13 bestimmte Planarten ablehnt.I observe that an OK search record for an engine not listed in the plan is accepted, guardtest correctly refuses extended plans, dry_run prints the expected header for an engines‑only plan, and I plan to investigate the remaining issue.엔진 전용 계획에서 `_node_run`의 cells 메타가 건너뛰어 빈 딕셔너리로 기록되고 table_guards 검사 역시 통과합니다. busy_patterns는 빈 cenvs에서도 정상 동작하며, identity 함수는 cells가 있는 경우에만 cells 정보를 포함합니다. preflight 테스트에서는 dwv_pxd029836 플랜이 OK인 것을 확인했습니다.평형 계획에서는 항상 두 엔진을 모두 확인하도록 고정되어 있어 변경 사항은 없습니다. 주된 발견은,(1) 셀 병합 테이블에 MSFragger 파이프라인을 언급하면서 실제에 실행되지 않은 경우입니다 (비사이즈), (2) 엔진을 줄이거나 변경한 뒤 남아 있는 오래된 OK 레코드가 표를 거부하게 되면서 ‘status’에는 보이지 않는 혼란을 초래합니다. 이 이슈들은 이론적 위험이지만, 실제 데이터에 미치는 영향은 사용자 조정 후 재실행으로 제한됩니다.rescore가 하드코딩된 ENGINES를 순회하면서, 엔진을 제외한 남은 ok 기록이 재계산되는 것은 이론적 위험이다. 엔진 키를 추가하거나 제거하면 플랜이 plain과 extended 사이를 전환하여 측정 해시가 바뀌고 다시 실행된다. 같은 플랜을 재시작하면 모든 추출이 다시 수행돼 비용이 발생한다.Evaluating the theoretical impact of adding [sage, msfragger] to the dwv_pxd029836 plan, noting extended‑measure changes, G‑V01 acceptance, and that missing by_charge in pre‑existing records causes permanent pending state.검증 결과 검색 함수가 “다음 실행이 재시도된다”는 주장은 틀렸으며, pending()이 False인 상태에서 파일이 삭제되고 테이블이 영구적으로 pending 상태를 보일 위험이 있음을 확인했다.검색 단계가 완료되면 OK 레코드를 기록하고, add_split은 그 레코드에 by_charge 정보를 덧붙입니다. add_split이 파싱 중에 중단되면 by_charge 없이 남아 다음 실행 시 건너뛰게 되는데, 이는 기존에 존재하던 낮은 위험 문제이며 엔진 옵션과는 무관합니다. Q6에서는 num(0)가 “0”을, num(None)가 “-”를 출력하고, 완전한 OK 레코드의 합계는 0이 될 수 없다는 점이 확인됩니다.분석 결과, 채점 표에서 `ratio2`가 0 분자나 0 분모일 때 '-'가 표시되는지 검사했고, 분모가 0일 때만 '-'가 나오는 것을 확인했다. 특히 `s_z2` 값이 0이면서 `d_sz2`가 0인 경우에는 '-'가 출력되도록 구현돼 있는 것으로 보이다. 다른 경우에는 정상적으로 '0' 또는 '0.00'이 나타나며, 부적절한 값이 없음을 확인했다.이 부분에서는 `engines` 목록에 대해 다양한 YAML 형태를 시험해 보며 수용 가능한 경우와 거절되는 경우를 확인하고, 순서가 검증에 영향을 주는 것이 사소한 문제라고 판단했다. G‑V01은 완전하게 검증된 상태이다.키 검사에서 engines가 포함돼 있어도 필수 키가 부족하면 거부되는 것을 확인했으며, Q3 테스트는 `extended()` 호출을 덮어쓰기하고 `dry_run`이 엔진 전용 플랜에서 “cells none” 헤더를 출력함을 검증했습니다. Q1에서는 [sage]만 있는 경우 MSFragger가 실행되지 않는 것을 phase‑2 루프(engines 변수 및 pending 상태)에서 확인했습니다.I’m mapping which harness parts consult the `engines` list: ready_arms, pair_done, sweep_outputs, rescore (though hard‑coded), add_split, status, the table renderer and dry‑run. I note that rescore does nothing for a Sage‑only plan but still touches any leftover MS‑Fragger records if the plan was later narrowed (finding #3). The Q2 check shows plain and dwv_stage1 plans stay unaffected—their `q_engines` stays the same and `extended()` behaves normally.테이블 가드와 SG 리팩터가 수정돼도 결과는 그대로이며, 새 G‑V13 검사에서 엔트랭을 포함한 기록이 있는 dwv_stage1 계획은 정상적으로 처리되고, entrapment false 시 레코드가 거부되는 상황이 예측됩니다.I verified that the only altered parts of the harness are the unmeasured functions (_node_run, dry_run, render, guards, selftest), while all measured run_pair/run_search/score routines remain unchanged. A second check of search_overlaps in render_cells_table shows no overlap issues on Sage‑only runs, and the queue logic around the engines key and busy_patterns is consistent with CORPUS.md’s rule that plain queues always invoke both engines.Q4에서 “widened back” 시 출력이 삭제되고 전체 그룹이 재실행되며, 오래된 레코드는 테이블 거부로 인해 무시되는 유일한 음성적 오류가 존재하고, 두 엔진 모두에서 msfragger가 FAILED이면 Sage만 표시되는 경우가 확인됐다.MSFragger entries are hidden in the status view, and narrowing the engines list so that MSFragger is present for only some samples triggers a G‑V13 table rejection. Issue #4 is rated low severity because the documentation already declares that the `engines` key makes a plan extended, and the legend wording for searches has been clarified.다음 사항을 검토 중입니다: diaTracer가 Sage 이전에 패치되고, `fix_mzml_cvparams.py`가 모든 arm에 대해 MSFragger 전에 실행되는 것으로 표시되며, `dwv_pxd029836` 표에서는 MSFragger jar SHA와 모든 arm에 대해 fix 실행을 잘못 표시합니다. 엔진 라인에서는 도구가 설치만 되고 실행은 없다고 명시하고 있어, 세심한 사용자는 그 차이를 알 수 있습니다. 현재 이 문제는 낮은 위험으로 평가되며, 향후 수정이 필요합니다.I noted that printing “‑” is intentional and fine, and that the `workers` name only appears in the `render_table` logic. I’ll double‑check the dry‑run output for a Sage‑only plan, making sure the string “fix_mzml_cvparams” does not appear. The plan is to list findings with severity, location, a concrete failing input, and whether the issue bites real data, followed by one line per question if none apply. Already identified two low‑severity issues: (1) the `render_cells_table` legend claims an MSFragger run that never happened, and (2) the status view hides stale records when an engine is dropped instead of flagging them.status 실행 후 엔진 리스트를 바꾸면 msfragger 결과가 화면에서 사라지고 Table은 G‑V13으로 거부된다. rescore는 하드코딩된 ENGINES를 순회해 msfragger 레코드를 재계산해 이론적인 부작용을 일으킨다. engines: `[sage, msfragger]` 로 설정하면 평형이 바뀌어 measure 해시가 달라져 전체 추출을 다시 실행한다.The review points out that a difference in the cells hash triggers a full re‑run of the extraction instead of just a search, and notes a low‑severity case where a search record without `by_charge` is deleted yet still appears pending. It also confirms that no new runtime paths were added—only the hard‑coded engine list in `rescore` remains unmodified.Finding 3 일정은 MSFragger 시작/대기 불가를 지적한다. 엔진키가 없는 계획은 q_engines와 extended()가 변하지 않으며, G‑V13 집합검사도 통과한다; None과 {}를 '셀없음'으로 묶어도, 실제 셀 불일치가 있으면 거부된다. run_group, noop_check, render_cells_table, guardtest는 빈 셀 리스트를 적절히 처리하며, self‑test가 이를 확인한다.Narrowing a plan removes an engine, so stale OK records trigger a G‑V13 rejection while any pending runs of that engine are abandoned and its outputs are deleted once the remaining engines finish per design. Widening causes a full re‑run because outputs are already gone, yielding correct counts at a higher cost; the engine filter enforces an exact match to the allowed list, rejecting duplicates or reordered entries.문자열·빈값·null·bool·중첩 리스트·대소문자 오류는 모두 거부되고, 전체 리스트는 허용된다. num(0)은 “0”, num(None)은 “-”로 표시되며, 엔진이 없는 경우 완전행에서는 0이 될 수 없어서 G‑V13에서 거부된다. 전반적으로 확장 플랜에서 엔진 목록 변경 시 measure 하시값이 달라져 전체 재실행이 발생한다.Ich bestätige, dass der serielle Abschnitt bei einem Plan mit beiden Engines unverändert bleibt, die Plain‑Branch‑Einheiten in `_node_run` weiterhin die härtig codierten ENGINES nutzen, `cmd_status` bei einem Plan ohne Engines aber mit Entrapment die Entrap‑Spalte anzeigt und dass der neue `table_guards`‑Check keine KeyError verursacht, da alle Suchaufzeichnungen ein „engine“-Feld besitzen.Other 체크는 `oks`가 비어 있어도 실행되며 no‑op 상태임. 이후 구체적인 실패 입력을 포함한 결과 도출을 준비 중입니다.
+
+To resume this session: kimi -r session_349e07dc-53ba-41f0-ad7b-2929c0bd5b96

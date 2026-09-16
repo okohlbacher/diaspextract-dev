@@ -1,0 +1,6 @@
+# python3 mutate_engines.py corpus.py CONTROL,E1,E2,E15   (corpus.py sha256 fb75a37a..., the review fix; output as printed, cut at 230 columns)
+CONTROL (no mutation)                                        SURVIVED 284/284 cases pass
+E1 engines value not validated                               KILLED   FAIL G-V01 extended plan refused: engines: sage (a string, not a list) guard did NOT fire | FAIL G-V01 extended plan refused: engines: [] (no engine) guard did 
+E2 validation accepts repeats and any order                  KILLED   FAIL G-V01 extended plan refused: engines with a repeat guard did NOT fire | FAIL G-V01 extended plan refused: engines out of ENGINES order guard did NOT fire |
+E15 full engines list accepted (plain plan re-runs whole)    KILLED   FAIL G-V01 extended plan refused: engines naming every engine (the default: omit the key) guard did NOT fire | 283/284 cases pass, 1 FAIL (world kept for inspec
+MUTATE_DONE
