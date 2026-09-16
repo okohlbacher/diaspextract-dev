@@ -266,7 +266,10 @@ environment rules as the reference arm apply (G-V03: stripped variables, no inhe
 exporting none of them, every `ldd` library inside the arm, `/ceph` or the system directories). The build identity
 (G-V04/G-V11/G-V13) of each cell is the binary, `FileFilter`, `lib/**` and the ceph libraries both resolve.
 
-**Phase 1, one group per sample.** One staged copy; the reference pair first (order alternating as before), then
+**Phase 1, one group per sample.** One staged copy holding **only `analysis.tdf` and `analysis.tdf_bin`** (the
+patient-data rule of this stage: a raw `.d` also carries sample and acquisition metadata files that no arm reads;
+same fresh `0700` directory, neutral name and pin checks as a plain pair, which still copies the whole `.d`);
+the reference pair first (order alternating as before), then
 the cells in plan order, rotated by queue index; each arm synced and pre-warmed outside its timed window; CPU
 (user + system from `time -v`) recorded for every arm. A cell runs
 `time -v $DWV_BIN -in <staged .d> -out <cell dir> -threads <threads> <args>` in its own session. The session is
@@ -459,10 +462,10 @@ writes charge, discriminant and `ENTRAP_` rows under the entrapment config, and 
 `bench/entrapment.py` and `bench/semantic_digest.py`. It runs extended queues end to end (two samples, two cells,
 entrapment; a no-op pair of cells; six cell failures with a relaunch; a memory-floor kill; six re-encode faults) and
 checks the pair-compatibility claim: the three measurement hashes equal `PAIR_MEASURE_1_3_0`, a plain plan resolves
-without the new keys, plain records, dry-run and table carry nothing of the extended plans. **230/230** cases pass
+without the new keys, plain records, dry-run and table carry nothing of the extended plans. **232/232** cases pass
 (135 before), and each of G-V16 to G-V19 fires; a crash inside the extended part is a FAIL line. Mutation proof
 (scratchpad `mutate.py`, the same method as the review round): each new check re-broken alone in a copy makes that
-copy's selftest fail, 24/24 mutations (corpus.py sha256 `7c0863e0`).
+copy's selftest fail, 25/25 mutations (corpus.py sha256 `bc6a3a8f`).
 
 Compatibility, read-only on 2026-09-16 with this `corpus.py`: `dry-run --local` of `corpus_v3` and
 `corpus_v3_selftest_v130` byte-identical to the 1.3.0 harness; `preflight --plan corpus_v3_selftest_v130` gave

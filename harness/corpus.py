@@ -125,6 +125,9 @@ CELL_TOOL_KEYS = ("digest",)                        # bench/semantic_digest.py, 
 ENTRAP_TOOL_KEYS = ("sage_entrap", "entrapment")    # Sage config naming the target+entrapment FASTA; bench/entrapment.py
 ENTRAP_DB, ENTRAP_TAG = "entrap_fasta", "ENTRAP_"
 STRATA = (("all", 0, 999), ("z1", 1, 1), ("z2p", 2, 999))   # charge strata (inclusive); z1 + z2p must partition all
+# What an extended plan stages (patient-data rule of the diaWeaver stage): the two files every extractor reads. A raw
+# .d also carries sample and acquisition metadata (SampleInfo.xml, HyStar files, method folders) that no arm needs.
+STAGE_FILES = ("analysis.tdf", "analysis.tdf_bin")
 
 
 class Abort(Exception):
@@ -1015,6 +1018,34 @@ def run_pair(q, idx, s, env, ident0, meta, removed, patterns) -> bool:
     return rec["status"] == "ok"
 
 
+def stage_tdf(q: dict, s: dict, pair_run: str) -> tuple:
+    """stage() for an extended plan: the same fresh 0700 directory, neutral name and pin checks (G-V02, G-V07), but
+    only STAGE_FILES are copied."""
+    sroot = Path(q["root"]) / "stage"
+    sroot.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(sroot, 0o700)
+    d = sroot / ("%s-%s" % (s["id"], pair_run))
+    d.mkdir(mode=0o700)
+    raw = Path(s["raw"])
+    fp_raw = fingerprint(raw, with_acq=True, what="raw of %s" % s["id"])
+    check_pin(fp_raw, s["pin"], "raw of %s" % s["id"])
+    if round(fp_raw["acq_min"], 1) != round(float(s["acq_min"]), 1):
+        die("G-V02", "raw of %s: acquisition %.1f min, registry acq_min %s" % (s["id"], fp_raw["acq_min"], s["acq_min"]))
+    dst = d / (s["id"] + ".d")
+    t0 = time.monotonic()
+    try:
+        dst.mkdir(mode=0o700)
+        for f in STAGE_FILES:
+            shutil.copyfile(raw / f, dst / f)
+    except OSError as x:
+        die("G-V07", "staging copy of %s failed: %s" % (s["id"], x.strerror or type(x).__name__))
+    secs = time.monotonic() - t0
+    fp = fingerprint(dst, what="staged copy of %s" % s["id"])
+    check_pin(fp, s["pin"], "staged copy of %s" % s["id"])
+    return dst, {"dir": str(d), "name": dst.name, "copy_s": round(secs, 1), "fingerprint": fp,
+                 "acq_min_read": fp_raw["acq_min"], "files": sorted(x.name for x in dst.iterdir())}
+
+
 def kill_session(pid: int) -> None:
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -1260,7 +1291,7 @@ def run_group(q, idx, s, env, ident0, meta, removed, patterns, cenvs, digest) ->
     write_json(root / "records" / ("%s.pair.json" % s["id"]), rec)
     say("group %s %s order %s" % (s["id"], pair_run, " -> ".join(order)))
     try:
-        staged, rec["stage"] = stage(q, s, pair_run)
+        staged, rec["stage"] = stage_tdf(q, s, pair_run)
         rec["gate"] = load_gate(q, patterns)
         nb = rec["neighbour_before"] = neighbour(s["raw"])
         for tool in ref:
@@ -1884,8 +1915,13 @@ def dry_run(q: dict) -> None:
         d = root / "stage" / ("%s-<pair_run>" % s["id"])
         staged, pdir = d / (s["id"] + ".d"), root / "runs" / s["id"] / "<pair_run>"
         print("\n## %s  %s  order %s" % (s["id"], s["scheme"], " -> ".join(order + extra)))
-        print("# copy data only, folders 0700 (no modes/ACLs/xattrs), neutral name; pin + acq_min check on the raw, "
-              "pin check on the copy\ncopy %s %s" % (shlex.quote(s["raw"]), shlex.quote(str(staged))))
+        if extended(q):
+            print("# copy %s only into a fresh 0700 directory, neutral name; pin + acq_min check on the raw, pin check on "
+                  "the copy\ncopy %s/{%s} %s" % (" + ".join(STAGE_FILES), shlex.quote(s["raw"]), ",".join(STAGE_FILES),
+                                                shlex.quote(str(staged))))
+        else:
+            print("# copy data only, folders 0700 (no modes/ACLs/xattrs), neutral name; pin + acq_min check on the raw, "
+                  "pin check on the copy\ncopy %s %s" % (shlex.quote(s["raw"]), shlex.quote(str(staged))))
         print("# load gate")
         for tool in order:
             a = pdir / tool
@@ -3087,7 +3123,8 @@ MEASURED = {
 
 # Extended plans only (plan keys `cells`, `entrapment`): the group runner, the cells, the re-encode, the entrapment search
 # and the per-charge split. A change here re-runs the groups and searches of extended plans and nothing else.
-MEASURED_CELLS = (sorted(CELL_KINDS.items()), REENCODE, NUMPRESS_CV, PREC_CV, ENTRAP_TAG, STRATA, cell_env, cmd_dwv,
+MEASURED_CELLS = (sorted(CELL_KINDS.items()), REENCODE, NUMPRESS_CV, PREC_CV, ENTRAP_TAG, STRATA, STAGE_FILES, stage_tdf,
+                  cell_env, cmd_dwv,
                   cmd_reencode, kill_session, run_capped, time_cpu, mzml_scan, reencode, run_cell, noop_check, run_group,
                   load_module, tsv_iter, entrap_strata, run_entrap, sage_by_charge, msf_by_charge, add_split)
 # The two-extractor pair as of DIAspeXtract 1.3.0 (CORPUS.md). selftest asserts these: an edit to a measured function
@@ -3255,6 +3292,8 @@ if "--help" in sys.argv:
     sys.exit(0)
 line = " ".join(sys.argv)
 out = os.path.join(arg("-out"), "pseudo_spectra.mzML")
+with open(os.path.join(arg("-out"), "staged_files.txt"), "w") as f:
+    f.write("\n".join(sorted(os.listdir(arg("-in")))) + "\n")
 if hit("FAKE_DWV_FAIL", line):
     sys.exit(3)
 if hit("FAKE_DWV_SLOW", line):
@@ -3530,7 +3569,8 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     with contextlib.redirect_stdout(buf):
         dry_run(q3)
     C.check("COMPAT", "plain dry-run prints nothing of the extended plans",
-            not any(x in buf.getvalue() for x in ("extended plan", "G-V17", "reencoded", "entrap", "dwv")))
+            not any(x in buf.getvalue() for x in ("extended plan", "G-V17", "reencoded", "entrap", "dwv", "tdf_bin only")))
+    C.check("COMPAT", "plain pairs stage the whole .d as before", "files" not in rp["A", "pair"]["stage"])
     mdp = render_table("selftest", *_reg(q1), list(rp.values()))[0]
     C.check("COMPAT", "plain table renders without the extended sections",
             "Peptides by precursor charge" not in mdp and "Entrapment by charge" not in mdp and "Cell outputs" not in mdp)
@@ -3629,6 +3669,10 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             a["spectra_stats"]["numpress_terms"] == 24 and a["reencoded_stats"]["numpress_terms"] == 0
             and a["reencoded_stats"]["unsorted"] == 0 and a["output"]["count"] == a["raw_output"]["count"] == 12
             and a["output"]["path"].endswith("/reencoded.mzML") and not Path(a["raw_output"]["path"]).exists(), a.get("reencoded_stats"))
+    C.check("G-V07", "an extended plan stages analysis.tdf + analysis.tdf_bin only (the raw also has a method folder)",
+            R["A", "pair"]["stage"]["files"] == list(STAGE_FILES) and (w / "ceph" / "raw" / "run_A.d" / "run.m").is_dir()
+            and (Path(a["cwd"]) / "staged_files.txt").read_text().split() == list(STAGE_FILES)
+            and R["A", "pair"]["stage"]["fingerprint"] == xq["samples"][0]["pin"], R["A", "pair"]["stage"].get("files"))
     C.check("G-V16", "every arm timed with CPU; the cell's cap recorded and not hit",
             all(R["A", "pair"]["arms"][t]["cpu"]["cpu_s"] == 125.0 for t in tx) and a["wall_cap_s"] == 3600
             and a["stopped"] is None and a["log_count"] == 12)
@@ -3703,7 +3747,7 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     with contextlib.redirect_stdout(buf):
         dry_run(xq)
     out = buf.getvalue()
-    want = ("order dt -> spx -> dwv_default -> dwv_pickim", "bin/diaWeaver -in", "-threads 100 -bruker:ms1_centroid_mz_ppm 0",
+    want = ("order dt -> spx -> dwv_default -> dwv_pickim", "analysis.tdf + analysis.tdf_bin only", "bin/diaWeaver -in", "-threads 100 -bruker:ms1_centroid_mz_ppm 0",
             "FileFilter -in", "reencoded.mzML' -sort >reencode.log", "G-V16", "G-V18: flag dwv_pickim", "sage_entrap.json",
             "dwv_pickim_msfragger", "G-V19")
     C.check("DRY", "extended dry-run prints the cells, re-encode, no-op and entrapment steps",
