@@ -39,6 +39,14 @@ cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON && cmake --build build && ctest --te
 
 The second form needs no OpenMS and is what CI runs on four platforms.
 
+Which CI legs run depends on the repository. The two Linux legs of `tests.yml` run on every push and
+pull request everywhere. The macOS and Windows legs, and the weekly OpenMS-from-source build of
+`build.yml`, run on the public repository (`okohlbacher/diaspextract`) and on a manual
+`workflow_dispatch`; the private development repository runs Linux only on push, because its Actions
+minutes are paid and the release gate is the public repository's CI on the exported code, green on all
+legs before a release is tagged. To run the full matrix on the development repository, dispatch
+`tests.yml` by hand.
+
 Run the end-to-end suite from a shell with no `DIASPEXTRACT_*` variable set: it passes the caller's
 environment through to the tool (check 22 strips only the two old prefixes it tests), so a stray probe
 variable would configure every check. CI runs it under `env -i`, and the cluster publish script starts

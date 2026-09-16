@@ -26,6 +26,10 @@ on:
 jobs:
   linux:
     name: ubuntu-latest, OpenMS from source + patches
+    # The weekly build runs only on the public repository (.../diaspextract): this file is exported there
+    # unchanged, and the private development repository pays for its Actions minutes. Tag pushes and
+    # manual dispatches run everywhere.
+    if: github.event_name != 'schedule' || endsWith(github.repository, '/diaspextract')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
