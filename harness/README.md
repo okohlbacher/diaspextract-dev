@@ -4,7 +4,9 @@
 write into the published benchmark tables.
 
 Head-to-head against diaTracer on the whole corpus (both extractors, Sage and MSFragger, wall and RSS,
-per-node queues) is `corpus.py`; see [CORPUS.md](CORPUS.md).
+per-node queues) is `corpus.py`; see [CORPUS.md](CORPUS.md). A corpus plan may add extra extractor cells
+(diaWeaver: timed and capped, re-encoded before any search, no-op flagged) and an entrapment search reported
+per charge stratum ("Extended plans" in CORPUS.md, guards G-V16 to G-V19).
 
 ```
 bench2.py   plan-check --plan P              # validate a plan; no side effects, no dirs created

@@ -5,6 +5,10 @@ and MSFragger. The mode reports peptides, peak RSS and runtime per file, with pe
 totals. It is part of the harness: the standing rule (benchmark numbers come from the harness only)
 applies. One module, stdlib only on the nodes (PyYAML only on the laptop side), no driver scripts.
 
+A plan may add **extra extractor cells** (diaWeaver so far) and an **entrapment search**; see
+[Extended plans](#extended-plans-extra-cells-and-entrapment). A plan without them runs exactly as before:
+the same functions run and measure it, and its three measurement hashes are unchanged.
+
 ```
 python3 harness/corpus.py selftest                                  # offline; every guard must fire
 python3 harness/corpus.py pin      --node data                      # print registry pins (read-only)
@@ -39,8 +43,8 @@ The registry is read with a loader that refuses duplicate keys (PyYAML's `safe_l
 without a word), and no two samples of a plan may share a raw path or a pin (G-V01).
 
 A plan is a top-level section (`corpus_v3`, and the proof plans `corpus_v3_selftest`,
-`corpus_v3_selftest_r2`, `corpus_v3_selftest_v120`)
-with exactly these keys:
+`corpus_v3_selftest_r2`, `corpus_v3_selftest_v120`, `corpus_v3_selftest_v130`; the extended plan `dwv_stage1`)
+with exactly these keys, plus the optional `cells` and `entrapment` of an extended plan:
 
 | key | meaning |
 |---|---|
@@ -53,8 +57,10 @@ with exactly these keys:
 | `load_wait_min` | how long the load gate waits before running a pair anyway and flagging it (20; T0 decision 2026-09-11) |
 | `n_samples` | the number of samples across all queues (49); anything else refuses the plan (G-V01) |
 | `search_db_sha256` | sha256 of the two node-local databases the configs name (`sage_fasta`, `msfragger_db`), checked on each node before staging (G-V12) |
-| `tools` | `sage`, `sage_config`, `msfragger_jar`, `msfragger_params`, `patch`, `fix` sources (copied run-local) |
+| `tools` | `sage`, `sage_config`, `msfragger_jar`, `msfragger_params`, `patch`, `fix` sources (copied run-local); an extended plan adds `digest` (with `cells`) and `sage_entrap`, `entrapment` (with `entrapment`) |
 | `queues` | `{node: {samples: [...], search_workers: N}}`; a sample may be in one queue only |
+| `cells` (optional) | `{name: {kind: dwv, arm, args: [...], wall_cap_h, differs_from?}}`: extra extractors, see below |
+| `entrapment` (optional) | `true`: a third search per output; `search_db_sha256` then also pins `entrap_fasta` |
 
 ---
 
@@ -207,6 +213,10 @@ triggered by `--selftest`, which fails if any id never fires.
 | G-V13 | table | more than one build, JDK feature version, thread count, measurement code or search setup across records (or ok records without measurement hashes); pair arms on two hosts; ok record with count, RSS or peptides <= 0; record pin or raw differs from the registry | a table mixing builds, rules, nodes or corrupted records |
 | G-V14 | queue/collect/purge | staged copy not deleted; collect or purge while the lock is held; destination not a `corpus_v3*` results directory; a collected path still group/other-accessible | patient-derived data lingering, or readable on ceph; writing into a published arm |
 | G-V15 | queue/launch | root under `/home`; `jnatmp` not writable; MemAvailable or `/proc` unreadable; python < 3.9; `TIME` not GNU `time -v`; no `java`; JDK feature versions differing across nodes (`preflight`) | the quota-killed "12 h JNA trap"; unrecorded memory state; a queue that crashes after 20 h without a marker |
+| G-V16 | cell | an extra cell's exit != 0 or signal; its wall cap passed or MemAvailable under 5% of MemTotal (the tool's session is killed); time log unparseable; `pseudo_spectra.mzML` missing, stale or unterminated; count <= 0; `Wrote N pseudo spectra` missing or different; the `Done. Output` finalisation line missing | a diaWeaver run of unknown length holding a shared node for a day or pushing it into OOM; an output from before the final RT sort and rewrite accepted |
+| G-V17 | cell | the re-encode failed; a numpress term (MS:1002312/13/14, MS:1002746/47/48) left; an m/z array unsorted or undecodable, or its length differing from `defaultArrayLength`; the spectrum count changed; RT, selected ion m/z, charge, 1/K0 or isolation target values changed; a spectrum without MS:1000744 | Sage 0.14 silently dropping numpress m/z arrays (spectra without peaks); an engine reading unsorted peaks; a rewrite that loses or edits precursors |
+| G-V18 | flag | a cell's order-independent content digest equals the one of the cell named in `differs_from`, or the check could not run | a no-op arm (flags that were already defaults) reported as a treatment; diaWeaver's unstable RT sort hiding a no-op from an order-dependent digest |
+| G-V19 | search | a result TSV without `charge` (or Sage's `sage_discriminant_score`); a charge split that does not add up to the cell's own count; an entrapment FASTA without `ENTRAP_` peptides; 0 target peptides in the entrapment search | a per-charge number from another counting rule than the table's; an entrapment rate against a database with no entrapment |
 
 ---
 
@@ -232,11 +242,113 @@ came from `hela_table.py` (sha256 `26df867abd67235b...`), which defines identica
 - Ratios in the table are ours / diaTracer. A count of 0 is a failed search (G-V10) and never reaches
   the table.
 
-Not in this run, and not computed: entrapment FDR (option for later: Sage with `sage_entrap.json` and
-`bench/entrapment.py`, with mandatory charge strata), per-charge walks, protein groups, and replicates
-(n = 1 per cell).
+Not in `corpus_v3`, and not computed there: entrapment FDR, per-charge walks, protein groups, and replicates
+(n = 1 per cell). An extended plan adds entrapment by charge stratum and a per-charge split of both counts
+(below); per-charge walks and protein groups remain uncomputed everywhere.
 
 ---
+
+## Extended plans: extra cells and entrapment
+
+Stage 1 of the diaWeaver comparison (`output/diaweaver-comparison/benchmark-plan.md` sections 2-4) needs a third
+extractor next to the pair, a re-encode of its output, and entrapment by charge. The pair itself is untouched:
+`run_pair`, `run_arm`, `run_search`, the peptide rules and every other measured function are unchanged, so a plan
+without `cells`/`entrapment` still measures with pair `3215b73e`, search `064af71b`, score `4fe0a1ce` (selftest pins
+these; `dry-run` of `corpus_v3` and `corpus_v3_selftest_v130` is byte-identical to the 1.3.0 harness). An extended
+plan runs new functions, hashed as a fourth part `cells`, which its records carry and G-V11/G-V13 compare.
+
+**Cell arm contract** (kind `dwv`, as the build slice published `diaweaver-7ed1169`). `<spx_root>/<cell arm>/env.sh`
+exports `DWV_BIN`, an executable inside the arm; `FileFilter` (the fork's own build) sits beside it; the fork's
+libraries live in `<arm>/lib`; `<arm>/PROVENANCE` lists under `sha256_published:` every published file, and the
+binary, `FileFilter` and every `lib/**` file must be listed with the sha256 they have now; `--help` prints
+`diaWeaver -- ...` and `Version: ...` (on the real arm: `diaWeaver 3.6.0-pre-diaWeaver-2-2026-09-12`). The same
+environment rules as the reference arm apply (G-V03: stripped variables, no inherited `LD_LIBRARY_PATH`, env.sh
+exporting none of them, every `ldd` library inside the arm, `/ceph` or the system directories). The build identity
+(G-V04/G-V11/G-V13) of each cell is the binary, `FileFilter`, `lib/**` and the ceph libraries both resolve.
+
+**Phase 1, one group per sample.** One staged copy; the reference pair first (order alternating as before), then
+the cells in plan order, rotated by queue index; each arm synced and pre-warmed outside its timed window; CPU
+(user + system from `time -v`) recorded for every arm. A cell runs
+`time -v $DWV_BIN -in <staged .d> -out <cell dir> -threads <threads> <args>` in its own session. The session is
+killed when `wall_cap_h` passes or MemAvailable falls under 5% of MemTotal (G-V16); a stopped runner kills it too.
+The tool writes one `<cell dir>/pseudo_spectra.mzML`; it must log `Wrote N pseudo spectra.` equal to the file's
+count and `Done. Output` (its final RT sort and numpress rewrite finished).
+
+**Re-encode** (G-V17), still in phase 1 and outside every timed window:
+`time -v <cell arm>/bin/FileFilter -in pseudo_spectra.mzML -out reencoded.mzML -sort` (the option string lives in
+`REENCODE` only). In the fork at 7ed1169, `-sort` is `sortSpectra(true)`: spectra by RT, every peak list by m/z
+with its data arrays; numpress defaults to none, zlib to off, m/z to 64 bit (`src/topp/FileFilter.cpp`). One
+streaming pass over both files (`mzml_scan`) checks: no numpress term left, every m/z array sorted and as long as
+declared, the same spectrum count four ways (both scans, both `spectrumList` counts), the same multiset of (RT,
+selected ion m/z, charge, 1/K0, isolation target) values, and MS:1000744 in every spectrum, so no selected-ion patch
+is needed. The raw output is then deleted; searches read `reencoded.mzML`. The raw scan's charge distribution,
+1/K0 = 0 count and median peaks per spectrum go into the record and the table.
+
+**No-op flag** (G-V18). A cell with `differs_from: <cell>` is flagged when its content digest equals that cell's.
+The content digest hashes each spectrum block of the re-encoded file without `id`/`index`/`spectrumRef`, sorts
+the block digests and hashes them again: diaWeaver's final RT sort is unstable and renumbers `scan=N`, so the
+order-dependent spectrum-list digest (bench/semantic_digest.py, recorded beside it) differs between two runs of
+one arm and would hide a no-op. The check cannot flag a real difference as a no-op; content that varies run to
+run for other reasons would hide one. A check that cannot run (the reference cell failed) is flagged.
+
+**Failures.** A failed reference arm ends the group before any cell (G-V09). A failed cell is recorded in its arm
+and the next cell still runs (a wall-cap stop of one arm must not hide the other); the group stays `ok` with
+`cells_failed`, every ok arm is searched, and the table prints `FAILED G-V16`/`G-V17` for that arm. A group
+counts as done only when every arm is ok, so the next launch re-runs it whole in a new `pair_run`.
+
+**Phase 2.** Every ok arm of a current group gets Sage and MSFragger as before (`fix_mzml_cvparams.py` and the
+Scans check for the cells too) and, with `entrapment: true`, a third search `entrap`: Sage with `sage_entrap.json`
+on the same input as its Sage cell (diaTracer patched), with the same read checks (G-V10). After each Sage and
+MSFragger search the count is split by charge (G-V19): each counted peptide goes to the stratum of its best
+counted PSM (Sage: highest `sage_discriminant_score`; MSFragger: the best-hyperscore PSM of its key, walked in
+`msf_peptides` order), and `z1 + z2p` must equal the count. The entrapment search is scored by the run-local
+`bench/entrapment.py` itself: `peptide_ratio()` on the FASTA the config names, and `score()` on the whole TSV
+restricted to each stratum's rows (each non-decoy peptide's best PSM, chosen as `score()` chooses it), so the
+strata `z1` and `z2p` partition `all` exactly (checked). Records keep accepted, target, entrapment, raw %, est.
+FDR % and the bootstrap CI per stratum. The mzML goes once every engine succeeded.
+
+**Table** (`table` on an extended plan): one row per (sample, arm) with wall, RSS, CPU cores, spectra, Sage
+(target+decoy and target-only), MSFragger, ratios against diaTracer and engine walls; peptides by charge; entrapment
+by stratum; cell outputs (args, charges, 1/K0 = 0, peaks, re-encode wall, numpress terms before/after, both
+digests, no-op result); totals per arm over complete samples, including the z >= 2 ratios (Sage target,
+MSFragger). G-V13 also refuses records whose cells or entrapment setting differ from the plan, or more than one
+cell label or cell build.
+
+**Not covered.** `guardtest` refuses extended plans (it proves the pair). The plan's optional runs (MSFragger on
+the unfixed file, determinism repeats, dwv-author) are not implemented. Spectrum statistics exist for the cells
+only; the unsorted share of the raw diaWeaver output is not measured (its m/z arrays are numpress, which the
+stdlib cannot decode).
+
+### diaWeaver stage 1: plan `dwv_stage1` (local, in the untracked samples.yaml)
+
+Dataset D only, node `data` (224 cores, 2.2 TB), `threads: 100`, `load_wait_min: 20`, `search_workers: 1`,
+`entrapment: true`, results `/ceph/ibmi/abi/oliver/spextract/corpus_v3_dwv_stage1`, report
+`harness/dwv-stage1.md`. Arms: `dt` (diaTracer 2.2.1, the corpus-v3 invocation), `spx` (arm `v1.3.0`), and two cells
+on the arm `diaweaver-7ed1169`, each with `wall_cap_h: 12`: `dwv_default` (no args) and `dwv_pickim`
+(`-bruker:ms1_centroid_mz_ppm 0 -bruker:ms1_centroid_im_pct 0`, `differs_from: dwv_default`). Extra tools, all
+run-local copies pinned by G-V12: `digest` = `$SPX/tools/semantic_digest.py` (equal to bench/), `sage_entrap` =
+`$SPX/tools/sage_entrap.json` (equal to `sage_deiso.json` except the FASTA), `entrapment` = `$SPX/tools/entrapment.py`
+(equal to bench/ up to comments); `entrap_fasta` pin `929d8859...` (`$SPX/tools/human_entrap.fasta`, 16,343
+`ENTRAP_` proteins).
+
+Read-only checks on 2026-09-16 (nothing launched): `preflight --plan dwv_stage1` gave `PREFLIGHT_OK` on data (load
+0.1, lock free, nothing of ours running): both cells `diaWeaver 3.6.0-pre-diaWeaver-2-2026-09-12`, binary
+`c517789e...` and FileFilter `49be3446...` equal to the arm's `sha256_published`, `ldd` closure inside the arm and
+`/lib`, `/lib64`, entrapment FASTA pin equal. The built FileFilter's `--help` lists `-sort`, numpress `none` and zlib
+`false`. `dry-run --node data` printed the commands above with the real paths.
+
+Launch, after the build slice published `diaweaver-7ed1169` and with nothing else of ours running:
+```
+python3 harness/corpus.py preflight --plan dwv_stage1            # PREFLIGHT_OK; prints both cells' label and shas
+python3 harness/corpus.py dry-run   --plan dwv_stage1 --node data
+python3 harness/corpus.py launch    --plan dwv_stage1 --node data # LAUNCH_OK
+until python3 harness/corpus.py status --plan dwv_stage1 --node data | grep -q "lock free"; do sleep 900; done
+python3 harness/corpus.py collect --plan dwv_stage1 --node data
+python3 harness/corpus.py table   --plan dwv_stage1 --source ceph
+python3 harness/corpus.py purge   --plan dwv_stage1 --node data
+```
+If `preflight` shows `data` busy or loaded above 24 at launch time, rename the queue key to `ibminode05` in
+samples.yaml and use `--node ibminode05` throughout. The group can take up to ~26 h (two 12-h caps plus the pair).
 
 ## Reading the table
 
@@ -338,6 +450,23 @@ users. Harness checks, not benchmark numbers.
   skipped`, and the five record files kept their mtimes (nothing re-ran, nothing rewritten).
 - **Collect and table:** 73 files to `/ceph/.../corpus_v3_selftest/data`; `table --source ceph` rendered
   the row with all 19 columns filled, no pending/FAILED/zero cell.
+
+### Extended-plan selftest (2026-09-16)
+
+`selftest` now also builds a diaWeaver arm and a FileFilter that write and read real base64 arrays (the fake
+diaWeaver labels plain arrays as numpress, writes peaks unsorted and shuffles spectra with RT ties), a Sage that
+writes charge, discriminant and `ENTRAP_` rows under the entrapment config, and imports the real
+`bench/entrapment.py` and `bench/semantic_digest.py`. It runs extended queues end to end (two samples, two cells,
+entrapment; a no-op pair of cells; six cell failures with a relaunch; a memory-floor kill; six re-encode faults) and
+checks the pair-compatibility claim: the three measurement hashes equal `PAIR_MEASURE_1_3_0`, a plain plan resolves
+without the new keys, plain records, dry-run and table carry nothing of the extended plans. **230/230** cases pass
+(135 before), and each of G-V16 to G-V19 fires; a crash inside the extended part is a FAIL line. Mutation proof
+(scratchpad `mutate.py`, the same method as the review round): each new check re-broken alone in a copy makes that
+copy's selftest fail, 24/24 mutations (corpus.py sha256 `7c0863e0`).
+
+Compatibility, read-only on 2026-09-16 with this `corpus.py`: `dry-run --local` of `corpus_v3` and
+`corpus_v3_selftest_v130` byte-identical to the 1.3.0 harness; `preflight --plan corpus_v3_selftest_v130` gave
+`PREFLIGHT_OK` on ibminode05.
 
 ## Guard test on a real node (`corpus.py guardtest --node data`)
 
