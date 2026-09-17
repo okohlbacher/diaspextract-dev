@@ -38,7 +38,7 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    grid, with at least 3 shared points).
 4. **Assembly and output.** The accepted fragments are ranked by correlation-weighted intensity and the top 500 kept;
    a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
-   each fragment's emitted intensity multiplied by the square of its correlation. Spectra are sorted per tile and
+   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile and
    serialised in parallel. The header records every setting that shaped the output.
 
 <p align="center"><img src="assets/algorithm.svg" alt="The co-elution gate and the assembly of one pseudo-spectrum" width="1000"></p>
@@ -63,7 +63,7 @@ into fixed 600-s retention-time cells at MS1 frame times, each tile (one cell by
 sorted and written before the next one starts, and the fragments that straddle a cut are carried over. Tiling
 bounds the fragment working set; the MS1 traces and precursors of the whole run stay resident throughout. Within a
 tile, isolation windows are admitted while they fit in 75 % of the machine's free RAM, so the run adapts to
-neighbours on a shared machine; one window is always admitted. Between tiles the allocator's free pages are returned to the OS.
+neighbours on a shared machine; one window is always admitted whatever the memory says, so a single oversized window cannot deadlock the run. Between tiles the allocator's free pages are returned to the OS.
 
 ## Requirements
 
