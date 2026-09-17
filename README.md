@@ -60,7 +60,8 @@ downstream loses peptides, so search it as written.
 
 Memory, not CPU, decides whether a run fits a machine. The window loop therefore runs **tile by tile**: the run is cut
 into fixed 600-s retention-time cells at MS1 frame times, each tile (one cell by default) is read, traced, scored,
-sorted and written before the next one starts, and the fragments that straddle a cut are carried over. Within a
+sorted and written before the next one starts, and the fragments that straddle a cut are carried over. Tiling
+bounds the fragment working set; the MS1 traces and precursors of the whole run stay resident throughout. Within a
 tile, isolation windows are admitted while they fit in 75 % of the machine's free RAM, so the run adapts to
 neighbours on a shared machine; one window is always admitted. Between tiles the allocator's free pages are returned to the OS.
 
@@ -106,12 +107,13 @@ The binary is `build/diaspextract`; `cmake --install build` puts it under `<pref
 | patch | what it changes | why |
 |---|---|---|
 | `openms-brukertims-mz-calibration.patch` + `src/TdfMzCalibration.h` | the Bruker reader converts flight time with the acquisition's exact calibration model instead of a two-point chord | the chord is −5 to −11 ppm off, m/z dependent, worth 6–11 % of closed-search identifications; the mzML records which model ran (`spx:mz_calibration`) |
-| `openms-epd-lockfree.patch` | removes a program-global critical section from elution-peak detection | called from a parallel window loop, that one lock serialised the tool |
+| `openms-epd-lockfree.patch` | removes a program-global critical section from elution-peak detection | called from a parallel window loop, that one lock burned about a quarter of the CPU in blocked threads |
 | `openms-masstrace-move.patch` | gives `MassTrace` move operations | OpenMS's defaulted copy operations made every `std::move` a deep copy; a `static_assert` enforces the patch |
-| `openms-mzml-parallel-write.patch` | encodes mzML spectra in chunks on all threads, appended in index order | the writer was CPU-bound on one thread; byte-identical output, 20 s → 6 s on a 30-minute run |
+| `openms-mzml-parallel-write.patch` | encodes mzML spectra in chunks on all threads, appended in index order | the writer was CPU-bound on one thread; byte-identical spectrum list, 20 s → 6 s on a 30-minute run |
 
 Environment variables the patched libOpenMS reads, none needed for a normal run: `DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1`
-opts into the legacy chord when the exact calibration is unavailable (otherwise the run fails closed);
+opts into the legacy chord when the exact calibration is unavailable (otherwise the run fails closed; the MS1
+denoiser needs the exact model, so this and the SDK path below require `-dnoise:ms1 false`);
 `DIASPEXTRACT_LOAD_BATCH=<n>` sets the frames per decode batch (default 256; output-neutral);
 `DIASPEXTRACT_SDK_PARALLEL` (any value) lets the loader decode frames in parallel even when Bruker's library does
 the conversion, which otherwise runs serially because that library's thread safety is not guaranteed. Optionally,
@@ -145,8 +147,9 @@ procedure cannot stratify by charge, filter the search results per precursor cha
 
 ### Options
 
-`diaspextract --helphelp` prints every option with its default. Defaults below are the shipped ones; options marked
-**changes output** move the spectrum list, the others only cost or save time and memory.
+`diaspextract --helphelp` prints every option with its default. Defaults below are the shipped ones. The detection,
+charge, gate, assembly and denoising options shape the spectra by definition; in the memory and concurrency table,
+only the options marked **changes output** move the spectrum list, the others cost or save time and memory.
 
 **Which option for what.** Memory: `-tile:cells_per_tile` (1 is the smallest footprint), `-perf:max_concurrent_windows`
 and `-perf:mem_fraction`; avoid `.mzpeak` output and `-trace:detector openms` on a small machine, both process the
@@ -161,15 +164,15 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-in` | required | a Bruker `.d` directory, an mzML, or an mzPeak archive |
 | `-out` | required | output file; the format follows the extension (`.mzML` or `.mzpeak`). mzPeak is written in one piece, so the whole run is processed as one tile at whole-run memory; write `.mzML` when memory is tight or a search comes next |
 | `-out_type` | follows the extension | force `mzML` or `mzpeak` |
-| `-threads` | all cores | worker threads. Only the command line is inspected: `threads = 1` in an ini file counts as unset |
+| `-threads` | all cores | worker threads. Without `-threads` on the command line the tool uses every core; an ini value above 1 is honoured, an ini `threads = 1` counts as unset |
 | `-ini`, `-write_ini` | | read or write a TOPP ini file with every option |
 | `-log`, `-no_progress`, `-debug` | | log to a file, silence progress, raise the debug level |
 
-**Memory and concurrency (`perf:`, `tile:`)** — none of these change the output unless marked.
+**Memory and concurrency (`perf:`, `tile:`)** — output-neutral unless marked.
 
 | option | default | meaning |
 |---|---|---|
-| `-tile:cells_per_tile` | 1 | cells per tile. Memory is one tile's; 0 runs the whole run as one tile, at several times the memory |
+| `-tile:cells_per_tile` | 1 | cells per tile. The fragment working set is one tile's; 0 runs the whole run as one tile, at several times the memory |
 | `-tile:rt_sec` | 600 | pitch of the retention-time cells, cut at MS1 frame times. **Changes output**: peptides eluting within 15 s of a cut line are lost a few points more often than elsewhere, about 0.2 % of the identified set at 600 s. −1 = one cell, the whole run in memory (`-tile:cells_per_tile` then has no effect) |
 | `-perf:mem_fraction` | 0.75 | fraction of the machine's currently free RAM the window loop may commit; re-decided at every window admission |
 | `-perf:max_concurrent_windows` | 0 = all | upper bound on isolation windows in flight; lower it to trade wall time for memory |
@@ -193,9 +196,9 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-trace:ms1_split_valleys`, `-trace:ms2_split_valleys` | 7, 7 | split traces at chromatographic valleys, value = expected peak FWHM in seconds; 0 = off |
 | `-trace:split_scan_time` | frame | scan time behind the valley splitter: the run's MS1 cycle time (`frame`) or each trace's own (`trace`, OpenMS's behaviour, about 6 % fewer Sage peptides). **Changes output**; leave at `frame` |
 | `-trace:max_span_sec` | 120 | trim every trace to this many seconds around its apex; 0 = no cap. **Changes output** (within 0.1 % of the peptides from 0 to 240) |
-| `-trace:mz_estimator` | apex | reported m/z of a trace: the most intense peak's (`apex`), the intensity-weighted centroid (`mean`) or the `median`. **Changes output**; `apex` identifies the most peptides on both engines |
-| `-trace:band_edges` | acquisition | where the integer detector's band edges come from; leave at `acquisition`. `slab` (edges from the window's own peaks) needs `-perf:stream_load false` and gives the same peptides |
-| `-trace:native_ms1_neighbors` | 0 | sum this many neighbouring MS1 frames on each side before picking (1 = 3 frames); needs `-perf:stream_load true` and `-dnoise:ms1 false`. **Changes output**: about 2.7× the spectra for about 8 % more Sage peptides |
+| `-trace:mz_estimator` | apex | reported m/z of a precursor trace: the most intense peak's (`apex`), the intensity-weighted centroid (`mean`) or the `median`. Fragment traces of the integer detector always report the calibrated m/z of their apex bin; with `-trace:detector openms` the estimator applies to them too. **Changes output**; `apex` identifies the most peptides on both engines |
+| `-trace:band_edges` | acquisition | where the integer detector's band edges come from; leave at `acquisition`. `slab` (edges from the window's own peaks) needs `-perf:stream_load false`; the spectra differ slightly, the identifications hardly |
+| `-trace:native_ms1_neighbors` | 0 | sum this many neighbouring MS1 frames on each side before picking (1 = 3 frames); needs `-perf:stream_load true` and `-dnoise:ms1 false`. **Changes output**: about 2.7× the spectra for about 8 % more Sage peptides, measured on older defaults |
 
 **Precursor charge (`charge:`)**
 
@@ -224,10 +227,10 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 
 | option | default | meaning |
 |---|---|---|
-| `-assembly:min_fragments` | 3 | emit a spectrum only with at least this many fragments |
-| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked |
-| `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage and +5–8 % MSFragger peptides over 0 |
-| `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave +1–7 % Sage peptides and no change on MSFragger |
+| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments pass the gate (checked before the cap below) |
+| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments` |
+| `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage and +4–8 % MSFragger peptides over 0 |
+| `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
 
@@ -239,7 +242,7 @@ bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw p
 |---|---|---|
 | `-dnoise:ms1` | true | on or off. **Changes output** (a few percent of the peptides, in either direction depending on the file) and lowers peak memory |
 | `-dnoise:mz_half_width`, `-dnoise:min_feature_length`, `-dnoise:max_internal_gap`, `-dnoise:iterations`, `-dnoise:min_window_intensity`, `-dnoise:min_feature_intensity` | 3, 5, 2, 2, 0, 0 | the streak filter: a point survives when its TOF bin (± half width) is occupied in a run of scans of this length, bridging this many gaps, repeated this many times; the two intensity floors (0 = off) require a scan's window sum, and a run's total, to reach the value before it counts |
-| `-dnoise:halo`, `-dnoise:halo_peak_fraction`, `-dnoise:halo_mz_idx_half_width`, `-dnoise:halo_scan_half_width` | true, 0.15, 80, 2 | the halo filter: keep a point at ≥ this fraction of the most intense survivor in its box |
+| `-dnoise:halo`, `-dnoise:halo_peak_fraction`, `-dnoise:halo_mz_idx_half_width`, `-dnoise:halo_scan_half_width` | true, 0.15, 80, 2 | the halo filter: keep a point at ≥ this fraction of the most intense streak survivor in its box, its own TOF bin excluded |
 | `-dnoise:dia_ms1_window`, `-dnoise:dia_ms1_mz_pad`, `-dnoise:dia_ms1_im_pad` | true, 5, 0.05 | keep only MS1 points inside a padded diaPASEF isolation window |
 
 **Diagnostics (`diag:`)**: `-diag:dump_ms1_tsv <prefix>` writes the MS1 traces and inferred precursors as TSV so a
@@ -255,7 +258,8 @@ detector and calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_iso
 `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
 `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
 (`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
-`bruker_sdk` or `legacy_chord_APPROXIMATE`.
+`bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
+transform, on request) or `unset` (an mzML input, which carries its m/z as is).
 
 ## Layout
 

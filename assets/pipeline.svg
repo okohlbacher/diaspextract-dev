@@ -43,5 +43,5 @@
   <text x="572" y="280" text-anchor="middle" fill="#4a5568">closed or open search; no spectral library, no prediction, no enumerated search space</text>
   <line x1="1037" y1="180" x2="1037" y2="265" stroke="#4a5568" stroke-width="1.5"/>
   <line x1="1037" y1="265" x2="967" y2="265" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
-  <text x="550" y="318" text-anchor="middle" fill="#718096" font-size="12">Phase names follow the tool's [perf] breakdown at the end of a run (LOAD is printed as LOAD(stream) and LOAD(tile)).</text>
+  <text x="550" y="318" text-anchor="middle" fill="#718096" font-size="12">Phase names follow the tool's [perf] breakdown at the end of a run (LOAD is printed as LOAD(stream), LOAD(tile) or LOAD(full)).</text>
 </svg>

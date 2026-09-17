@@ -10,15 +10,16 @@ software moved out of the README: the dated measurement chronology, the comparis
 the reference implementation, the performance tables and the description of the test suites. Those live on in
 `docs/BASELINE.md`, `docs/REFERENCE-COMPARISON-2026-09-08.md`, `CONTRIBUTING.md` and this changelog. No option,
 default or algorithm changed: the binary differs from 1.3.1 only in its version string, and the spectra of every
-input are identical (the four digest pins of 1.3.1 stand). The cluster reference arm stays `v1.3.1`.
+input are identical (the four digest pins of 1.3.1 stand).
 
 ### Changed
 
 - **README.md rewritten** for users and packagers, with three SVG diagrams in `assets/` (`pipeline.svg`, `algorithm.svg`,
-  `streaming.svg`). The option reference lists all 59 registered options with their defaults, marks the ones
-  that change the spectrum list, and says what to change for memory, time and sensitivity. A stale claim of the
+  `streaming.svg`). The option reference lists every user-facing option with its default, marks the resource
+  options that change the spectrum list, and says what to change for memory, time and sensitivity. A stale claim of the
   old README is gone: `-threads` does not default to 1, the tool uses every core unless `-threads` is on the
-  command line. `scripts/check_option_tokens.py` and a defaults cross-check against `--helphelp` gate the text.
+  command line. `scripts/check_option_tokens.py` gates the option names in CI; the defaults were cross-checked by hand against
+  `--helphelp` of the 1.3.1 binary for this release.
 - **assets/logo.svg** is tracked in the development repository as well, so the README renders there.
 
 ## v1.3.1 — 2026-09-17
