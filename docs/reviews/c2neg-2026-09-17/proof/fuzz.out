@@ -1,0 +1,11 @@
+accepted 87022 refused 112978 violations 0 nonmono_below_1e5 0 min_vertex_mz 259395 max_rt_rel 2.32e-11 rt_bad 0
+1418: max accepted |C2| 0.05953006; m/z vertex at T1_ref 4.57494e+08; m/z where slope halves 1.14373e+08
+1418 real: vertex m/z 1.49245e+12, TOF at vertex 7.77754e+09
+D: max accepted |C2| 0.09451424; m/z vertex at T1_ref 1.80232e+08; m/z where slope halves 4.50581e+07
+1418 mzToTof(100000) = 3.89866e+06
+1418 mzToTof(400000) = 7.92361e+06
+1418 mzToTof(1e+12) = 7.52149e+09
+1418 mzToTof(1.46e+12) = 7.77661e+09
+1418 mzToTof(1e+13) = -1.18483e+10
+1418 mzToTof(1e+20) = -5.21006e+17
+1418 mzToTof(1.79769e+308) = -9.36838e+305

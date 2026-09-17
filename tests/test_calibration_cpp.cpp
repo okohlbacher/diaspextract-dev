@@ -63,6 +63,10 @@ int main(int argc, char** argv)
   if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 2; }
   std::stringstream ss; ss << f.rdbuf();
   const std::string j = ss.str();
+  // The scanner below reads eight calibration keys and leaves C4 at 0 (true of every golden file so far). A golden
+  // file that carries C4 must not be tested silently at C4 = 0: teach the scanner the key first (review 2026-09-17).
+  if (j.find("\"C4\":") != std::string::npos)
+  { std::fprintf(stderr, "%s carries a C4 key, which this test does not read yet\n", path.c_str()); return 1; }
 
   size_t pos = 0;
   int n_files = 0, n_cases = 0, n_negative = 0;
@@ -90,7 +94,7 @@ int main(int argc, char** argv)
     const size_t fend = j.find("\"model_type\":", fstart + 10);
     size_t cp = j.find("\"cases\":", fstart);
     int f_cases = 0;
-    double f_worst = 0.0, f_noc2 = 0.0, f_flip = 0.0;
+    double f_worst = 0.0, f_noc2 = 0.0, f_flip = 0.0, f_notemp = 0.0;
     while (true)
     {
       const size_t c = j.find("\"frame\":", cp);
@@ -124,15 +128,18 @@ int main(int argc, char** argv)
       diaspextract::TdfMzCalibration flip = cal; flip.C2 = -cal.C2;
       f_noc2 = std::fmax(f_noc2, std::fabs(no_c2.tofToMz(tof, b) - mz) / mz * 1e6);
       f_flip = std::fmax(f_flip, std::fabs(flip.tofToMz(tof, b) - mz) / mz * 1e6);
-      worst_notemp = std::fmax(worst_notemp, std::fabs(cal.tofToMz(tof, cal.frameFactor(cal.T1_ref)) - mz) / mz * 1e6);
+      f_notemp = std::fmax(f_notemp, std::fabs(cal.tofToMz(tof, cal.frameFactor(cal.T1_ref)) - mz) / mz * 1e6);
       ++n_cases; ++f_cases;
       cp = q;
     }
-    // per file, so a file whose cases cannot tell the model from the known-bad ports fails on its own
-    if (f_cases < 20 || !(f_noc2 >= 5.0) || !(f_flip >= 5.0))
-    { std::fprintf(stderr, "FAIL %s: %d cases, C2 ablation %.3f ppm, sign flip %.3f ppm\n", name.c_str(), f_cases, f_noc2, f_flip); return 1; }
-    std::printf("    %-16s C2 %+.6e  %2d cases  max %.7f ppm  (C2 dropped %.2f, flipped %.2f ppm)\n",
-                name.c_str(), cal.C2, f_cases, f_worst, f_noc2, f_flip);
+    // per file, so a file whose cases cannot tell the model from the known-bad ports fails on its own; the temperature
+    // floor is per file too (the smallest measured is 0.074 ppm, PXD029836 1408: its frames lie within 0.004 K of T1)
+    if (f_cases < 20 || !(f_noc2 >= 5.0) || !(f_flip >= 5.0) || !(f_notemp >= 0.05))
+    { std::fprintf(stderr, "FAIL %s: %d cases, C2 ablation %.3f ppm, sign flip %.3f ppm, temperature ablation %.4f ppm\n",
+                   name.c_str(), f_cases, f_noc2, f_flip, f_notemp); return 1; }
+    worst_notemp = std::fmax(worst_notemp, f_notemp);
+    std::printf("    %-16s C2 %+.6e  %2d cases  max %.7f ppm  (C2 dropped %.2f, flipped %.2f, temperature dropped %.3f ppm)\n",
+                name.c_str(), cal.C2, f_cases, f_worst, f_noc2, f_flip, f_notemp);
     worst = std::fmax(worst, f_worst);
     worst_noc2 = std::fmax(worst_noc2, f_noc2);
     n_negative += cal.C2 < 0.0;
@@ -217,7 +224,11 @@ int main(int argc, char** argv)
       {
         const double mz = px.tofToMz(tof, b);
         if (!(std::isfinite(mz) && mz > prev)) { std::fprintf(stderr, "negative C2: tof %.0f -> %.9g after %.9g\n", tof, mz, prev); return 1; }
-        worst_rt = std::fmax(worst_rt, std::fabs(px.mzToTof(mz, b) - tof));   // bins: 3e-8 at TOF index 8.4e7, as for C2 >= 0
+        // bins: 3e-8 at TOF index 8.4e7, as for C2 >= 0. Checked per point: fmax drops a NaN operand, so a NaN inverse
+        // would never reach worst_rt (review 2026-09-17)
+        const double rt = std::fabs(px.mzToTof(mz, b) - tof);
+        if (!(rt <= 1e-6)) { std::fprintf(stderr, "negative C2 round trip: tof %.0f -> m/z %.9g -> %.3g bins off\n", tof, mz, rt); return 1; }
+        worst_rt = std::fmax(worst_rt, rt);
         prev = mz;
       }
       for (double mz : {50.0, 1700.0, Cal::kDomainMaxMz})   // the inverse stays on the rising branch up to 1e5

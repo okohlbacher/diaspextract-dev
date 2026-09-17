@@ -1,0 +1,13 @@
+1418 edge |C2| 0.05953006 = 57.1 x |C2| 0.00104227
+1431 edge |C2| 0.05953045 = 48.5 x |C2| 0.00122836
+1408 edge |C2| 0.05952922 = 78.8 x |C2| 0.000755926
+1347 edge |C2| 0.05952889 = 101.5 x |C2| 0.000586432
+fmax(1e-9, NaN) = 1e-09
+codex row A supported 1; tofToMz(0) = nan
+codex row B supported 1; tofToMz(2) = nan
+codex T1 witness: supported 1 frameReason 'Frames.T1 50025.6 is not within 1000 K of the MzCalibration T1 25.6188, the temperature span over which the negative C2 was checked' b inf tofToMz(2000) 500
+  same with C2 > 0: supported 1 frameReason '' tofToMz(2000) 500
+1418 uint32-max corner disc/b^2 0.4367
+1431 uint32-max corner disc/b^2 0.3362
+1408 uint32-max corner disc/b^2 0.5915
+1347 uint32-max corner disc/b^2 0.6831

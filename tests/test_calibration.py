@@ -23,11 +23,13 @@ twice. tests/test_calibration_cpp.cpp is the one that exercises the code that ac
 Regressions this catches:
   * dropping the C2*m term -- the bug in the widely-copied open implementation (timsrust-calibration,
     adapted then disabled by mzdata): -11..-40 ppm on this data;
-  * flipping the sign of a negative C2, or taking the other root: 38..80 ppm on PXD029836 (checked per file);
+  * flipping the sign of a negative C2: 38..80 ppm on PXD029836 (checked per file). Taking the other root of the
+    quadratic is not in that range: it lands beyond the parabola's vertex, near m/z 1e12;
   * dropping the dC1 temperature term: ~0.67 ppm. (m is proportional to C1_eff, NOT its square
     root, so dC1*dT/1e6 lands on m/z undiminished -- an earlier note here claimed ~0.33 ppm by
     applying a spurious halving; the measured guard value 0.669 confirms 0.67. The golden files
-    span only ~0.03 K, so the guard threshold stays loose at 0.1 ppm.)
+    span only ~0.03 K, so the guard threshold stays loose at 0.1 ppm over the whole set, and 0.05 ppm per
+    file: the smallest per-file value is 0.074 ppm, PXD029836 1408, whose frames lie within 0.004 K of T1.)
 Run: python3 tests/test_calibration.py
 """
 import json, math, os, sys
@@ -36,6 +38,7 @@ TOL_PPM = 0.0001         # measured max 3.1e-5 ppm (this textbook root cancels o
                          # matches the C++ test's tolerance exactly
 NO_C2_MIN_PPM = 5.0      # dropping C2 must be caught: it is worth >>5 ppm
 NO_TEMP_MIN_PPM = 0.1    # dropping the temperature term must be visible
+NO_TEMP_FILE_MIN_PPM = 0.05   # ... and visible in every file on its own
 
 def tof_to_mz(tof, p, t1_frame, use_c2=True, use_temp=True):
     t_ns = tof * p["timebase"] + p["delay"]
@@ -97,7 +100,7 @@ def main():
     negative = 0
     for f in files:
         assert f["model_type"] == 1, f"{f['file']}: golden set must be ModelType 1"
-        f_worst = f_noc2 = f_flip = 0.0
+        f_worst = f_noc2 = f_flip = f_notemp = 0.0
         flipped = dict(f, C2=-f["C2"])
         for case in f["cases"]:
             got = tof_to_mz(case["tof"], f, case["t1"])
@@ -108,14 +111,16 @@ def main():
             f_worst = max(f_worst, e)
             f_noc2 = max(f_noc2, ppm(tof_to_mz(case["tof"], f, case["t1"], use_c2=False), case["mz"]))
             f_flip = max(f_flip, ppm(tof_to_mz(case["tof"], flipped, case["t1"]), case["mz"]))
-            worst_notemp = max(worst_notemp, ppm(tof_to_mz(case["tof"], f, case["t1"], use_temp=False), case["mz"]))
+            f_notemp = max(f_notemp, ppm(tof_to_mz(case["tof"], f, case["t1"], use_temp=False), case["mz"]))
             n += 1
         # per file: every file must tell the model from the known-bad variants on its own
-        assert len(f["cases"]) >= 20 and f_noc2 > NO_C2_MIN_PPM and f_flip > NO_C2_MIN_PPM, (
-            f"{f['file']}: {len(f['cases'])} cases, without C2 {f_noc2:.3f} ppm, C2 sign-flipped {f_flip:.3f} ppm")
+        assert (len(f["cases"]) >= 20 and f_noc2 > NO_C2_MIN_PPM and f_flip > NO_C2_MIN_PPM
+                and f_notemp > NO_TEMP_FILE_MIN_PPM), (
+            f"{f['file']}: {len(f['cases'])} cases, without C2 {f_noc2:.3f} ppm, C2 sign-flipped {f_flip:.3f} ppm, "
+            f"without temperature {f_notemp:.4f} ppm")
         print(f"    {f['file']:<16} C2 {f['C2']:+.6e}  {len(f['cases']):2d} cases  max {f_worst:.7f} ppm  "
-              f"(without C2 {f_noc2:.2f}, sign-flipped {f_flip:.2f} ppm)")
-        worst, worst_noc2 = max(worst, f_worst), max(worst_noc2, f_noc2)
+              f"(without C2 {f_noc2:.2f}, sign-flipped {f_flip:.2f}, without temperature {f_notemp:.3f} ppm)")
+        worst, worst_noc2, worst_notemp = max(worst, f_worst), max(worst_noc2, f_noc2), max(worst_notemp, f_notemp)
         negative += f["C2"] < 0
     assert len(files) >= 9 and n >= 270 and negative >= 6, f"only {n} cases in {len(files)} files ({negative} with C2 < 0)"
     # the ablations must actually be detectable, or this test proves nothing

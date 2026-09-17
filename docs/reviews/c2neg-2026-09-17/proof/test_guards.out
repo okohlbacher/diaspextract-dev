@@ -1,0 +1,18 @@
+Test-guard mutation check (review fixes F1-F3), run 2026-09-17T03:36:28+02:00 on the laptop.
+old = tests at 2b9ade4, new = tests after the review fixes; header = src/TdfMzCalibration.h at 2b9ade4 (unchanged).
+nan-inverse: mzToTof returns NaN for m/z > 1e5 (a mutation of the header); golden_c4: a C4 key on PXD029836 1347;
+golden_flat: PXD029836 1408 with every frame at T1_ref (vendor m/z replaced by the model's at T1_ref).
+C++ old golden rc=0
+C++ old golden_c4 rc=0
+C++ old golden_flat rc=0
+C++ old nan-inverse rc=0
+C++ new golden rc=0
+C++ new golden_c4 rc=1
+C++ new golden_flat rc=1
+C++ new nan-inverse rc=1
+py old golden rc=0
+py old golden_c4 rc=0
+py old golden_flat rc=0
+py new golden rc=0
+py new golden_c4 rc=0
+py new golden_flat rc=1
