@@ -1129,3 +1129,78 @@ precursor as a regression target: find out whether the feature is lost at detect
 emission, and add the 16.3-16.9 min window of that file to the sensitivity checks. A second variant
 peptide (23-mer, z=3, ~26.0 min) IS emitted by both tools with a 26/44-ion ladder in dataset A, so the
 gap is specific, not general.
+
+### Fragment ownership resolved at search time ("claiming") (2026-09-17, user request; from the diaWeaver code read)
+
+Explore independently of the orphan-search item below; the two share a data format, not a result.
+
+**The idea.** Leave fragment sharing at extraction as it is (share-all), but stamp every emitted peak with
+the mass trace it came from, and let the *search* decide who owns a shared trace: PSMs are sorted by
+score, the best PSM claims the traces it matched, a lower-scoring PSM that is a different peptide (or
+the same peptide in another spectrum) loses those peaks and is rescored from the peaks it still owns,
+then FDR runs. This is what the `diaWeaver-2` fork does (`alhigaylan/diaWeaver` at 7ed11696:
+`ClusterMassTracesByPrecursor` writes `fragment_trace_id` / `fragment_window_id` integer arrays;
+`ProSEAlgorithm::applyClaimingPass_` claims, rescores, keeps top-1 per spectrum). The code-read
+comparison and its claim register are in `output/diaweaver-comparison/` beside this repository.
+
+**Why it fits our open problem.** `docs/ISOTOPE-DUPLICATION-2026-09-03.md`: our excess over the
+reference implementation is over-generation (isotope-offset duplicates that are *different*
+extractions, content cosine ~0.5), every id-agnostic collapse lost about a third of the peptides, and
+even the oracle collapse lost some, so the fix has to be an ownership rule. The pre-registered
+upstream form (owner tracking at precursor selection) risks discarding the member that is right most
+of the time, because at extraction nothing says which hypothesis is real. Claiming is an ownership
+rule that uses the one piece of evidence the extractor cannot have (which hypothesis matched a
+peptide), and it works at peak level: nothing is deleted, a losing spectrum keeps its unshared peaks,
+so the chimera case that defeated the oracle collapse is handled rather than thrown away.
+
+**Steps, smallest first.**
+1. Per-peak provenance: one integer data array per spectrum with the owning trace id (globally
+   unique across windows and tiles), behind a flag, off by default so the default digest pins
+   (`e43672a0` / `3aafd0b5`) are untouched. The window loop already tracks peak ownership internally;
+   this only writes it out.
+2. Claiming as a post-search pass, no engine change: Sage with `--annotate-matches` gives the matched
+   fragments per PSM; a script claims traces in score order (exemption only for the exact claiming
+   PSM, sequence AND spectrum, as the fork does), strips claimed peaks from the losers, and writes the
+   stripped file. Rescoring outside the engine would invalidate its FDR model, so the first form is
+   two-pass: identify at 1 %, claim, re-search the stripped file (that is the orphan mode below).
+3. Gate: dataset D, both engines, entrapment. Falsifier: no peptide gain at matched entrapment, or
+   entrapment above the shipped arm's. Read per charge (the z=1 stratum is the FDR-sensitive one).
+
+**Caveats carried over from the code read.** The fork claims *before* FDR, has no FDR across rounds,
+and its defaults run with no decoys at all; nothing in the branch shows the scheme holds 1 %. If ProSE
+is used as the engine, its open-search tail (O(bins x PSMs)) and the candidate-buffer pathology apply,
+and its window clip must be off for our output. A fragment duplicated into several spectra must be
+claimed once, by one spectrum, or the same peptide claims everywhere it appears.
+
+### Orphan-peak search over ordered databases, for the variant question (2026-09-17, user request)
+
+Explore independently of the claiming item above. The spectrum-level form needs nothing from it; only
+the fragment-level form needs the provenance arrays.
+
+**The idea.** After a first search against the reference proteome, search what is left (the
+unidentified spectra, or, at fragment level, the peaks no confident PSM claimed) against a second
+database, and optionally a third, in order: a variant FASTA, then semi-tryptic and non-tryptic tiers.
+Each pass has its own decoys and its own FDR. This is cascade search (Kertesz-Farkas, Keich & Noble
+2015) as implemented in the fork's `diaWeaverPeptide` (`-database` list, tiers `tryptic ->
+semitryptic-only -> nontryptic-only`, default fragment-level orphan mode, `-spectrum_level_orphan`
+for the cascade form).
+
+**Why it is worth a run.** The reference-plus-delta open search missed genotype-confirmed variant
+peptides in datasets A and B although both extractors emitted the spectrum for one of them (ladder
+26/44 ions, see the dataset B entry above). An open search can only report a mass shift on a
+reference span; a second pass with the variant sequences in the database gives those peptides real
+candidates, precursor-tolerance matching, and an FDR inside the pass. It cannot recover a precursor
+that was never emitted (the dataset B 10-mer above stays a detection problem).
+
+**Steps.** (1) Build the variant FASTA from the per-position variant catalogue already used in the
+variant audit (dev only; never exported). (2) Spectrum-level cascade with Sage: pass 1 reference FASTA
+at 1 %, pass 2 on the unidentified spectra with reference + variant FASTA and reversed decoys of the
+same set; report the variant peptides found with their q-values and the two known targets by name.
+(3) Entrapment for the second pass with a shuffled variant FASTA of the same size, since a small,
+targeted second database is exactly where per-pass FDR is optimistic. (4) Only then the fragment-level
+form, on top of the claiming item.
+
+**Caveats from the code read.** The fork's later tiers search only proteins whose gene matched a
+tier-1 hit (the Everett 2010 correction, shown by Bern & Kil 2011 to underestimate FDR), proteins
+without a gene name all fall into one bucket, a step with 0 PSMs clears the orphan pool and silently
+stops the cascade, and there is no FDR across steps. Use the paper's abort condition, not the fork's.
