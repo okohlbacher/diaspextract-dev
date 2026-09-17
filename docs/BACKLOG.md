@@ -1204,3 +1204,12 @@ form, on top of the claiming item.
 tier-1 hit (the Everett 2010 correction, shown by Bern & Kil 2011 to underestimate FDR), proteins
 without a gene name all fall into one bucket, a step with 0 PSMs clears the orphan pool and silently
 stops the cascade, and there is no FDR across steps. Use the paper's abort condition, not the fork's.
+
+### Harness: the contention measure of an extended cell counts the cell's own process (2026-09-17, found in the diaWeaver run)
+
+`during.foreign_cores_mean` of a `dwv` cell record read 29.9 with a "peak60" of 16,220 cores, on a 128-core node whose
+only other load was ~2 cores: the own-process-tree exclusion that works for the dt/spx arms (their `during` read 2.2)
+misses a cell started with `start_new_session=True` (`run_capped`), so the cell's own threads are summed as foreign
+CPU and every cell row is flagged `contended`. Fix: exclude by session id (or walk the children of the wrapper) in
+`ArmMonitor`, and add a selftest case that runs a fake cell with a known CPU burn and asserts foreign ~ 0. Until
+then, read the `during` flags of cell rows as meaningless; the dt/spx flags are unaffected.
