@@ -1090,11 +1090,35 @@ def kill_session(pid: int) -> None:
         pass
 
 
+def arc_evictable_kb(path="/proc/spl/kstat/zfs/arcstats") -> int:
+    """The ZFS ARC above its own floor, in kB; 0 where there is no ZFS.
+
+    Linux does NOT count the ARC in MemAvailable, but ZFS evicts it under memory pressure down to `c_min`. Where
+    /scratch is ZFS the ARC grows to `c_max` (half of RAM by default), and MemAvailable then understates what a job
+    can actually get by that much: on a 2,268 GB node the ARC sat at 1,135 GB with MemAvailable at 1,058 GB, and
+    G-V16 killed a cell holding 939 GB -- 41% of the machine -- as if the node were full (2026-09-19, user
+    approved the change). The floor below therefore asks for MemAvailable PLUS the evictable ARC, so the guard
+    still stops a runaway arm but measures what the node can really give.
+    """
+    size = cmin = None
+    try:
+        for line in open(path):
+            f = line.split()
+            if len(f) == 3 and f[0] == "size":
+                size = int(f[2])
+            elif len(f) == 3 and f[0] == "c_min":
+                cmin = int(f[2])
+    except OSError:
+        return 0
+    return (size - cmin) // 1024 if size is not None and cmin is not None and size > cmin else 0
+
+
 def run_capped(argv, cwd, env, log: Path, cap_s: float) -> tuple:
     """run_logged with a wall cap and a node memory floor (G-V16). The tool runs in its own session, and the whole
-    session is killed when the cap passes, when MemAvailable stays below MEM_FLOOR of MemTotal for MEM_FLOOR_SAMPLES
-    consecutive samples (a runaway arm must not take a shared node down; a neighbour's transient dip must not cost a
-    12-h cell), or when the runner itself is stopped. Returns (returncode, reason stopped or None)."""
+    session is killed when the cap passes, when available memory (MemAvailable plus the evictable ZFS ARC, which the
+    kernel leaves out of MemAvailable) stays below MEM_FLOOR of MemTotal for MEM_FLOOR_SAMPLES consecutive samples
+    (a runaway arm must not take a shared node down; a neighbour's transient dip must not cost a 12-h cell), or when
+    the runner itself is stopped. Returns (returncode, reason stopped or None)."""
     t0, why, low = time.monotonic(), None, 0
     with open(log, "wb") as f:
         p = subprocess.Popen(argv, cwd=str(cwd), env=env, stdout=f, stderr=subprocess.STDOUT,
@@ -1102,12 +1126,16 @@ def run_capped(argv, cwd, env, log: Path, cap_s: float) -> tuple:
         try:
             while p.poll() is None:
                 m = proc_snapshot()
-                low = low + 1 if m and m["memavail_kb"] < MEM_FLOOR * m["memtotal_kb"] else 0
+                arc = arc_evictable_kb()                     # ZFS cache the kernel omits from MemAvailable
+                avail = (m["memavail_kb"] + arc) if m else 0
+                low = low + 1 if m and avail < MEM_FLOOR * m["memtotal_kb"] else 0
                 if time.monotonic() - t0 > cap_s:
                     why = "wall cap %.0f s exceeded" % cap_s
                 elif low >= MEM_FLOOR_SAMPLES:
-                    why = "MemAvailable %.1f%% of total in %d consecutive samples" % (
-                        100.0 * m["memavail_kb"] / m["memtotal_kb"], low)
+                    why = ("available memory %.1f%% of total in %d consecutive samples "
+                           "(MemAvailable %.0f GB + evictable ZFS ARC %.0f GB)" % (
+                               100.0 * avail / m["memtotal_kb"], low,
+                               m["memavail_kb"] / 1048576.0, arc / 1048576.0))
                 if why:
                     kill_session(p.pid)
                     break
@@ -3311,7 +3339,10 @@ MEASURED_CELLS = (sorted(CELL_KINDS.items()), REENCODE, NUMPRESS_CV, NUMPRESS_LI
 PAIR_MEASURE_1_3_0 = {"pair": "3215b73e62ae", "search": "064af71b2bfe", "score": "4fe0a1cecefb"}
 # The extended-plan code the reviewed harness (0d8532d) measured dwv_stage1 with; dwv_pxd029836 reuses it. Same rule:
 # an edit that moves it re-runs every group and search of an extended plan, so change it here on purpose only.
-CELLS_MEASURE_DWV = "c586f8716617"
+# Moved c586f8716617 -> 4c23e6ab6354 on 2026-09-19 (user approved): run_capped's memory floor now counts the
+# evictable ZFS ARC, which the kernel leaves out of MemAvailable. It had killed a diaWeaver cell holding 939 GB of
+# a 2,268 GB node whose ARC held 1,135 GB. Only extended plans re-run, and every existing cell record is a failure.
+CELLS_MEASURE_DWV = "4c23e6ab6354"
 
 
 def measure_sha256(extended=False) -> dict:
@@ -4172,10 +4203,17 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             % MEM_FLOOR_SAMPLES, all(RB["A", "pair"]["arms"][n].get("status") == "ok" and RB["A", "pair"]["arms"][n]["stopped"]
                                      is None for n in DWV_CELLS) and max(seen.values()) > 2 * MEM_FLOOR_SAMPLES,
             [RB["A", "pair"]["arms"][n].get("message") for n in DWV_CELLS])
-    C.check("G-V16", "MemAvailable under the floor: the cell session is killed; the reference arms are flagged",
-            all("MemAvailable 1.0%" in RM["A", "pair"]["arms"][n].get("message", "") for n in DWV_CELLS)
+    C.check("G-V16", "available memory under the floor: the cell session is killed; the reference arms are flagged",
+            all("available memory 1.0%" in RM["A", "pair"]["arms"][n].get("message", "") for n in DWV_CELLS)
             and "during" in group_flags(RM["A", "pair"]) and not busy([mine]),
             RM["A", "pair"]["arms"]["dwv_default"].get("message"))
+    # the floor counts the evictable ZFS ARC, which the kernel omits from MemAvailable (2026-09-19)
+    _arc = Path(tempfile.mkdtemp()) / "arcstats"
+    _arc.write_text("name type data\nsize                            4    1218567890123\nc_min                           4    76025168896\n")
+    C.check("G-V16", "the floor adds the evictable ZFS ARC (size - c_min), and is 0 without ZFS",
+            arc_evictable_kb(str(_arc)) == (1218567890123 - 76025168896) // 1024
+            and arc_evictable_kb(str(_arc.parent / "absent")) == 0,
+            arc_evictable_kb(str(_arc)))
 
     # ---- G-V17: the re-encode checks
     ff = {"FAKE_FF_NUMPRESS": "/runs/A/", "FAKE_FF_NOSORT": "/runs/B/", "FAKE_FF_DROP": "/runs/C/",
