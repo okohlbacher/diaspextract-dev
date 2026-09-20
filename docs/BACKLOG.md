@@ -1213,3 +1213,24 @@ misses a cell started with `start_new_session=True` (`run_capped`), so the cell'
 CPU and every cell row is flagged `contended`. Fix: exclude by session id (or walk the children of the wrapper) in
 `ArmMonitor`, and add a selftest case that runs a fake cell with a known CPU burn and asserts foreign ~ 0. Until
 then, read the `during` flags of cell rows as meaningless; the dt/spx flags are unaffected.
+
+## Restore precursor de-duplication, in its merging form
+
+`assembly:dedup_precursors` / `dedupPrecursors_` (`git show 9a6c2d4^:src/spextractor.cpp:2632-2668`) collapsed
+precursor hypotheses that are the same species -- same charge, mono m/z within ppm, co-eluting, co-located in
+mobility -- immediately after inference. It was pre-registered as a probable loss, **never run**, and removed on
+2026-09-08 among options with no measurement on record. It now has one:
+docs/SAME-POSITION-DUPLICATION-2026-09-20.md prices the drop form at -1.8% of peptides for -30% of spectra and the
+*merging* form -- one precursor kept, the duplicate seeds' fragments folded in -- at **-0.5%** on Sage and -0.4% on
+MSFragger, with entrapment FDR +0.03 points. 45.9% of inferred precursors have a same-monoisotope competitor.
+Restoring it needs `Precursor_` to carry the merged members' trace indices so `assembleOne_` can correlate against
+the summed XIC, placement relative to the IM charge veto (the historical code ran before it), and the same
+predicate taught to the post-tile coverage assertion (src/diaspextract.cpp:4695-4711).
+
+## Give the window loop the ownership rule the tile loop already has
+
+Adjacent diaPASEF windows on PXD029836 overlap by exactly 1.00 m/z; precursor selection at
+src/diaspextract.cpp:4554 takes `[win_lo, win_hi]` closed at both ends with no cross-window guard, so a precursor
+in the seam is assembled twice. The tile loop immediately below has an exact ownership predicate and throws when
+two tiles claim one precursor (:4565-4568). 13.2% of same-position twin pairs on that file
+(docs/SAME-POSITION-DUPLICATION-2026-09-20.md).
