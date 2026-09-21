@@ -177,7 +177,31 @@ population, which is the failure mode `bench/fdrcheck.py` caught on the min_corr
 - **The merge is a fragment union, not a re-assembly.** The principled version folds the duplicate seeds' XICs
   together *before* fragment correlation, which the offline union only approximates.
 
-## 7. What to do
+## 7. In the tool: 1.4.0rc1 (2026-09-21)
+
+The fold shipped as `-assembly:twin_im_tolerance` (default 0.005), run per tile on the canonically sorted block with a
+same-MS1-frame RT clause -- the relation measured here, since every linked pair shared its frame. On run 1418 it
+equals `bench/twin_merge.py --im=0.005` for 802,099 of 802,099 spectra and every fragment; fold off equals the v1.3.1
+spectra; entrapment at 0.005 is 0.98 % [0.87, 1.09], +0.01 points. Gates: docs/reviews/twin-fold-1.4.0/GATES.md.
+
+**A second acquisition** (K562 250 ng, three replicates, harness plans `rost_k562_v131e` and `rost_k562_v140` on one idle
+node, both engines, entrapment search; v1.3.1 and 1.4.0rc1 each paired with the reference implementation):
+
+| arm | spectra | Sage | MSFragger | entrapment FDR all / z≥2 | Sage search | MSFragger search |
+|---|---:|---:|---:|---:|---:|---:|
+| reference implementation | 905,633 ± 4,030 | 36,121 ± 120 | 49,326 ± 630 | 0.82 / 0.82 % | 2:11 | 5:54 |
+| DIAspeXtract 1.3.1 | 1,254,789 ± 1,474 | 45,710 ± 299 | 42,829 ± 332 | 0.97 / 0.93 % | 2:47 | 6:46 |
+| DIAspeXtract 1.4.0rc1 | 831,004 ± 1,950 | **45,974 ± 331** | **43,101 ± 431** | **0.92 / 0.88 %** | 2:16 | 4:40 |
+
+Here the fold removes a third of the emission and **gains** peptides on every replicate and both engines (+189/+236/+367
+Sage, +214/+163/+439 MSFragger) while the entrapment rate falls -- the pattern of fewer redundant hypotheses competing,
+not of a threshold sliding on thinned decoys (that would raise it). Extraction wall and memory are unchanged; the search
+engines save 19 % (Sage) and 31 % (MSFragger).
+
+## 8. What to do
+
+Done in 1.4.0 as the offline union moved into the tool (section 7), rather than as the precursor-level
+restoration first proposed here; the window seam is folded by the same relation.
 
 1. **Restore `dedupPrecursors_`** at its original site (after inference, before the isotope-support gate), and
    extend `Precursor_` to carry the merged members' trace indices so `assembleOne_` can correlate fragments against

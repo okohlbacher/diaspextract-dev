@@ -17,6 +17,11 @@
   1,000 spectra removed, against 2.7 when the duplicates are dropped instead and 9.5 for a random cut
   (docs/SAME-POSITION-DUPLICATION-2026-09-20.md). `assembly:dedup_precursors`, removed unmeasured in 1.3.0, was the
   drop form of this. The header records the setting as `spx:twin_merge`, `off` included.
+  **On a second acquisition** (K562 250 ng triplicates, harness plans `rost_k562_v131e` / `rost_k562_v140`, both on one
+  idle node, entrapment search included): −33.8 % spectra (1,254,789 → 831,004), **+0.58 % Sage and +0.64 % MSFragger
+  peptides, higher on all three replicates and both engines**, entrapment FDR 0.97 → 0.92 % (z≥2 0.93 → 0.88 %),
+  Sage search −19 %, MSFragger search −31 %, extraction wall and peak RSS unchanged. On PXD029836 run 1418 the in-tool
+  fold equals the priced offline one spectrum for spectrum, with entrapment +0.01 points at 0.005.
 - **`-diag:selftest_twins`** asserts both sides of every clause of the fold's relation, the cluster closure, the
   survivor order, the fusion anchor and tolerance, and that the survivor keeps its own fields. e2e checks 12b and 15b
   run it, show the fold inert on a fixture without twins and firing on a precursor assembled in two window groups,

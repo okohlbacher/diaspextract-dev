@@ -236,7 +236,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
-| `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of their fragments (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3. On a 2-hour HeLa run: 24 % fewer spectra for 0.2 % of the peptides on both engines |
+| `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of their fragments (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3. On a 2-hour HeLa run: 24 % fewer spectra for 0.2 % of the peptides; on K562 triplicates: 34 % fewer spectra and 0.6 % more peptides; both engines, entrapment FDR not raised on either |
 
 **MS1 denoising (`dnoise:`)** — a bit-identical port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
 bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker
