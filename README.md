@@ -38,8 +38,9 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    grid, with at least 3 shared points).
 4. **Assembly and output.** The accepted fragments are ranked by correlation-weighted intensity and the top 500 kept;
    a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
-   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile and
-   serialised in parallel. The header records every setting that shaped the output.
+   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile,
+   a precursor claimed twice is folded into one spectrum that carries the union of both fragment lists
+   (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
 
 <p align="center"><img src="assets/algorithm.svg" alt="The co-elution gate and the assembly of one pseudo-spectrum" width="1000"></p>
 
@@ -51,8 +52,10 @@ uses about 40 % less memory, which is why it is the default. Design notes: [docs
 [docs/INTEGER-TRACING-DESIGN.md](docs/INTEGER-TRACING-DESIGN.md), [docs/charge-inference.md](docs/charge-inference.md).
 
 **Emission is deliberately generous.** Two precursor hypotheses that share fragments each get their own spectrum, and
-a fragment may appear in several spectra. Search engines cope with that well; merging or deduplicating the output
-downstream loses peptides, so search it as written.
+a fragment may appear in several spectra. The one exception is a precursor claimed twice — two seeds that resolve to
+the same monoisotope, or one precursor in the overlap of two isolation windows — which is folded into one spectrum by
+default. Search engines cope with the rest well; merging or deduplicating the output further downstream loses peptides,
+so search it as written.
 
 ### Streaming and memory
 
@@ -228,12 +231,12 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | option | default | meaning |
 |---|---|---|
 | `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments pass the gate (checked before the cap below) |
-| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments` |
+| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more |
 | `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage and +4–8 % MSFragger peptides over 0 |
 | `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
-| `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of their fragments (so it can exceed `max_fragments`); −1 = off. On a 2-hour HeLa run: 24 % fewer spectra for 0.2 % of the peptides on both engines, entrapment FDR unchanged |
+| `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of their fragments (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3. On a 2-hour HeLa run: 24 % fewer spectra for 0.2 % of the peptides on both engines |
 
 **MS1 denoising (`dnoise:`)** — a bit-identical port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
 bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker

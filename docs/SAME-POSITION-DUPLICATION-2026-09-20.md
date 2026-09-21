@@ -65,6 +65,11 @@ tile path immediately below it has an exact ownership predicate and *throws* if 
 and away from any cell edge, **13.2% cross-window**, **1.0%** cell cuts.
 The cell grid is close to free; the window seam is not.
 
+**Every linked pair shares its MS1 frame exactly.** Of the pairs the relation links within |dRT| <= 1.5 s -- 563,634
+at d1/K0 <= 0.01, 354,462 at 0.005 -- every one has a text-identical RT, and none sits one frame apart
+(`bench/twin_rt_exact.py`). So "same MS1 frame" is the same relation on this file, and it is the one 1.4.0 ships: it
+can never link two RT cells, which keeps the fold invariant to tile grouping by construction.
+
 ## 2. The price list, and what it does and does not say
 
 `bench/iso_frontier.py` prices 14 removal rules by peptides LOST at the fixed baseline threshold -- a peptide is

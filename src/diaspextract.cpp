@@ -2228,10 +2228,10 @@ protected:
 
     registerTOPPSubsection_("assembly", "Pseudo-spectrum assembly");
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
-    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum.", false);
+    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance).", false);
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off. 0.005 is the measured optional setting (Sage +1-7% over corr_power 2 on three files, flat on MSFragger): docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage, +5-8% MSFragger on three files, docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the output before 1.4.0). CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides, entrapment unchanged, on PXD029836 (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
+    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0). CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836 (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
@@ -3265,6 +3265,34 @@ protected:
           "every survivor keeps its own place (the later twin here), the folded member leaves no gap"); }
     { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.001, 2, P)};
       chk(mergeTwins_(v, 0.0) == 1 && v.size() == 2, "tolerance 0 folds identical-1/K0 twins only"); }
+    chk(pair_folds(sp(10.0, 500.00975, 2, 1.0, 2, P)), "19.5 ppm apart: folded (the 20-ppm relation, pinned from below)");
+    chk(!pair_folds(sp(10.0, 500.01025, 2, 1.0, 2, P)), "20.5 ppm apart: untouched (pinned from above)");
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.001, 2, 1.25, 2, P)};
+      chk(mergeTwins_(v, 0.25) == 1, "|d1/K0| exactly the tolerance: folded (the bound is inclusive)"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.001, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 2, P)};
+      chk(mergeTwins_(v, 0.005) == 1 && v.size() == 1, "the higher m/z first in the input: still folded (the backward scan)"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 3, {{100.0, 1.0f}, {200.0, 1.0f}}), sp(10.0, 500.001, 2, 1.0, 2, {{110.0, 1.0f}, {210.0, 1.0f}, {310.0, 1.0f}})};
+      mergeTwins_(v, 0.005);
+      chk(v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.0, "isotopes outrank peaks: 3 isotopes / 2 peaks beats 2 isotopes / 3 peaks"); }
+    { vector<MSSpectrum> v{sp(20.0, 400.0, 2, 0.9, 2, {{400.0, 1.0f}, {400.003, 2.0f}})};
+      chk(mergeTwins_(v, 0.005) == 0 && v.size() == 1 && v[0].size() == 2 && v[0][0].getMZ() == 400.0 && v[0][1].getMZ() == 400.003
+          && v[0][0].getIntensity() == 1.0f && v[0][1].getIntensity() == 2.0f, "a spectrum without a twin keeps its peaks bit for bit, 7.5 ppm apart or not"); }
+    // the fusion anchor is the RUNNING intensity-weighted mean, at 10 ppm of it
+    auto fused = [&](const vector<pair<double, float>>& a, const vector<pair<double, float>>& b) {
+      vector<MSSpectrum> v{sp(30.0, 600.0, 2, 1.0, 3, a), sp(30.0, 600.0, 2, 1.0, 2, b)};
+      mergeTwins_(v, 0.005); return v.size() == 1 ? v[0].size() : (size_t)0; };
+    chk(fused({{200.0, 1.0f}}, {{200.0021, 1.0f}}) == 2, "fusion: 10.5 ppm apart stays two peaks");
+    chk(fused({{200.0, 1.0f}, {200.0038, 1.0f}}, {{200.0019, 1.0f}}) == 2, "fusion: equal weights, the third peak is 14.25 ppm from the running mean: two peaks");
+    chk(fused({{200.0, 1.0f}, {200.0038, 1.0f}}, {{200.0019, 100.0f}}) == 1, "fusion: a heavy middle peak pulls the mean to 9.6 ppm of the third: one peak (not anchored on the first)");
+    { MSSpectrum a = sp(40.0, 700.0, 3, 1.1, 3, P), b = sp(40.0, 700.002, 3, 1.101, 2, P);
+      OpenMS::Precursor pa = a.getPrecursors()[0]; pa.setIsolationWindowLowerOffset(7.0); pa.setIsolationWindowUpperOffset(18.0); a.setPrecursors({pa});
+      a.setMetaValue("spx_guessed", 0); b.setMetaValue("spx_guessed", 1);
+      vector<MSSpectrum> v{a, b};
+      mergeTwins_(v, 0.005);
+      const auto& q = v[0].getPrecursors()[0];
+      chk(v.size() == 1 && v[0].getRT() == 40.0 && q.getMZ() == 700.0 && q.getCharge() == 3 && q.getDriftTime() == 1.1
+          && q.getIsolationWindowLowerOffset() == 7.0 && q.getIsolationWindowUpperOffset() == 18.0 && (int)v[0].getMetaValue("spx_guessed") == 0,
+          "the survivor keeps its own RT, precursor, 1/K0, isolation offsets and userParams"); }
     writeLogInfo_(fail ? "[twins] SELFTEST FAILED" : "[twins] selftest passed");
     return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
   }
