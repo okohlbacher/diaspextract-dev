@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.4.0 — unreleased
+
+**Why 1.4.0.** The default output changes: spectra that claim one precursor twice are folded into one.
+
+- **`-assembly:twin_im_tolerance` (default 0.005; −1 = off, the output before 1.4.0).** 45.9 % of inferred
+  precursors had a competitor claiming the same monoisotope: the claim loop's `used[]` owns traces, not
+  monoisotope positions, so two seeds that resolve to one mono both emit; a precursor in the 1-m/z overlap of two
+  isolation windows is also assembled twice. After the canonical sort of each tile, spectra in the same MS1
+  frame, of the same charge, with precursor m/z within 20 ppm and 1/K0 within the tolerance are folded: the
+  member with the most isotopes (then the most peaks) keeps its precursor and takes the union of the cluster's
+  fragments, fused within 10 ppm. Same frame means same RT cell, so the output stays invariant to tile grouping
+  and thread count. The fold is the offline transformation `bench/twin_merge.py` priced on PXD029836: −23.8 %
+  spectra for −0.21 % Sage / −0.18 % MSFragger peptides; dropping the duplicates instead costs 1.3–1.9 %, and a
+  size-matched random cut 5.9 % (docs/SAME-POSITION-DUPLICATION-2026-09-20.md). `assembly:dedup_precursors`,
+  removed unmeasured in 1.3.0, was the drop form of this. The header records the setting as `spx:twin_merge`.
+- **`-diag:selftest_twins`** checks the fold's relation, cluster closure, survivor order and fusion.
+
 ## v1.3.2 — 2026-09-17
 
 **Why 1.3.2.** A documentation release. The README was rewritten for users and packagers: what the tool does,

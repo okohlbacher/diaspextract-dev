@@ -437,6 +437,23 @@ def main():
             "arena selftest did not report success:\n" + (r.stdout + r.stderr)[-1500:]
     check("MS1 arena compaction survives container order != offset order", c12)
 
+    # 12b: the twin fold (assembly:twin_im_tolerance): its selftest, then the wiring on the fixture -- the
+    #      header names the setting, and the logged fold count is exactly the spectra the fold removed.
+    def c12b():
+        r = run(binary, inp, os.path.join(work, "selftest_twins.mzML"), extra=("-diag:selftest_twins",))
+        assert "[twins] selftest passed" in (r.stdout + r.stderr), \
+            "twin selftest did not report success:\n" + (r.stdout + r.stderr)[-1500:]
+        n = lambda f: int(re.search(rb'<spectrumList count="0*(\d+)"', open(f, "rb").read()).group(1))
+        on, off = os.path.join(work, "twins_on.mzML"), os.path.join(work, "twins_off.mzML")
+        r_on = run(binary, inp, on)
+        run(binary, inp, off, extra=("-assembly:twin_im_tolerance", "-1"))
+        folded = int(re.search(r"\[twins\] (\d+) spectra folded into a twin", r_on.stdout).group(1))
+        assert n(off) - n(on) == folded, f"off {n(off)} - on {n(on)} != the logged fold count {folded}"
+        stamp = lambda f: re.search(rb'name="spx:twin_merge"[^>]*value="([^"]*)"', open(f, "rb").read(40000))
+        assert stamp(on) and stamp(on).group(1).startswith(b"same frame") and stamp(off) and stamp(off).group(1) == b"off", \
+            "the header does not record the twin setting"
+    check("twin fold: selftest, and the logged count reconciles with the on/off spectra", c12b)
+
     # 13: the concurrency cap is enforced. It used to be computed, logged and never checked: the
     #     only bound was a byte budget that over-booked every window, so nothing ever throttled.
     def c13():
