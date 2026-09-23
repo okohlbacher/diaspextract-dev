@@ -1,27 +1,33 @@
 # The emission excess is duplicate claims on one monoisotope, and folding them together is nearly free
 
-**Question (user, 2026-09-20).** Research solutions for the redundancy removal of these spectra, then try it out on
-this data set.
+**Question (2026-09-20).** DIAspeXtract emits about 1.45x the spectra of the reference implementation for about the same
+peptides. How much of that emission is the same precursor emitted twice, which spectra can go without losing
+identifications, and what does removing them cost?
+
+Line numbers below refer to `src/diaspextract.cpp` at v1.3.2, the source this study examined (`git show
+v1.3.2:src/diaspextract.cpp`); 1.4.0 added the fold described in section 7.
 
 **Verdict.** The excess is real, it is far larger than the isotope duplication the project has been chasing, and it
 is removable. **45.9% of inferred precursors have a competitor claiming the same monoisotope.** Deleting the
 duplicates costs 1.3-1.9% of peptides; *merging* them -- keeping one precursor and unioning the fragments --
 removes 23.8% of the emission for **0.21%** of Sage peptides and 0.18% of MSFragger peptides, or 31.6% for 0.53%
 and 0.40%. At the wider setting the file drops to 719,631 spectra, **below the reference implementation's 725,731
-on the same run**, while keeping 98.4% of its peptides. The isotope-offset rules the project already rejected are
+on the same run**, while its 50,533 Sage peptides are 98.4% of the reference implementation's 51,347 there (both
+extractors searched with the same configuration in one benchmark run). The isotope-offset rules the project already rejected are
 confirmed rejected against a proper control for the first time: every one of them is at or below a size- and
 charge-matched random cut.
 
 **The fix existed and was deleted unmeasured.** `assembly:dedup_precursors` / `dedupPrecursors_` (in the
-source before 1.3.0, called with 15 ppm / 3.0 s / 0.01) is exactly this de-duplication, placed immediately after precursor inference, with a better tiebreak than
-anything measured offline here: the higher MS1 trace apex intensity wins. It was pre-registered as a probable loss
-in the July roadmap, never run, and removed on 2026-09-08 in the pass that dropped 24 options
+source before 1.2.0, called with 15 ppm / 3.0 s / 0.01) is exactly this de-duplication, placed immediately after precursor inference, with a better tiebreak than
+anything measured offline here: the higher MS1 trace apex intensity wins. It was pre-registered as a probable loss,
+never run, and removed on 2026-09-08 in the pass that dropped 24 options
 "with no measurement on record". Its help text carries a redundancy observation, not a falsification.
 
-All measurements on PXD029836 run 1418 (120 min, 32 windows) with the released v1.3.1 arm, one extraction kept and
-re-used; arms are spectrum filters over that one file, searched with the harness's pinned closed configs and
-counted by the corpus-v3 rules. **Exploratory: these arms are outside the benchmark harness, so no timing claim and no
-harness record comes from them.** Scripts: `bench/iso_frontier.py` (price list), `bench/iso_rule.py` and
+All measurements on PXD029836 run 1418 (120 min, 32 windows) with the released v1.3.1 binary, one extraction kept and
+re-used. An **arm** is one filtered or merged copy of that extraction, searched with Sage and MSFragger in closed search
+(the configuration of `bench/sage_closed.json`, ±25 ppm, fully tryptic) and counted the same way throughout: Sage,
+distinct peptides at rank 1 with peptide q <= 0.01; MSFragger, the best hyperscore per peptide and modification, the
+deepest target-decoy prefix at 1 %. **Exploratory: the arms were not timed, so no wall-time claim comes from them.** Scripts: `bench/iso_frontier.py` (price list), `bench/iso_rule.py` and
 `bench/neigh_rule.py` (drop lists), `bench/mzml_drop.py` (exact spectrum filter), `bench/twin_merge.py` (the merge
 rewriter), `bench/twin_origin.py` (origin classification), `bench/twin_sim.py` (content similarity),
 `bench/funnel_dup.py` (the mechanism at the source), `bench/rho.py` (redundancy vs coverage).
@@ -119,7 +125,7 @@ the merge form is the one to carry forward.
 
 ## 4. The arms
 
-Nine spectrum-filter arms over the one kept extraction, both engines, corpus-v3 counting. The baseline is the
+Nine spectrum-filter arms over the one kept extraction, both engines, counted as above. The baseline is the
 unfiltered file; `identity` is the same re-serialisation every filtered arm gets (`index=` renumbered, the
 `indexedmzML` wrapper dropped) with **nothing** removed, so file form is not a confound.
 
@@ -153,7 +159,8 @@ Three things fall out, all on both engines:
 
 ## 5. The error rate does not move
 
-Entrapment (`tools/sage_entrap.json`, 20,416 target / 16,343 foreign proteins, peptide-hypothesis ratio 0.6805,
+Entrapment (Sage against the target database concatenated with a foreign proteome, 20,416 target / 16,343 foreign
+proteins, peptide-hypothesis ratio 0.6805,
 scored with the shipped `bench/entrapment.py` estimator) on the baseline and on the arm that would ship:
 
 | arm | accepted | entrapment hits | raw | corrected FDR | 95% CI |
@@ -171,7 +178,7 @@ population, which is the failure mode `bench/fdrcheck.py` caught on the min_corr
   (:2589-2596, :2626-2627, :2820-2821), so suppressing a precursor upstream frees its claimed traces and changes
   which *other* precursors form. Deleting a finished spectrum is exact for the arm and is not a model of
   `dedupPrecursors_` restored. The upstream change has to be measured on its own.
-- **No wall-time or memory claim.** Nothing here ran under the harness.
+- **No wall-time or memory claim.** The arms were not timed.
 - **One file.** 1418 only; the emission ratio and the window overlap are file properties.
 - **The merge is a fragment union, not a re-assembly.** The principled version folds the duplicate seeds' XICs
   together *before* fragment correlation, which the offline union only approximates.
@@ -181,10 +188,11 @@ population, which is the failure mode `bench/fdrcheck.py` caught on the min_corr
 The fold shipped as `-assembly:twin_im_tolerance` (default 0.005), run per tile on the canonically sorted block with a
 same-MS1-frame RT clause -- the relation measured here, since every linked pair shared its frame. On run 1418 it
 equals `bench/twin_merge.py --im=0.005` for 802,099 of 802,099 spectra and every fragment; fold off equals the v1.3.1
-spectra; entrapment at 0.005 is 0.98 % [0.87, 1.09], +0.01 points. On the two gate files (dataset D, TNBC 009) the fold
-off reproduces the 1.3 digests, and the fold on is digest-identical across tile groupings and thread counts.
+spectra; entrapment FDR is 0.98 % [0.87, 1.09] with the fold at 0.005 against 0.98 % without (+0.01 points unrounded). On two
+further runs (dataset D, see docs/BASELINE.md, and run 009 of PXD047793) the fold off reproduces the 1.3 output
+digests exactly, and the fold on gives the same digest at every tile grouping and thread count tried.
 
-## 8. What to do
+## 8. Proposed on 2026-09-20 (superseded by what 1.4.0 shipped)
 
 Done in 1.4.0 as the offline union moved into the tool (section 7), rather than as the precursor-level
 restoration first proposed here; the window seam is folded by the same relation.

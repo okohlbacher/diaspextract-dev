@@ -2206,7 +2206,7 @@ protected:
     setValidFormats_("in", {"mzML", "d"});      // stock OpenMS does not know the mzpeak format
 #endif
     registerOutputFile_("out", "<file>", "", "Output pseudo-MS2 spectra. The FORMAT FOLLOWS THE "
-                        "EXTENSION: .mzpeak (default) or .mzML. mzPeak is columnar and much smaller; "
+                        "EXTENSION: .mzpeak (the default in a build with mzPeak support) or .mzML (the only format otherwise). mzPeak is columnar and much smaller; "
                         "mzML is what DDA search engines read today, so pass an .mzML name (or "
                         "-out_type mzML) if the next step is a search. mzPeak is written in one piece, "
                         "so it runs as one tile (the whole run's memory).");
@@ -2217,7 +2217,7 @@ protected:
 #endif
     registerStringOption_("out_type", "<type>", "", "Force the output format instead of taking it "
                           "from the extension of -out. Empty = follow the extension; mzPeak if the "
-                          "extension says nothing. mzPeak output runs as one tile (see -out).", false);
+                          "extension says nothing (mzML in a build without mzPeak support). mzPeak output runs as one tile (see -out).", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
     registerTOPPSubsection_("gate", "Precursor-to-fragment co-localization gate");
@@ -2230,8 +2230,8 @@ protected:
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
     registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance).", false);
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off. 0.005 is the measured optional setting (Sage +1-7% over corr_power 2 on three files, flat on MSFragger): docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage, +5-8% MSFragger on three files, docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0). CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836 (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
+    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
+    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
@@ -2258,7 +2258,7 @@ protected:
                           "and needs the vendor calibration (without it: 'openms', logged). 'openms' runs OpenMS MassTraceDetection. Different "
                           "algorithms: they share ~85% of identified peptides, neither wins on every file and engine, integer uses ~40% less memory. docs/MZ-AXIS-DESIGN.md.", false);
     setValidStrings_("trace:detector", {"openms", "integer"});
-    registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. With trace:detector integer and trace:ms2_split_valleys 0 the fragment traces keep the centroid whatever this says. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
+    registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. Fragment traces of the integer detector always report the calibrated m/z of their apex bin, whatever this says; with trace:detector openms the estimator applies to them too. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
     setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic valleys (ElutionPeakDetection, width filtering off). Value = chrom_fwhm (seconds); 0 = off.", false);
     registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation, the cluster closure, the survivor order and the 10-ppm fusion", true);
