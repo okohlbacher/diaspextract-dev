@@ -4249,9 +4249,10 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
     if sys.platform.startswith("linux") and os.path.exists("/usr/bin/time"):   # the real GNU time: TIME may be a stand-in here
         _k = Path(tempfile.mkdtemp())
         _burn = ["/usr/bin/time", "-v", "-o", str(_k / "t.log"), sys.executable, "-c", "while True: pass"]
-        _o0 = proc_snapshot()["ours"]
+        _s0 = proc_snapshot()
         _rc, _why = run_capped(_burn, _k, dict(os.environ), _k / "burn.log", 4.0)
-        _grew = (proc_snapshot()["ours"] - _o0) / CLK_TCK
+        _s1 = proc_snapshot()
+        _grew = (_s1["ours"] - _s0["ours"]) / CLK_TCK if _s0 and _s1 else -1.0   # -1: /proc not readable, a FAIL not a crash
         C.check("G-V06", "a killed cell's CPU stays in the runner's process tree (the wrapper reaps the tool before it dies)",
                 _why is not None and _grew >= 1.0, "rc %s, stopped %r, own-tree CPU grew %.2f s over a 4-s burn" % (_rc, _why, _grew))
     # the floor counts the evictable ZFS ARC, which the kernel omits from MemAvailable (2026-09-19)

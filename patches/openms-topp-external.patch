@@ -9,6 +9,8 @@
 #    exist!" for any tool it does not list: no CTD or CWL could be written for DIAspeXtract at all, so it could not
 #    be wrapped for KNIME or Galaxy. An unregistered tool now gets no types, like most registered ones.
 # Worth upstreaming as "respect official_" in both places.
+# ABI: the new virtual sits before other virtuals in TOPPBase, so it shifts their vtable slots. Never run a binary built
+# against UNPATCHED OpenMS headers with this libOpenMS (already unsupported with the other four patches).
 --- a/src/openms/include/OpenMS/APPLICATIONS/TOPPBase.h
 +++ b/src/openms/include/OpenMS/APPLICATIONS/TOPPBase.h
 @@ -191,7 +191,9 @@
