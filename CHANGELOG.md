@@ -17,7 +17,7 @@
 - **An error inside a parallel task ends the run with its message.** An exception thrown inside an OpenMP task
   terminated the process without one. The six task loops that allocate now hand the exception back once the loop has
   joined, and the run exits non-zero with the error, like any other failure. e2e check 12e injects one
-  (`DIASPEXTRACT_TASK_THROW`, a test-only switch) in the MS1 band tracing and in the per-window assembly; 12d pins the
+  (`DIASPEXTRACT_TASK_THROW`, a switch meant for the tests) in the MS1 band tracing and in the per-window assembly; 12d pins the
   `--help` line and the CTD's `docurl`.
 - **README**: the build section lists five OpenMS patches.
 
