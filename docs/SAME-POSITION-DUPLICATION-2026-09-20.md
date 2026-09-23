@@ -12,16 +12,15 @@ on the same run**, while keeping 98.4% of its peptides. The isotope-offset rules
 confirmed rejected against a proper control for the first time: every one of them is at or below a size- and
 charge-matched random cut.
 
-**The fix existed and was deleted unmeasured.** `assembly:dedup_precursors` / `dedupPrecursors_` (`git show
-9a6c2d4^:src/spextractor.cpp`, flag at :1839, implementation :2632-2668, call :3516-3521 with 15 ppm / 3.0 s /
-0.01) is exactly this de-duplication, placed immediately after precursor inference, with a better tiebreak than
+**The fix existed and was deleted unmeasured.** `assembly:dedup_precursors` / `dedupPrecursors_` (in the
+source before 1.3.0, called with 15 ppm / 3.0 s / 0.01) is exactly this de-duplication, placed immediately after precursor inference, with a better tiebreak than
 anything measured offline here: the higher MS1 trace apex intensity wins. It was pre-registered as a probable loss
-(docs/ROADMAP-2026-07-23.md:377-400), never run, and removed on 2026-09-08 in the pass that dropped 24 options
+in the July roadmap, never run, and removed on 2026-09-08 in the pass that dropped 24 options
 "with no measurement on record". Its help text carries a redundancy observation, not a falsification.
 
 All measurements on PXD029836 run 1418 (120 min, 32 windows) with the released v1.3.1 arm, one extraction kept and
 re-used; arms are spectrum filters over that one file, searched with the harness's pinned closed configs and
-counted by the corpus-v3 rules. **Exploratory: these arms are outside harness/corpus.py, so no timing claim and no
+counted by the corpus-v3 rules. **Exploratory: these arms are outside the benchmark harness, so no timing claim and no
 harness record comes from them.** Scripts: `bench/iso_frontier.py` (price list), `bench/iso_rule.py` and
 `bench/neigh_rule.py` (drop lists), `bench/mzml_drop.py` (exact spectrum filter), `bench/twin_merge.py` (the merge
 rewriter), `bench/twin_origin.py` (origin classification), `bench/twin_sim.py` (content similarity),
@@ -182,21 +181,8 @@ population, which is the failure mode `bench/fdrcheck.py` caught on the min_corr
 The fold shipped as `-assembly:twin_im_tolerance` (default 0.005), run per tile on the canonically sorted block with a
 same-MS1-frame RT clause -- the relation measured here, since every linked pair shared its frame. On run 1418 it
 equals `bench/twin_merge.py --im=0.005` for 802,099 of 802,099 spectra and every fragment; fold off equals the v1.3.1
-spectra; entrapment at 0.005 is 0.98 % [0.87, 1.09], +0.01 points. Gates: docs/reviews/twin-fold-1.4.0/GATES.md.
-
-**A second acquisition** (K562 250 ng, three replicates, harness plans `rost_k562_v131e` and `rost_k562_v140` on one idle
-node, both engines, entrapment search; v1.3.1 and 1.4.0rc1 each paired with the reference implementation):
-
-| arm | spectra | Sage | MSFragger | entrapment FDR all / z≥2 | Sage search | MSFragger search |
-|---|---:|---:|---:|---:|---:|---:|
-| reference implementation | 905,633 ± 4,030 | 36,121 ± 120 | 49,326 ± 630 | 0.82 / 0.82 % | 2:11 | 5:54 |
-| DIAspeXtract 1.3.1 | 1,254,789 ± 1,474 | 45,710 ± 299 | 42,829 ± 332 | 0.97 / 0.93 % | 2:47 | 6:46 |
-| DIAspeXtract 1.4.0rc1 | 831,004 ± 1,950 | **45,974 ± 331** | **43,101 ± 431** | **0.92 / 0.88 %** | 2:16 | 4:40 |
-
-Here the fold removes a third of the emission and **gains** peptides on every replicate and both engines (+189/+236/+367
-Sage, +214/+163/+439 MSFragger) while the entrapment rate falls -- the pattern of fewer redundant hypotheses competing,
-not of a threshold sliding on thinned decoys (that would raise it). Extraction wall and memory are unchanged; the search
-engines save 19 % (Sage) and 31 % (MSFragger).
+spectra; entrapment at 0.005 is 0.98 % [0.87, 1.09], +0.01 points. On the two gate files (dataset D, TNBC 009) the fold
+off reproduces the 1.3 digests, and the fold on is digest-identical across tile groupings and thread counts.
 
 ## 8. What to do
 
