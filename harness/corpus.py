@@ -1084,6 +1084,40 @@ def stage_tdf(q: dict, s: dict, pair_run: str) -> tuple:
 
 
 def kill_session(pid: int) -> None:
+    """Kill a cell's session so that its CPU stays in this runner's process tree, which the contention measure
+    (G-V06) subtracts as our own. The leader is the GNU time wrapper: its children die first, it reaps them and exits,
+    and only then does the rest of the group go. Killing the group in one signal orphaned the tool to init, whose reap
+    took the tool's entire CPU out of our tree in one sample and booked it as foreign: 16,220 and 12,034 "foreign"
+    cores on a 128-core node for the two diaWeaver cells G-V16 stopped (2026-09-17, -19). The leader is NOT reaped
+    here -- Popen.wait() must reap it, or it reports the killed cell as exit 0. Linux /proc; elsewhere the group kill."""
+    kids = []
+    try:
+        for d in os.listdir("/proc"):
+            if d.isdigit() and int(d) != pid:
+                try:
+                    with open("/proc/%s/stat" % d) as f:
+                        st = f.read()
+                    if int(st[st.rindex(")") + 2:].split()[3]) == pid:      # field 6, the session id
+                        kids.append(int(d))
+                except (OSError, ValueError, IndexError):
+                    continue
+    except OSError:
+        pass
+    for k in kids:
+        try:
+            os.kill(k, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    t_end = time.monotonic() + 30
+    while kids and time.monotonic() < t_end:                              # the leader reaps them and exits
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                st = f.read()
+            if st[st.rindex(")") + 2:].split()[0] in ("Z", "X"):
+                break
+        except (OSError, ValueError, IndexError):
+            break
+        time.sleep(0.05)
     try:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -3342,7 +3376,10 @@ PAIR_MEASURE_1_3_0 = {"pair": "3215b73e62ae", "search": "064af71b2bfe", "score":
 # Moved c586f8716617 -> 4c23e6ab6354 on 2026-09-19 (user approved): run_capped's memory floor now counts the
 # evictable ZFS ARC, which the kernel leaves out of MemAvailable. It had killed a diaWeaver cell holding 939 GB of
 # a 2,268 GB node whose ARC held 1,135 GB. Only extended plans re-run, and every existing cell record is a failure.
-CELLS_MEASURE_DWV = "4c23e6ab6354"
+# Moved 4c23e6ab6354 -> 196c420d07ce on 2026-09-23 (user asked for the fix): kill_session kills the time wrapper's
+# children first, so a killed cell's CPU stays in the runner's tree instead of reading as 12-16k "foreign" cores. The
+# kill itself is unchanged (the whole session still goes). Existing extended-plan tables still render; resuming one re-runs.
+CELLS_MEASURE_DWV = "196c420d07ce"
 
 
 def measure_sha256(extended=False) -> dict:
@@ -4207,6 +4244,16 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             all("available memory 1.0%" in RM["A", "pair"]["arms"][n].get("message", "") for n in DWV_CELLS)
             and "during" in group_flags(RM["A", "pair"]) and not busy([mine]),
             RM["A", "pair"]["arms"]["dwv_default"].get("message"))
+    # a killed cell's CPU stays in the runner's tree (2026-09-23): with one group SIGKILL the tool was orphaned to init
+    # and its whole CPU left the tree at once, which the contention measure booked as foreign. Linux /proc only.
+    if sys.platform.startswith("linux") and os.path.exists("/usr/bin/time"):   # the real GNU time: TIME may be a stand-in here
+        _k = Path(tempfile.mkdtemp())
+        _burn = ["/usr/bin/time", "-v", "-o", str(_k / "t.log"), sys.executable, "-c", "while True: pass"]
+        _o0 = proc_snapshot()["ours"]
+        _rc, _why = run_capped(_burn, _k, dict(os.environ), _k / "burn.log", 4.0)
+        _grew = (proc_snapshot()["ours"] - _o0) / CLK_TCK
+        C.check("G-V06", "a killed cell's CPU stays in the runner's process tree (the wrapper reaps the tool before it dies)",
+                _why is not None and _grew >= 1.0, "rc %s, stopped %r, own-tree CPU grew %.2f s over a 4-s burn" % (_rc, _why, _grew))
     # the floor counts the evictable ZFS ARC, which the kernel omits from MemAvailable (2026-09-19)
     _arc = Path(tempfile.mkdtemp()) / "arcstats"
     _arc.write_text("name type data\nsize                            4    1218567890123\nc_min                           4    76025168896\n")

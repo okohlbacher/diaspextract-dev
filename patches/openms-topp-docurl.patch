@@ -1,0 +1,20 @@
+# DIAspeXtract: let a TOPP tool outside the OpenMS release name its own documentation.
+#
+# TOPPBase::getDocumentationURL() returns http://www.openms.de/doxygen/<nightly|release>/html/TOPP_<tool>.html
+# unconditionally -- it does not consult the `official` flag the tool passes as false -- and it is not virtual.
+# For DIAspeXtract that page does not exist: the first line of --help, the "online documentation" line of
+# --helphelp and the docurl of every CTD written with -write_ctd all pointed at a 404. One word makes it
+# overridable; the tool returns its repository. Worth upstreaming as "respect official_" or as this.
+--- a/src/openms/include/OpenMS/APPLICATIONS/TOPPBase.h
++++ b/src/openms/include/OpenMS/APPLICATIONS/TOPPBase.h
+@@ -191,7 +191,9 @@
+     String getToolPrefix() const;
+ 
+     /// Returns a link to the documentation of the tool (accessible on our servers and only after inclusion in the nightly branch or a release).
+-    String getDocumentationURL() const;
++    /// Virtual so that a tool outside the OpenMS release can point --help and its CTD at its own documentation:
++    /// the default URL does not consult `official_`, so for such a tool it always 404s.
++    virtual String getDocumentationURL() const;
+ 
+     /// The latest and greatest OpenMS citation
+     static const Citation cite_openms;
