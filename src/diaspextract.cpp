@@ -2213,7 +2213,7 @@ public:
     verboseVersion_ = String(DIASPEXTRACT_VERSION) + " (OpenMS " + VersionInfo::getVersion() + ")";
   }
 
-  // [docurl] patches/openms-topp-docurl.patch makes this virtual. TOPPBase's default is an OpenMS doxygen page that
+  // [docurl] patches/openms-topp-external.patch makes this virtual. TOPPBase's default is an OpenMS doxygen page that
   // does not exist for a tool outside the release: the first line of --help and the docurl of every CTD 404'd.
   String getDocumentationURL() const override { return "https://github.com/okohlbacher/diaspextract"; }
 

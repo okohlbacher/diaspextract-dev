@@ -113,7 +113,7 @@ The binary is `build/diaspextract`; `cmake --install build` puts it under `<pref
 | `openms-epd-lockfree.patch` | removes a program-global critical section from elution-peak detection | called from a parallel window loop, that one lock burned about a quarter of the CPU in blocked threads |
 | `openms-masstrace-move.patch` | gives `MassTrace` move operations | OpenMS's defaulted copy operations made every `std::move` a deep copy; a `static_assert` enforces the patch |
 | `openms-mzml-parallel-write.patch` | encodes mzML spectra in chunks on all threads, appended in index order | the writer was CPU-bound on one thread; byte-identical spectrum list, 20 s → 6 s on a 30-minute run |
-| `openms-topp-docurl.patch` | makes `TOPPBase::getDocumentationURL()` virtual | OpenMS points every tool's `--help` and CTD at its own doxygen page, which does not exist for a tool outside the release; DIAspeXtract points them at this repository |
+| `openms-topp-external.patch` | makes `TOPPBase::getDocumentationURL()` virtual, and lets `-write_ctd` / `-write_cwl` skip the tool-registry lookup for a tool OpenMS does not list | OpenMS pointed `--help` at a doxygen page that does not exist for a tool outside the release (DIAspeXtract now points it at this repository), and the unguarded lookup made CTD and CWL export fail outright, so the tool could not be wrapped for KNIME or Galaxy |
 
 Environment variables the patched libOpenMS reads, none needed for a normal run: `DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1`
 opts into the legacy chord when the exact calibration is unavailable (otherwise the run fails closed; the MS1

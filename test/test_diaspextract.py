@@ -464,7 +464,7 @@ def main():
     check("twin fold: inert without twins, fires on a precursor assembled twice, count reconciles", c12b)
 
     # 12d: --help and the CTD name this repository, not the OpenMS doxygen page TOPPBase builds for every tool
-    #      (which does not exist for one outside the release). Needs patches/openms-topp-docurl.patch.
+    #      (which does not exist for one outside the release), and -write_ctd works at all. Needs patches/openms-topp-external.patch.
     def c12d():
         url = "https://github.com/okohlbacher/diaspextract"
         h = subprocess.run([binary, "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
