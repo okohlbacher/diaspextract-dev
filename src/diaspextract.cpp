@@ -132,7 +132,8 @@ namespace
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
   /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
-  /// 15 s, with the first gate it fails (pearson mode). The spectra are unchanged; off unless both variables are set.
+  /// 15 s, with the first gate it fails (pearson mode, default gate rules only: gate:short_traces, gate:colocation and
+  /// gate:shrinkage are not reflected in the fate). The spectra are unchanged; off unless both variables are set.
   struct GateDump_
   {
     struct T { std::string id; double mz, rt, im; int z; };
@@ -220,7 +221,7 @@ namespace
   bool coloc_ = false;               ///< [coloc] gate:colocation == "ranges": each apex inside the other span, span overlap
   double coloc_overlap_ = 0.3;       ///< [coloc] gate:colocation_overlap, fraction of the shorter span
   bool shrink_ = false;              ///< [shrink] gate:shrinkage == "fisher": Fisher-z posterior mean instead of a hard point cut
-  double shrink_r0_ = 0.3, shrink_sd_ = 0.5;   ///< [shrink] prior N(atanh r0, sd^2) on the Fisher z of the true correlation
+  double shrink_r0_ = 0.0, shrink_sd_ = 0.5;   ///< [shrink] prior N(atanh r0, sd^2) on the Fisher z of the true correlation
   int shrink_min_pts_ = 2;           ///< [shrink] gate:shrink_min_points, overlapping frames needed to compute r at all
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
 
@@ -2360,9 +2361,9 @@ protected:
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
     setMinFloat_("gate:colocation_overlap", 0.0);
-    registerStringOption_("gate:shrinkage", "<mode>", "off", "'fisher': gate on the posterior mean of the correlation instead of a hard gate:min_correlation_points cut: z = atanh(r) over the overlapping frames n, sampling variance 1/max(n-3,1), prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2); short traces are pulled toward the prior. Experimental.", false, true);
+    registerStringOption_("gate:shrinkage", "<mode>", "off", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental.", false, true);
     setValidStrings_("gate:shrinkage", {"off", "fisher"});
-    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.3, "gate:shrinkage fisher: prior mean correlation.", false, true);
+    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.0, "gate:shrinkage fisher: prior mean correlation (0 = shrink toward no co-elution).", false, true);
     registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.5, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
     setMinFloat_("gate:shrink_prior_sd", 0.01);
     registerIntOption_("gate:shrink_min_points", "<n>", 2, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation.", false, true);
@@ -3165,7 +3166,8 @@ protected:
           if (inter < coloc_overlap_ * shorter) continue;
         }
         double c;
-        if (short_conc_ && (short_np || overlap < min_corr_pts))
+        const bool no_corr = shrink_ ? overlap < shrink_min_pts_ : (short_np || overlap < min_corr_pts);   // [short]/[shrink] precedence
+        if (short_conc_ && no_corr)
         {
           // [short] too few points for a correlation: faint ions are the tips of their elution peaks, so their
           // detected spans shrink with intensity but stay centred on the apex. Keep a fragment whose span lies inside
@@ -3174,7 +3176,7 @@ protected:
           if (f_lo < p_lo - 1 || f_hi > p_hi + 1) continue;
           const double d = std::fabs(0.5 * (f_lo + f_hi) - p_ctr), tol = std::max(1.0, short_center_tol_ * p_half);
           if (d > tol) continue;
-          c = 1.0 - d / (tol + 1.0);
+          c = min_corr * (1.0 - 0.5 * d / (tol + 1.0));                // at the gate: ranks and weighs as a borderline fragment
         }
         else
         {
@@ -3514,6 +3516,8 @@ protected:
     shrink_r0_ = getDoubleOption_("gate:shrink_prior_r");
     shrink_sd_ = getDoubleOption_("gate:shrink_prior_sd");
     shrink_min_pts_ = getIntOption_("gate:shrink_min_points");
+    if (shrink_ && log_overlap_)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "gate:shrinkage fisher needs a correlation: it does not apply to gate:coelution logoverlap");
     corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
