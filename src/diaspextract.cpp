@@ -217,6 +217,11 @@ namespace
   bool short_conc_ = false;          ///< [short] gate:short_traces == "concentric": span test for traces too short for Pearson
   double short_center_tol_ = 0.5;    ///< [short] gate:short_center_tol, fraction of the precursor half-span
   int short_min_pts_ = 1;            ///< [short] gate:short_min_points
+  bool coloc_ = false;               ///< [coloc] gate:colocation == "ranges": each apex inside the other span, span overlap
+  double coloc_overlap_ = 0.3;       ///< [coloc] gate:colocation_overlap, fraction of the shorter span
+  bool shrink_ = false;              ///< [shrink] gate:shrinkage == "fisher": Fisher-z posterior mean instead of a hard point cut
+  double shrink_r0_ = 0.3, shrink_sd_ = 0.5;   ///< [shrink] prior N(atanh r0, sd^2) on the Fisher z of the true correlation
+  int shrink_min_pts_ = 2;           ///< [shrink] gate:shrink_min_points, overlapping frames needed to compute r at all
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
@@ -2347,7 +2352,20 @@ protected:
     registerStringOption_("gate:short_traces", "<mode>", "off", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
     registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: centre tolerance as a fraction of the precursor half-span (at least one cycle).", false, true);
+    setMinFloat_("gate:short_center_tol", 0.0);
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
+    setMinInt_("gate:short_min_points", 1);
+    registerStringOption_("gate:colocation", "<mode>", "off", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
+    setValidStrings_("gate:colocation", {"off", "ranges"});
+    registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
+    setMinFloat_("gate:colocation_overlap", 0.0);
+    registerStringOption_("gate:shrinkage", "<mode>", "off", "'fisher': gate on the posterior mean of the correlation instead of a hard gate:min_correlation_points cut: z = atanh(r) over the overlapping frames n, sampling variance 1/max(n-3,1), prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2); short traces are pulled toward the prior. Experimental.", false, true);
+    setValidStrings_("gate:shrinkage", {"off", "fisher"});
+    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.3, "gate:shrinkage fisher: prior mean correlation.", false, true);
+    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.5, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
+    setMinFloat_("gate:shrink_prior_sd", 0.01);
+    registerIntOption_("gate:shrink_min_points", "<n>", 2, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation.", false, true);
+    setMinInt_("gate:shrink_min_points", 1);
     registerFlag_("gate:variance_support", "Compute the Pearson co-elution score over the union support of the two profiles instead of the full RT grid (gate:coelution pearson only; the scale changes, retune gate:min_correlation). Falsified 2026-07-27, kept for reproducibility: docs/BASELINE.md 'What is already falsified'.");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
     registerStringOption_("perf:ms1_prune", "<true/false>", "true",
@@ -3100,7 +3118,12 @@ protected:
       if (log_overlap_) plogsum += std::log1p(v);
     }
     int p_lo = std::numeric_limits<int>::max(), p_hi = -1;              // [short] the precursor's span in window frames
-    for (int gi : touched) { p_lo = std::min(p_lo, gi); p_hi = std::max(p_hi, gi); }
+    int p_apex = -1;                                                    // [coloc] the precursor apex frame
+    for (int gi : touched)
+    {
+      p_lo = std::min(p_lo, gi); p_hi = std::max(p_hi, gi);
+      if (p_apex < 0 || pdense[gi] > pdense[p_apex]) p_apex = gi;
+    }
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
@@ -3123,14 +3146,23 @@ protected:
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
-        if (short_np && !short_conc_) continue;
-        int f_lo = -1, f_hi = -1;                                       // [short] the fragment's detected span
+        if (short_np && !short_conc_ && !(shrink_ && (int)f.np() >= shrink_min_pts_)) continue;
+        int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
+        float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
         for (size_t k = 0; k < f.span(); ++k)
         { const float fv = xv(wst, f, k); if (fv == 0.0f) continue;
           if (f_lo < 0) f_lo = (int)(f.frame0 + k);
           f_hi = (int)(f.frame0 + k);
+          if (fv > f_max) { f_max = fv; f_apex = (int)(f.frame0 + k); }
           const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
+        if (coloc_)                                                     // [coloc] DIA-Umpire-style co-location
+        {
+          if (f_lo < 0 || p_hi < 0) continue;
+          if (f_apex < p_lo - 1 || f_apex > p_hi + 1 || p_apex < f_lo - 1 || p_apex > f_hi + 1) continue;
+          const int inter = std::min(f_hi, p_hi) - std::max(f_lo, p_lo) + 1, shorter = std::min(f_hi - f_lo, p_hi - p_lo) + 1;
+          if (inter < coloc_overlap_ * shorter) continue;
+        }
         double c;
         if (short_conc_ && (short_np || overlap < min_corr_pts))
         {
@@ -3145,7 +3177,7 @@ protected:
         }
         else
         {
-          if (overlap < min_corr_pts) continue;                          // overlap guard [H-4]
+          if (overlap < (shrink_ ? shrink_min_pts_ : min_corr_pts)) continue;   // overlap guard [H-4]; [shrink] its own floor
           // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
           // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
           // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
@@ -3179,6 +3211,12 @@ protected:
             c = inter;
           }
           else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
+          if (shrink_)                                                   // [shrink] Fisher-z posterior mean
+          {
+            const double z = std::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
+            const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
+            c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
+          }
           if (c < min_corr) continue;                                    // correlation gate
         }
         // [E5] The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
@@ -3467,6 +3505,12 @@ protected:
     short_conc_ = (getStringOption_("gate:short_traces") == "concentric");
     short_center_tol_ = getDoubleOption_("gate:short_center_tol");
     short_min_pts_ = getIntOption_("gate:short_min_points");
+    coloc_ = (getStringOption_("gate:colocation") == "ranges");
+    coloc_overlap_ = getDoubleOption_("gate:colocation_overlap");
+    shrink_ = (getStringOption_("gate:shrinkage") == "fisher");
+    shrink_r0_ = getDoubleOption_("gate:shrink_prior_r");
+    shrink_sd_ = getDoubleOption_("gate:shrink_prior_sd");
+    shrink_min_pts_ = getIntOption_("gate:shrink_min_points");
     corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
