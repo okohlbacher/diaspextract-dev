@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **`dnoise:ms1` no longer refuses Bruker files whose `AccumulationTime` exceeds 100 ms.** The MS1 denoiser filters raw
+  ion counts, and the reader returns them scaled by opentims' intensity correction, 100 / `AccumulationTime`. At 100 ms
+  and below the scaling is inverted exactly; above it several raw counts share one intensity, so the run was refused.
+  Now each point takes the raw count nearest intensity × `AccumulationTime` / 100 among those that give its intensity:
+  an approximation, applied without a warning. Output at 100 ms and below is unchanged. Affected: for example the
+  PXD029836 high-sensitivity runs (166 ms), which 1.4.x refused at the defaults.
+
 ## v1.4.1 — 2026-09-23
 
 **Why 1.4.1.** Fixes to the interface and to error handling. The spectra are unchanged: the dataset D gate reproduces

@@ -239,9 +239,10 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
 | `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of the cluster's fragments, peaks within 10 ppm fused (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3 (0 still folds twins of identical 1/K0). On a 2-hour HeLa run (PXD029836): 24 % fewer spectra for 0.2 % of the peptides on both engines, entrapment FDR 0.98 % with the fold against 0.98 % without |
 
-**MS1 denoising (`dnoise:`)** — a bit-identical port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
+**MS1 denoising (`dnoise:`)** — a port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
 bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker
-`.d` before peak picking. Other inputs pass through, logged and stamped.
+`.d` before peak picking. Other inputs pass through, logged and stamped. It is bit-identical to dnoise for frames up to
+100 ms `AccumulationTime`; above that the reader's intensities no longer identify one raw count, and the nearest is taken.
 
 | option | default | meaning |
 |---|---|---|

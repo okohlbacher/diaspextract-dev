@@ -824,6 +824,9 @@ intensity correction below 1 makes the raw counts unrecoverable -- but a default
 wrong experience. Proposal: skip dnoise with a warning and stamp `spx:dnoise_ms1` "skipped (AccumulationTime > 100 ms)",
 as for non-.d input. **A decision for the user**: it trades fail-closed for a documented degrade.
 
+**Status 2026-09-24:** decided (user): approximate, no refusal and no warning -- recoverPoint takes the raw count
+nearest v / corr among the candidates (CHANGELOG Unreleased).
+
 ## CWL export needs an OpenMS built with ENABLE_TDL (2026-09-23)
 
 With the registry lookup fixed (patches/openms-topp-external.patch), `-write_cwl` and `-write_nested_cwl` reach OpenMS's

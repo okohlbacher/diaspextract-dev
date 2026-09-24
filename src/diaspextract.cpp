@@ -1506,7 +1506,7 @@ namespace
       spx::dnoise::GateBuild g = spx::dnoise::buildMs1WindowGate(tdf.meta, tdf.windows, p);
       if (!g.error.empty()) return "the dnoise MS1 port cannot build its window gate from this file: " + g.error;
       gate = std::move(g.gate);
-      for (size_t id = 1; id < tdf.frames.size(); ++id)   // below 1 (AccumulationTime > 100 ms) raw counts share a corrected value
+      for (size_t id = 1; id < tdf.frames.size(); ++id)   // above 100 ms raw counts are approximate (recoverPoint), not refused
         if (tdf.frames[id].msms_type == 0)
           if (std::string r = spx::dnoise::recover::correctionRefusal(id, tdf.frames[id].corr); !r.empty()) return r;
       // one table per TimsCalibration row, over the most scans an MS1 frame using it has (tdf.ms1_max_scans): a row no MS1
@@ -1582,7 +1582,7 @@ namespace
           case Refusal::intensity_range:
             throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is >= 2^24 = 16777216: the loader's float32 intensity no longer identifies one raw count");
           default:   // Refusal::intensity
-            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of exactly one raw count (" + String(hits) + " found)");
+            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of any raw count");
         }
       }
       const spx::dnoise::FrameCounts fc = spx::dnoise::denoiseMs1Frame(k.scan.data(), k.tof.data(), k.raw.data(), n, fr.num_scans, p, gate ? &*gate : nullptr, k.w, k.keep);
@@ -2353,9 +2353,9 @@ protected:
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
     registerStringOption_("dnoise:ms1", "<true/false>", "true",
-                          "Denoise every MS1 frame on its raw points before picking: a bit-identical port of dnoise v0.1.0's default MS1 path "
+                          "Denoise every MS1 frame on its raw points before picking: a port of dnoise v0.1.0's default MS1 path, bit-identical up to AccumulationTime 100 ms "
                           "(Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT, LICENSES/dnoise-MIT.txt). Bruker .d only: other inputs "
-                          "pass through, logged and stamped spx:dnoise_ms1. A run whose raw points do not recover exactly is refused, as is "
+                          "pass through, logged and stamped spx:dnoise_ms1. Above 100 ms several raw counts share one intensity and the nearest is taken. A run whose raw points do not recover is refused, as is "
                           "trace:native_ms1_neighbors > 0. CHANGES OUTPUT (dataset D -4.3% Sage peptides, TNBC 009 +1.5%) and lowers peak memory "
                           "13-21% at one cell per tile: CHANGELOG, 2026-09-10 'MS1 denoising is on by default'. false = the output before 2026-09-10.", false);
     setValidStrings_("dnoise:ms1", {"true", "false"});
