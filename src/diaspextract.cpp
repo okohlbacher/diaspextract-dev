@@ -129,6 +129,32 @@ namespace
     if (want && String(want) == site)
       throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
   }
+  /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
+  /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
+  /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
+  /// 15 s, with the first gate it fails (pearson mode). The spectra are unchanged; off unless both variables are set.
+  struct GateDump_
+  {
+    struct T { std::string id; double mz, rt, im; int z; };
+    std::vector<T> t;   ///< sorted by mz
+    std::ofstream out;
+    std::mutex mu;
+    bool on = false;
+    GateDump_()
+    {
+      const char* f = std::getenv("DIASPEXTRACT_GATE_DUMP");
+      const char* g = std::getenv("DIASPEXTRACT_GATE_TARGETS");
+      if (!f || !g) return;
+      std::ifstream in(g);
+      T x;
+      while (in >> x.id >> x.mz >> x.rt >> x.im >> x.z) t.push_back(x);
+      std::sort(t.begin(), t.end(), [](const T& a, const T& b) { return a.mz < b.mz; });
+      out.open(f);
+      out << "target\tiso_k\tpc_mz\tpc_z\tpc_rt\tpc_im\tpc_iso\tpc_guessed\tfrag_mz\tdim\tdrt\tnp\toverlap\tcorr\tinten\tfate\n";
+      on = !t.empty() && out.good();
+    }
+    static GateDump_& get() { static GateDump_ d; return d; }
+  };
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
@@ -3136,6 +3162,43 @@ protected:
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_scores.push_back(c * inten);
       }
+    }
+    if (GateDump_& gd = GateDump_::get(); gd.on)                       // [gate-dump] read-only; before the reset
+    {
+      std::ostringstream rows;
+      rows.imbue(std::locale::classic());
+      auto it = std::lower_bound(gd.t.begin(), gd.t.end(), pc.mono_mz - 1.2, [](const GateDump_::T& a, double v) { return a.mz < v; });
+      for (; it != gd.t.end() && it->mz <= pc.mono_mz + 1.2; ++it)
+      {
+        if (std::fabs(it->rt - pc.rt) > 20.0 || std::fabs(it->im - pc.im) > 0.05 || it->z <= 0) continue;
+        int kk = 9;
+        for (int k = -1; k <= 1; ++k)
+          if (std::fabs(pc.mono_mz - (it->mz + k * 1.003355 / it->z)) <= it->mz * 20e-6) { kk = k; break; }
+        if (kk == 9) continue;
+        auto head = [&]() { rows << it->id << '\t' << kk << '\t' << pc.mono_mz << '\t' << pc.charge << '\t' << pc.rt << '\t' << pc.im
+                                 << '\t' << pc.n_isotopes << '\t' << (int)pc.guessed << '\t'; };
+        head(); rows << "-\t-\t-\t-\t-\t-\t" << frags.size() << (pinv > 0.0 ? "\tPRECURSOR\n" : "\tPRECURSOR_FLAT\n");
+        if (!(pinv > 0.0)) continue;
+        const size_t lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - 0.05) - frag_im.begin();
+        const size_t hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + 0.05) - frag_im.begin();
+        for (size_t fi = lo; fi < hi; ++fi)
+        {
+          const double drt = frag_rt[fi] - pc.rt, dim = frag_im[fi] - pc.im;
+          if (std::fabs(drt) > 15.0) continue;
+          const Trace& f = frag_traces[fi];
+          double dot = 0; int overlap = 0;
+          for (size_t k = 0; k < f.span(); ++k)
+          { const float fv = xv(wst, f, k); if (fv == 0.0f) continue;
+            const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
+          const double c = fg.invnorm[fi] == 0.0 ? 0.0 : (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi];
+          const char* fate = std::fabs(dim) > delta_im ? "im" : std::fabs(drt) > delta_rt ? "rt" : fg.invnorm[fi] == 0.0 ? "degenerate"
+                           : std::fabs(f.mz - pc.mono_mz) < 0.01 ? "precursor_peak" : f.np() < (size_t)std::max(min_corr_pts, 0) ? "np"
+                           : overlap < min_corr_pts ? "overlap" : c < min_corr ? "corr" : "kept";
+          head(); rows << exportMz_(f.tof, bOf(wst, f), f.mz) << '\t' << dim << '\t' << drt << '\t' << f.np() << '\t' << overlap << '\t'
+                       << c << '\t' << intensityOf(wst, f) << '\t' << fate << '\n';
+        }
+      }
+      if (rows.tellp() > 0) { std::lock_guard<std::mutex> lk(gd.mu); gd.out << rows.str(); gd.out.flush(); }
     }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
     if (frags.size() < min_frags) return;
