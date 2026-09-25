@@ -223,6 +223,9 @@ namespace
   bool shrink_ = false;              ///< [shrink] gate:shrinkage == "fisher": Fisher-z posterior mean instead of a hard point cut
   double shrink_r0_ = 0.0, shrink_sd_ = 0.5;   ///< [shrink] prior N(atanh r0, sd^2) on the Fisher z of the true correlation
   int shrink_min_pts_ = 2;           ///< [shrink] gate:shrink_min_points, overlapping frames needed to compute r at all
+  bool adaptive_ = false;            ///< [adaptive] gate:adaptive == "faint": the relaxed modes only for faint precursors
+  int faint_frames_ = 4;             ///< [adaptive] gate:faint_max_frames
+  double faint_drt_ = 6.0, faint_cp_ = 1.0;   ///< [adaptive] gate:faint_delta_rt, gate:faint_corr_power
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
@@ -2357,6 +2360,14 @@ protected:
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
+    registerStringOption_("gate:adaptive", "<mode>", "off", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'off': the modes apply to every precursor. Experimental.", false, true);
+    setValidStrings_("gate:adaptive", {"off", "faint"});
+    registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive faint: most window frames with precursor signal for a faint precursor.", false, true);
+    setMinInt_("gate:faint_max_frames", 1);
+    registerDoubleOption_("gate:faint_delta_rt", "<sec>", 6.0, "gate:adaptive faint: the apex RT window for faint precursors.", false, true);
+    setMinFloat_("gate:faint_delta_rt", 0.0);
+    registerDoubleOption_("gate:faint_corr_power", "<k>", 1.0, "gate:adaptive faint: assembly:corr_power for faint precursors.", false, true);
+    setMinFloat_("gate:faint_corr_power", 0.0);
     registerStringOption_("gate:colocation", "<mode>", "off", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
@@ -3126,6 +3137,10 @@ protected:
       p_lo = std::min(p_lo, gi); p_hi = std::max(p_hi, gi);
       if (p_apex < 0 || pdense[gi] > pdense[p_apex]) p_apex = gi;
     }
+    // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
+    const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
+    const bool g_shrink = shrink_ && all_p, g_coloc = coloc_ && all_p, g_conc = short_conc_ && all_p;
+    const double g_drt = faint ? faint_drt_ : delta_rt, g_cp = faint ? faint_cp_ : corr_power_;
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
@@ -3139,7 +3154,7 @@ protected:
         const int dq = (int)frag_rt.q[fi] - pq;
         if (dq < -2 || dq > 2) continue;                                // 2 B reject, see FragRt
         // [soa] the gate reads a parallel array; the trace record is touched only after it passes.
-        if (fabs(frag_rt[fi] - pc.rt) > delta_rt) continue;            // RT gate
+        if (fabs(frag_rt[fi] - pc.rt) > g_drt) continue;               // RT gate ([adaptive] faint window)
         if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
         const Trace& f = frag_traces[fi];
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
@@ -3148,7 +3163,7 @@ protected:
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
-        if (short_np && !short_conc_ && !(shrink_ && (int)f.np() >= shrink_min_pts_)) continue;
+        if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_)) continue;
         int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
         float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
@@ -3158,7 +3173,7 @@ protected:
           f_hi = (int)(f.frame0 + k);
           if (fv > f_max) { f_max = fv; f_apex = (int)(f.frame0 + k); }
           const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
-        if (coloc_)                                                     // [coloc] DIA-Umpire-style co-location
+        if (g_coloc)                                                    // [coloc] DIA-Umpire-style co-location
         {
           if (f_lo < 0 || p_hi < 0) continue;
           if (f_apex < p_lo - 1 || f_apex > p_hi + 1 || p_apex < f_lo - 1 || p_apex > f_hi + 1) continue;
@@ -3166,8 +3181,8 @@ protected:
           if (inter < coloc_overlap_ * shorter) continue;
         }
         double c;
-        const bool no_corr = shrink_ ? overlap < shrink_min_pts_ : (short_np || overlap < min_corr_pts);   // [short]/[shrink] precedence
-        if (short_conc_ && no_corr)
+        const bool no_corr = g_shrink ? overlap < shrink_min_pts_ : (short_np || overlap < min_corr_pts);   // [short]/[shrink] precedence
+        if (g_conc && no_corr)
         {
           // [short] too few points for a correlation: faint ions are the tips of their elution peaks, so their
           // detected spans shrink with intensity but stay centred on the apex. Keep a fragment whose span lies inside
@@ -3180,7 +3195,7 @@ protected:
         }
         else
         {
-          if (overlap < (shrink_ ? shrink_min_pts_ : min_corr_pts)) continue;   // overlap guard [H-4]; [shrink] its own floor
+          if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts)) continue;   // overlap guard [H-4]; [shrink] its own floor
           // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
           // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
           // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
@@ -3214,7 +3229,7 @@ protected:
             c = inter;
           }
           else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
-          if (shrink_)                                                   // [shrink] Fisher-z posterior mean
+          if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
           {
             const double z = std::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
             const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
@@ -3227,7 +3242,7 @@ protected:
         const double dim = frag_im[fi] - pc.im;
         if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
         double emit_inten = inten;
-        if (corr_power_ > 0.0 && c > 0.0) emit_inten *= std::pow(c, corr_power_);
+        if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_scores.push_back(c * inten);
       }
@@ -3516,6 +3531,10 @@ protected:
     shrink_r0_ = getDoubleOption_("gate:shrink_prior_r");
     shrink_sd_ = getDoubleOption_("gate:shrink_prior_sd");
     shrink_min_pts_ = getIntOption_("gate:shrink_min_points");
+    adaptive_ = (getStringOption_("gate:adaptive") == "faint");
+    faint_frames_ = getIntOption_("gate:faint_max_frames");
+    faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
+    faint_cp_ = getDoubleOption_("gate:faint_corr_power");
     if (shrink_ && log_overlap_)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "gate:shrinkage fisher needs a correlation: it does not apply to gate:coelution logoverlap");
     corr_power_ = getDoubleOption_("assembly:corr_power");
@@ -4952,7 +4971,7 @@ protected:
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
-        FragRt frag_rt; frag_rt.build(frag_traces, wst, delta_rt);
+        FragRt frag_rt; frag_rt.build(frag_traces, wst, adaptive_ ? std::max(delta_rt, faint_drt_) : delta_rt);   // [adaptive] buckets cover the wider window
         w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
