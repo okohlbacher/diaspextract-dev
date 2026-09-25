@@ -292,6 +292,8 @@ namespace
   /// 1000-10000, >=10000; 100 and 300 are MS1 tracing's default noise and seed thresholds). Counting only.
   inline bool ms1HistOn_() { static const bool on = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_HIST"); return e && *e && *e != '0'; }(); return on; }
   inline std::array<std::atomic<long long>, 5>& ms1Hist_() { static std::array<std::atomic<long long>, 5> h{}; return h; }
+  /// [pspan] precursors reaching assembly by MS1 span in window frames: 1, 2, 3, 4, 5-6, 7-10, 11-20, >20; [8] = faint (adaptive)
+  inline std::array<std::atomic<long long>, 9>& pspanHist_() { static std::array<std::atomic<long long>, 9> h{}; return h; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -3142,6 +3144,7 @@ protected:
     }
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
+    { const size_t n = touched.size(); pspanHist_()[n <= 4 ? (n ? n - 1 : 0) : n <= 6 ? 4 : n <= 10 ? 5 : n <= 20 ? 6 : 7]++; if (faint) pspanHist_()[8]++; }
     const bool g_shrink = shrink_ && all_p, g_coloc = coloc_ && all_p, g_conc = short_conc_ && all_p;
     const double g_drt = faint ? faint_drt_ : delta_rt, g_cp = faint ? faint_cp_ : corr_power_;
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
@@ -5202,6 +5205,12 @@ protected:
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
+    {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
+      auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();
+      writeLogInfo_("[pspan] precursors by MS1 span (window frames): 1:" + String(h[0].load()) + " 2:" + String(h[1].load()) + " 3:" + String(h[2].load())
+                    + " 4:" + String(h[3].load()) + " 5-6:" + String(h[4].load()) + " 7-10:" + String(h[5].load()) + " 11-20:" + String(h[6].load())
+                    + " >20:" + String(h[7].load()) + " total " + String(tot) + (adaptive_ ? " faint(<=" + String(faint_frames_) + "): " + String(h[8].load()) : String("")));
+    }
     report_phases_(phase_clock_());
     return EXECUTION_OK;
   }
