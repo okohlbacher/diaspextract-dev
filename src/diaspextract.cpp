@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.4.1"
+#define DIASPEXTRACT_VERSION "1.5.0"
 #endif
 
 using namespace OpenMS;
@@ -2278,7 +2278,7 @@ protected:
 
     registerTOPPSubsection_("gate", "Precursor-to-fragment co-localization gate");
     registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Max |precursor - fragment| ion mobility difference (1/K0). (the reference implementation deltaApexIM default 0.01)", false);
-    registerDoubleOption_("gate:delta_rt", "<sec>", 3.0, "Max |precursor - fragment| apex RT difference (seconds).", false);
+    registerDoubleOption_("gate:delta_rt", "<sec>", 6.0, "Max |precursor - fragment| apex RT difference (seconds).", false);
     registerDoubleOption_("gate:min_correlation", "<0..1>", 0.3, "Min Pearson correlation of elution profiles. (the reference implementation ms1MS2Corr default 0.3; raise for cleaner but sparser spectra)", false);
     registerIntOption_("gate:min_correlation_points", "<n>", 3, "Min overlapping XIC points required to accept a correlation.", false, true);
 
@@ -2286,7 +2286,7 @@ protected:
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
     registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance).", false);
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off. 0.005 is the measured optional setting (Sage +1-7% over corr_power 2 on three files, flat on MSFragger): docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
+    registerDoubleOption_("assembly:corr_power", "<k>", 1.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
@@ -2350,23 +2350,23 @@ protected:
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
     registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching.", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
-    registerStringOption_("gate:short_traces", "<mode>", "off", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
+    registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
     registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: centre tolerance as a fraction of the precursor half-span (at least one cycle).", false, true);
     setMinFloat_("gate:short_center_tol", 0.0);
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
-    registerStringOption_("gate:colocation", "<mode>", "off", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
+    registerStringOption_("gate:colocation", "<mode>", "ranges", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
     setMinFloat_("gate:colocation_overlap", 0.0);
-    registerStringOption_("gate:shrinkage", "<mode>", "off", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental.", false, true);
+    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental.", false, true);
     setValidStrings_("gate:shrinkage", {"off", "fisher"});
-    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.0, "gate:shrinkage fisher: prior mean correlation (0 = shrink toward no co-elution).", false, true);
-    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.5, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
+    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.6, "gate:shrinkage fisher: prior mean correlation (0 = shrink toward no co-elution).", false, true);
+    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.3, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
     setMinFloat_("gate:shrink_prior_sd", 0.01);
-    registerIntOption_("gate:shrink_min_points", "<n>", 2, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation.", false, true);
+    registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation.", false, true);
     setMinInt_("gate:shrink_min_points", 1);
     registerFlag_("gate:variance_support", "Compute the Pearson co-elution score over the union support of the two profiles instead of the full RT grid (gate:coelution pearson only; the scale changes, retune gate:min_correlation). Falsified 2026-07-27, kept for reproducibility: docs/BASELINE.md 'What is already falsified'.");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
