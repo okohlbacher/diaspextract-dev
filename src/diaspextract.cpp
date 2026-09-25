@@ -224,6 +224,8 @@ namespace
   double shrink_r0_ = 0.0, shrink_sd_ = 0.5;   ///< [shrink] prior N(atanh r0, sd^2) on the Fisher z of the true correlation
   int shrink_min_pts_ = 2;           ///< [shrink] gate:shrink_min_points, overlapping frames needed to compute r at all
   bool adaptive_ = false;            ///< [adaptive] gate:adaptive == "faint": the relaxed modes only for faint precursors
+  bool adaptive_auto_ = false;       ///< [adaptive] gate:adaptive == "auto": faint mode only when the run's faint fraction >= auto_faint_frac_
+  double auto_faint_frac_ = 0.45;    ///< [adaptive] gate:auto_faint_fraction
   int faint_frames_ = 4;             ///< [adaptive] gate:faint_max_frames
   double faint_drt_ = 6.0, faint_cp_ = 1.0;   ///< [adaptive] gate:faint_delta_rt, gate:faint_corr_power
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
@@ -2365,8 +2367,11 @@ protected:
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by r^2 x ln(1+I) with r the raw co-elution correlation (DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
-    registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'off': the modes apply to every precursor. Experimental.", false, true);
-    setValidStrings_("gate:adaptive", {"off", "faint"});
+    registerStringOption_("gate:adaptive", "<mode>", "auto", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'off': the modes apply to every precursor. Experimental.", false, true);
+    setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
+    registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, K562 250 ng 0.30, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
+    setMinFloat_("gate:auto_faint_fraction", 0.0);
+    setMaxFloat_("gate:auto_faint_fraction", 1.0);
     registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive faint: most window frames with precursor signal for a faint precursor.", false, true);
     setMinInt_("gate:faint_max_frames", 1);
     registerDoubleOption_("gate:faint_delta_rt", "<sec>", 6.0, "gate:adaptive faint: the apex RT window for faint precursors.", false, true);
@@ -3542,6 +3547,8 @@ protected:
     shrink_sd_ = getDoubleOption_("gate:shrink_prior_sd");
     shrink_min_pts_ = getIntOption_("gate:shrink_min_points");
     adaptive_ = (getStringOption_("gate:adaptive") == "faint");
+    adaptive_auto_ = (getStringOption_("gate:adaptive") == "auto");
+    auto_faint_frac_ = getDoubleOption_("gate:auto_faint_fraction");
     cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
@@ -4140,6 +4147,15 @@ protected:
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring);
+    if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
+    {
+      size_t nf = 0;
+      for (const Precursor_& pc : precursors) if ((int)ms1_traces[pc.trace_idx].np() <= faint_frames_) ++nf;
+      const double frac = precursors.empty() ? 0.0 : (double)nf / (double)precursors.size();
+      adaptive_ = frac >= auto_faint_frac_;
+      writeLogInfo_("[adaptive] auto: " + String(nf) + " of " + String(precursors.size()) + " precursors span <= " + String(faint_frames_)
+                    + " MS1 points (" + String(frac) + ", threshold " + String(auto_faint_frac_) + "): faint gate " + (adaptive_ ? "ON" : "OFF"));
+    }
     if (detOn_())
     {
       vector<uint64_t> b;
@@ -4547,6 +4563,7 @@ protected:
     out_exp.setMetaValue("spx:pearson_G", "frames");
     out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
+    out_exp.setMetaValue("spx:gate_adaptive", adaptive_auto_ ? String(adaptive_ ? "auto:on" : "auto:off") : String(adaptive_ ? "faint" : "off"));
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
