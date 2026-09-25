@@ -227,6 +227,7 @@ namespace
   int faint_frames_ = 4;             ///< [adaptive] gate:faint_max_frames
   double faint_drt_ = 6.0, faint_cp_ = 1.0;   ///< [adaptive] gate:faint_delta_rt, gate:faint_corr_power
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
+  int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -2360,6 +2361,8 @@ protected:
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
+    registerStringOption_("assembly:cap_rank", "<mode>", "corr_inten", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by r^2 x ln(1+I) with r the raw co-elution correlation (DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
+    setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
     registerStringOption_("gate:adaptive", "<mode>", "off", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'off': the modes apply to every precursor. Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint"});
     registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive faint: most window frames with precursor signal for a faint precursor.", false, true);
@@ -3180,7 +3183,7 @@ protected:
           const int inter = std::min(f_hi, p_hi) - std::max(f_lo, p_lo) + 1, shorter = std::min(f_hi - f_lo, p_hi - p_lo) + 1;
           if (inter < coloc_overlap_ * shorter) continue;
         }
-        double c;
+        double c, c_raw = 0.0;                                          // c_raw: the unshrunk score, for assembly:cap_rank
         const bool no_corr = g_shrink ? overlap < shrink_min_pts_ : (short_np || overlap < min_corr_pts);   // [short]/[shrink] precedence
         if (g_conc && no_corr)
         {
@@ -3192,6 +3195,7 @@ protected:
           const double d = std::fabs(0.5 * (f_lo + f_hi) - p_ctr), tol = std::max(1.0, short_center_tol_ * p_half);
           if (d > tol) continue;
           c = min_corr * (1.0 - 0.5 * d / (tol + 1.0));                // at the gate: ranks and weighs as a borderline fragment
+          c_raw = c;
         }
         else
         {
@@ -3229,6 +3233,7 @@ protected:
             c = inter;
           }
           else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
+          c_raw = c;
           if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
           {
             const double z = std::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
@@ -3244,7 +3249,9 @@ protected:
         double emit_inten = inten;
         if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
-        frag_scores.push_back(c * inten);
+        frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
+                            : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
+                            : c * inten);                              // [cap] the max_fragments ranking key
       }
     }
     if (GateDump_& gd = GateDump_::get(); gd.on)                       // [gate-dump] read-only; before the reset
@@ -3532,6 +3539,7 @@ protected:
     shrink_sd_ = getDoubleOption_("gate:shrink_prior_sd");
     shrink_min_pts_ = getIntOption_("gate:shrink_min_points");
     adaptive_ = (getStringOption_("gate:adaptive") == "faint");
+    cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
