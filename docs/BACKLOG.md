@@ -606,7 +606,7 @@ prints even on `--help`, where it is meaningless; and there is still no macOS or
 packaging at all (blocked on the missing Developer ID private key -- see the release review).
 
 
-### Linux GUI application, distributable (2026-09-09, user request)
+### Linux GUI application, distributable (2026-09-09, user request) — SUPERSEDED 2026-09-26 by "Distribution" D4 (Tauri GUI, end of file)
 
 **Status 2026-09-23:** open (XL); the README-from-binary and References items inside it are open
 
@@ -870,3 +870,182 @@ use) works. Fix: build OpenMS with TDL where CWL matters, or catch the error ups
 ---
 
 Closed and superseded items moved to [BACKLOG-CLOSED.md](BACKLOG-CLOSED.md) on 2026-09-23 (15 sections).
+
+---
+
+## Distribution: signed macOS and Windows builds, Homebrew, Tauri GUI (added 2026-09-26, user request)
+
+**Status 2026-09-26:** open.
+- The tool is built on Linux only (build.yml:27-34). The macOS and Windows legs compile header tests only (tests.yml:123-132).
+- Releases carry 0 assets. Both repos have 0 secrets. Dev-repo CI has been stopped by a billing block since 09-25.
+- The "blocked on the Developer ID key" notes (:576, :605-606, :613) are stale. The key is in the vault, not the login keychain, which is why `security find-identity` shows 0 identities. That identity (team 9WF4NVY9MY, valid to 2031-05-22) already signs FASTag and DIALibGen.
+
+- **D0. Reviewer artefacts on Linux: relocatable tarball and container image.**
+  - *Why:* the JPR gap is "a reviewer-runnable distribution" (:30-34), and the Linux recipe already exists (build.yml).
+  - *Tarball:*
+    - Contents: `bin/diaspextract`, `lib/` via patchelf `$ORIGIN`, and `share/OpenMS` without `examples/` (135 of 194 MB in a local tree).
+    - glibc floor = the build host's (ubuntu-latest 24.04: 2.39; RHEL 9: 2.34). State it in the README.
+  - *Container:*
+    - A multi-stage Dockerfile on the same recipe, pushed to GHCR under the org namespace after the transfer.
+    - Platforms: linux/amd64 and linux/arm64.
+    - Make the package public; new GHCR packages start private (check).
+    - Document Docker Desktop's VM memory cap against the tool's 21-22 GB cluster peaks, and the `-perf:max_concurrent_windows` knob.
+  - *Code fix:* window admission reads `/proc/meminfo`, which inside a container shows the host or VM, not the cgroup limit. Under `--memory` or any cgroup cap it can overshoot and be OOM-killed. Take the minimum with cgroup v2 `memory.max − memory.current`.
+  - *Done when:*
+    - An anonymous `docker pull` works, and both the image and the tarball (under `env -i` on a fresh runner) run the `.d` fixture (D1).
+    - The shipped Linux binary, run on dataset D on the cluster, reproduces the digest pins (e43672a0 / 3aafd0b5), or the difference is characterised before the paper cites it.
+  - *Effort:* M.
+
+- **D1. Native builds: macOS arm64 and x64, Windows x64.**
+  - *Why:* diaspextract.cpp has never been compiled off Linux, and no released OpenMS works (README:79). Every leg therefore builds the patched OpenMS at `openms.lock`.
+  - *Fixture first:* no redistributable `.d` exists; :686-687 only says one would close a gap. Candidate: `DIA_HeLa_50ng_5_6min.d.zip` (OpenMS/timsrust_cpp_bridge release `test-data-v1`, referenced by OpenMS `CMakeLists.txt:84` at the pin). Size and licence unchecked. It doubles as JPR's test data.
+  - *CI legs:*
+    - One per platform, on the public repo only (as tests.yml:117).
+    - The OpenMS install cache key covers: the lock SHA, `patches/*.patch`, `src/TdfMzCalibration.h`, `scripts/apply_openms_patches.sh` (the script installs that header into the tree, :21), the compiler/toolset, and the resolved dependency versions.
+    - Mind the 10 GB per-repo cache cap.
+    - FASTag's cold Windows build: 37 min (contrib) + 63 min (OpenMS). There is no macOS reference, because FASTag uses bioconda there.
+    - The arm64 macOS runner has about 3 vCPU / 7 GB RAM / 14 GB disk (check). Build only the OpenMS target (build.yml:79) and cap concurrent windows on the fixture run.
+  - *OpenMS configuration:*
+    - Pass `-DWITH_OPENTIMS=ON` explicitly. It defaults to ON at the pin (OpenMS `CMakeLists.txt:60`; opentims v1.2.0b4 via FetchContent).
+    - Use a `CMAKE_INSTALL_PREFIX` that cannot exist on a user's machine.
+    - OpenMS CI at the pin already compiles opentims on windows-2025/cl.exe and on macos-14. Reading a `.d` correctly there is untested (`ENABLE_OPENTIMS_TESTS` is OFF).
+  - *macOS toolchain:*
+    - Build both OpenMS and the tool with `-DOpenMP_ROOT=$(brew --prefix libomp)`.
+    - Build arm64 and x64 separately (a universal binary needs fat builds of every dependency). x64 builds on `macos-15-intel`.
+    - `CMAKE_OSX_DEPLOYMENT_TARGET` is not enough: Homebrew bottles carry the runner's OS as minos, so the floor is the highest minos of any bundled Mach-O. Either accept Sonoma on arm64 and declare it, or take the dependencies from conda-forge.
+  - *Windows toolchain:*
+    - The blockers:
+      - MSVC `/openmp:llvm` has no `taskloop`, which the tool uses 9 times (:1009 … :5045).
+      - OpenMS forces `/openmp:experimental` (multithreading.cmake:26-34).
+      - OpenMS supports cl.exe only; clang-cl is untested (openms_ci_matrix_full.yml:99-103).
+    - Rule: OpenMS and the tool share one OpenMP runtime. With two, the EPD patch's `omp_in_parallel()` misfires into threads² threads.
+    - Spike both options, then decide:
+      - (a) clang-cl + LLVM libomp for both;
+      - (b) MSVC for both, with the taskloops rewritten as task+taskwait under `#ifdef _WIN32` (the Linux path and pins are unchanged), and one flag for both that supports OpenMS's `simd` and the tool's `task`. That flag may need a sixth patch.
+  - *Code fixes:*
+    - `<sys/resource.h>` (:13) and `getrusage` (:166).
+    - `clock_gettime` (:1542).
+    - `extern char** environ` (:5246): use `_environ`.
+    - `::setenv` (:5273): use `_putenv_s`, only if the variable is unset.
+    - `TileWriter("/dev/null")` (:2199): use `NUL`.
+    - In `main()`: if `OPENMS_DATA_PATH` is unset and `<realpath(exe)>/../share/OpenMS/CHEMISTRY/unimod.xml` exists, set it. OpenMS checks its compiled install path and build-tree path *before* the executable-relative one (File.cpp:590-638 at the pin). Without the fix, another installed OpenMS wins silently, and the runner's build tree hides a bundle that has no `share/`.
+  - *Memory probe:*
+    - Replace the `/proc` reads (:172, :344, :363-372) with `sysctl`/`host_statistics64` and `task_info` on macOS, and `GlobalMemoryStatusEx` and `GetProcessMemoryInfo` on Windows.
+    - Today `availableBytes_()` returns 0 off Linux, so only `active == 0` admits a window (:4705). The window loop is serial by construction; the cost is unmeasured.
+    - Gate: the "admission high-water" log line (:5210) shows more than 1.
+  - *Build config:*
+    - Create `.gitattributes` with `*.patch -text`. None exists; OpenMS already forces LF on its side.
+    - Leave `MZPEAK_ROOT` unset.
+  - *Bundling (beyond CMakeLists:78):*
+    - macOS: dylibbundler `-p @executable_path/lib/`, then LC_RPATH dedup.
+    - Windows: a flat `bin/` with every DLL beside the exe.
+    - `share/OpenMS` sits beside `bin/`, copied with `cp -RL`, without `examples/`.
+  - *Licences:* ship the licence texts for everything in the bundled library set:
+    - Qt6 (LGPL-3), Boost, Xerces-C, Arrow/Parquet, COIN-OR (EPL-2), libsvm, SQLite, OpenTIMS, zstd, libomp.
+    - GLPK (GPL-3) is linked only if COIN-OR is absent (cmake_findExternalLibs.cmake:91-105). Assert that it is not in the bundle.
+  - *Done when:*
+    - Each leg passes the e2e suite and a fixture run.
+    - Output gate: per-platform digest pins, or a set/science gate whose tolerance is fixed before the first cross-platform run.
+    - Peak RSS and wall time measured on a 16 GB and a 32 GB Mac.
+    - The taskloop bounds were tuned on libgomp (:5036-5045) and LLVM libomp schedules differently, so measure rather than assume Linux ratios. The same pass covers :690-691: the `_M_FP_FAST` guard already exists (DnoiseMs1.h:73), and the dnoise goldens already run under MSVC. What is left is the UCRT parse in the full build.
+  - *Risk:* the Windows OpenMP toolchain. Arrow ≥23 on each platform (conda on Windows, Homebrew on macOS; check the versions).
+  - *Effort:* macOS L, Windows XL.
+
+- **D2. Signing.**
+  - *macOS (FASTag's flow):*
+    - Gate on a step output, never on `secrets.*` in `if:`. Use a throwaway keychain.
+    - Sign after dylibbundler/install_name_tool, because those edits invalidate signatures: `codesign --options runtime --timestamp` every dylib, then the binary, then notarytool.
+    - Tauri staples the `.app`; we re-sign, notarize and staple the DMG ourselves.
+    - Ship the CLI in a stapled DMG: a signed CLI in a tarball took 335 s to first start.
+    - Export `APPLE_*` via `$GITHUB_ENV`.
+    - Fix the app's bundle ID once, then prime its first notarization (8-12 h) out of band.
+  - *Windows:*
+    - SignPath with artifact configuration `initial` (`<zip-file><pe-file path="*.exe">`).
+    - Two requests per release:
+      - (1) the CLI exe and the GUI exe together (`tauri build --no-bundle`, sign, then bundle; check tauri-cli support, or use Tauri 2's per-file `bundle.windows.signCommand`);
+      - (2) the NSIS installer.
+    - Each request needs a human approval.
+    - Decide whether to sign `OpenMS.dll`; `*.exe` leaves every DLL unsigned.
+    - BALL-Project/ball is the only working SignPath setup; FASTag's application has been pending since 09-09. File for this tool now (or as a BALL-org project, check).
+  - *Secrets:*
+    - The 7 `MACOS_*` plus `SIGNPATH_API_TOKEN` and `SIGNPATH_ORG_ID`, on the public repo only.
+    - GitHub's transfer documentation says secrets stay with a transferred repository. Push them now with `push-secrets.sh` (on the Mac, values on stdin) and confirm with `gh secret list` after the transfer.
+    - `SIGNPATH_API_TOKEN` is pasted by hand.
+    - Before the transfer, check that KohlbacherLab's Actions policy allows the third-party actions and macOS runners.
+  - *Done when:*
+    - App: `codesign --verify --strict`, and `spctl -a -vv` reports Notarized Developer ID; `stapler validate` passes on the `.app` and on the DMG.
+    - CLI DMG: `stapler validate` and `spctl -a -t open --context context:primary-signature -vv` pass on the DMG; `codesign --verify --strict` passes on every Mach-O; a quarantined first `--help` takes under 60 s. (`spctl` rejects a bare Mach-O by design.)
+    - Windows: `Get-AuthenticodeSignature` reports Valid with the release certificate on the CLI exe, the installed GUI exe and the installer.
+  - *Risk:* SignPath approval time.
+  - *Effort:* macOS M, Windows M + wait.
+
+- **D3. Homebrew.**
+  - *Tap:* in the org from day one, because a moved tap changes the install command. Prefer one lab tap, `KohlbacherLab/homebrew-tap`.
+  - *Casks:*
+    - The CLI cask comes first and is arm64-only (`depends_on arch: :arm64`) until x64 ships.
+    - `depends_on macos:` is set from the measured floor and checked by `check-macos-floor.sh`. Use `livecheck :github_latest`.
+    - With D1's data-path fix, a plain `binary` stanza works. Without it, use a `/bin/sh` wrapper and `command_wrapper`, because a symlink sends OpenMS to `$(brew --prefix)/share/OpenMS`.
+    - The app cask follows after submission, with `uninstall quit:` and `zap`.
+    - The README shows the fully qualified install command.
+  - *Updates:*
+    - FASTag's 6-hourly `update-casks.yml`: it refuses drafts and downgrades, requires every DMG, audits, installs and smoke-tests.
+    - GitHub disables the schedule after 60 days without a tap commit. Keep the dispatch PAT path, or document how to re-enable it.
+  - *Formula:* not feasible for 1.x. homebrew-core rejects it, and a tap formula would have to build the patched OpenMS in the sandbox.
+  - *Completeness gate:* a `release-complete` job in each workflow asserts every advertised asset exists before any README or cask link points at it. Asset names carry no version.
+  - *Done when:* on a clean Mac, `brew install --cask kohlbacherlab/tap/diaspextract-cli` prints our version and runs the fixture, and `brew upgrade` picks up the next tag.
+  - *Effort:* S after D2.
+
+- **D4. Tauri GUI beside the CLI.** Tauri 2, starting from FASTag's `gui/`.
+  - *v1 scope:*
+    - Inputs: a `.d` directory or a `.mzML` file (the picker must accept directories), the output folder and format, `-threads` (always passed explicitly), and the options users actually set.
+    - Panels are generated from `-write_ini`/`--helphelp`. TOPPBase writes `--help` to stderr, so read stderr.
+    - Runs stream the log and the [perf]/[mem] summary, with cancel and "open output folder".
+    - Filter OpenMS's non-tty `stty` line (BACKLOG:598-602).
+    - Sage hand-off is v2.
+  - *Bundling:*
+    - The CLI tree goes in as a Tauri **resource**, not an `externalBin` sidecar, which is a single file: `bin/diaspextract`, `bin/lib/` (macOS) or a flat `bin/` (Windows), and `share/OpenMS`.
+    - The tree is signed (and SignPath-signed) before staging and is not modified afterwards. Tauri signs no resources.
+    - Resolve the binary from `DIASPEXTRACT_BIN`, then the resource dir, then `PATH`. Set `OPENMS_DATA_PATH` on spawn.
+    - `version-guard.cmake` pins the GUI's version files.
+    - DMG and NSIS follow FASTag. The AppImage has no FASTag precedent: it needs patchelf `$ORIGIN` and a glibc at least as new as the build host's.
+  - *Done when:*
+    - The installed app, launched from Finder or the Start menu (no shell environment), passes a startup self-check (`Version:`, and `share/` resolves; carried over from :620-621).
+    - It runs the `.d` fixture end to end on each OS.
+    - Cancel kills the child and removes partial output.
+  - *Risk:* stdout block-buffering into a pipe (check).
+  - *Effort:* L.
+
+- **D5. Release gates.** Acceptance checks, `exit 1` on tag builds; extends build.yml:111-138; effort S.
+  - All gates run in a separate job, on a fresh runner, from the uploaded artifact.
+  - `env -i HOME=$HOME …/diaspextract --help` (a minimal pwsh environment on Windows): `Version:` equals CMakeLists:2 and shows the OpenMS build; no `QIODevice`/`QNetwork` output.
+  - `test -s` on `share/OpenMS/CHEMISTRY/unimod.xml` and `share/OpenMS/CV/psi-ms.obo` inside every bundle.
+  - Nothing resolves outside the bundle (`otool -L`, `LC_RPATH`, `ldd`, `dumpbin /dependents`). There is exactly one OpenMP runtime, and no libglpk.
+  - Highest minos is at or below the cask and `minimumSystemVersion` floor. `stapler validate` targets the `.app` and the DMGs.
+  - `release-complete` passes. New steps use the `diaspextract/` checkout prefix. Each dispatch has its own concurrency group.
+  - Every tag-only path passes a dry run (`workflow_dispatch gui_dry_run=true`) before tagging.
+
+- **D6. Order.** Deadline 2 Nov; freeze the paper's availability text by about 26 Oct.
+  1. Now, no code needed:
+     - Transfer the repos to KohlbacherLab (check the Actions policy, and approve Zenodo's OAuth app for the org). Enable Zenodo.
+     - Push the secrets. File the SignPath application. Create the tap.
+     - Fix the bundle ID and prime notarization. Choose the fixture.
+     - Clear the billing block. It is not on the critical path while the heavy legs run on the public repo.
+  2. By about 5 Oct: tag 1.5.0 as validated (rc3b record, no portability code), with D0's tarball and container and D5's Linux gates. Zenodo archives it on publication. The concept DOI reaches `--help` (:593-596) in the next release.
+  3. Go/no-go about 23 Oct: 1.5.1, containing D1 macOS arm64, the D2 CLI DMG and the D3 CLI cask, with the Linux digest pins unchanged.
+  4. After submission: macOS x64, the GUI, and Windows with SignPath. Meanwhile, Windows reviewers use the container or WSL2.
+  - *Risk:* if macOS slips, the paper ships with Linux + container only, which still meets the JPR checklist.
+
+**Merges**
+- :609-624 "Linux GUI application, distributable" is superseded by D4. The startup `share/` assert (:620-621) and the Flatpak note carry over. The README references item (:639-647) stays.
+- :626-637 (parameter structure) is absorbed into D4's panel generation. The README generation it describes stays.
+- The packaging clause at :576, and :605-606, are absorbed by D1/D2.
+- :690-691 (MSVC `/fp:fast`, UCRT) are absorbed into D1's done-when (guard and goldens exist; the UCRT parse remains).
+- :30-34, and the "no binaries or containers" clause of :22-25, are closed by D0 and D6 step 2. The homepage URL, GitHub Pages and the lab-website entry in :22-25 stay open.
+
+*Sources:* this repository (src/diaspextract.cpp, CMakeLists.txt, .github/workflows/{build,tests}.yml, docs/BACKLOG.md,
+README.md, scripts/apply_openms_patches.sh), OpenMS at bd4b8955 (CMakeLists.txt, cmake/{multithreading,
+cmake_findExternalLibs}.cmake, src/openms/source/SYSTEM/File.cpp, .github/workflows/openms_ci_matrix_full.yml), and the
+FASTag release pipeline. Marked "check": runner specs, secrets surviving a repository transfer, GHCR default visibility,
+`tauri bundle` / `signCommand`. Line numbers in this section (":NNN") are BACKLOG.md lines as of 2e2ca17 where they name
+backlog items, otherwise src/diaspextract.cpp lines.
+
