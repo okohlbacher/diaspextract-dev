@@ -7,7 +7,7 @@ the first dispatch from a non-git cwd; re-run from inside the dev repo.
 
 | id | finding | verdict | action |
 |---|---|---|---|
-| kimi H1 | faint classification `touched.size() <= N` is a step function on the window grid: tile invariance unproven | open, testable | the 1.5.0 dataset D gate (gate_D_150.sh R3 vs R3a one tile / R3b two cells / R3c 8 threads) is the proof; runs on ibminode05 after the corpus share |
+| kimi H1 | faint classification `touched.size() <= N` is a step function on the window grid: tile invariance unproven | **CONFIRMED by gate D (10:25): R3a one tile 6498e613 and R3b two cells 6ec96a6e differ from R3 96ef35ee (one spectrum); R3c 8 threads PASS** | root cause is not the step but the tiling: tile ownership, the boundary carry and the RT index were sized with gate:delta_rt (3 s) while a faint precursor gathers candidates within gate:faint_delta_rt (6 s); fixed by `tile_drt = adaptive_ ? max(delta_rt, faint_delta_rt) : delta_rt` in all three places; re-gated on the next arm |
 | kimi H2 | Section B drops `auto` from the valid strings | refuted | stale context of the rc2 diff; the release branch is cut from main, `setValidStrings_` has {off, faint, auto} |
 | kimi H3 / vibe 2 | no synthetic-trace tests for the gate modes | confirmed, deferred | the gate lives inside assembleOne_; extracting the three formulas into a testable header is a separate change (BACKLOG); coverage today = e2e 30 checks + gate D digests |
 | kimi M1 | auto rule counts MS1 trace points, the gate counts window frames | confirmed by design | documented in the help/README ("MS1 points"); auto is off by default and its threshold was calibrated on that statistic |

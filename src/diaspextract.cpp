@@ -4450,11 +4450,14 @@ protected:
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "the .d streaming source needs a fixed perf:trace_bands: the auto setting derives the band count from the WINDOW COUNT, and the streaming source counts every window of the acquisition while the resident source counts only the windows that delivered a frame -- the two would band differently (review 3b).");
     // [tile] The cells grouped into TILES. A tile owns the precursors whose MS1 frame time lies in
-    // [lo - delta_rt, hi - delta_rt) -- the half-open ranges partition RT (lo = -inf for the first,
+    // [lo - tile_drt, hi - tile_drt) -- the half-open ranges partition RT (lo = -inf for the first,
     // hi = +inf for the last) -- and traces its windows on the tile's frames only; a precursor's
-    // candidates (|rtOf - rt| <= delta_rt) then lie in [lo - 2 delta_rt, hi): the tile's own
-    // fragments plus those CARRIED from the previous tile (rtOf >= lo - 2 delta_rt, re-carried
-    // transitively). One tile = today's loop, statement for statement.
+    // candidates (|rtOf - rt| <= tile_drt) then lie in [lo - 2 tile_drt, hi): the tile's own
+    // fragments plus those CARRIED from the previous tile (rtOf >= lo - 2 tile_drt, re-carried
+    // transitively). One tile = today's loop, statement for statement. tile_drt is the WIDEST RT
+    // window any precursor's gate may use: gate:faint_delta_rt under gate:adaptive (a faint precursor
+    // 3-6 s from a cut line otherwise sees different candidates per tile grid -- gate D 2026-09-26).
+    const double tile_drt = adaptive_ ? std::max(delta_rt, faint_drt_) : delta_rt;
     struct Tile { double lo, hi; bool last; };
     vector<Tile> tiles;
     const int cells_per_tile = getIntOption_("tile:cells_per_tile");
@@ -4957,9 +4960,9 @@ protected:
             n_carried_in = ci.rec.size();
           } }
         // [tile] the precursors this tile OWNS, decided with the SCORER's own arithmetic: a
-        // fragment at frame time x is a candidate of rt iff fabs(x - rt) <= delta_rt (doubles), so
-        // rt has no candidate at or beyond an edge T iff (T - rt) > delta_rt -- the same
-        // subtraction, monotone in T. The first tile k with (T_{k+1} - rt) > delta_rt owns rt:
+        // fragment at frame time x is a candidate of rt iff fabs(x - rt) <= tile_drt (doubles), so
+        // rt has no candidate at or beyond an edge T iff (T - rt) > tile_drt -- the same
+        // subtraction, monotone in T. The first tile k with (T_{k+1} - rt) > tile_drt owns rt:
         // exactly one does (-inf never, +inf always). Marked here, before any early exit, so the
         // coverage check after the last tile sees every precursor exactly once. Only this
         // window's precursors (by mono m/z); NaN sorts to the end, excluded; charge 0 kept.
@@ -4970,8 +4973,8 @@ protected:
         {
           const Precursor_& pc = precursors[pi];
           if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
-          if (!(tk == 0 || !(tile.lo - pc.rt > delta_rt))) continue;   // an earlier tile owns it
-          if (!(tile.last || (tile.hi - pc.rt > delta_rt))) continue;  // a later tile owns it
+          if (!(tk == 0 || !(tile.lo - pc.rt > tile_drt))) continue;   // an earlier tile owns it
+          if (!(tile.last || (tile.hi - pc.rt > tile_drt))) continue;  // a later tile owns it
           pidx.push_back((uint32_t)pi);
         }
         { vector<uint8_t>& vis = visited.at(wl[wi].first);
@@ -5004,7 +5007,7 @@ protected:
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
-        FragRt frag_rt; frag_rt.build(frag_traces, wst, adaptive_ ? std::max(delta_rt, faint_drt_) : delta_rt);   // [adaptive] buckets cover the wider window
+        FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt);   // [adaptive] buckets cover the wider window
         w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
@@ -5068,17 +5071,17 @@ protected:
           w_emit = secs(_t7 - _t6);
         }
         // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
-        // whose RT is within 2 delta_rt of this tile's upper edge -- the candidates of a precursor
+        // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
         // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
-        // A precursor a later tile owns has (T - rt) <= delta_rt, its candidates x have
-        // (rt - x) <= delta_rt: x >= T - 2 delta_rt up to two roundings of ~1e-12 s. The slack
+        // A precursor a later tile owns has (T - rt) <= tile_drt, its candidates x have
+        // (rt - x) <= tile_drt: x >= T - 2 tile_drt up to two roundings of ~1e-12 s. The slack
         // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
         // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
         static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
         if (!tile.last && !no_carry)
         {
           Carry& co = carry_out.at(wl[wi].first);
-          const double keep_from = tile.hi - 2.0 * delta_rt - 1e-6;
+          const double keep_from = tile.hi - 2.0 * tile_drt - 1e-6;
           for (const Trace& t : frag_traces)
             if (rtOf(wst, t) >= keep_from)
             {
