@@ -834,6 +834,10 @@ TDL check, and the cluster build (no `-DENABLE_TDL=ON`) throws `TDL support is n
 that OpenMS does not catch, so the process aborts after writing the file. CTD export (what KNIME and Galaxy converters
 use) works. Fix: build OpenMS with TDL where CWL matters, or catch the error upstream.
 
+- **Gate math unit tests (review 1.5.0, kimi H3 / vibe 2).** The Fisher-z posterior, the concentric score and the colocation test live inside
+  `assembleOne_`; extract them into a small header and test them on synthetic traces (r = ±1 from two points, n − 3 ≤ 0, zero-length spans, the
+  shrinkage+logoverlap refusal). Until then the gate is covered only by the e2e suite and the dataset D digests.
+
 ---
 
 Closed and superseded items moved to [BACKLOG-CLOSED.md](BACKLOG-CLOSED.md) on 2026-09-23 (15 sections).

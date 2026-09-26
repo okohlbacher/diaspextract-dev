@@ -35,8 +35,12 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
    A fragment joins a precursor's spectrum when both lie in the same isolation window, its apex is within 3 s and
    0.01 1/K0 of the precursor's, and the two elution profiles correlate (Pearson ≥ 0.3 over the full retention-time
-   grid, with at least 3 shared points).
-4. **Assembly and output.** The accepted fragments are ranked by correlation-weighted intensity and the top 500 kept;
+   grid, with at least 3 shared points). A faint precursor — signal in at most 4 window frames, the short tip of an
+   elution peak — gets a relaxed gate instead (`-gate:adaptive`): a 6 s window, the correlation shrunk toward a prior
+   of 0.6 from as little as one shared point, an apex inside the precursor's span, and traces too short to correlate
+   judged by their centre.
+4. **Assembly and output.** The accepted fragments are ranked by evidence — correlation × log intensity × shared
+   points — and the top 500 kept;
    a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
    each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
@@ -226,6 +230,21 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-gate:min_correlation_points` | 3 | minimum shared XIC points for a correlation to count |
 | `-gate:coelution` | pearson | correlation over the full RT grid, or `logoverlap` (AlphaDIA-style; the scale differs, retune the threshold) |
 | `-gate:variance_support` | off | Pearson over the union support of the two profiles instead of the full grid (scale differs) |
+| `-gate:adaptive` | faint | `faint`: the relaxed gate below (`shrinkage`, `colocation`, `short_traces`, `faint_delta_rt`, `faint_corr_power`) applies only to faint precursors — signal in at most `faint_max_frames` window frames, the short tip of an elution peak — and every other precursor keeps the plain gate above. `auto`: `faint` when at least `auto_faint_fraction` of the run's precursors have that few MS1 points (the choice is stamped as `spx:gate_adaptive`), else `off`. `off`: the relaxed modes apply to every precursor |
+| `-gate:faint_max_frames` | 4 | most window frames with precursor signal for a faint precursor |
+| `-gate:faint_delta_rt` | 6 s | `gate:delta_rt` for faint precursors |
+| `-gate:faint_corr_power` | 1 | `assembly:corr_power` for faint precursors |
+| `-gate:auto_faint_fraction` | 0.45 | `adaptive auto`: the faint fraction at which the relaxed gate switches on |
+| `-gate:shrinkage` | fisher | `fisher`: gate on the posterior mean of the Fisher-z correlation (prior `shrink_prior_r` ± `shrink_prior_sd`, n − 3 effective points) instead of the raw r, so one or two shared points are judged by the prior rather than by their ±1; replaces `min_correlation_points` with `shrink_min_points`; `off` |
+| `-gate:shrink_prior_r` | 0.6 | prior mean correlation: 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments) |
+| `-gate:shrink_prior_sd` | 0.3 | prior standard deviation in Fisher-z units; smaller = stronger shrinkage |
+| `-gate:shrink_min_points` | 1 | fewest shared points for a correlation under `shrinkage`; at 1 a one-point overlap is scored almost at the prior, which is why the mode is confined to faint precursors |
+| `-gate:colocation` | ranges | `ranges`: a fragment's apex must lie inside the precursor's detected retention-time span and the two spans overlap by at least `colocation_overlap` of the shorter; `off` |
+| `-gate:colocation_overlap` | 0.3 | least span overlap as a fraction of the shorter span |
+| `-gate:short_traces` | concentric | `concentric`: a fragment trace too short to correlate passes when its centre lies within `short_center_tol` of the precursor's half-width from the precursor's centre; `off` drops it |
+| `-gate:short_center_tol` | 0.5 | centre tolerance as a fraction of the precursor half-width |
+| `-gate:short_min_points` | 1 | fewest points of a short fragment trace |
+| `-gate:fragment_delta_im` | −1 | 1/K0 window of the gate alone (tracing keeps `delta_im`); −1 = `delta_im` |
 
 **Assembly (`assembly:`)**
 
@@ -233,6 +252,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 |---|---|---|
 | `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments pass the gate (checked before the cap below) |
 | `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more |
+| `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
 | `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
 | `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |

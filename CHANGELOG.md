@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
+  is the one-to-three-point tip of its elution peak with its apex a cycle off, so the 3-point minimum, the 3 s window
+  and the padded Pearson rejected it. Precursors with signal in at most 4 window frames are now gated as faint
+  (`-gate:adaptive faint`, `-gate:faint_max_frames`): a 6 s window (`-gate:faint_delta_rt`), the correlation shrunk in
+  Fisher z toward a prior of 0.6 from as little as one shared point (`-gate:shrinkage fisher`, `-gate:shrink_prior_r`,
+  `-gate:shrink_prior_sd`, `-gate:shrink_min_points`), the apex inside the precursor's retention-time span
+  (`-gate:colocation ranges`, `-gate:colocation_overlap`), traces too short to correlate judged by their centre
+  (`-gate:short_traces concentric`, `-gate:short_center_tol`, `-gate:short_min_points`) and the emitted intensity
+  weighted by the correlation to the first power (`-gate:faint_corr_power`). Every other precursor keeps the 1.4 gate.
+  `-gate:adaptive auto` applies the relaxed gate per run when at least `-gate:auto_faint_fraction` of the precursors
+  are faint; the choice is stamped as `spx:gate_adaptive`, and a `[pspan]` log line gives the precursor span histogram.
+- **The `max_fragments` cap ranks by evidence.** `-assembly:cap_rank evidence` (the default) orders fragments by
+  max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence;
+  `corr_inten` is the 1.4 key, `umpire` DIA-Umpire's max(r, 0)² × ln(1 + I).
+- Measured with entrapment FDR on both engines: HeLa 10 ng +87 % Sage / +131 % MSFragger peptides over 1.4.1,
+  50 ng +39 % / +66 %, 100 ng +28 % / +45 %, six tissue runs +2 % / +1 % (triplicates, harness runs); FDR 0.9–1.25 % throughout.
+  `-gate:adaptive off -gate:shrinkage off -gate:colocation off -gate:short_traces off -assembly:cap_rank corr_inten`
+  reproduces 1.4.1's output exactly (same semantic digest).
+- `-gate:fragment_delta_im` sets the gate's 1/K0 window apart from the tracing tolerance (−1 = `-gate:delta_im`).
+- Diagnostics: `DIASPEXTRACT_GATE_DUMP=<file>` with `DIASPEXTRACT_GATE_TARGETS=<m/z,rt;...>` dumps the gate fate of every
+  fragment near the listed precursors.
+
 - **`dnoise:ms1` no longer refuses Bruker files whose `AccumulationTime` exceeds 100 ms.** The MS1 denoiser filters raw
   ion counts, and the reader returns them scaled by opentims' intensity correction, 100 / `AccumulationTime`. At 100 ms
   and below the scaling is inverted exactly; above it several raw counts share one intensity, so the run was refused.

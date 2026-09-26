@@ -1,0 +1,51 @@
+• Review of the diff as presented (HEAD 433931e + the two RC commits). Ranked by severity; line numbers refer to the new-file side of the section A hunks in `src/diaspextract.cpp` unless noted.
+
+  ## High — would change output / break a shipped guarantee
+
+  **H1. The faint classification is a hard threshold on a grid-dependent count — tile-grid determinism is unproven, likely broken.**
+  `diaspextract.cpp:3150`: `const bool faint = adaptive_ && (int)touched.size() <= faint_frames_`. `touched` is the number of grid frames where this precursor has signal *in this window's correlation grid*. Unlike the continuous statistics (dot, overlap), which degrade gracefully under clipping, this is a step function: a precursor with 5 true span points that shows 4 touched frames under one tile grid gets shrinkage + colocation + concentric + 6 s + corr_power 1, and under another grid gets the plain 3 s / power-2 gate. That is exactly the class of dependence the digest guarantee forbids, and the stated verification ("with all new modes off the digest is identical, aea1ae05") does not cover it — under 1.5.0 defaults the faint gate is *on*. Before release: run the cross-tile / cross-thread digest check with the 1.5.0 defaults, not with modes off. (If windows provably contain each precursor's full MS1 span, this collapses to M2 below — but then `touched.size()` and `np()` would be interchangeable, and the code treats them as different things.)
+
+  **H2. Section B drops `auto` from the valid strings of `gate:adaptive`.**
+  In the RC2 diff, the context line directly under the changed default reads `setValidStrings_("gate:adaptive", {"off", "faint"});` — while section A (`diaspextract.cpp:2365`) registered `{"off", "faint", "auto"}`, the code still parses `"auto"` (`:3548`), the `gate:auto_faint_fraction` option and the `spx:gate_adaptive` stamp (`:4566`, which can emit `"auto:on"`/`"auto:off"`) all reference it. If the RC branches were cut before `auto` landed on main and this context is what actually ships, `gate:adaptive auto` becomes unparsable: a dead, still-documented feature. If it's a stale-context artifact of the diff, ignore — but verify the merged file, because the two RC commits were authored on branches (`lowint-gate-rc2`, `lowint-gate-rc3b`) and this is precisely the line a careless merge would clobber.
+
+  **H3. Zero test coverage for everything 1.5.0 ships.**
+  Section A's test changes cover only the dnoise `recoverPoint` approximation (`tests/test_dnoise_ms1.cpp`, `tests/test_tdf_load.cpp`) — those are good tests (round-trip sweep over 3 corrections × 2²⁰ raw counts, tie-to-smaller pinned). But no test exercises: the concentric span test or its score formula, the colocation apex/overlap tests, the Fisher posterior (clamping at r=±1, n−3≤0, posterior-mean formula), adaptive faint vs non-faint precedence, `cap_rank` key ordering, the shrinkage+logoverlap refusal (`:3556`), or the auto rule. The only guard for the entire new gate is the modes-off digest check plus entrapment benchmarks. For a release whose defaults turn all of this on, one synthetic-trace unit test per mode (a handful of hand-computable cases each) is the minimum; the refusal path is one `CHECK_THROWS`. This is the finding I'd gate the release on together with H1.
+
+  ## Medium — correctness/interaction, bounded blast radius
+
+  **M1. The auto rule and the gate measure "faint" with two different statistics.**
+  The per-precursor test uses `touched.size()` (grid frames with signal, `:3150`); the auto rule uses `ms1_traces[pc.trace_idx].np()` (raw trace points, `:4152`). A trace with two points landing in one grid frame, or a span clipped by the grid, scores differently in the two places — so the fraction that switches the mode (threshold 0.45) is not the fraction the gate actually treats as faint. Pick one definition (presumably `np()`, which is grid-independent — see H1) and use it in both.
+
+  **M2. NaN passes the gate, and shrinkage/cap keys now propagate it further.**
+  `fg.invnorm[fi] == 0.0` (`:3169`) does not catch NaN; `c < min_corr` (`:3246`) is false for NaN, so a NaN-scored fragment is *kept*. This is pre-existing from 1.4.1, but the new code widens it: `atanh`/`tanh` (`:3241-3244`) propagate NaN, and NaN cap keys (`:3256-3258`) make the `max_fragments` sort order comparator-undefined — a genuine nondeterminism vector if a NaN ever occurs. One `std::isfinite(c)` guard before the gate closes it.
+
+  **M3. Shrinkage silently overrides `gate:min_correlation_points`.**
+  With `g_shrink` true, both the np pre-skip (`:3176-3177`) and the overlap guard (`:3211`) switch to `shrink_min_pts_`, and `no_corr` (`:3197`) ignores `min_corr_pts` entirely. A user who sets `gate:min_correlation_points 5` *and* `gate:shrinkage fisher` (the 1.5.0 default) gets the 5 ignored with no warning. At minimum the shrinkage help should say it replaces the point cut; better, log once when both are explicitly set. (The shrinkage+logoverlap refusal itself is correct and correctly placed, `:3556-3557`.)
+
+  **M4. `cap_rank` umpire/evidence + `gate:coelution logoverlap`: the "raw r" is not a correlation.**
+  `c_raw` (`:3196`, `:3239`) is whatever the coelution statistic produced — under logoverlap it's the [0,1] profile-overlap score. Only shrinkage+logoverlap is refused; cap_rank+logoverlap is allowed, and the help text ("r the raw co-elution correlation (DIA-Umpire's key)") is then wrong. Either refuse the combination or document that the key uses the raw coelution *score*.
+
+  ## Low — cosmetic / documentation
+
+  - **L1. Umpire help vs code:** help says "r² x ln(1+I)"; code is `max(r,0)² x ln(1+I)` (`:3256`). For negative r these differ (help implies they rank *high*). Code matches your brief; fix the string.
+  - **L2. Gate dump fate vs adaptive window:** the dump's `rt` fate uses `delta_rt` (`:3290`), not `g_drt`, so under `adaptive faint` a fragment kept via the 6 s window is reported as failing "rt". The dump header lists the modes it ignores but not this one. (Its `im` fate is fine — it reads the `delta_im` parameter, which now carries `gate_dim`, `:5051`.) Also note the dump's row order across precursors is thread-scheduling dependent (mutex only serializes writes) — fine for a diagnostic, but worth a comment since everything else in the tool is deterministic.
+  - **L3. Provenance stamps:** `spx:corr_power` (`:4565`) stamps only the global power, not `faint_corr_power`; of the new modes only `spx:gate_adaptive` is stamped. A run's shrinkage/colocation/short_traces/cap_rank settings are invisible in the output metadata.
+  - **L4. `[pspan]` bin edge:** `n==0` maps to the "1" bin (`:3152`); unreachable in practice. Histogram bucketing itself is correct (1,2,3,4 / 5-6 / 7-10 / 11-20 / >20 ✓).
+  - **L5. Help/default consistency in section B:** otherwise clean — I checked each `register*Option_` default against the RC commit messages: shrink r0 0.6 / sd 0.3 / min_points 1, colocation 0.3, faint 4 frames / 6 s / power 1, cap_rank evidence, version 1.5.0 in both CMake and the fallback define — all match. The "(0 = shrink toward no co-elution)" text describes the *meaning* of 0, not the default, so it's technically accurate with default 0.6, but it will mislead a skimming reader; consider "(default 0.6: shrink toward moderate co-elution)".
+
+  ## Things attacked and found fine (one line each)
+
+  - **Fisher posterior math** (`:3241-3244`): precision-weighted normal-normal update is correct; r=±1 clamped to ±0.999 before `atanh`; `n-3 ≤ 0` clamped to variance 1; prior sd floor 0.01 keeps t² numerically safe. (Conceptually a likelihood from n=1 is meaningless — but the clamp makes it prior-dominated, and the benchmarks carry that choice.)
+  - **Concentric score** (`:3208`): range is (0.5·min_corr, min_corr] — bounded below the gate by construction, so concentric fragments always rank as borderline; matches the stated intent. Zero-length spans are safe: `shorter ≥ 1`, overlap test is in multiplication form, no division anywhere.
+  - **ln(1+I) at I=0**: key 0, deterministic; ties resolve by the serial per-precursor fragment loop order, so no thread dependence in cap ranking (assuming the existing cap sort isn't parallel — not in the diff).
+  - **Order dependence**: the auto fraction is a serial loop over precursors (`:4151-4153`), not a parallel reduction; `pspanHist_`/`ms1Hist_` atomics feed only log lines; `p_apex`/`f_apex` use strict `>` so first-max wins in deterministic iteration order.
+  - **`fragment_delta_im` sentinel** (`:3530`): negative → `delta_im`, tracing tolerance untouched, help text accurate.
+  - **Max-window RT index** (`:5002`): the wider bucket range only loosens a prefilter; the exact per-precursor gate (`g_drt`, `:3168`) decides, so output is unaffected — cost is roughly 2× candidate visits for non-faint precursors, each rejected by one `fabs`. Acceptable.
+  - **Hot loop**: no per-fragment allocations (span/apex tracked inside the existing stream loop, `:3182-3185`); `atanh`/`tanh`/`log1p` only on fragments that reach scoring; no second pass for the faint classification; the dump path when the env vars are unset is one static-local guard read per precursor. All fine.
+  - **dnoise recoverPoint** (`DnoiseMs1.h:454-468`): nearest-candidate selection is deterministic, tie takes the smaller raw, NaN corr still refused (`NaN < 1e6` is false), help text updated consistently. Only note: the candidate loop is O(1/corr) per point, so an absurd AccumulationTime (say 10 s → corr 0.01) makes recovery ~100× slower — unrealistic, not worth guarding.
+  - **Digest with modes off**: the restructured guards collapse exactly to the 1.4.1 conditions when `g_shrink`/`g_coloc`/`g_conc` are false and `cap_rank_ == 0` (`:3176-3177`, `:3197`, `:3256`) — consistent with the verified aea1ae05 equivalence.
+
+  ## Bottom line
+
+  Block release on **H1** (prove tile/thread determinism with the *1.5.0 defaults*, or make `faint` use the grid-independent `np()`), **H2** (confirm `auto` survives the merge in `setValidStrings_`), and **H3** (at least one synthetic-trace test per gate mode plus the refusal path). M1–M4 are small code or doc fixes worth doing in the same RC cycle; everything else is fine as written.
+

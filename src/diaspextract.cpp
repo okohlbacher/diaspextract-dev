@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.4.1"
+#define DIASPEXTRACT_VERSION "1.5.0"
 #endif
 
 using namespace OpenMS;
@@ -2358,16 +2358,16 @@ protected:
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
     registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching.", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
-    registerStringOption_("gate:short_traces", "<mode>", "off", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
+    registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
     registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: centre tolerance as a fraction of the precursor half-span (at least one cycle).", false, true);
     setMinFloat_("gate:short_center_tol", 0.0);
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
-    registerStringOption_("assembly:cap_rank", "<mode>", "corr_inten", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by r^2 x ln(1+I) with r the raw co-elution correlation (DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
+    registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
-    registerStringOption_("gate:adaptive", "<mode>", "off", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'off': the modes apply to every precursor. Experimental.", false, true);
+    registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else 'off' (the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': the modes apply to every precursor. Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
     registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, K562 250 ng 0.30, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
     setMinFloat_("gate:auto_faint_fraction", 0.0);
@@ -2378,16 +2378,16 @@ protected:
     setMinFloat_("gate:faint_delta_rt", 0.0);
     registerDoubleOption_("gate:faint_corr_power", "<k>", 1.0, "gate:adaptive faint: assembly:corr_power for faint precursors.", false, true);
     setMinFloat_("gate:faint_corr_power", 0.0);
-    registerStringOption_("gate:colocation", "<mode>", "off", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
+    registerStringOption_("gate:colocation", "<mode>", "ranges", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
     setMinFloat_("gate:colocation_overlap", 0.0);
-    registerStringOption_("gate:shrinkage", "<mode>", "off", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental.", false, true);
+    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental. Replaces gate:min_correlation_points with gate:shrink_min_points.", false, true);
     setValidStrings_("gate:shrinkage", {"off", "fisher"});
-    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.0, "gate:shrinkage fisher: prior mean correlation (0 = shrink toward no co-elution).", false, true);
-    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.5, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
+    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.6, "gate:shrinkage fisher: prior mean correlation; 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments).", false, true);
+    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.3, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
     setMinFloat_("gate:shrink_prior_sd", 0.01);
-    registerIntOption_("gate:shrink_min_points", "<n>", 2, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation.", false, true);
+    registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation; at 1 a one-frame overlap is scored almost at the prior (the data get weight 1/(1 + 1/gate:shrink_prior_sd^2)), so pair it with gate:adaptive faint.", false, true);
     setMinInt_("gate:shrink_min_points", 1);
     registerFlag_("gate:variance_support", "Compute the Pearson co-elution score over the union support of the two profiles instead of the full RT grid (gate:coelution pearson only; the scale changes, retune gate:min_correlation). Falsified 2026-07-27, kept for reproducibility: docs/BASELINE.md 'What is already falsified'.");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
@@ -3248,7 +3248,7 @@ protected:
             const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
             c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
-          if (c < min_corr) continue;                                    // correlation gate
+          if (!(c >= min_corr)) continue;                                // correlation gate (a NaN score is rejected too)
         }
         // [E5] The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
         double inten = intensityOf(wst, f);
@@ -3290,7 +3290,7 @@ protected:
           { const float fv = xv(wst, f, k); if (fv == 0.0f) continue;
             const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
           const double c = fg.invnorm[fi] == 0.0 ? 0.0 : (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi];
-          const char* fate = std::fabs(dim) > delta_im ? "im" : std::fabs(drt) > delta_rt ? "rt" : fg.invnorm[fi] == 0.0 ? "degenerate"
+          const char* fate = std::fabs(dim) > delta_im ? "im" : std::fabs(drt) > g_drt ? "rt" : fg.invnorm[fi] == 0.0 ? "degenerate"
                            : std::fabs(f.mz - pc.mono_mz) < 0.01 ? "precursor_peak" : f.np() < (size_t)std::max(min_corr_pts, 0) ? "np"
                            : overlap < min_corr_pts ? "overlap" : c < min_corr ? "corr" : "kept";
           head(); rows << exportMz_(f.tof, bOf(wst, f), f.mz) << '\t' << dim << '\t' << drt << '\t' << f.np() << '\t' << overlap << '\t'
@@ -4564,6 +4564,11 @@ protected:
     out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
     out_exp.setMetaValue("spx:gate_adaptive", adaptive_auto_ ? String(adaptive_ ? "auto:on" : "auto:off") : String(adaptive_ ? "faint" : "off"));
+    out_exp.setMetaValue("spx:gate_faint", String(faint_frames_) + " frames, " + String(faint_drt_) + " s, power " + String(faint_cp_));
+    out_exp.setMetaValue("spx:gate_shrinkage", shrink_ ? String("fisher r0 ") + String(shrink_r0_) + " sd " + String(shrink_sd_) + " from " + String(shrink_min_pts_) : String("off"));
+    out_exp.setMetaValue("spx:gate_colocation", coloc_ ? String("ranges ") + String(coloc_overlap_) : String("off"));
+    out_exp.setMetaValue("spx:gate_short_traces", short_conc_ ? String("concentric tol ") + String(short_center_tol_) + " from " + String(short_min_pts_) : String("off"));
+    out_exp.setMetaValue("spx:cap_rank", String(cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten"));
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
