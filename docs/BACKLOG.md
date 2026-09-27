@@ -1051,16 +1051,24 @@ backlog items, otherwise src/diaspextract.cpp lines.
 
 ---
 
-## Emitted fragments with identical m/z (2026-09-27, found by the ProSE diagnosis)
+## Emitted fragments with identical m/z: one ion traced as several 1/K0 slices (2026-09-27; root cause found)
 
-- **What:** 15.2 % of DIAspeXtract spectra (HeLa_22, 1.5.0 candidate) contain exact duplicate fragment m/z values (37,806
-  peaks, different intensities: distinct signals landing on one m/z), plus float near-ties < 1e-4 Th. Fragment m/z is
-  exported from the integer TOF bin (`exportMz_(f.tof, …)` at assembly), so two traces in the same bin (e.g. at different
-  1/K0) collide. Harm: OpenMS `MatchedIterator` stalls at the first duplicate (upstream bug, see
-  docs/reviews/prose-diagnosis-2026-09-27), costing ProSE ~5 % peptides on our output (5,758 -> 6,068 when merged);
-  other engines are unaffected or less affected (check Sage/MSFragger on merged spectra).
-- **Fix:** merge equal-m/z fragments at assembly (sum intensities; keep the higher-evidence one for the cap) before the
-  `max_fragments` ranking, and fold near-ties below ~1e-4 Th. Output-changing: new digest pins, corpus spot check.
-- **Kill criterion:** merged spectra lose peptides on Sage or MSFragger (duplicate peaks would then be carrying signal).
-- **Effort:** S (code) + M (gates). Not a 1.5.0 blocker; candidate for 1.5.1.
-
+- **Root cause (docs/reviews/same-bin-traces-2026-09-27):** the integer detector traces PICKED PEAKS, not (frame, TOF-bin)
+  cells. `pickIMCluster` is given a total 1/K0 span of `gate:delta_im` = 0.01, so an ion whose mobility peak is wider
+  becomes 2-3 centroids per frame in the SAME bin at different 1/K0. The tracer marks peaks taken one by one, takes one
+  peak per frame, breaks exact same-bin distance ties by slab order (not 1/K0) and counts a taken winner as a miss; with no
+  minimum trace length the leftover slices become their own (often 1-point) traces. The ±0.01 gate admits two slices up to
+  0.02 apart and `assembleOne_` never merges bins. ~98-99 % of duplicate groups; valley-split children ~1 %; band-edge
+  double tracing ~0.1 %; tiles 0-0.2 %. One ion split, not two ions (72 % of groups have another peak within 20 ppm vs ~1 %
+  by chance; raw Bruker-SDK mobility profiles show one peak). The twin fold (10 ppm) has hidden it since 1.4.0: without the
+  fold 50.6 % of spectra carry duplicates. Near-ties are the same bin under a different calibration temperature step.
+- **Root fix (tracer):** when a trace takes a bin in a frame, take and SUM every free peak in that bin within its 1/K0
+  tolerance; skip taken peaks instead of counting a miss; break same-bin ties by 1/K0 distance; decouple the picker's 1/K0
+  box from `gate:delta_im`. Changes trace counts, profiles, correlations and admissions: full benchmark (both engines,
+  entrapment) and new digest pins. Check whether MS1 (same picker, same box) is split the same way.
+- **Guard (assembly):** merge fragments of one TOF bin before the cap (sum), so no spectrum ever carries two peaks at one
+  m/z (ProSE loses ~5 % to OpenMS MatchedIterator otherwise). A guard only: the split pieces still compete in the gate and cap.
+- **Also found:** the band partition is not clean (bands extend across edges with separate taken sets; band count changes
+  output by ~30 groups); the gate dump rounds precursor m/z to 6 digits (targets >= 1000 lost) and its fate column ignores
+  the faint rules.
+- **Effort:** tracer M-L + benchmark; guard S. Candidate for 1.5.1 / 1.6.
