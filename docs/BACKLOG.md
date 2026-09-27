@@ -1092,6 +1092,10 @@ backlog items, otherwise src/diaspextract.cpp lines.
   tol 0.5: stock yields 0,2,3 only; fixed 0,2,3,4,7), a HyperScore test with one duplicated low-m/z peak (score and
   matched ions must equal the duplicate-free spectrum's), and a minimal mzML + FASTA on which stock ProSE misidentifies
   and the fixed one identifies the peptide.
-- **Status:** fix, tests and fixture being prepared on an OpenMS develop build (ibminode05:/scratch/kohlbach/openms_pr);
-  draft PR to OpenMS/OpenMS to follow. Owner of ProSE/HyperScore upstream: Timo Sachsenberg.
+- **Status 2026-09-27:** DRAFT PR https://github.com/OpenMS/OpenMS/pull/10291 (branch fix/matchediterator-duplicate-targets,
+  on develop 305c2055ee): tie-tolerant advanceTarget_, 3 MatchedIterator_test sections, a HyperScore duplicate-peak test,
+  TOPP_ProSE_10 fixture (8 KB mzML + one-protein FASTA + idXML golden), ProSEAlgorithm_test data adjusted (its decoy PSMs
+  came only from b1+/b2++ coincidences mis-scored by the bug). ProSE on diaTracer HeLa_22: 189 -> 6,020 peptides, same
+  runtime; 241/241 related tests pass; goldens unchanged. Suggested reviewers: Chris Bielow (MatchedIterator), Timo
+  Sachsenberg (HyperScore/ProSE) -- not requested yet. Build/test tree: ibminode05:/scratch/kohlbach/openms_pr.
 
