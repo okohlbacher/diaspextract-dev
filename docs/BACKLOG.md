@@ -1072,3 +1072,26 @@ backlog items, otherwise src/diaspextract.cpp lines.
   output by ~30 groups); the gate dump rounds precursor m/z to 6 digits (targets >= 1000 lost) and its fate column ignores
   the faint rules.
 - **Effort:** tracer M-L + benchmark; guard S. Candidate for 1.5.1 / 1.6.
+
+---
+
+## Upstream: the duplicate-peak stall in OpenMS (MatchedIterator) breaks ProSE (2026-09-27, user request)
+
+- **Problem:** OpenMS `MatchedIterator::advanceTarget_` (DATASTRUCTURES/MatchedIterator.h) walks the target container
+  only while the distance strictly decreases; at two equal target values it steps back and never passes the first one.
+  HyperScore and SpectrumAlignment then ignore every experimental peak above the first duplicate m/z, so ProSE scores
+  spectra with duplicate peaks near-randomly (diaTracer output: 187 vs 5,962 peptides; ours lost ~5 % before the
+  same-bin merge). Also exposed: PScore, AScore, QC FragmentMassError, QC PSMExplainedIonCurrent. Still present in
+  OpenMS develop (checked 2026-09-27). Diagnosis: docs/reviews/prose-diagnosis-2026-09-27.
+- **Fix (upstream, in OpenMS, not in ProSE's code):** make `advanceTarget_` tie-tolerant: keep walking while the
+  distance does not get worse, remember the first element with the smallest distance, stop only when it gets strictly
+  worse (O(n+m), "smaller value wins a tie" preserved, existing test outputs unchanged). Optional in ProSE itself:
+  merge equal m/z in `preprocessSpectra_` with a warning, and make the logged precursor-error diagnostic
+  isotope-corrected and FDR-filtered (it reported "612 ppm" for correct precursors).
+- **Fixture to submit with it:** the MatchedIterator repro (ref {0,1,2,3,4,5,6,7,13}, target {-0.01,2.5,2.5,3.5,7,11},
+  tol 0.5: stock yields 0,2,3 only; fixed 0,2,3,4,7), a HyperScore test with one duplicated low-m/z peak (score and
+  matched ions must equal the duplicate-free spectrum's), and a minimal mzML + FASTA on which stock ProSE misidentifies
+  and the fixed one identifies the peptide.
+- **Status:** fix, tests and fixture being prepared on an OpenMS develop build (ibminode05:/scratch/kohlbach/openms_pr);
+  draft PR to OpenMS/OpenMS to follow. Owner of ProSE/HyperScore upstream: Timo Sachsenberg.
+
