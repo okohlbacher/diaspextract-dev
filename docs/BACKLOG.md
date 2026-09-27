@@ -1049,3 +1049,18 @@ FASTag release pipeline. Marked "check": runner specs, secrets surviving a repos
 `tauri bundle` / `signCommand`. Line numbers in this section (":NNN") are BACKLOG.md lines as of 2e2ca17 where they name
 backlog items, otherwise src/diaspextract.cpp lines.
 
+---
+
+## Emitted fragments with identical m/z (2026-09-27, found by the ProSE diagnosis)
+
+- **What:** 15.2 % of DIAspeXtract spectra (HeLa_22, 1.5.0 candidate) contain exact duplicate fragment m/z values (37,806
+  peaks, different intensities: distinct signals landing on one m/z), plus float near-ties < 1e-4 Th. Fragment m/z is
+  exported from the integer TOF bin (`exportMz_(f.tof, …)` at assembly), so two traces in the same bin (e.g. at different
+  1/K0) collide. Harm: OpenMS `MatchedIterator` stalls at the first duplicate (upstream bug, see
+  docs/reviews/prose-diagnosis-2026-09-27), costing ProSE ~5 % peptides on our output (5,758 -> 6,068 when merged);
+  other engines are unaffected or less affected (check Sage/MSFragger on merged spectra).
+- **Fix:** merge equal-m/z fragments at assembly (sum intensities; keep the higher-evidence one for the cap) before the
+  `max_fragments` ranking, and fold near-ties below ~1e-4 Th. Output-changing: new digest pins, corpus spot check.
+- **Kill criterion:** merged spectra lose peptides on Sage or MSFragger (duplicate peaks would then be carrying signal).
+- **Effort:** S (code) + M (gates). Not a 1.5.0 blocker; candidate for 1.5.1.
+

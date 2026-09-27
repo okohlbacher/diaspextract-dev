@@ -1,0 +1,41 @@
+--- /scratch/kohlbach/OpenMS/src/openms/include/OpenMS/DATASTRUCTURES/MatchedIterator.h	2026-04-24 10:03:15.000000000 +0200
++++ MatchedIterator.h.patched	2026-09-27 09:21:32.125267390 +0200
+@@ -224,27 +224,29 @@
+ 
+           double max_dist = TRAIT::allowedTol(tol_, *it_ref_);
+ 
+-          // forward iterate over elements in target data until distance gets worse
++          // Forward iterate over elements in target data until the distance gets worse.
++          // Equal distances do not stop the walk: two target elements with the same value (or
++          // closer than float resolution) are equally distant from every reference element, and
++          // stopping on the first of them would pin it_tgt_ there for all following reference
++          // elements. The first element with the smallest distance is kept, so a tie between a
++          // smaller and a larger value still resolves to the smaller one.
+           float diff = std::numeric_limits<float>::max();
++          CONT_IT best = it_tgt_;
+           do
+           {
+             auto d = TRAIT::getDiffAbsolute(*it_ref_, *it_tgt_);
+-            if (diff > d) // getting better
++            if (d < diff) // getting better
+             {
+               diff = d;
++              best = it_tgt_;
+             }
+-            else   // getting worse (overshot)
++            else if (d > diff) // getting worse (overshot)
+             {
+-              --it_tgt_;
+               break;
+             }
+             ++it_tgt_;
+           } while (it_tgt_ != tgt_end_);
+-
+-          if (it_tgt_ == tgt_end_)
+-          { // reset to last valid entry
+-            --it_tgt_;
+-          }
++          it_tgt_ = best;
+           if (diff <= max_dist) return; // ok, found match
+ 
+           // try next ref peak
