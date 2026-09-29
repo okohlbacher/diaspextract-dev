@@ -18,22 +18,30 @@
   rejected) and the spectra by 28 %: `findPartner` takes the first candidate in m/z order, which for a third of true
   steps sits more than 0.01 1/K0 from the seed, and ion-mobility slicing splits one isotope over several traces, so a
   single trace's profile and intensity are noisy. `v2` sums the apex intensity of every MS1 trace, claimed or not, at
-  each isotope position of the seed (the partner m/z tolerance, `gate:delta_rt`, `-charge:mono_position_im_box` 0.01
+  each isotope position of the seed (the partner m/z tolerance, `gate:delta_rt`, `-charge:mono_position_im_box` 0.02
   1/K0). Only the walk's leftmost step is tested (an identified walk has at most one spurious step, and it is the
   leftmost): it is rejected when PS(−j)/PS(−j+1) × λ, with averagine's λ = max(0.1, 0.000594 × neutral mass), is below
-  `-charge:mono_position_min_ratio` (0.2), and the monoisotope moves one isotope right; `-charge:mono_position_iterate`
-  repeats the test on the new leftmost step. If nothing was rejected and the walk ended on a miss, the next lighter
-  position becomes the monoisotope, without claiming its trace, when its ratio is ≥ `-charge:mono_position_extend` (0.6;
-  0 = off). Claims, charge and `spx_n_isotopes` never change, so the same precursors are inferred (the
-  spectrum count can still shift where a moved mass crosses a window edge or the twin fold). The test reads only
-  the fixed trace arrays (no speculation dependencies) and sums in m/z order (deterministic). Logged as `[monocheck]`,
-  stamped `spx:monocheck`. `false` output unchanged; `true` unchanged.
-  Screened 2026-09-29 (n = 1, K562 9905, HeLa 10 ng and 100 ng): with `-charge:mono_position_iterate` the isotope
-  error of identified K562 precursors falls from 18.5 % to 8.1 % (M-1 9.9 % to 1.4 %), peptides rise with both engines
-  on all three runs (Sage / MSFragger +1.0 / +0.7 %, +0.4 / +0.2 %, +1.5 / +4.8 %), entrapment is lower on all three,
-  and spectra fall by 1.6-5.6 % (seeds of one ion that sat one isotope apart now fold into twins). Without iterate:
-  10.3 %. On the 2019 HeLa py3 runs the isotope traces of one ion scatter about 3x wider in 1/K0 than on K562, and the
-  leftmost-step test rejects 12 % of true steps (K562 3 %): the identified 10 ng isotope error rises from 8.6 % to 9.8 %.
+  `-charge:mono_position_min_ratio` (0.15), and the monoisotope moves one isotope right;
+  `-charge:mono_position_iterate` (`true`; `false` = one step only) repeats the test on the new leftmost step while it
+  fails. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope,
+  without claiming its trace, when its ratio is ≥ `-charge:mono_position_extend` (0.5; 0 = off). Claims, charge and
+  `spx_n_isotopes` never change, so the same precursors are inferred (the spectrum count can still shift where a moved
+  mass crosses a window edge or the twin fold). The test reads only the fixed trace arrays (no speculation
+  dependencies) and sums in m/z order (deterministic). Logged as `[monocheck]`, stamped `spx:monocheck`. `false`
+  output unchanged; `true` unchanged. Screened 2026-09-29 (iteration 1: im_box 0.01, min_ratio 0.2, extend 0.6; n = 1,
+  K562 9905, HeLa 10 ng and 100 ng): with iterate the isotope error of identified K562 precursors falls from 18.5 % to
+  8.1 % (M-1 9.9 % to 1.4 %), peptides rise with both engines on all three runs (Sage / MSFragger +1.0 / +0.7 %, +0.4
+  / +0.2 %, +1.5 / +4.8 %), entrapment is lower on all three, and spectra fall by 1.6-5.6 % (seeds of one ion that sat
+  one isotope apart now fold into twins). Without iterate: 10.3 %. On the 2019 HeLa py3 runs the isotope traces of one
+  ion scatter about 3x wider in 1/K0 than on K562, and the leftmost-step test rejects 12 % of true steps (K562 3 %):
+  the identified 10 ng isotope error rises from 8.6 % to 9.8 %.
+  **Defaults re-tuned (iteration 2):** iterate is on (`-charge:mono_position_iterate` is now a `true`/`false` option,
+  default `true`), `im_box` 0.01 → 0.02, `min_ratio` 0.2 → 0.15, `extend` 0.6 → 0.5. Search-free sweep on the fixed
+  identified release keys (K562 MSFragger/DDA truth; HeLa Sage isotope_error), total isotope error K562 / HeLa 10 ng /
+  HeLa 100 ng: release 18.5 / 9.0 / 18.2 %; iteration-1 settings 7.7 / 10.3 / 14.8 %; new defaults 8.1 / 8.5 / 12.7 %
+  (extend 0.6: im_box 0.015 7.7 / 9.5 / 13.5; 0.02 8.0 / 9.3 / 13.1; 0.03 8.6 / 9.1 / 13.1; 0.02 with min_ratio 0.10
+  8.9 / 8.3 / 13.1). Of the ten settings tried the new defaults have the lowest error summed over the three runs; at the
+  iteration-1 settings (im_box 0.01) the HeLa 10 ng error stays above the release.
 
 ## v1.5.0 — 2026-09-29
 
