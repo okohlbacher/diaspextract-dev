@@ -40,6 +40,15 @@
   rescues (by the gate step that had rejected them) and rescued peaks in the written spectra; the header stamps
   `spx:anchor`, and `DIASPEXTRACT_GATE_DUMP` labels a rescued fragment's fate `rescued`. The default output is
   unchanged (same semantic digest).
+- **`-assembly:post_fusion_cap` (off by default): `max_fragments` holds after the twin fold.** The cap was applied per
+  precursor before the fold, whose union of the members' fragment lists lets a spectrum exceed 500 peaks: at the 1.5.0
+  defaults 50.5 % of the K562 9905 spectra (up to 5,551 peaks) and 35.4 % of HeLa 10 ng (up to 1,611). With the option
+  on, each peak carries its `cap_rank` key (as a 32-bit float) through the same-bin merge and the fold (a fused peak
+  keeps its members' best key), and every spectrum over the cap after the fold keeps its top-ranked peaks (ties: higher
+  intensity, then lower m/z), in m/z order: on K562 9905 it removes 44 % of those spectra's peaks (203 M), the spectrum
+  count is unchanged, the cap takes 0.6 s and the keyed fold 0.9 s more, peak RSS +0.6 GB (+2.9 %). A `[recap]` log
+  line gives the spectra re-capped and the peaks removed; the header stamps `spx:post_fusion_cap`. Off, the output is
+  unchanged (same semantic digest on HeLa 10 ng and K562 9905). `-diag:selftest_twins` covers the keyed fold and the cap.
 
 ## v1.5.0 — 2026-09-29
 

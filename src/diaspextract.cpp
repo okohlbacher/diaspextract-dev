@@ -242,6 +242,7 @@ namespace
   double anchor_min_corr_ = 0.8;     ///< [anchor] gate:anchor_min_corr
   double anchor_rescue_corr_ = 0.7;  ///< [anchor] gate:anchor_rescue_corr
   int anchor_max_rescued_ = 50;      ///< [anchor] gate:anchor_max_rescued
+  bool post_fusion_cap_ = false;     ///< [recap] assembly:post_fusion_cap: carry the cap key per peak, re-cap after the twin fold
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -2141,7 +2142,8 @@ namespace
   /// own. Same frame => same RT cell => same tile under every grouping, so the output stays grouping- and
   /// thread-invariant. This is bench/twin_merge.py, which priced it: docs/SAME-POSITION-DUPLICATION-2026-09-20.md.
   /// `v` in canonical order; survivors keep their places. Returns the number of spectra removed.
-  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol)
+  /// [recap] `keyed`: every spectrum carries its peaks' cap keys as float data array 0; a fused peak keeps the max key.
+  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, bool keyed = false)
   {
     const double TWIN_PPM = 20.0, FUSE_PPM = 10.0;   // ponytail: the measured values, no option until another is measured
     struct K { double rt, mz, im; int z; uint32_t i; };
@@ -2199,6 +2201,36 @@ namespace
 #pragma omp parallel for schedule(dynamic, 64)
     for (long c = 0; c < (long)surv.size(); ++c)
     {
+      if (keyed)
+      {
+        // [recap] the same fusion over (m/z, intensity, key) triples. Peaks equal in m/z and intensity add equal terms
+        // and always land in one fused peak, so the peaks are the unkeyed fold's; each fused peak keeps its members' max key.
+        vector<std::array<double, 3>> ps;
+        for (uint32_t i : members[(size_t)c])
+        {
+          const auto& fd = v[i].getFloatDataArrays();
+          for (Size j = 0; j < v[i].size(); ++j) ps.push_back({v[i][j].getMZ(), (double)v[i][j].getIntensity(), fd.empty() ? 0.0 : (double)fd[0][j]});
+        }
+        sort(ps.begin(), ps.end());
+        vector<pair<double, double>> fused;
+        OpenMS::DataArrays::FloatDataArray kk;
+        kk.setName("spx_cap_key");
+        const double NO_KEY = -std::numeric_limits<double>::infinity();
+        double gm = 0.0, gw = 0.0, gi = 0.0, gk = NO_KEY;
+        for (const auto& pk : ps)
+        {
+          if (gw != 0.0 && pk[0] - gm / gw > (gm / gw) * (FUSE_PPM * 1e-6)) { fused.emplace_back(gm / gw, gi); kk.push_back((float)gk); gm = gw = gi = 0.0; gk = NO_KEY; }
+          gm += pk[0] * pk[1]; gw += pk[1]; gi = std::max(gi, pk[1]); gk = std::max(gk, pk[2]);
+        }
+        if (gw != 0.0) { fused.emplace_back(gm / gw, gi); kk.push_back((float)gk); }
+        MSSpectrum& s = v[surv[(size_t)c]];
+        s.clear(false);
+        s.reserve(fused.size());
+        for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
+        s.getFloatDataArrays().clear();
+        s.getFloatDataArrays().push_back(std::move(kk));   // moved, not copied (assign(1, x) copies)
+        continue;
+      }
       vector<pair<double, double>> ps;
       for (uint32_t i : members[(size_t)c]) for (const auto& pk : v[i]) ps.emplace_back(pk.getMZ(), (double)pk.getIntensity());
       sort(ps.begin(), ps.end());
@@ -2226,6 +2258,40 @@ namespace
     const size_t removed = v.size() - w;
     v.erase(v.begin() + (long)w, v.end());
     return removed;
+  }
+
+  /// [recap] assembly:post_fusion_cap: the twin fold unions capped spectra, so a folded one can exceed max_frags. Keeps
+  /// the max_frags peaks with the highest carried cap key (ties: higher intensity, then lower m/z), in m/z order, and
+  /// drops the key array of every spectrum (it is never written). Per spectrum, so thread-invariant.
+  /// Returns {spectra re-capped, peaks removed, largest spectrum before}.
+  static std::array<size_t, 3> capAfterFusion_(vector<MSSpectrum>& v, Size max_frags)
+  {
+    size_t n_sp = 0, n_pk = 0, n_max = 0;
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
+    for (long i = 0; i < (long)v.size(); ++i)
+    {
+      MSSpectrum& s = v[(size_t)i];
+      n_max = std::max(n_max, (size_t)s.size());
+      if (s.size() > max_frags && !s.getFloatDataArrays().empty())
+      {
+        const auto& k = s.getFloatDataArrays()[0];
+        vector<Size> idx(s.size());
+        for (Size j = 0; j < idx.size(); ++j) idx[j] = j;
+        partial_sort(idx.begin(), idx.begin() + (long)max_frags, idx.end(), [&](Size a, Size b) {
+          if (k[a] != k[b]) return k[a] > k[b];
+          if (s[a].getIntensity() != s[b].getIntensity()) return s[a].getIntensity() > s[b].getIntensity();
+          if (s[a].getMZ() != s[b].getMZ()) return s[a].getMZ() < s[b].getMZ();
+          return a < b;
+        });
+        idx.resize(max_frags);
+        sort(idx.begin(), idx.end());   // the peaks are m/z-sorted: ascending positions keep that order
+        n_pk += s.size() - max_frags; ++n_sp;
+        s.getFloatDataArrays().clear();
+        s.select(idx);
+      }
+      s.getFloatDataArrays().clear();
+    }
+    return {n_sp, n_pk, n_max};
   }
 
   /// [tile-2e] Streams spectra to an mzML in BLOCKS: the header once, then every block encoded in
@@ -2374,7 +2440,7 @@ protected:
 
     registerTOPPSubsection_("assembly", "Pseudo-spectrum assembly");
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
-    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance).", false);
+    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance; assembly:post_fusion_cap re-applies it after the fold).", false);
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off. 0.005 is the measured optional setting (Sage +1-7% over corr_power 2 on three files, flat on MSFragger): docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
@@ -2407,7 +2473,7 @@ protected:
     registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. Fragment traces of the integer detector always report the calibrated m/z of their apex bin, whatever this says; with trace:detector openms the estimator applies to them too. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
     setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic valleys (ElutionPeakDetection, width filtering off). Value = chrom_fwhm (seconds); 0 = off.", false);
-    registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation, the cluster closure, the survivor order and the 10-ppm fusion", true);
+    registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation, the cluster closure, the survivor order, the 10-ppm fusion and the keyed fold with the post-fusion cap (assembly:post_fusion_cap)", true);
     registerFlag_("diag:selftest_arena", "Run assertions on the MS1 arena compaction (compactUnreferenced) and exit: kept spans must survive a container order that differs from their offset order", true);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys (ElutionPeakDetection), so two peptides eluting apart within the m/z tolerance do not merge into one precursor with the wrong monoisotope and charge. Value = chrom_fwhm (seconds); 0 = off.", false);
     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each mass trace (precursor and fragment) to at most this many seconds "
@@ -2463,6 +2529,8 @@ protected:
     setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
     registerStringOption_("assembly:merge_same_bin", "<true/false>", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", false, true);
     setValidStrings_("assembly:merge_same_bin", {"true", "false"});
+    registerStringOption_("assembly:post_fusion_cap", "<true/false>", "false", "Re-apply assembly:max_fragments after the twin fold (assembly:twin_im_tolerance), whose union of the members' capped fragments can exceed it. Every peak carries its assembly:cap_rank key (as a 32-bit float) through the same-bin merge and the fold (a fused peak keeps its members' best key); a spectrum over the cap keeps its top-ranked peaks (ties: higher intensity, then lower m/z). Logged as [recap], stamped spx:post_fusion_cap. CHANGES OUTPUT. Experimental.", false, true);
+    setValidStrings_("assembly:post_fusion_cap", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
     registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the assembly:cap_rank key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the twin fold's intensity-weighted m/z), so a few peaks move or change. Experimental.", false, true);
@@ -3661,6 +3729,12 @@ protected:
       for (size_t i = 0; i < max_frags; ++i) keep.push_back(frags[idx[i]]);
       if (!resc.empty()) { n_resc = 0; for (size_t i = 0; i < max_frags; ++i) n_resc += resc[idx[i]]; }
       frags.swap(keep);
+      if (post_fusion_cap_)                                            // [recap] the kept peaks' keys, in the same order
+      {
+        vector<double> keep_k(max_frags);
+        for (size_t i = 0; i < max_frags; ++i) keep_k[i] = frag_scores[idx[i]];
+        frag_scores.swap(keep_k);
+      }
     }
     if (n_resc) { anchorCount_()[6] += n_resc; ++anchorCount_()[7]; }
     out.setMSLevel(2);
@@ -3669,6 +3743,13 @@ protected:
     // [mem] exact reserve: no doubling slack held from emit until the write.
     out.reserve(frags.size());
     for (const auto& fr : frags) out.emplace_back(fr.first, fr.second);
+    if (post_fusion_cap_)   // [recap] each peak's cap key rides along as a float data array (sorted with the peaks), dropped before the write
+    {
+      OpenMS::DataArrays::FloatDataArray k;
+      k.setName("spx_cap_key");
+      k.assign(frag_scores.begin(), frag_scores.end());
+      out.getFloatDataArrays().push_back(std::move(k));
+    }
     out.sortByPosition();
     OpenMS::Precursor prec;
     prec.setMZ(pc.mono_mz);   // MS1 traces come from the OpenMS detector: no bin to calibrate
@@ -3829,6 +3910,26 @@ protected:
       chk(v.size() == 1 && v[0].getRT() == 40.0 && q.getMZ() == 700.0 && q.getCharge() == 3 && q.getDriftTime() == 1.1
           && q.getIsolationWindowLowerOffset() == 7.0 && q.getIsolationWindowUpperOffset() == 18.0 && (int)v[0].getMetaValue("spx_guessed") == 0,
           "the survivor keeps its own RT, precursor, 1/K0, isolation offsets and userParams"); }
+    // [recap] the keyed fold (assembly:post_fusion_cap) and the cap after it
+    auto keyed = [](MSSpectrum s, const vector<float>& k) {
+      OpenMS::DataArrays::FloatDataArray a; a.setName("spx_cap_key"); a.assign(k.begin(), k.end()); s.getFloatDataArrays().push_back(std::move(a)); return s; };
+    { const vector<pair<double, float>> A{{100.0, 10.0f}, {200.0, 20.0f}}, B{{200.0005, 5.0f}, {300.0, 30.0f}};
+      vector<MSSpectrum> u{sp(10.0, 500.0, 2, 1.0, 2, A), sp(10.0, 500.001, 2, 1.0, 3, B)};
+      vector<MSSpectrum> v{keyed(sp(10.0, 500.0, 2, 1.0, 2, A), {1.0f, 2.0f}), keyed(sp(10.0, 500.001, 2, 1.0, 3, B), {7.0f, 0.5f})};
+      mergeTwins_(u, 0.005); mergeTwins_(v, 0.005, true);
+      bool same = u.size() == 1 && v.size() == 1 && u[0].size() == v[0].size();
+      for (Size i = 0; same && i < u[0].size(); ++i) same = u[0][i].getMZ() == v[0][i].getMZ() && u[0][i].getIntensity() == v[0][i].getIntensity();
+      chk(same, "keyed fold: the peaks of the unkeyed fold, bit for bit");
+      const auto& k = v[0].getFloatDataArrays();
+      chk(k.size() == 1 && k[0].size() == 3 && k[0][0] == 1.0f && k[0][1] == 7.0f && k[0][2] == 0.5f, "keyed fold: a fused peak keeps its members' max key");
+      const std::array<size_t, 3> r = capAfterFusion_(v, 2);
+      chk(r[0] == 1 && r[1] == 1 && r[2] == 3 && v[0].size() == 2 && v[0][0].getMZ() == 100.0 && v[0][1].getMZ() == u[0][1].getMZ()
+          && v[0].getFloatDataArrays().empty(), "post-fusion cap: the top keys survive in m/z order, the key array is dropped"); }
+    { vector<MSSpectrum> v{keyed(sp(10.0, 500.0, 2, 1.0, 2, {{100.0, 5.0f}, {200.0, 9.0f}, {300.0, 9.0f}}), {1.0f, 1.0f, 1.0f}),
+                           keyed(sp(12.0, 500.0, 2, 1.0, 2, {{100.0, 5.0f}}), {3.0f})};
+      const std::array<size_t, 3> r = capAfterFusion_(v, 1);
+      chk(r[0] == 1 && r[1] == 2 && v[0].size() == 1 && v[0][0].getMZ() == 200.0, "post-fusion cap ties: the higher intensity, then the lower m/z");
+      chk(v[1].size() == 1 && v[1][0].getMZ() == 100.0 && v[1].getFloatDataArrays().empty(), "post-fusion cap: a spectrum within the cap keeps its peaks, without the key array"); }
     writeLogInfo_(fail ? "[twins] SELFTEST FAILED" : "[twins] selftest passed");
     return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
   }
@@ -3905,6 +4006,7 @@ protected:
     if (getIntOption_("assembly:frag_core_frames") % 2 == 0)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:frag_core_frames must be odd: the core is centred on the precursor's apex frame");
     frag_core_half_ = getIntOption_("assembly:frag_core_frames") / 2;
+    post_fusion_cap_ = getStringOption_("assembly:post_fusion_cap") == "true";
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
@@ -4945,6 +5047,9 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
     if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
+    if (post_fusion_cap_)   // [recap] only when on: the default header is unchanged
+      out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the "
+                           + (cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten") + " cap key");
     out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
     if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
       out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
@@ -4956,6 +5061,7 @@ protected:
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
     Size n_twins = 0;   // [twins] spectra folded into a twin, over every tile
+    std::array<size_t, 4> recap{};   // [recap] spectra re-capped, peaks removed, largest spectrum before, spectra seen
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
@@ -5427,7 +5533,7 @@ protected:
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
                              gate_dim, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
                 if (!ms2.empty())
-                { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * 12)); pslot[(size_t)j] = std::move(ms2); }
+                { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * (post_fusion_cap_ ? 16 : 12))); pslot[(size_t)j] = std::move(ms2); }   // [recap] +4 B/peak key
               }
             }
           } catch (...) { taskErr_(asm_err); } }
@@ -5525,14 +5631,20 @@ protected:
       { size_t n_tot = 0; for (const auto& bucket : win_out) n_tot += bucket.size(); tile_out.reserve(n_tot); }
       for (auto& bucket : win_out) { for (auto& s : bucket) tile_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
       long long tile_spec_bytes = 0;
-      for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * 12);
+      for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * (post_fusion_cap_ ? 16 : 12));   // as charged at emission
       { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
       if (twin_im >= 0.0)
       {
         Phase _ph("MERGE(twins)");
-        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im);
+        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, post_fusion_cap_);
         n_twins += gone;
         writeLogInfo_("[twins] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(gone) + " of " + String(before) + " spectra folded into a twin");
+      }
+      if (post_fusion_cap_)
+      {
+        Phase _ph("RECAP(post-fusion)");
+        const std::array<size_t, 3> r = capAfterFusion_(tile_out, max_frags);
+        recap[0] += r[0]; recap[1] += r[1]; recap[2] = std::max(recap[2], r[2]); recap[3] += tile_out.size();
       }
       if (writer)
       {
@@ -5599,6 +5711,9 @@ protected:
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
+    if (post_fusion_cap_)
+      writeLogInfo_("[recap] assembly:post_fusion_cap: " + String(recap[0]) + " of " + String(recap[3]) + " spectra re-capped to " + String(max_frags)
+                    + " peaks after the twin fold, " + String(recap[1]) + " peaks removed (largest spectrum before: " + String(recap[2]) + " peaks)");
     {   // [merge] how much splitting the two merges removed
       auto& m = mergeCount_();
       writeLogInfo_("[merge] im-slice merge (trace:im_slice_merge " + (!integer_detector ? String("n/a, openms detector") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) : String("off")) + "): " + String(m[0].load())
