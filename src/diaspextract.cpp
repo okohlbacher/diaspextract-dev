@@ -306,8 +306,9 @@ namespace
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
   /// [foreign] [0] precursors with a foreign candidate, [1] foreign envelopes matched, [2] spectra with a fragment
-  /// attenuated, [3] fragments attenuated, [4] candidates skipped as this precursor's own ion, [5] spectra of [2] left
-  /// below assembly:min_fragments, [6] matched fragments' signed m/z error summed in 0.001 ppm, [7] matches behind [6]
+  /// attenuated, [3] fragments attenuated, [4] candidates skipped as this precursor's own ion, [5] spectra of [2] that
+  /// the removal (weight 0) took from at least assembly:min_fragments to below it, [6] matched fragments' signed m/z
+  /// error summed in 0.001 ppm, [7] matches behind [6]
   inline std::array<std::atomic<long long>, 8>& foreignCount_() { static std::array<std::atomic<long long>, 8> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
@@ -3233,15 +3234,17 @@ protected:
       for (int j = -3; j <= 3; ++j) if (std::fabs(a - (b + j * ISO / z)) <= a * ppm) return true;
       return false; };
     vector<const Precursor_*> cand;
+    long long n_skip = 0;                                            // added to the shared counter once per call
     const size_t lo = std::lower_bound(fx.rt.begin(), fx.rt.end(), pc.rt - drt) - fx.rt.begin();
     for (size_t j = lo; j < fx.rt.size() && fx.rt[j] <= pc.rt + drt; ++j)
     {
       const Precursor_& f = (*fx.p)[fx.idx[j]];
       if (&f == &pc || std::fabs(f.rt - pc.rt) > drt || std::fabs(f.im - pc.im) > foreign_dim_) continue;
       if (std::fabs(f.mono_mz - pc.mono_mz) < 0.01 || (pc.charge > 0 && on_grid(f.mono_mz, pc.mono_mz, pc.charge))
-          || on_grid(pc.mono_mz, f.mono_mz, f.charge)) { ++cnt[4]; continue; }
+          || on_grid(pc.mono_mz, f.mono_mz, f.charge)) { ++n_skip; continue; }
       cand.push_back(&f);
     }
+    if (n_skip) cnt[4] += n_skip;
     if (cand.empty()) return 0;
     ++cnt[0];
     vector<uint32_t> om(frags.size());                               // the fragments by m/z, ties by index
@@ -3495,6 +3498,7 @@ protected:
     }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
     // [foreign] other precursors' residual envelopes, before the merge and the cap: a removed fragment frees its slot
+    const size_t n_before = frags.size();                              // [foreign] for the fell-below count
     const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai) : 0;
     // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
     // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
@@ -3540,7 +3544,11 @@ protected:
         mergeCount_()[2] += nm;
       }
     }
-    if (frags.size() < min_frags) { if (n_foreign) ++foreignCount_()[5]; return; }
+    if (frags.size() < min_frags)
+    {   // [foreign] counted only when the removal (weight 0) took a spectrum that had enough fragments below the floor
+      if (n_foreign && foreign_w_ <= 0.0 && n_before >= min_frags) ++foreignCount_()[5];
+      return;
+    }
     if (frags.size() > max_frags)
     {
       vector<size_t> idx(frags.size());
@@ -5501,7 +5509,7 @@ protected:
                     + String(c[4].load()) + " candidates skipped as the precursor's own ion); " + String(c[1].load()) + " foreign envelopes matched; "
                     + String(c[3].load()) + " fragments " + (foreign_w_ > 0.0 ? "attenuated" : "removed") + " in " + String(c[2].load()) + " spectra, "
                     + String(c[5].load()) + " of which then fell below assembly:min_fragments; mean m/z error of the " + String(nm)
-                    + " matches " + String(nm ? (double)c[6].load() / 1000.0 / (double)nm : 0.0) + " ppm");
+                    + " matches " + String(nm ? (double)c[6].load() / 1000.0 / (double)nm : 0.0, false) + " ppm");
     }
     {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
       auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();

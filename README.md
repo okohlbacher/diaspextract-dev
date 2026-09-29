@@ -48,7 +48,7 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    spectrum carries two peaks at one m/z. Before that merge, `-assembly:foreign_precursor_weight` below 1 (off by
    default) attenuates the residual isotope envelope of another precursor isolated with this one: one of the run's own
    precursors in the same window, co-eluting within the gate's window and 0.015 1/K0, with at least 2 of its mono…M+3
-   positions among the fragments; the precursor's own envelope is never touched; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
+   positions among the fragments; the precursor's own envelope is never touched. A spectrum with at least 3 fragments is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
    each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
    (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
