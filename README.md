@@ -43,7 +43,9 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    grid, with at least 3 shared points). A faint precursor — signal in at most 4 window frames, the short tip of an
    elution peak — gets a relaxed gate instead (`-gate:adaptive`): a 6 s window, the correlation shrunk toward a prior
    of 0.6 from as little as one shared point, an apex inside the precursor's span, and traces too short to correlate
-   judged by their centre.
+   judged by their centre. With `-gate:anchor_rescue true` (off by default) a well-sampled precursor whose own fragments
+   correlate strongly (the anchors) also takes back weak fragments the gate rejected for too few points or a low
+   correlation, when their apex and their points follow the anchors' consensus elution profile.
 4. **Assembly and output.** The accepted fragments are ranked by evidence — max(r, 0) × ln(1 + intensity) × (1 + shared
    points) — and the top 500 kept;
    fragments that still share a flight-time bin are merged into one peak first (`-assembly:merge_same_bin`), so no
@@ -255,6 +257,11 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-gate:short_center_tol` | 0.5 | centre tolerance as a fraction of the precursor half-width |
 | `-gate:short_min_points` | 1 | fewest points of a short fragment trace |
 | `-gate:fragment_delta_im` | −1 | 1/K0 window of the gate alone (tracing keeps `delta_im`); −1 = `delta_im` |
+| `-gate:anchor_rescue` | false | `true`: rescue weak fragments of a well-sampled precursor (signal in more than `faint_max_frames` window frames, whatever `adaptive` is set to). When at least `anchor_min_count` fragments pass the gate at a correlation of `anchor_min_corr` or more, their profiles, each scaled to unit maximum, are summed into a consensus; a fragment trace inside the retention-time and 1/K0 windows that the gate rejected only for too few shared points or by `min_correlation`, with at least 2 points, joins when its apex is within one cycle of the consensus apex and its points correlate with the consensus by `anchor_rescue_corr` or more (Pearson over its own points; a 2-point trace needs both points at half the consensus maximum or more, rising or falling with it, and scores `anchor_rescue_corr`). Its emitted intensity and cap key use that score, capped at `anchor_min_corr` (the cap key's shared points are, as for every fragment, the frames it shares with the precursor). Logged as `[anchor]`, stamped `spx:anchor`; `DIASPEXTRACT_GATE_DUMP` rows carry the fate `rescued`. **Changes output** |
+| `-gate:anchor_min_count` | 3 | fewest anchors a precursor needs for `anchor_rescue` |
+| `-gate:anchor_min_corr` | 0.8 | least gate correlation of an anchor; also the cap on a rescued fragment's score |
+| `-gate:anchor_rescue_corr` | 0.7 | least correlation of a rejected fragment's points with the anchor consensus |
+| `-gate:anchor_max_rescued` | 50 | most rescued fragments per spectrum, best score first (ties by m/z) |
 
 **Assembly (`assembly:`)**
 
@@ -299,7 +306,7 @@ tolerance, or `off`), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`
 (`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
 `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
 `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
-(`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
+(`spx:frame_table`); `-gate:anchor_rescue true` adds `spx:anchor`. `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
 transform, on request) or `unset` (an mzML input, which carries its m/z as is). With
 `-charge:mono_profile_check true` the header also carries `spx:monocheck` (its settings and how many monoisotopes moved).
