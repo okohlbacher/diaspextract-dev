@@ -116,7 +116,7 @@ BUSY_FIXED = [r"diaTracer-2\.2\.[1]\.jar", r"MSFragger-4\.4\.[1]\.jar", r"/sag[e
 # copy) and `entrapment` (a third search per output). A plan without either is the two-extractor pair above: the same
 # functions run and measure it, and its three measurement hashes do not move (selftest pins them). `engines` (a subset
 # of ENGINES) restricts which searches run; it changes no measured function, only which search cells exist.
-OPTIONAL_PLAN_KEYS = {"cells", "entrapment", "engines"}
+OPTIONAL_PLAN_KEYS = {"cells", "entrapment", "engines", "keep_mzml"}
 CELL_KEYS = {"kind", "arm", "args", "wall_cap_h"}                 # plus optional differs_from
 CELL_NAME = r"[a-z][a-z0-9_]{0,23}"
 # One kind so far: diaWeaver (alhigaylan/diaWeaver, branch diaWeaver-2). Its env.sh exports `bin` and points
@@ -2025,7 +2025,8 @@ def _node_run(q: dict, root: Path) -> int:
     n = rescore(root, q["samples"], ctx)
     if n:
         say("RESCORED %d search cell(s) from their kept result TSVs (peptide rule changed)" % n)
-    sweep_outputs(root, q["samples"], ctx)
+    if not q.get("keep_mzml"):
+        sweep_outputs(root, q["samples"], ctx)
     failed = 0
     for i, s in enumerate(q["samples"]):             # phase 1: timed pairs, one at a time, no searches
         if pair_done(read_json(rec_path(root, s["id"], "pair")), s, ctx, root):
@@ -2052,8 +2053,8 @@ def _node_run(q: dict, root: Path) -> int:
         s, tool = u
         # a cell's own libraries run its re-encode, never an engine: every search runs in the reference arm's env
         oks = [one_search(s, tool, e) if pending(s, tool, e) else True for e in engines]
-        if all(oks):                                  # every engine succeeded: the mzML goes
-            Path(pairs[s["id"]]["arms"][tool]["output"]["path"]).unlink(missing_ok=True)
+        if all(oks) and not q.get("keep_mzml"):      # every engine succeeded: the mzML goes (keep_mzml: it stays
+            Path(pairs[s["id"]]["arms"][tool]["output"]["path"]).unlink(missing_ok=True)  # for spectrum-level analysis)
         return oks.count(False)
 
     if ext:        # every ok arm of a current group is searched, also when another cell of the group failed
@@ -2074,7 +2075,7 @@ def _node_run(q: dict, root: Path) -> int:
         failed += sum(ex.map(unit, rest))
     finally:
         ex.shutdown(wait=True, cancel_futures=True)
-    left = sweep_outputs(root, q["samples"], ctx)
+    left = leftovers(root) if q.get("keep_mzml") else sweep_outputs(root, q["samples"], ctx)
     say("QUEUE_DONE failed %d mzml_left %d%s" % (failed, len(left), (" " + " ".join(left[:6])) if left else ""))
     (root / ("QUEUE_DONE-%s" % q["nonce"])).write_text("failed %d\n" % failed)
     return 0 if failed == 0 else 1
@@ -2645,6 +2646,8 @@ def check_extended(name: str, plan: dict) -> None:
     makes a plan extended); the entrapment search has its own key."""
     if "entrapment" in plan and not isinstance(plan["entrapment"], bool):
         die("G-V01", "plan %s: entrapment must be true or false, not %r" % (name, plan["entrapment"]))
+    if "keep_mzml" in plan and not isinstance(plan["keep_mzml"], bool):
+        die("G-V01", "plan %s: keep_mzml must be true or false, not %r" % (name, plan["keep_mzml"]))
     eng = plan.get("engines")
     if "engines" in plan and (not isinstance(eng, list) or not eng or [e for e in ENGINES if e in eng] != eng):
         die("G-V01", "plan %s: engines must be a non-empty list of %s in that order without repeats, not %r"
@@ -3932,6 +3935,7 @@ def _selftest_extended(C, w: Path, q1: dict, q3: dict) -> None:
             ("differs_from itself", lambda pl: pl["cells"]["dwv_pickim"].update(differs_from="dwv_pickim"), "differs_from"),
             ("a cell arm with a path separator", lambda pl: pl["cells"]["dwv_default"].update(arm="../v1.3.0"), "directory name"),
             ("entrapment: yes (a string)", lambda pl: pl.update(entrapment="yes"), "true or false"),
+            ("keep_mzml: yes (a string)", lambda pl: pl.update(keep_mzml="yes"), "true or false"),
             ("entrapment without its tools", lambda pl: pl["tools"].pop("sage_entrap"), "tools need exactly"),
             ("cells without the digest tool", lambda pl: pl["tools"].pop("digest"), "tools need exactly"),
             ("entrapment without an entrap_fasta pin", lambda pl: pl["search_db_sha256"].pop("entrap_fasta"), "search_db_sha256"),
@@ -4754,6 +4758,11 @@ def selftest(args=None) -> int:
                 any(x.endswith("A_diatracer.mzML") for x in st7["mzml_left"]), st7["mzml_left"])
         pr = node_purge({"root": q7["root"], "lock": q7["lock"]})
         C.check("G-V14", "purge deletes the kept mzMLs after the run", bool(pr["removed"]) and not pr["left"], pr)
+        q8 = _queue(w, "A", root="r8", keep_mzml=True)          # 2026-09-28: kept for spectrum-level analysis
+        node_run(q8)
+        st8 = node_status({"root": q8["root"], "lock": q8["lock"]})
+        C.check("G-V14", "keep_mzml keeps both arms' mzML after every search succeeded",
+                all(r["status"] == "ok" for r in _records(q8).values()) and len(st8["mzml_left"]) == 2, st8["mzml_left"])
 
         # ---- review F2: contention that starts after the gate flags the row
         os.environ["FAKE_FOREIGN_CORES"] = "50"

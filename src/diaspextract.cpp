@@ -230,6 +230,8 @@ namespace
   double faint_drt_ = 6.0, faint_cp_ = 1.0;   ///< [adaptive] gate:faint_delta_rt, gate:faint_corr_power
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
   int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
+  double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
+  bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -296,6 +298,9 @@ namespace
   inline std::array<std::atomic<long long>, 5>& ms1Hist_() { static std::array<std::atomic<long long>, 5> h{}; return h; }
   /// [pspan] precursors reaching assembly by MS1 span in window frames: 1, 2, 3, 4, 5-6, 7-10, 11-20, >20; [8] = faint (adaptive)
   inline std::array<std::atomic<long long>, 9>& pspanHist_() { static std::array<std::atomic<long long>, 9> h{}; return h; }
+  /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
+  /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
+  inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -950,19 +955,79 @@ namespace
   /// m/z quanta -> flight-time bins, in place. The store keeps m/z at a 1e-5 Da quantum, ~400x finer
   /// than one TOF bin at m/z 600, so inverting the calibration recovers the ORIGINAL bin exactly --
   /// no approximation is introduced here, and the loader does not have to know the axis.
+  ///
+  /// [merge] The IM picker's 1/K0 box (gate:delta_im) cuts an ion whose mobility peak is wider into several centroids per
+  /// frame that land in ONE bin; the tracer takes one peak per frame, so each slice became its own trace and a spectrum
+  /// could carry the same m/z twice (docs/reviews/same-bin-traces-2026-09-27). Here, where the bin first exists, a
+  /// frame's peaks that share a bin and chain within trace:im_slice_merge in 1/K0 become one peak: intensity summed,
+  /// 1/K0 intensity-weighted. Frame-local, so thread and tile invariant; peaks stay ascending by bin within a frame.
   void toTof(PeakSlab& sl)
   {
     if (!sl.mzq) return;
+    const long long led_b0 = (long long)sl.bytes();         // [ledger] the load charged the pre-merge bytes
     const TofAxis& ax = tofAxis();
     const size_t F = sl.frames();
     sl.b.resize(F);
+    // single linkage along 1/K0 with a link of im_slice_merge_, the whole group within 2x that (one ion's 2-3 slices;
+    // measured slice spacing median 0.008, q90 0.014, max 0.019 at the 0.01 picker box)
+    const long tol_q = im_slice_merge_ >= 0.0 ? (long)llround(im_slice_merge_ * IM_Q) : -1, span_q = 2 * tol_q;
+    vector<pair<uint16_t, uint32_t>> run;                    // (imq, slab index) of one same-bin run
+    vector<std::tuple<uint32_t, float, uint16_t>> cl;        // (first slab index, intensity, imq) of the run's groups
+    uint32_t w = 0;
+    long long merged = 0, frames_merged = 0;
     for (size_t i = 0; i < F; ++i)
     {
       const double b = ax.factor(sl.frame_id[i]);
       sl.b[i] = b;
-      for (uint32_t k = sl.frame_off[i]; k < sl.frame_off[i + 1]; ++k)
+      const uint32_t lo = sl.frame_off[i], hi = sl.frame_off[i + 1];
+      for (uint32_t k = lo; k < hi; ++k)
         sl.tof[k] = ax.tofOf((double)sl.tof[k] / MZ_Q, b);
+      sl.frame_off[i] = w;
+      bool any = false;
+      for (uint32_t k = lo; k < hi;)
+      {
+        uint32_t e = k + 1;
+        while (e < hi && sl.tof[e] == sl.tof[k]) ++e;
+        if (e - k == 1 || tol_q < 0)
+        {
+          for (uint32_t j = k; j < e; ++j) { sl.tof[w] = sl.tof[j]; sl.inten[w] = sl.inten[j]; sl.imq[w] = sl.imq[j]; ++w; }
+          k = e; continue;
+        }
+        run.clear();
+        for (uint32_t j = k; j < e; ++j) run.emplace_back(sl.imq[j], j);
+        std::sort(run.begin(), run.end());                   // by 1/K0, then slab order: deterministic
+        cl.clear();                                          // every read of the run happens before any write
+        for (size_t r = 0; r < run.size();)
+        {
+          size_t q = r + 1;
+          while (q < run.size() && (long)run[q].first - (long)run[q - 1].first <= tol_q
+                 && (long)run[q].first - (long)run[r].first <= span_q) ++q;
+          if (q - r == 1) { cl.emplace_back(run[r].second, sl.inten[run[r].second], run[r].first); r = q; continue; }   // untouched
+          double isum = 0.0, wim = 0.0;
+          uint32_t first = run[r].second;
+          for (size_t u = r; u < q; ++u)
+          {
+            first = std::min(first, run[u].second);
+            const float v = sl.inten[run[u].second];
+            if (v > 0.0f && std::isfinite(v)) { isum += v; wim += (double)v * run[u].first; }
+          }
+          cl.emplace_back(first, (float)isum, isum > 0.0 ? (uint16_t)std::min(65535.0, std::max(0.0, std::round(wim / isum))) : run[r].first);
+          merged += (long long)(q - r - 1); any = true;
+          r = q;
+        }
+        // groups written at their first member's slab position: with nothing merged the slab is byte-identical,
+        // so the tracer's same-bin tie-break (slab order) is unchanged wherever no merge happened
+        std::sort(cl.begin(), cl.end(), [](const auto& x, const auto& y) { return std::get<0>(x) < std::get<0>(y); });
+        const TofIdx t = sl.tof[k];
+        for (const auto& c : cl) { sl.tof[w] = t; sl.inten[w] = std::get<1>(c); sl.imq[w] = std::get<2>(c); ++w; }
+        k = e;
+      }
+      frames_merged += any;
     }
+    if (F) sl.frame_off[F] = w;
+    sl.tof.resize(w); sl.inten.resize(w); sl.imq.resize(w);
+    ledAdd_(LC_SLAB, (long long)sl.bytes() - led_b0);         // [ledger] give back what the merge freed
+    mergeCount_()[0] += merged; mergeCount_()[1] += frames_merged;
     vector<uint32_t>().swap(sl.frame_id);
     sl.mzq = false;
   }
@@ -2365,6 +2430,9 @@ protected:
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
+    registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's picked MS2 peaks that fall in one flight-time bin into one peak (intensity summed, 1/K0 intensity-weighted). Peaks join when their 1/K0 is within this distance of the previous one and the group spans at most twice this distance: the IM picker (box gate:delta_im) cuts an ion with a wider mobility peak into several same-bin centroids, which would otherwise become separate traces and duplicate m/z in a spectrum. Negative = off.", false, true);
+    registerStringOption_("assembly:merge_same_bin", "<true/false>", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", false, true);
+    setValidStrings_("assembly:merge_same_bin", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
     registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else 'off' (the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': the modes apply to every precursor. Experimental.", false, true);
@@ -3120,6 +3188,8 @@ protected:
   {
     vector<pair<double, double>> frags;
     vector<double> frag_scores;
+    vector<uint32_t> frag_bin;   // [merge] the TOF bin of each fragment (0: OpenMS detector, no bin)
+    vector<pair<int, int>> frag_span;   // [merge] its detected window-frame span
     const double G = (double)fg.G;
     const Trace& p_tr = ms1_traces[pc.trace_idx];
     vector<int> touched;
@@ -3257,6 +3327,8 @@ protected:
         double emit_inten = inten;
         if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
+        frag_bin.push_back(f.tof);
+        frag_span.emplace_back(f_lo, f_hi);
         frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
                             : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
                             : c * inten);                              // [cap] the max_fragments ranking key
@@ -3300,6 +3372,50 @@ protected:
       if (rows.tellp() > 0) { std::lock_guard<std::mutex> lk(gd.mu); gd.out << rows.str(); gd.out.flush(); }
     }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
+    // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
+    // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
+    // RT span overlaps its span are summed (parallel slices of one ion), RT-disjoint pieces are dropped (the stronger
+    // piece stands, as the twin fold's max); the merged peak takes the strongest member's m/z and the best cap key of
+    // the summed members (not recomputed). Two peaks at one m/z stall OpenMS' MatchedIterator.
+    if (merge_same_bin_ && frags.size() > 1)
+    {
+      vector<size_t> ord(frags.size());
+      for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+      auto key = [&](size_t i) { return std::make_tuple(frag_bin[i] == 0, frag_bin[i], frag_bin[i] ? 0.0 : frags[i].first, i); };
+      std::sort(ord.begin(), ord.end(), [&](size_t a, size_t b) { return key(a) < key(b); });
+      auto same = [&](size_t a, size_t b) { return frag_bin[a] ? frag_bin[a] == frag_bin[b] : (!frag_bin[b] && frags[a].first == frags[b].first); };
+      vector<char> gone(frags.size(), 0);
+      long long nm = 0;
+      for (size_t g = 0; g < ord.size();)
+      {
+        size_t e = g + 1;
+        while (e < ord.size() && same(ord[g], ord[e])) ++e;
+        if (e - g > 1)
+        {
+          const size_t head = ord[g];                                    // lowest index: the output order is unchanged
+          size_t top = head;
+          for (size_t k = g; k < e; ++k) if (frags[ord[k]].second > frags[top].second) top = ord[k];
+          double sum = 0.0, cap = -std::numeric_limits<double>::infinity();
+          for (size_t k = g; k < e; ++k)
+          {
+            const size_t i = ord[k];
+            if (!(frag_span[i].second < frag_span[top].first || frag_span[top].second < frag_span[i].first))
+            { sum += frags[i].second; cap = std::max(cap, frag_scores[i]); }
+            if (k > g) gone[i] = 1;
+          }
+          frags[head] = {frags[top].first, sum}; frag_scores[head] = cap;
+          nm += (long long)(e - g - 1);
+        }
+        g = e;
+      }
+      if (nm)
+      {
+        size_t w = 0;
+        for (size_t i = 0; i < frags.size(); ++i) if (!gone[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; ++w; }
+        frags.resize(w); frag_scores.resize(w);
+        mergeCount_()[2] += nm;
+      }
+    }
     if (frags.size() < min_frags) return;
     if (frags.size() > max_frags)
     {
@@ -3550,6 +3666,8 @@ protected:
     adaptive_auto_ = (getStringOption_("gate:adaptive") == "auto");
     auto_faint_frac_ = getDoubleOption_("gate:auto_faint_fraction");
     cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
+    im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
+    merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
@@ -4572,6 +4690,8 @@ protected:
     out_exp.setMetaValue("spx:gate_colocation", coloc_ ? String("ranges ") + String(coloc_overlap_) : String("off"));
     out_exp.setMetaValue("spx:gate_short_traces", short_conc_ ? String("concentric tol ") + String(short_center_tol_) + " from " + String(short_min_pts_) : String("off"));
     out_exp.setMetaValue("spx:cap_rank", String(cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten"));
+    out_exp.setMetaValue("spx:same_bin_merge", String("im_slices ") + (!integer_detector ? String("n/a (openms detector)") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) + " (span " + String(2.0 * im_slice_merge_) + ")" : String("off"))
+                         + ", assembly " + (merge_same_bin_ ? (integer_detector ? "on" : "on (exact m/z)") : "off"));
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
@@ -4646,7 +4766,7 @@ protected:
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
       { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledSet_(LC_SLAB, sb); }
-      if (detOn_())
+      if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
         // the chain of a window's tiles EQUALS the whole-window digest a resident run prints -- the
@@ -5230,6 +5350,12 @@ protected:
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
+    {   // [merge] how much splitting the two merges removed
+      auto& m = mergeCount_();
+      writeLogInfo_("[merge] im-slice merge (trace:im_slice_merge " + (!integer_detector ? String("n/a, openms detector") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) : String("off")) + "): " + String(m[0].load())
+                    + " picked MS2 peaks merged away in " + String(m[1].load()) + " frames; assembly same-bin merge (" + (merge_same_bin_ ? "on" : "off") + "): "
+                    + String(m[2].load()) + " fragments merged away");
+    }
     {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
       auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();
       writeLogInfo_("[pspan] precursors by MS1 span (window frames): 1:" + String(h[0].load()) + " 2:" + String(h[1].load()) + " 3:" + String(h[2].load())
