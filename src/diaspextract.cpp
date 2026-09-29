@@ -232,6 +232,11 @@ namespace
   int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
   double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
   bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
+  bool anchor_rescue_ = false;       ///< [anchor] gate:anchor_rescue: weak fragments of non-faint precursors judged against an anchor consensus
+  int anchor_min_count_ = 3;         ///< [anchor] gate:anchor_min_count
+  double anchor_min_corr_ = 0.8;     ///< [anchor] gate:anchor_min_corr
+  double anchor_rescue_corr_ = 0.7;  ///< [anchor] gate:anchor_rescue_corr
+  int anchor_max_rescued_ = 50;      ///< [anchor] gate:anchor_max_rescued
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -301,6 +306,11 @@ namespace
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
+  /// [anchor] gate:anchor_rescue: [0] non-faint precursors scored, [1] of them anchored, [2] candidates of the anchored,
+  /// [3] rescued, [4] passed beyond gate:anchor_max_rescued, [5] precursors with a rescue, [6] rescued peaks in written
+  /// spectra (after the same-bin merge and the cap, before the twin fold), [7] written spectra holding one, [8] written
+  /// spectra that reach assembly:min_fragments only through rescues
+  inline std::array<std::atomic<long long>, 9>& anchorCount_() { static std::array<std::atomic<long long>, 9> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -2430,6 +2440,18 @@ protected:
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
+    registerStringOption_("gate:anchor_rescue", "<true/false>", "false", "Rescue weak fragments of well-sampled precursors (not the faint ones of gate:adaptive). When at least gate:anchor_min_count fragments pass the gate with a correlation of gate:anchor_min_corr or more, their profiles, each scaled to unit maximum, are summed into a consensus over the window frames. A fragment trace inside the RT and 1/K0 windows that the gate rejected only for too few shared points or by gate:min_correlation, with at least 2 points, then joins when its apex is within one cycle of the consensus apex and its points correlate with the consensus at those frames (Pearson over its own points, not the full grid) by gate:anchor_rescue_corr or more; a 2-point trace instead needs both points in the consensus core (at least half its maximum) rising or falling with it, and scores gate:anchor_rescue_corr. The emitted intensity and the cap key use that score, capped at gate:anchor_min_corr; at most gate:anchor_max_rescued per spectrum, best score first. Logged as [anchor], stamped spx:anchor. Experimental.", false, true);
+    setValidStrings_("gate:anchor_rescue", {"true", "false"});
+    registerIntOption_("gate:anchor_min_count", "<n>", 3, "gate:anchor_rescue: fewest anchors (accepted fragments at gate:anchor_min_corr or more) a precursor needs for the rescue.", false, true);
+    setMinInt_("gate:anchor_min_count", 1);
+    registerDoubleOption_("gate:anchor_min_corr", "<r>", 0.8, "gate:anchor_rescue: least gate correlation of an anchor; also caps the score of a rescued fragment, so it never outweighs an anchor.", false, true);
+    setMinFloat_("gate:anchor_min_corr", 0.0);
+    setMaxFloat_("gate:anchor_min_corr", 1.0);
+    registerDoubleOption_("gate:anchor_rescue_corr", "<r>", 0.7, "gate:anchor_rescue: least Pearson correlation of a rejected fragment's points with the anchor consensus.", false, true);
+    setMinFloat_("gate:anchor_rescue_corr", 0.0);
+    setMaxFloat_("gate:anchor_rescue_corr", 1.0);
+    registerIntOption_("gate:anchor_max_rescued", "<n>", 50, "gate:anchor_rescue: most rescued fragments per spectrum (best score first, ties by m/z).", false, true);
+    setMinInt_("gate:anchor_max_rescued", 0);
     registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's picked MS2 peaks that fall in one flight-time bin into one peak (intensity summed, 1/K0 intensity-weighted). Peaks join when their 1/K0 is within this distance of the previous one and the group spans at most twice this distance: the IM picker (box gate:delta_im) cuts an ion with a wider mobility peak into several same-bin centroids, which would otherwise become separate traces and duplicate m/z in a spectrum. Negative = off.", false, true);
     setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
     registerStringOption_("assembly:merge_same_bin", "<true/false>", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", false, true);
@@ -3227,6 +3249,11 @@ protected:
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
+    // [anchor] gate:anchor_rescue, non-faint precursors: the accepted fragments that can anchor a consensus, and the ones
+    // the gate rejected only for support (point or overlap floor) or by the correlation cut, with at least 2 points
+    const bool g_anchor = anchor_rescue_ && !faint;
+    vector<uint32_t> anchors, cands;
+    vector<char> resc;                                                  // [anchor] 1 = rescued, parallel to frags (empty: none)
     if (pinv > 0.0)
     {
       size_t lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - delta_im) - frag_im.begin();
@@ -3246,7 +3273,8 @@ protected:
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
-        if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_)) continue;
+        if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_))
+        { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi); continue; }
         int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
         float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
@@ -3279,7 +3307,8 @@ protected:
         }
         else
         {
-          if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts)) continue;   // overlap guard [H-4]; [shrink] its own floor
+          if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts))    // overlap guard [H-4]; [shrink] its own floor
+          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi); continue; }
           // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
           // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
           // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
@@ -3320,7 +3349,8 @@ protected:
             const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
             c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
-          if (!(c >= min_corr)) continue;                                // correlation gate (a NaN score is rejected too)
+          if (!(c >= min_corr))                                          // correlation gate (a NaN score is rejected too)
+          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi); continue; }
         }
         // [E5] The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
         double inten = intensityOf(wst, f);
@@ -3334,6 +3364,96 @@ protected:
         frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
                             : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
                             : c * inten);                              // [cap] the max_fragments ranking key
+        if (g_anchor && c >= anchor_min_corr_) anchors.push_back((uint32_t)fi);   // [anchor] a well-correlated accepted fragment
+      }
+      // [anchor] gate:anchor_rescue. A weak fragment of a strong precursor is a 2-3 point tip that fails the plain gate's
+      // point floor or its full-grid Pearson, while the precursor's well-correlated fragments (the anchors) outline the
+      // elution peak. Their profiles, each at unit maximum, are summed into a consensus over the window frames; a candidate
+      // joins when its apex is within one cycle of the consensus apex and its own points follow the consensus (local
+      // Pearson; with two points: both in the core, >= half the consensus maximum, and in its direction, scored at the
+      // threshold like a borderline fragment). The score, capped at anchor_min_corr, weighs it like any other fragment.
+      // Deterministic: anchors and candidates come in index order, the budget sorts by (score, m/z, index).
+      if (g_anchor)
+      {
+        auto& ac = anchorCount_();
+        ++ac[0];
+        if ((int)anchors.size() >= anchor_min_count_)
+        {
+          ++ac[1]; ac[2] += (long long)cands.size();
+          int c_lo = std::numeric_limits<int>::max(), c_hi = -1;
+          for (uint32_t ai : anchors)
+          { const Trace& a = frag_traces[ai]; c_lo = std::min(c_lo, (int)a.frame0); c_hi = std::max(c_hi, (int)(a.frame0 + a.span()) - 1); }
+          vector<double> cons((size_t)(c_hi - c_lo + 1), 0.0);
+          for (uint32_t ai : anchors)
+          {
+            const Trace& a = frag_traces[ai];
+            float amax = 0.0f;
+            for (size_t k = 0; k < a.span(); ++k) amax = std::max(amax, xv(wst, a, k));
+            if (!(amax > 0.0f)) continue;
+            for (size_t k = 0; k < a.span(); ++k) cons[a.frame0 + k - (size_t)c_lo] += (double)xv(wst, a, k) / amax;
+          }
+          size_t ca = 0;
+          for (size_t j = 1; j < cons.size(); ++j) if (cons[j] > cons[ca]) ca = j;   // the consensus apex (first maximum)
+          const int c_apex = c_lo + (int)ca;
+          const double core = 0.5 * cons[ca];
+          struct Resc { double r, mz; uint32_t fi; int sup, t_lo, t_hi; };
+          vector<Resc> rs;
+          for (uint32_t fi : cands)
+          {
+            const Trace& f = frag_traces[fi];
+            if (std::abs((int)(f.frame0 + f.apex) - c_apex) > 1) continue;   // the raw apex, within one cycle
+            // sums shifted by the first point, so a constant profile has exactly zero variance
+            double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, x0 = 0, y0 = 0, dx1 = 0, dy1 = 0;
+            int n = 0, sup = 0, t_lo = -1, t_hi = -1;
+            bool in_core = true;
+            for (size_t k = 0; k < f.span(); ++k)
+            {
+              const double x = xv(wst, f, k); if (x <= 0.0) continue;
+              const int g = (int)(f.frame0 + k);
+              const double y = g < c_lo || g > c_hi ? 0.0 : cons[(size_t)(g - c_lo)];
+              if (t_lo < 0) { t_lo = g; x0 = x; y0 = y; }
+              t_hi = g;
+              if (y > 0.0) ++sup;                                        // points on the consensus support: its shared points
+              if (y < core) in_core = false;
+              const double dx = x - x0, dy = y - y0;
+              if (n == 1) { dx1 = dx; dy1 = dy; }
+              sx += dx; sy += dy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; ++n;
+            }
+            double r = -1.0;
+            if (n == 2) { if (in_core && dx1 * dy1 > 0.0) r = anchor_rescue_corr_; }
+            else if (n > 2)
+            {
+              const double vx = sxx - sx * sx / n, vy = syy - sy * sy / n;
+              if (vx > 0.0 && vy > 0.0) r = (sxy - sx * sy / n) / std::sqrt(vx * vy);
+            }
+            if (!(r >= anchor_rescue_corr_)) continue;
+            rs.push_back({r, exportMz_(f.tof, bOf(wst, f), f.mz), fi, sup, t_lo, t_hi});
+          }
+          std::sort(rs.begin(), rs.end(), [](const Resc& a, const Resc& b) {
+            if (a.r != b.r) return a.r > b.r;
+            if (a.mz != b.mz) return a.mz < b.mz;
+            return a.fi < b.fi;
+          });
+          const size_t nk = std::min(rs.size(), (size_t)anchor_max_rescued_);
+          ac[4] += (long long)(rs.size() - nk);
+          if (nk) { ac[3] += (long long)nk; ++ac[5]; resc.assign(frags.size(), 0); }
+          for (size_t j = 0; j < nk; ++j)
+          {
+            const Resc& q = rs[j];
+            const Trace& f = frag_traces[q.fi];
+            const double c = std::min(q.r, anchor_min_corr_);
+            double inten = intensityOf(wst, f);                          // as above: IM weight, then c^corr_power
+            const double dim = frag_im[q.fi] - pc.im;
+            if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
+            double emit_inten = inten;
+            if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
+            frags.emplace_back(q.mz, emit_inten);
+            frag_bin.push_back(f.tof);
+            frag_span.emplace_back(q.t_lo, q.t_hi);
+            frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.sup) : c * inten);
+            resc.push_back(1);
+          }
+        }
       }
     }
     if (GateDump_& gd = GateDump_::get(); gd.on)                       // [gate-dump] read-only; before the reset
@@ -3406,6 +3526,7 @@ protected:
             if (k > g) gone[i] = 1;
           }
           frags[head] = {frags[top].first, sum}; frag_scores[head] = cap;
+          if (!resc.empty()) resc[head] = resc[top];                    // [anchor] rescued if its m/z is a rescued one's
           nm += (long long)(e - g - 1);
         }
         g = e;
@@ -3413,12 +3534,20 @@ protected:
       if (nm)
       {
         size_t w = 0;
-        for (size_t i = 0; i < frags.size(); ++i) if (!gone[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; ++w; }
+        for (size_t i = 0; i < frags.size(); ++i)
+          if (!gone[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; if (!resc.empty()) resc[w] = resc[i]; ++w; }
         frags.resize(w); frag_scores.resize(w);
+        if (!resc.empty()) resc.resize(w);
         mergeCount_()[2] += nm;
       }
     }
     if (frags.size() < min_frags) return;
+    long long n_resc = 0;                                               // [anchor] rescued peaks in this spectrum
+    if (!resc.empty())
+    {
+      for (char r : resc) n_resc += r;
+      if (frags.size() - (size_t)n_resc < min_frags) ++anchorCount_()[8];
+    }
     if (frags.size() > max_frags)
     {
       vector<size_t> idx(frags.size());
@@ -3433,8 +3562,10 @@ protected:
       });
       vector<pair<double, double>> keep; keep.reserve(max_frags);
       for (size_t i = 0; i < max_frags; ++i) keep.push_back(frags[idx[i]]);
+      if (!resc.empty()) { n_resc = 0; for (size_t i = 0; i < max_frags; ++i) n_resc += resc[idx[i]]; }
       frags.swap(keep);
     }
+    if (n_resc) { anchorCount_()[6] += n_resc; ++anchorCount_()[7]; }
     out.setMSLevel(2);
     out.setType(SpectrumSettings::SpectrumType::CENTROID);
     out.setRT(pc.rt);
@@ -3673,6 +3804,11 @@ protected:
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
+    anchor_rescue_ = getStringOption_("gate:anchor_rescue") == "true";
+    anchor_min_count_ = getIntOption_("gate:anchor_min_count");
+    anchor_min_corr_ = getDoubleOption_("gate:anchor_min_corr");
+    anchor_rescue_corr_ = getDoubleOption_("gate:anchor_rescue_corr");
+    anchor_max_rescued_ = getIntOption_("gate:anchor_max_rescued");
     if (shrink_ && log_overlap_)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "gate:shrinkage fisher needs a correlation: it does not apply to gate:coelution logoverlap");
     corr_power_ = getDoubleOption_("assembly:corr_power");
@@ -4695,6 +4831,9 @@ protected:
     out_exp.setMetaValue("spx:cap_rank", String(cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten"));
     out_exp.setMetaValue("spx:same_bin_merge", String("im_slices ") + (!integer_detector ? String("n/a (openms detector)") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) + " (span " + String(2.0 * im_slice_merge_) + ")" : String("off"))
                          + ", assembly " + (merge_same_bin_ ? (integer_detector ? "on" : "on (exact m/z)") : "off"));
+    if (anchor_rescue_)   // [anchor] stamped only when on: the default header is unchanged
+      out_exp.setMetaValue("spx:anchor", String("anchors ") + String(anchor_min_count_) + " at r " + String(anchor_min_corr_) + ", rescue r "
+                                          + String(anchor_rescue_corr_) + ", max " + String(anchor_max_rescued_) + " per spectrum");
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
@@ -5364,6 +5503,19 @@ protected:
       writeLogInfo_("[pspan] precursors by MS1 span (window frames): 1:" + String(h[0].load()) + " 2:" + String(h[1].load()) + " 3:" + String(h[2].load())
                     + " 4:" + String(h[3].load()) + " 5-6:" + String(h[4].load()) + " 7-10:" + String(h[5].load()) + " 11-20:" + String(h[6].load())
                     + " >20:" + String(h[7].load()) + " total " + String(tot) + (adaptive_ ? " faint(<=" + String(faint_frames_) + "): " + String(h[8].load()) : String("")));
+    }
+    if (anchor_rescue_)
+    {   // [anchor] what the rescue did (counted at assembly: before the twin fold)
+      auto& a = anchorCount_();
+      char b[640];
+      snprintf(b, sizeof b, "[anchor] %lld of %lld non-faint precursors anchored (>= %d fragments at r >= %g), %lld candidates; %lld fragments "
+                            "rescued (r >= %g) in %lld precursors, %.2f per anchored precursor, %lld more beyond %d per spectrum; %lld rescued peaks "
+                            "in %lld written spectra after the same-bin merge and the cap (%.2f per such spectrum), %lld spectra reach min_fragments "
+                            "only through rescues",
+               a[1].load(), a[0].load(), anchor_min_count_, anchor_min_corr_, a[2].load(), a[3].load(), anchor_rescue_corr_, a[5].load(),
+               a[1].load() ? (double)a[3].load() / a[1].load() : 0.0, a[4].load(), anchor_max_rescued_, a[6].load(), a[7].load(),
+               a[7].load() ? (double)a[6].load() / a[7].load() : 0.0, a[8].load());
+      writeLogInfo_(b);
     }
     report_phases_(phase_clock_());
     return EXECUTION_OK;

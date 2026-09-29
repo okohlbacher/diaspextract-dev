@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased (tuning 2026-09-29)
+
+- **Anchor-conditioned rescue of weak fragments (`-gate:anchor_rescue`, off by default).** Of the DDA fragment ions
+  below 5 % relative intensity the pseudo-spectra recover 33 % (diaTracer 44 %): the faint-precursor gate helps only
+  when the precursor is faint, and a weak fragment of a strong precursor still needs 3 shared points and a full-grid
+  Pearson of 0.3. With the option on, a non-faint precursor with at least `-gate:anchor_min_count` (3) fragments at
+  r >= `-gate:anchor_min_corr` (0.8) builds a consensus profile from them (each at unit maximum, summed); fragment
+  traces in the RT and 1/K0 windows that the gate rejected only for support or by the correlation cut, with at least
+  2 points, join when their apex is within one cycle of the consensus apex and their own points correlate with the
+  consensus by `-gate:anchor_rescue_corr` (0.7) or more (2 points: both in the consensus core, in its direction,
+  scored at the threshold). Rescued fragments are weighted and cap-ranked like the others with that score, capped at
+  `anchor_min_corr`; at most `-gate:anchor_max_rescued` (50) per spectrum. An `[anchor]` log line counts anchored
+  precursors, candidates, rescues and rescued peaks in the written spectra; the header stamps `spx:anchor`. The
+  default output is unchanged (same semantic digest).
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
