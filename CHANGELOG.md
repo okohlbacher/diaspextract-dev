@@ -2,6 +2,13 @@
 
 ## Unreleased (tuning 2026-09-29)
 
+- **Release candidate A (branch tune/rc-a): new defaults** `-assembly:im_weight_sigma 0.005` (was 0 = off) and
+  `-assembly:foreign_precursor_weight 0` (was 1 = off). Screen, both engines at 1 % FDR with Sage entrapment, versus 1.5.0: K562
+  (two instruments) +8.2 % Sage / +4.2-5.1 % MSFragger, HeLa py3 10/50/100 ng +2.7-5.1 % / +3.6-4.6 %, HeLa 25pc 10 ng +6.4 / +3.9 %,
+  Evosep 60/200 SPD +5.5-7.5 % / +2.3-3.4 %, TNBC +5.2 / +4.5 %; entrapment within -0.14..+0.09 points. The spectra are more
+  DDA-like on the K562 scorecard (b/y ions in the top 150 +0.76, unexplained top-20 peaks -1.4, weak-ion recovery 25.6 -> 29.4 %).
+  The default output changes: the release digest pins do not apply to this branch.
+
 - **Fragment intensity definition (`-assembly:frag_intensity`, off by default).** The written fragment intensity is
   the trace's apex in one frame, while a DDA spectrum sums the precursor's selection. `core` sums the fragment trace
   over the `-assembly:frag_core_frames` (default 3, odd) window frames centred on the precursor's apex frame, the same
