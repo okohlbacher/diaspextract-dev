@@ -305,11 +305,12 @@ namespace
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
-  /// [foreign] [0] precursors with a foreign candidate, [1] foreign envelopes matched, [2] spectra with a fragment
-  /// attenuated, [3] fragments attenuated, [4] candidates skipped as this precursor's own ion, [5] spectra of [2] with
-  /// at least assembly:min_fragments before the removal (weight 0) and fewer after it and the same-bin merge, [6]
-  /// matched fragments' signed m/z error summed in 0.001 ppm, [7] matches behind [6]
-  inline std::array<std::atomic<long long>, 8>& foreignCount_() { static std::array<std::atomic<long long>, 8> c{}; return c; }
+  /// [foreign] per assembly (one precursor in one window): [8] assemblies checked (with fragments), [0] of them with a
+  /// foreign candidate, [1] foreign envelopes matched, [2] assemblies with a fragment attenuated, [3] fragments
+  /// attenuated, [4] candidates skipped as this precursor's own ion, [5] assemblies of [2] with at least
+  /// assembly:min_fragments before the removal (weight 0) and fewer after it and the same-bin merge, [6] matched
+  /// fragments' signed m/z error summed in 0.001 ppm, [7] matches behind [6]
+  inline std::array<std::atomic<long long>, 9>& foreignCount_() { static std::array<std::atomic<long long>, 9> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -3235,6 +3236,7 @@ protected:
     // (chance 0.06 %): the same ion called again with a mono just outside the sibling test took them.
     const double ISO = 1.0033548, ppm = foreign_ppm_ * 1e-6, same = std::max(ppm, 30e-6);
     auto& cnt = foreignCount_();
+    ++cnt[8];
     auto on_grid = [&](double a, double b, int z) {                 // a within `same` of b + j ISO/z, |j| <= 3
       for (int j = -3; j <= 3; ++j) if (std::fabs(a - (b + j * ISO / z)) <= a * same) return true;
       return false; };
@@ -5510,9 +5512,10 @@ protected:
       auto& c = foreignCount_();
       const long long nm = c[7].load();
       writeLogInfo_("[foreign] assembly:foreign_precursor_weight " + String(foreign_w_) + " (" + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
-                    + ", min_iso " + String(foreign_min_iso_) + "): " + String(c[0].load()) + " precursors had a foreign candidate ("
-                    + String(c[4].load()) + " candidates skipped as the precursor's own ion); " + String(c[1].load()) + " foreign envelopes matched; "
-                    + String(c[3].load()) + " fragments " + (foreign_w_ > 0.0 ? "attenuated" : "removed") + " in " + String(c[2].load()) + " spectra, "
+                    + ", min_iso " + String(foreign_min_iso_) + "): of " + String(c[8].load()) + " precursor-window assemblies with fragments, "
+                    + String(c[0].load()) + " had a foreign candidate (" + String(c[4].load()) + " candidates skipped as the precursor's own ion); "
+                    + String(c[1].load()) + " foreign envelopes matched; "
+                    + String(c[3].load()) + " fragments " + (foreign_w_ > 0.0 ? "attenuated" : "removed") + " in " + String(c[2].load()) + " assemblies, "
                     + String(c[5].load()) + " of which then fell below assembly:min_fragments; mean m/z error of the " + String(nm)
                     + " matches " + String(nm ? (double)c[6].load() / 1000.0 / (double)nm : 0.0, false) + " ppm");
     }
