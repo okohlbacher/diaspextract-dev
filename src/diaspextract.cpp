@@ -2884,8 +2884,9 @@ protected:
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
     // dependency. docs/BASELINE.md, "Ordered speculation on the greedy claim loop".
     // mc: [monocheck] walks checked, monos moved, rejected by profile, by 1/K0, steps passed with < 3 shared
-    // frames, partners released, moved monos left with no claimed partner. Summed at commit, not in speculation.
-    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; std::array<size_t, 7> mc{}; };
+    // frames (or a flat profile), partners released, moved monos left with no claimed partner, steps accepted
+    // by a profile that could be judged. Summed at commit, not in speculation.
+    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; std::array<size_t, 8> mc{}; };
     auto evalSeed = [&](size_t seed, SeedRes& R)
     {
       R.emit.clear(); R.claims.clear(); R.deps.clear(); R.mc.fill(0);
@@ -2996,6 +2997,7 @@ protected:
             const double r = xicCorr(ms1st, t, s);   // -2: < 3 shared frames (or flat), too little to judge
             if (r <= -2.0) ++R.mc[4];
             else if (r < mono_check_min_corr_) { ++R.mc[2]; break; }
+            else ++R.mc[7];
             acc_mz = t.mz;
           }
           if (acc < best_nl)
@@ -3097,7 +3099,7 @@ protected:
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
     vector<SeedRes> res(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
-    std::array<size_t, 7> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
+    std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
     {
       const size_t b1 = std::min(b0 + spec_batch, order.size());
@@ -3176,8 +3178,8 @@ protected:
                           + ", max_dim " + String(mono_check_max_dim_) + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right";
       writeLogInfo_("[monocheck] " + String(mc_tot[0]) + " count walks checked (winning charge with a leftward partner): "
                     + String(mc_tot[1]) + " monoisotopes moved right; steps rejected by profile (r < " + String(mono_check_min_corr_) + ") "
-                    + String(mc_tot[2]) + ", by 1/K0 (> " + String(mono_check_max_dim_) + ") " + String(mc_tot[3]) + "; "
-                    + String(mc_tot[4]) + " steps passed unchecked (< 3 shared frames); " + String(mc_tot[5])
+                    + String(mc_tot[2]) + ", by 1/K0 (> " + String(mono_check_max_dim_) + ") " + String(mc_tot[3]) + "; steps accepted "
+                    + String(mc_tot[7]) + " by profile, " + String(mc_tot[4]) + " unchecked (< 3 shared frames or flat); " + String(mc_tot[5])
                     + " leftward partners released unclaimed; " + String(mc_tot[6]) + " precursors kept no claimed partner"
                     + (envelope_scoring ? " (charge:scoring envelope: not applied)" : ""));
     }
