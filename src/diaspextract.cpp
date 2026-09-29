@@ -316,7 +316,8 @@ namespace
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
-  /// [fragint] [0] gate-passing fragments given the core/sum amplitude; [1] those of them with no point there (fallback)
+  /// [fragint] [0] gate-passing (and gate:anchor_rescue rescued) fragments given the core/sum amplitude; [1] those of
+  /// them with no point there (fallback)
   inline std::array<std::atomic<long long>, 2>& fragIntCount_() { static std::array<std::atomic<long long>, 2> c{}; return c; }
   /// [anchor] gate:anchor_rescue: [0] non-faint precursors scored, [1] of them anchored, [2] candidates of the anchored,
   /// [3] rescued, [4] passed beyond gate:anchor_max_rescued, [5] precursors with a rescue, [6] rescued peaks in written
@@ -3376,10 +3377,10 @@ protected:
   /// fragments are multiplied by foreign_w_ (0 removes them) and their cap key is recomputed from the attenuated
   /// IM-weighted apex (@p frag_ai). A fragment within 30 ppm of this precursor's own envelope (mono to M+3) neither
   /// counts nor is touched: stripping the own isotopes lost 2.3 % of peptides (CHANGELOG). Returns the fragments
-  /// attenuated.
+  /// attenuated. @p resc: gate:anchor_rescue's rescued flags, parallel to @p frags when not empty, compacted with it.
   size_t attenuateForeign_(const Precursor_& pc, double drt, const ForeignIdx_& fx, vector<pair<double, double>>& frags,
                            vector<double>& frag_scores, vector<uint32_t>& frag_bin, vector<pair<int, int>>& frag_span,
-                           const vector<double>& frag_ai) const
+                           const vector<double>& frag_ai, vector<char>& resc) const
   {
     // The two own-ion tests take a wider tolerance than the envelope match: an ion's residual peaks scatter tens of
     // ppm around the MS1 mono grid (HeLa_22: 31 % of the own-grid peaks within 60 ppm lie 20-60 ppm off), and with
@@ -3446,8 +3447,9 @@ protected:
     {
       size_t w = 0;
       for (size_t i = 0; i < hit.size(); ++i)
-        if (!hit[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; frag_bin[w] = frag_bin[i]; frag_span[w] = frag_span[i]; ++w; }
+        if (!hit[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; frag_bin[w] = frag_bin[i]; frag_span[w] = frag_span[i]; if (!resc.empty()) resc[w] = resc[i]; ++w; }
       frags.resize(w); frag_scores.resize(w); frag_bin.resize(w); frag_span.resize(w);
+      if (!resc.empty()) resc.resize(w);
     }
     cnt[1] += n_env; cnt[3] += (long long)n; cnt[6] += err; cnt[7] += n_match;
     if (n) ++cnt[2];
@@ -3510,6 +3512,23 @@ protected:
       fint_lo = frag_int_ == 1 ? fint_apex - frag_core_half_ : p_lo;
       fint_hi = frag_int_ == 1 ? fint_apex + frag_core_half_ : p_hi;
     }
+    auto fintAmp = [&](const Trace& f, double dim)                     // [fragint] a gate-passing or rescued fragment's amplitude
+    {
+      const int f0 = (int)f.frame0, f1 = f0 + (int)f.span() - 1;
+      double b = 0.0;                                                  // the same frames for every fragment of this precursor
+      for (int g = std::max(fint_lo, f0); g <= std::min(fint_hi, f1); ++g) b += xv(wst, f, (size_t)(g - f0));
+      if (!(b > 0.0))                                                  // no point there: the point nearest the precursor apex (ties earlier),
+      {                                                                // so the peak set stays the apex mode's and no peak is written at 0
+        int kb = -1;
+        for (int k = 0; k < (int)f.span(); ++k)
+          if (real(wst, f, (size_t)k) && (kb < 0 || std::abs(f0 + k - fint_apex) < std::abs(f0 + kb - fint_apex))) kb = k;
+        if (kb >= 0) b = xv(wst, f, (size_t)kb);
+        ++n_fint_fb;
+      }
+      if (im_weight_sigma_ > 0.0) b *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
+      ++n_fint;
+      return b;
+    };
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
     { const size_t n = touched.size(); pspanHist_()[n <= 4 ? (n ? n - 1 : 0) : n <= 6 ? 4 : n <= 10 ? 5 : n <= 20 ? 6 : 7]++; if (faint) pspanHist_()[8]++; }
@@ -3628,23 +3647,7 @@ protected:
         const double dim = frag_im[fi] - pc.im;
         if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
         double emit_inten = inten;
-        if (frag_int_ != 0)                                              // [fragint] base amplitude summed over frames; the cap key keeps the apex
-        {
-          const int f0 = (int)f.frame0, f1 = f0 + (int)f.span() - 1;
-          double b = 0.0;                                                // the same frames for every fragment of this precursor
-          for (int g = std::max(fint_lo, f0); g <= std::min(fint_hi, f1); ++g) b += xv(wst, f, (size_t)(g - f0));
-          if (!(b > 0.0))                                                // no point there: the point nearest the precursor apex (ties earlier),
-          {                                                              // so the peak set stays the apex mode's and no peak is written at 0
-            int kb = -1;
-            for (int k = 0; k < (int)f.span(); ++k)
-              if (real(wst, f, (size_t)k) && (kb < 0 || std::abs(f0 + k - fint_apex) < std::abs(f0 + kb - fint_apex))) kb = k;
-            if (kb >= 0) b = xv(wst, f, (size_t)kb);
-            ++n_fint_fb;
-          }
-          if (im_weight_sigma_ > 0.0) b *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
-          emit_inten = b;
-          ++n_fint;
-        }
+        if (frag_int_ != 0) emit_inten = fintAmp(f, dim);               // [fragint] base amplitude summed over frames; the cap key keeps the apex
         if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
@@ -3737,11 +3740,12 @@ protected:
             double inten = intensityOf(wst, f);                          // as above: IM weight, then c^corr_power
             const double dim = frag_im[q.fi] - pc.im;
             if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
-            double emit_inten = inten;
+            double emit_inten = frag_int_ != 0 ? fintAmp(f, dim) : inten;  // [fragint] the same amplitude as a gate-passing fragment
             if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
             frags.emplace_back(q.mz, emit_inten);
             frag_bin.push_back(f.tof);
             frag_span.emplace_back(q.t_lo, q.t_hi);
+            if (fx) frag_ai.push_back(inten);                            // [foreign] parallel to frags, as above
             frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.ov) : c * inten);
             resc.push_back(1);
             resc_fi.push_back(q.fi);
@@ -3795,7 +3799,7 @@ protected:
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
     // [foreign] other precursors' residual envelopes, before the merge and the cap: a removed fragment frees its slot
     const size_t n_before = frags.size();                              // [foreign] for the fell-below count
-    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai) : 0;
+    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai, resc) : 0;
     // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
     // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
     // RT span overlaps its span are summed (parallel slices of one ion), RT-disjoint pieces are dropped (the stronger
@@ -5868,7 +5872,7 @@ protected:
                     + " picked MS2 peaks merged away in " + String(m[1].load()) + " frames; assembly same-bin merge (" + (merge_same_bin_ ? "on" : "off") + "): "
                     + String(m[2].load()) + " fragments merged away");
     }
-    if (frag_int_ != 0)   // [fragint] what the fragment-intensity mode did (gate-passing fragments, before the merge and the cap)
+    if (frag_int_ != 0)   // [fragint] what the fragment-intensity mode did (gate-passing and rescued fragments, before the merge and the cap)
       writeLogInfo_("[fragint] assembly:frag_intensity " + (frag_int_ == 1 ? "core (" + String(2 * frag_core_half_ + 1) + " frames around the precursor apex)" : String("sum (the precursor's span)"))
                     + ": " + String(fragIntCount_()[0].load()) + " fragments took the summed amplitude, " + String(fragIntCount_()[1].load())
                     + " of them had no point there and took their point nearest the precursor apex");

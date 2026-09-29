@@ -63,6 +63,20 @@
   removed on HeLa_22 were the precursor's own isotopes, taken by the same ion called again with a mono just outside
   the test. A `[foreign]` log line counts what it did; the header stamps `spx:foreign`. The default output is
   unchanged (same semantic digest).
+- **The five tuning options together (integration branch `tune/r1`).** Each option alone behaves as on its own
+  branch; all five off is the 1.5.0 output. Where two act on the same fragments: `-gate:anchor_rescue` fragments take
+  the `-assembly:frag_intensity` amplitude like gate-passing ones (their cap key stays the IM-weighted apex, as for every
+  fragment), and the `[fragint]` counts include them. `-assembly:foreign_precursor_weight` sees the rescued fragments
+  like any other (their apex is carried for its cap-key rescale, and removal at weight 0 keeps the rescued flags in
+  step, so the `[anchor]` written-peak counts stay exact); both happen before the same-bin merge and the cap.
+  `-assembly:post_fusion_cap` carries the cap key as it stands after the foreign rescale and the rescue, and its
+  ties fall to the written intensity, which is the `frag_intensity` amplitude when that is on; the `[anchor]`
+  written-peak counts are taken before the fold and the post-fusion cap. `-charge:mono_profile_check` changes the
+  precursor list that `-assembly:foreign_precursor_weight` draws its candidates from: the own-envelope protection
+  follows the moved monoisotope (mono…M+3 of the new one), so the released lighter trace at its M−1 is outside it, but
+  a precursor that trace seeds lies on this precursor's isotope grid and is skipped as the same ion, so it never turns
+  that position into a foreign envelope; the extra precursors seeded by released traces add candidates and spectra,
+  so the `[foreign]` counts are not comparable across `mono_profile_check` settings.
 
 ## v1.5.0 — 2026-09-29
 
