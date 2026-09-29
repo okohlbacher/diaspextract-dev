@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
   is the one-to-three-point tip of its elution peak with its apex a cycle off, so the 3-point minimum, the 3 s window
@@ -18,8 +18,18 @@
   `corr_inten` is the 1.4 key, `umpire` DIA-Umpire's max(r, 0)² × ln(1 + I).
 - Measured with entrapment FDR on both engines: HeLa 10 ng +87 % Sage / +131 % MSFragger peptides over 1.4.1,
   50 ng +39 % / +66 %, 100 ng +28 % / +45 %, six tissue runs +2 % / +1 % (triplicates, harness runs); FDR 0.9–1.25 % throughout.
-  `-gate:adaptive off -gate:shrinkage off -gate:colocation off -gate:short_traces off -assembly:cap_rank corr_inten`
-  reproduces 1.4.1's output exactly (same semantic digest).
+  `-gate:adaptive off -gate:shrinkage off -gate:colocation off -gate:short_traces off -assembly:cap_rank corr_inten
+  -trace:im_slice_merge -1 -assembly:merge_same_bin false` reproduces 1.4.1's output exactly (same semantic digest).
+- **No spectrum carries two peaks at one m/z.** The ion-mobility picker cut an ion with a broad mobility peak into
+  several centroids in one flight-time bin, and the tracer followed each as its own trace, so a spectrum could hold the
+  same fragment m/z twice (15 % of the spectra of a HeLa run; without the 1.4.0 twin fold, which hid most of them, half). OpenMS-based
+  search engines stop matching at the first duplicate (OpenMS MatchedIterator; fixed upstream in OpenMS #10291), and
+  every engine scores the split intensity. Slices of one frame are now merged before tracing
+  (`-trace:im_slice_merge`, 0.015 1/K0, span at most twice that) and fragments that still share a bin are merged in
+  assembly (`-assembly:merge_same_bin`); the header stamps `spx:same_bin_merge` and the log prints a `[merge]` line.
+  On the 18 HeLa py3/25pc runs of PXD017703: +2.5 % Sage and +1.9 % MSFragger peptides over the same build without it,
+  entrapment FDR unchanged or lower; `-trace:im_slice_merge -1 -assembly:merge_same_bin false` restores the previous
+  output exactly.
 - `-gate:fragment_delta_im` sets the gate's 1/K0 window apart from the tracing tolerance (−1 = `-gate:delta_im`).
 - Diagnostics: `DIASPEXTRACT_GATE_DUMP=<file>` with `DIASPEXTRACT_GATE_TARGETS=<m/z,rt;...>` dumps the gate fate of every
   fragment near the listed precursors.

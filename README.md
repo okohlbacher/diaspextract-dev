@@ -33,6 +33,9 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
 3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
    mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
+   Before tracing, the peaks of one frame that share a flight-time bin at nearly the same 1/K0 are merged into one
+   (`-trace:im_slice_merge`): the ion-mobility picker cuts a broad ion into slices, and each slice would otherwise
+   become its own trace and a second peak at the same m/z.
    A fragment joins a precursor's spectrum when both lie in the same isolation window, its apex is within 3 s and
    0.01 1/K0 of the precursor's, and the two elution profiles correlate (Pearson ≥ 0.3 over the full retention-time
    grid, with at least 3 shared points). A faint precursor — signal in at most 4 window frames, the short tip of an
@@ -41,7 +44,8 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    judged by their centre.
 4. **Assembly and output.** The accepted fragments are ranked by evidence — correlation × log intensity × shared
    points — and the top 500 kept;
-   a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
+   fragments that still share a flight-time bin are merged into one peak first (`-assembly:merge_same_bin`), so no
+   spectrum carries two peaks at one m/z; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
    each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
    (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
@@ -206,6 +210,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-trace:max_span_sec` | 120 | trim every trace to this many seconds around its apex; 0 = no cap. **Changes output** (within 0.1 % of the peptides from 0 to 240) |
 | `-trace:mz_estimator` | apex | reported m/z of a precursor trace: the most intense peak's (`apex`), the intensity-weighted centroid (`mean`) or the `median`. Fragment traces of the integer detector always report the calibrated m/z of their apex bin; with `-trace:detector openms` the estimator applies to them too. **Changes output**; `apex` identifies the most peptides on both engines |
 | `-trace:band_edges` | acquisition | where the integer detector's band edges come from; leave at `acquisition`. `slab` (edges from the window's own peaks) needs `-perf:stream_load false`; the spectra differ slightly, the identifications hardly |
+| `-trace:im_slice_merge` | 0.015 | integer detector: before tracing, merge a frame's MS2 peaks in one flight-time bin whose 1/K0 lies within this distance of the previous one (the group spans at most twice this distance) into one peak, intensity summed, 1/K0 intensity-weighted; negative = off. **Changes output** |
 | `-trace:native_ms1_neighbors` | 0 | sum this many neighbouring MS1 frames on each side before picking (1 = 3 frames); needs `-perf:stream_load true` and `-dnoise:ms1 false`. **Changes output**: about 2.7× the spectra for about 8 % more Sage peptides, measured on older defaults |
 
 **Precursor charge (`charge:`)**
@@ -251,6 +256,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | option | default | meaning |
 |---|---|---|
 | `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments pass the gate (checked before the cap below) |
+| `-assembly:merge_same_bin` | true | merge a spectrum's fragments of one flight-time bin (one exact m/z with the OpenMS detector) into one peak before `max_fragments`: members overlapping the strongest in retention time are summed, retention-time-disjoint pieces dropped. Two peaks at one m/z stall the fragment matching of OpenMS-based search engines. **Changes output** |
 | `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more |
 | `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
 | `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
