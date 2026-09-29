@@ -15,6 +15,16 @@
   overlap it, the twin fold fuses peaks at their intensity-weighted m/z), so on HeLa 10 ng 99.9 % of the peaks lie
   within 10 ppm of the `apex` run's. Stamped `spx:fragint`; a `[fragint]` log line counts the fragments and the
   fallbacks. `apex` is the 1.5.0 output (same semantic digest).
+- **`-charge:mono_profile_check` (off by default): profile-supported monoisotope.** 9.9 % of the identified precursors
+  were reported one isotope below the monoisotope (5.5 % in DDA on the same keys): the count walk latches leftward onto
+  the first unused MS1 trace at mono − 1.00335/z within 15 ppm, 3 s and 0.05 1/K0 without asking whether it belongs to
+  the envelope. With the option on, each leftward step of the winning charge must correlate with the seed trace's MS1
+  profile (Pearson ≥ `-charge:mono_profile_min_corr`, default 0.6, over the frames both have; fewer than 3 shared frames
+  pass unchecked) and lie within `-charge:mono_profile_max_dim` (default 0.015) 1/K0 of the seed. The walk stops at the
+  first failed step, the monoisotope is the last accepted peak, and the rejected trace (and any beyond it) stays
+  unclaimed. The charge, the seed and `spx_n_isotopes` are unchanged. A `[monocheck]` log line counts the walks checked,
+  the monoisotopes moved and the rejections; the header is stamped `spx:monocheck`. Default output unchanged. At the
+  defaults the unclaimed traces seed precursors of their own: spectra +8.5 % on HeLa_22 (10 ng), +28 % on K562 9905.
 
 ## v1.5.0 — 2026-09-29
 

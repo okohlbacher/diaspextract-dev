@@ -214,6 +214,9 @@ namespace
   double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
   double mono_guard_ = 0.0;          ///< [mono-guard] averagine slack on leftward isotope steps (0=off)
   bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
+  bool mono_check_ = false;          ///< [monocheck] charge:mono_profile_check: profile + 1/K0 test on leftward steps
+  double mono_check_min_corr_ = 0.6, mono_check_max_dim_ = 0.015;   ///< [monocheck] charge:mono_profile_min_corr, _max_dim
+  String mono_check_stamp_;          ///< [monocheck] the spx:monocheck run stamp, filled by inferPrecursors_
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   bool short_conc_ = false;          ///< [short] gate:short_traces == "concentric": span test for traces too short for Pearson
   double short_center_tol_ = 0.5;    ///< [short] gate:short_center_tol, fraction of the precursor half-span
@@ -2501,6 +2504,11 @@ protected:
     setValidStrings_("assembly:require_isotope_support", {"true", "false"});
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "Reject a leftward isotope step of the charge:scoring=count walk when the lighter peak is below slack x heavier peak / lambda, averagine's loosest ratio (lambda = 0.000594 x neutral mass; 1.0 = exactly that bound, smaller values add slack). 0 = off. Falsified: it trades the -1.003 Da open-search artefact for a +1.003 Da one, docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.", false);
     registerFlag_("charge:mono_averagine_select", "Choose the monoisotope by averagine cosine over the whole isotope run of the charge:scoring=count walk instead of its furthest-left peak; only the reported precursor mass moves. Missed its pre-registered criterion: docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.");
+    registerStringOption_("charge:mono_profile_check", "<true/false>", "false", "Check the leftward isotope steps of the charge:scoring=count walk, for the winning charge only: a lighter trace becomes the monoisotope only if its MS1 elution profile correlates with the seed trace's (Pearson >= charge:mono_profile_min_corr over the frames both have; below 3 shared frames the correlation test passes unchecked) and its 1/K0 is within charge:mono_profile_max_dim of the seed's. "
+                          "The walk stops at the first failed step: the monoisotope is the last accepted peak, and the rejected trace and the ones beyond it stay unclaimed for other precursors. The charge, the seed and the envelope size (spx_n_isotopes) do not change. Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, true);
+    setValidStrings_("charge:mono_profile_check", {"true", "false"});
+    registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
+    registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "1/K0 tolerance for matching isotope partners. Only 0.05 has been measured; change it behind a peptide-set gate.", false);
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
@@ -2541,6 +2549,9 @@ protected:
     setMinFloat_("gate:min_correlation", -1.0);
     setMaxFloat_("gate:min_correlation", 1.0);
     setMinFloat_("charge:iso_im_tolerance", 0.0);
+    setMinFloat_("charge:mono_profile_min_corr", -1.0);
+    setMaxFloat_("charge:mono_profile_min_corr", 1.0);
+    setMinFloat_("charge:mono_profile_max_dim", 0.0);
     setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
     setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
     setMinFloat_("trace:ms2_noise_threshold_int", 0.0);
@@ -2881,10 +2892,13 @@ protected:
     // and re-evaluates one whose recorded partner has since been claimed. A search that returned -1 saw
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
     // dependency. docs/BASELINE.md, "Ordered speculation on the greedy claim loop".
-    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; };
+    // mc: [monocheck] walks checked, monos moved, rejected by profile, by 1/K0, steps passed with < 3 shared
+    // frames (or a flat profile), partners released, moved monos left with no claimed partner, steps accepted
+    // by a profile that could be judged. Summed at commit, not in speculation.
+    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; std::array<size_t, 8> mc{}; };
     auto evalSeed = [&](size_t seed, SeedRes& R)
     {
-      R.emit.clear(); R.claims.clear(); R.deps.clear();
+      R.emit.clear(); R.claims.clear(); R.deps.clear(); R.mc.fill(0);
       // do/while(0): the body below is the sequential loop body VERBATIM, and its seed-level
       // `continue` statements exit this wrapper exactly as they used to exit one loop iteration,
       // while `continue` inside the body's own inner loops keeps binding to those loops.
@@ -2914,7 +2928,7 @@ protected:
       // break-on-first-miss, monoisotope = furthest-left partner reached, z by partner count, ties to lowest z.
       if (!envelope_scoring)
       {
-        int best_z = 0, best_n = 1;
+        int best_z = 0, best_n = 1, best_nl = 0;
         double best_mono = s.mz;
         vector<size_t> best_partners;
         for (int z = 1; z <= max_charge; ++z)
@@ -2976,7 +2990,32 @@ protected:
             mono = (best_c < nL) ? ms1[lefts[nL - 1 - best_c]].mz : s.mz;
           }
           const int n = 1 + (int)partners.size();
-          if (n > best_n) { best_n = n; best_z = z; best_mono = mono; best_partners = partners; }
+          if (n > best_n) { best_n = n; best_z = z; best_mono = mono; best_partners = partners; best_nl = (int)lefts.size(); }
+        }
+        // [monocheck] Re-walk the winning charge's leftward partners (best_partners[0, best_nl), nearest first):
+        // each must share the seed's elution profile and mobility, else the walk stops there and the
+        // rejected trace and those beyond it are released unclaimed. Charge and n_isotopes stay as counted.
+        if (mono_check_ && best_nl > 0)
+        {
+          ++R.mc[0];
+          int acc = 0; double acc_mz = s.mz;
+          for (; acc < best_nl; ++acc)
+          {
+            const Trace& t = ms1[best_partners[acc]];
+            if (fabs(t.im - s.im) > mono_check_max_dim_) { ++R.mc[3]; break; }
+            const double r = xicCorr(ms1st, t, s);   // -2: < 3 shared frames (or flat), too little to judge
+            if (r <= -2.0) ++R.mc[4];
+            else if (r < mono_check_min_corr_) { ++R.mc[2]; break; }
+            else ++R.mc[7];
+            acc_mz = t.mz;
+          }
+          if (acc < best_nl)
+          {
+            R.mc[5] += (size_t)(best_nl - acc);
+            if (acc_mz > best_mono) { best_mono = acc_mz; ++R.mc[1]; }   // mono_averagine_select may already sit further right
+            best_partners.erase(best_partners.begin() + acc, best_partners.begin() + best_nl);
+            if (best_partners.empty()) ++R.mc[6];
+          }
         }
         Precursor_ pc0;
         pc0.trace_idx = seed;
@@ -3069,6 +3108,7 @@ protected:
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
     vector<SeedRes> res(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
+    std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
     {
       const size_t b1 = std::min(b0 + spec_batch, order.size());
@@ -3091,6 +3131,7 @@ protected:
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
         if (stale) { evalSeed(seed, R); ++n_conflict; }
         for (const auto& pc : R.emit) out.push_back(pc);
+        if (mono_check_) for (size_t q = 0; q < mc_tot.size(); ++q) mc_tot[q] += R.mc[q];
         used[seed] = true;
         for (size_t j : R.claims) used[j] = true;
         ++n_committed;
@@ -3139,6 +3180,17 @@ protected:
                     + String(spec_batch) + ": " + String(n_committed) + " committed, " + String(n_conflict)
                     + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
                     + "%), " + String(n_skipped) + " already claimed)");
+    }
+    if (mono_check_)
+    {
+      mono_check_stamp_ = String(envelope_scoring ? "n/a (charge:scoring envelope)" : "on") + ", min_corr " + String(mono_check_min_corr_)
+                          + ", max_dim " + String(mono_check_max_dim_) + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right";
+      writeLogInfo_("[monocheck] " + String(mc_tot[0]) + " count walks checked (winning charge with a leftward partner): "
+                    + String(mc_tot[1]) + " monoisotopes moved right; steps rejected by profile (r < " + String(mono_check_min_corr_) + ") "
+                    + String(mc_tot[2]) + ", by 1/K0 (> " + String(mono_check_max_dim_) + ") " + String(mc_tot[3]) + "; steps accepted "
+                    + String(mc_tot[7]) + " by profile, " + String(mc_tot[4]) + " unchecked (< 3 shared frames or flat); " + String(mc_tot[5])
+                    + " leftward partners released unclaimed; " + String(mc_tot[6]) + " precursors kept no claimed partner"
+                    + (envelope_scoring ? " (charge:scoring envelope: not applied)" : ""));
     }
     return out;
   }
@@ -3692,6 +3744,9 @@ protected:
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
     mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
     mono_select_ = getFlag_("charge:mono_averagine_select");
+    mono_check_ = getStringOption_("charge:mono_profile_check") == "true";
+    mono_check_min_corr_ = getDoubleOption_("charge:mono_profile_min_corr");
+    mono_check_max_dim_ = getDoubleOption_("charge:mono_profile_max_dim");
     var_support_ = getFlag_("gate:variance_support");
     short_conc_ = (getStringOption_("gate:short_traces") == "concentric");
     short_center_tol_ = getDoubleOption_("gate:short_center_tol");
@@ -4743,6 +4798,7 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
+    if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
     out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
     if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
       out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));

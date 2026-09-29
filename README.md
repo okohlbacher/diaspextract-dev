@@ -31,6 +31,8 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    trimmed to 120 s around their apex. Traces that sit one isotope apart at the same mobility are walked into
    envelopes: the walk assigns the monoisotopic peak and a charge from 1 to 5, an ion-mobility veto re-calls a z = 1
    envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
+   Optionally (`-charge:mono_profile_check true`, off by default) a lighter peak becomes the monoisotope only if its
+   elution profile and mobility match the seed's; otherwise the walk stops before that peak and leaves it free.
 3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
    mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
    Before tracing, the peaks of one frame that share a flight-time bin at nearly the same 1/K0 are merged into one
@@ -226,6 +228,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-charge:im_veto_band` | 2.5 | half-width of that band in MAD-sigma of the fit residuals |
 | `-charge:iso_im_tolerance` | 0.05 | 1/K0 tolerance for isotope partners |
 | `-charge:mono_averagine_guard`, `-charge:mono_averagine_select` | 0, off | averagine-based corrections of the monoisotope; off by default, neither improves identifications |
+| `-charge:mono_profile_check`, `-charge:mono_profile_min_corr`, `-charge:mono_profile_max_dim` | false, 0.6, 0.015 | `true` checks each leftward step of the count walk for the winning charge: the lighter trace becomes the monoisotope only if its MS1 profile correlates with the seed's (Pearson ≥ min_corr; fewer than 3 shared frames pass unchecked) and its 1/K0 is within max_dim of the seed's; the walk stops at the first failure and the rejected trace stays unclaimed. Charge and envelope size are unchanged. **Changes output**; under evaluation |
 
 **Co-elution gate (`gate:`)**
 
@@ -298,7 +301,8 @@ tolerance, or `off`), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`
 `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
 (`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
-transform, on request) or `unset` (an mzML input, which carries its m/z as is).
+transform, on request) or `unset` (an mzML input, which carries its m/z as is). With
+`-charge:mono_profile_check true` the header also carries `spx:monocheck` (its settings and how many monoisotopes moved).
 
 ## Layout
 
