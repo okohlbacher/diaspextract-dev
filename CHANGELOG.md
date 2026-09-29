@@ -42,6 +42,15 @@
   (extend 0.6: im_box 0.015 7.7 / 9.5 / 13.5; 0.02 8.0 / 9.3 / 13.1; 0.03 8.6 / 9.1 / 13.1; 0.02 with min_ratio 0.10
   8.9 / 8.3 / 13.1). Of the ten settings tried the new defaults have the lowest error summed over the three runs; at the
   iteration-1 settings (im_box 0.01) the HeLa 10 ng error stays above the release.
+  Screened (iteration 2, n = 1; Sage / MSFragger peptides vs release): K562 +0.6 / +0.3 %, HeLa 10 ng +0.4 / −0.8 %,
+  HeLa 100 ng +1.3 / +4.6 %; entrapment −0.09, +0.02, −0.06 pt; spectra −5.0, −1.9, −4.5 %. Identified K562 isotope
+  error 8.4 % (M-1 2.4 %; iteration 1 with iterate 8.1 %, M-1 1.4 %). Sage isotope error on the peptides both runs
+  identify: HeLa 10 ng 8.5 → 8.2 %, 100 ng 17.6 → 12.3 % (same measure, iteration 1: 8.5 → 9.7 %, 17.5 → 14.3 %).
+  Peptide counts are 0.2-0.5 % below iteration 1's, except at 10 ng (Sage equal, MSFragger −1.0 %); that MSFragger
+  loss sits at the 1 % cut (71 vs 72 decoys; target peptides above hyperscore 20, 22 and 25 equal iteration 1's within
+  4). With `-assembly:im_weight_sigma 0.005`: K562 +8.4 / +4.3 %, 10 ng +3.1 / +3.4 %, 100 ng +6.0 / +5.6 % (above
+  `im_weight_sigma 0.005` alone at 100 ng, which iteration 1 was not), entrapment −0.01, +0.05, +0.05 pt, K562 isotope
+  error 8.0 %.
 
 ## v1.5.0 — 2026-09-29
 
