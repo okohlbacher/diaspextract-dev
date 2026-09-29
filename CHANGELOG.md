@@ -83,10 +83,14 @@
   the fold's union of its members' peaks, which it fuses only within 10 ppm), peaks per spectrum 404 to 402 (the
   freed slots refill), wall time unchanged. K562 9905: 18.6 % fused away, the spectrum count unchanged, wall +3 %
   (3:37 to 3:43, the second run on a busier node), peak RSS -3.7 %. With the other tuning options: the fused
-  intensities are the `frag_intensity` amplitudes after the `foreign_precursor_weight` attenuation; a fused peak is `anchor_rescue`-rescued when its strongest member was; with
-  `post_fusion_cap` it carries its fused key into the twin fold. A `[fuse]` log line counts the fragments in, the
-  peaks out, the groups fused, their mean size and the spectra that fell below `min_fragments`; the header stamps
-  `spx:fragment_fuse`. The default output is unchanged (same semantic digest).
+  intensities are the `frag_intensity` amplitudes after the `foreign_precursor_weight` attenuation; a fused peak is
+  `anchor_rescue`-rescued when its strongest member was; with `post_fusion_cap` it carries its fused key into the
+  twin fold. Fused together with `foreign_precursor_weight 0`, `anchor_rescue` and `post_fusion_cap` (anchored and
+  linkage, 20 ppm), and with all five tuning options (anchored 20 ppm; linkage 25 ppm with `frag_intensity sum` and
+  foreign weight 0.1), the output is the same at 16 and 100 threads (anchored 20 ppm also at 64 threads with 4 cells
+  per tile). A `[fuse]` log line counts the fragments in, the peaks out, the groups fused, their mean size and the
+  spectra that fell below `min_fragments`; the header stamps `spx:fragment_fuse`. The default output is unchanged
+  (same semantic digest).
 - **The five tuning options together (integration branch `tune/r1`).** Each option alone behaves as on its own
   branch; all five off is the 1.5.0 output. Where two act on the same fragments: `-gate:anchor_rescue` fragments take
   the `-assembly:frag_intensity` amplitude like gate-passing ones (their cap key stays the IM-weighted apex, as for every
