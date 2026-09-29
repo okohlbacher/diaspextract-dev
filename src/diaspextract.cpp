@@ -214,8 +214,10 @@ namespace
   double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
   double mono_guard_ = 0.0;          ///< [mono-guard] averagine slack on leftward isotope steps (0=off)
   bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
-  bool mono_check_ = false;          ///< [monocheck] charge:mono_profile_check: profile + 1/K0 test on leftward steps
+  int mono_check_ = 0;               ///< [monocheck] charge:mono_profile_check: 0 false, 1 true (v1 profile + 1/K0 steps), 2 v2
   double mono_check_min_corr_ = 0.6, mono_check_max_dim_ = 0.015;   ///< [monocheck] charge:mono_profile_min_corr, _max_dim
+  double mono_pos_min_ratio_ = 0.2, mono_pos_im_box_ = 0.01, mono_pos_extend_ = 0.6;   ///< [monocheck-v2] charge:mono_position_*
+  bool mono_pos_iterate_ = false;    ///< [monocheck-v2] charge:mono_position_iterate
   String mono_check_stamp_;          ///< [monocheck] the spx:monocheck run stamp, filled by inferPrecursors_
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   bool short_conc_ = false;          ///< [short] gate:short_traces == "concentric": span test for traces too short for Pearson
@@ -2495,11 +2497,20 @@ protected:
     setValidStrings_("assembly:require_isotope_support", {"true", "false"});
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "Reject a leftward isotope step of the charge:scoring=count walk when the lighter peak is below slack x heavier peak / lambda, averagine's loosest ratio (lambda = 0.000594 x neutral mass; 1.0 = exactly that bound, smaller values add slack). 0 = off. Falsified: it trades the -1.003 Da open-search artefact for a +1.003 Da one, docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.", false);
     registerFlag_("charge:mono_averagine_select", "Choose the monoisotope by averagine cosine over the whole isotope run of the charge:scoring=count walk instead of its furthest-left peak; only the reported precursor mass moves. Missed its pre-registered criterion: docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.");
-    registerStringOption_("charge:mono_profile_check", "<true/false>", "false", "Check the leftward isotope steps of the charge:scoring=count walk, for the winning charge only: a lighter trace becomes the monoisotope only if its MS1 elution profile correlates with the seed trace's (Pearson >= charge:mono_profile_min_corr over the frames both have; below 3 shared frames the correlation test passes unchecked) and its 1/K0 is within charge:mono_profile_max_dim of the seed's. "
-                          "The walk stops at the first failed step: the monoisotope is the last accepted peak, and the rejected trace and the ones beyond it stay unclaimed for other precursors. The charge, the seed and the envelope size (spx_n_isotopes) do not change. Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, true);
-    setValidStrings_("charge:mono_profile_check", {"true", "false"});
-    registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
-    registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
+    registerStringOption_("charge:mono_profile_check", "<false/true/v2>", "false", "Check the monoisotope of the charge:scoring=count walk, for the winning charge only. "
+                          "'true' (v1): a lighter trace becomes the monoisotope only if its MS1 elution profile correlates with the seed trace's (Pearson >= charge:mono_profile_min_corr over the frames both have; below 3 shared frames the correlation test passes unchecked) and its 1/K0 is within charge:mono_profile_max_dim of the seed's. "
+                          "The walk stops at the first failed step: the monoisotope is the last accepted peak, and the rejected trace and the ones beyond it stay unclaimed for other precursors. "
+                          "'v2': isotope-position intensity sums (charge:mono_position_*). PS(k) = summed apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (the partner tolerance in m/z, gate:delta_rt, charge:mono_position_im_box 1/K0 of the seed). "
+                          "The walk's leftmost step j is rejected when PS(-j) / PS(-j+1) x lambda < charge:mono_position_min_ratio (lambda = max(0.1, 0.000594 x neutral mass), averagine's M-1/M0 bound; an empty heavier position counts as 0); "
+                          "the monoisotope moves one isotope right, the rejected trace stays claimed. If nothing was rejected and the walk ended on a miss, the next lighter position is accepted without claiming when its ratio is >= charge:mono_position_extend (0 = off). "
+                          "Both 'true' and 'v2' keep the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, true);
+    setValidStrings_("charge:mono_profile_check", {"false", "true", "v2"});
+    registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check true: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
+    registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check true: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
+    registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: the walk's leftmost step is rejected when its averagine-scaled position ratio PS(-j) / PS(-j+1) x lambda is below this.", false, true);
+    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.01, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums.", false, true);
+    registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when no step was rejected and the walk ended on a miss, move the monoisotope one isotope lighter (the most intense trace there, not claimed) if that position's ratio is >= this. 0 = off.", false, true);
+    registerFlag_("charge:mono_position_iterate", "charge:mono_profile_check v2: after a rejected leftmost step, test the new leftmost step too, and repeat while steps fail.", true);
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "1/K0 tolerance for matching isotope partners. Only 0.05 has been measured; change it behind a peptide-set gate.", false);
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
@@ -2543,6 +2554,9 @@ protected:
     setMinFloat_("charge:mono_profile_min_corr", -1.0);
     setMaxFloat_("charge:mono_profile_min_corr", 1.0);
     setMinFloat_("charge:mono_profile_max_dim", 0.0);
+    setMinFloat_("charge:mono_position_min_ratio", 0.0);
+    setMinFloat_("charge:mono_position_im_box", 0.0);
+    setMinFloat_("charge:mono_position_extend", 0.0);
     setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
     setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
     setMinFloat_("trace:ms2_noise_threshold_int", 0.0);
@@ -2883,9 +2897,10 @@ protected:
     // and re-evaluates one whose recorded partner has since been claimed. A search that returned -1 saw
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
     // dependency. docs/BASELINE.md, "Ordered speculation on the greedy claim loop".
-    // mc: [monocheck] walks checked, monos moved, rejected by profile, by 1/K0, steps passed with < 3 shared
-    // frames (or a flat profile), partners released, moved monos left with no claimed partner, steps accepted
-    // by a profile that could be judged. Summed at commit, not in speculation.
+    // mc: [monocheck] v1 (true): walks checked, monos moved, rejected by profile, by 1/K0, steps passed with < 3
+    // shared frames (or a flat profile), partners released, moved monos left with no claimed partner, steps
+    // accepted by a profile that could be judged. v2: walks tested, monos moved right, steps rejected, extensions
+    // tested, monos moved left, -, monos moved back onto the seed, -. Summed at commit, not in speculation.
     struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; std::array<size_t, 8> mc{}; };
     auto evalSeed = [&](size_t seed, SeedRes& R)
     {
@@ -2986,7 +3001,7 @@ protected:
         // [monocheck] Re-walk the winning charge's leftward partners (best_partners[0, best_nl), nearest first):
         // each must share the seed's elution profile and mobility, else the walk stops there and the
         // rejected trace and those beyond it are released unclaimed. Charge and n_isotopes stay as counted.
-        if (mono_check_ && best_nl > 0)
+        if (mono_check_ == 1 && best_nl > 0)
         {
           ++R.mc[0];
           int acc = 0; double acc_mz = s.mz;
@@ -3006,6 +3021,63 @@ protected:
             if (acc_mz > best_mono) { best_mono = acc_mz; ++R.mc[1]; }   // mono_averagine_select may already sit further right
             best_partners.erase(best_partners.begin() + acc, best_partners.begin() + best_nl);
             if (best_partners.empty()) ++R.mc[6];
+          }
+        }
+        // [monocheck-v2] Isotope-position sums instead of the claimed partner: findPartner takes the first box
+        // candidate in m/z order (often > 0.01 1/K0 from the seed) and IM slicing splits one isotope over several
+        // traces, so single-trace ratios are noisy. PS(k) sums the apex intensity of EVERY trace (claimed or not,
+        // the seed included) at isotope position k; it reads only the immutable arrays, so it records no deps and
+        // is safe under speculation, and it sums in m/z order (deterministic). An identified walk carries at most
+        // one spurious step and it is the leftmost (engines search -1..2), so only that step is tested (A); a walk
+        // that ended on a miss may stop one isotope short when the true mono is claimed by a brighter precursor,
+        // so the next lighter position is accepted, unclaimed, on a strong ratio (B). Claims never change.
+        if (mono_check_ == 2 && best_z > 0)
+        {
+          auto PS = [&](int k, long* best) -> double {
+            const double target = s.mz + k * ISO / best_z;
+            const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
+            double sum = 0.0; float bi = -1.0f;
+            for (size_t q = klo; q < khi; ++q)
+            {
+              if (fabs(sorted_rt[q] - s_rt) > delta_rt || fabs(sorted_im[q] - s.im) > mono_pos_im_box_) continue;
+              const size_t j = by_mz[q];
+              sum += inten[j];
+              if (best && inten[j] > bi) { bi = inten[j]; *best = (long)j; }
+            }
+            return sum;
+          };
+          // q of the step onto position -j: PS(-j) / PS(-j+1) x lambda(neutral mass of the mono after that step)
+          auto ratio = [&](int j, long* best) -> double {
+            const double neutral = (s.mz - j * ISO / best_z) * best_z - best_z * PROTON_;
+            const double lam = std::max(0.10, 0.000594 * neutral);
+            const double den = PS(-j + 1, nullptr);
+            return den > 0.0 ? PS(-j, best) / den * lam : 0.0;
+          };
+          int acc = best_nl;
+          if (best_nl > 0)
+          {
+            ++R.mc[0];
+            while (acc > 0 && ratio(acc, nullptr) < mono_pos_min_ratio_)
+            {
+              --acc; ++R.mc[2];
+              if (!mono_pos_iterate_) break;
+            }
+            if (acc < best_nl)
+            {
+              const double acc_mz = acc > 0 ? ms1[best_partners[acc - 1]].mz : s.mz;
+              if (acc_mz > best_mono) { best_mono = acc_mz; ++R.mc[1]; }   // mono_averagine_select may already sit further right
+              if (acc == 0) ++R.mc[6];
+            }
+          }
+          // B: only when A rejected nothing, the walk ended on a miss (< 5 steps) and the mono is the walk's leftmost
+          // peak (mono_averagine_select may have moved it right).
+          const double leftmost_mz = best_nl > 0 ? ms1[best_partners[best_nl - 1]].mz : s.mz;
+          if (mono_pos_extend_ > 0.0 && acc == best_nl && best_nl < 5 && best_mono == leftmost_mz)
+          {
+            ++R.mc[3];
+            long bt = -1;
+            const double q = ratio(best_nl + 1, &bt);
+            if (q >= mono_pos_extend_ && q > 0.0 && bt >= 0) { best_mono = ms1[(size_t)bt].mz; ++R.mc[4]; }
           }
         }
         Precursor_ pc0;
@@ -3172,7 +3244,18 @@ protected:
                     + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
                     + "%), " + String(n_skipped) + " already claimed)");
     }
-    if (mono_check_)
+    if (mono_check_ == 2)
+    {
+      const String cfg = "v2, min_ratio " + String(mono_pos_min_ratio_) + ", im_box " + String(mono_pos_im_box_) + ", extend "
+                         + String(mono_pos_extend_) + (mono_pos_iterate_ ? ", iterate" : "");
+      mono_check_stamp_ = (envelope_scoring ? String("n/a (charge:scoring envelope), ") : String("")) + cfg + ": " + String(mc_tot[1]) + " of "
+                          + String(mc_tot[0]) + " monos moved right, " + String(mc_tot[4]) + " of " + String(mc_tot[3]) + " moved left";
+      writeLogInfo_("[monocheck] " + cfg + ": " + String(mc_tot[0]) + " count walks with a leftward partner tested, " + String(mc_tot[2])
+                    + " steps rejected, " + String(mc_tot[1]) + " monoisotopes moved right (" + String(mc_tot[6]) + " back onto the seed); "
+                    + String(mc_tot[3]) + " walks tested for extension, " + String(mc_tot[4]) + " monoisotopes moved left (unclaimed); claims unchanged"
+                    + (envelope_scoring ? " (charge:scoring envelope: not applied)" : ""));
+    }
+    else if (mono_check_)
     {
       mono_check_stamp_ = String(envelope_scoring ? "n/a (charge:scoring envelope)" : "on") + ", min_corr " + String(mono_check_min_corr_)
                           + ", max_dim " + String(mono_check_max_dim_) + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right";
@@ -3706,9 +3789,16 @@ protected:
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
     mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
     mono_select_ = getFlag_("charge:mono_averagine_select");
-    mono_check_ = getStringOption_("charge:mono_profile_check") == "true";
+    {
+      const String mc = getStringOption_("charge:mono_profile_check");
+      mono_check_ = (mc == "true") ? 1 : (mc == "v2") ? 2 : 0;
+    }
     mono_check_min_corr_ = getDoubleOption_("charge:mono_profile_min_corr");
     mono_check_max_dim_ = getDoubleOption_("charge:mono_profile_max_dim");
+    mono_pos_min_ratio_ = getDoubleOption_("charge:mono_position_min_ratio");
+    mono_pos_im_box_ = getDoubleOption_("charge:mono_position_im_box");
+    mono_pos_extend_ = getDoubleOption_("charge:mono_position_extend");
+    mono_pos_iterate_ = getFlag_("charge:mono_position_iterate");
     var_support_ = getFlag_("gate:variance_support");
     short_conc_ = (getStringOption_("gate:short_traces") == "concentric");
     short_center_tol_ = getDoubleOption_("gate:short_center_tol");

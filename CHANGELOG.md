@@ -13,6 +13,22 @@
   the monoisotopes moved and the rejections; the header is stamped `spx:monocheck`. Default output unchanged. At the
   defaults the unclaimed traces seed precursors of their own: spectra +8.5 % on HeLa_22 (10 ng), +28 % on K562 9905.
 
+- **`-charge:mono_profile_check v2` (off by default): isotope-position monoisotope check.** `true` (v1) cut the M-1
+  calls on K562 9905 from 9.9 % to 3.7 % but raised the total isotope error from 18.5 % to 39.7 % (true monoisotopes
+  rejected) and the spectra by 28 %: `findPartner` takes the first candidate in m/z order, which for a third of true
+  steps sits more than 0.01 1/K0 from the seed, and ion-mobility slicing splits one isotope over several traces, so a
+  single trace's profile and intensity are noisy. `v2` sums the apex intensity of every MS1 trace, claimed or not, at
+  each isotope position of the seed (the partner m/z tolerance, `gate:delta_rt`, `-charge:mono_position_im_box` 0.01
+  1/K0). Only the walk's leftmost step is tested (an identified walk has at most one spurious step, and it is the
+  leftmost): it is rejected when PS(−j)/PS(−j+1) × λ, with averagine's λ = max(0.1, 0.000594 × neutral mass), is below
+  `-charge:mono_position_min_ratio` (0.2), and the monoisotope moves one isotope right; `-charge:mono_position_iterate`
+  repeats the test on the new leftmost step. If nothing was rejected and the walk ended on a miss, the next lighter
+  position becomes the monoisotope, without claiming its trace, when its ratio is ≥ `-charge:mono_position_extend` (0.6;
+  0 = off). Claims, charge and `spx_n_isotopes` never change, so the same precursors are inferred (the
+  spectrum count can still shift where a moved mass crosses a window edge or the twin fold). The test reads only
+  the fixed trace arrays (no speculation dependencies) and sums in m/z order (deterministic). Logged as `[monocheck]`,
+  stamped `spx:monocheck`. `false` output unchanged; `true` unchanged.
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
