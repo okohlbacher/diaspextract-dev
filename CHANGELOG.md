@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (tuning 2026-09-29)
+
+- **`-assembly:post_fusion_cap` (off by default): `max_fragments` holds after the twin fold.** The cap was applied per
+  precursor before the fold, whose union of the members' fragment lists let 51 % of the K562 9905 spectra exceed 500
+  peaks (up to 7,094). With the option on, each peak carries its `cap_rank` key (as a 32-bit float) through the
+  same-bin merge and the fold (a fused peak keeps its members' best key), and every spectrum over the cap after the
+  fold keeps its top-ranked peaks (ties: higher intensity, then lower m/z), in m/z order. A `[recap]` log line gives
+  the spectra re-capped and the peaks removed; the header stamps `spx:post_fusion_cap`. Off, the output is unchanged
+  (same semantic digest). `-diag:selftest_twins` covers the keyed fold and the cap.
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion

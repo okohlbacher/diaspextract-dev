@@ -48,7 +48,8 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    spectrum carries two peaks at one m/z; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
    each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
-   (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
+   (`-assembly:twin_im_tolerance`; with `-assembly:post_fusion_cap` a folded spectrum is cut back to the top 500 by
+   the same evidence key, which each peak carries through the merge and the fold), and the tile is serialised in parallel. The header records every setting that shaped the output.
 
 <p align="center"><img src="assets/algorithm.svg" alt="The co-elution gate and the assembly of one pseudo-spectrum" width="1000"></p>
 
@@ -257,13 +258,14 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 |---|---|---|
 | `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments remain after the gate and the same-bin merge (checked before the cap below) |
 | `-assembly:merge_same_bin` | true | merge a spectrum's fragments of one flight-time bin (one exact m/z with the OpenMS detector) into one peak before `max_fragments`: members overlapping the strongest in retention time are summed, retention-time-disjoint pieces dropped. Two peaks at one m/z stall the fragment matching of OpenMS-based search engines. **Changes output** |
-| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more |
+| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more (unless `post_fusion_cap`) |
 | `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
 | `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
 | `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
 | `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of the cluster's fragments, peaks within 10 ppm fused (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3 (0 still folds twins of identical 1/K0). On a 2-hour HeLa run (PXD029836): 24 % fewer spectra for 0.2 % of the peptides on both engines, entrapment FDR 0.98 % with the fold against 0.98 % without |
+| `-assembly:post_fusion_cap` | false | re-apply `max_fragments` after the twin fold: every peak carries its `cap_rank` key (a 32-bit float) through the same-bin merge and the fold, where a fused peak keeps its members' best key, and a spectrum over the cap keeps its top-ranked peaks (ties: higher intensity, then lower m/z). A `[recap]` log line counts the spectra cut and the peaks removed; stamped `spx:post_fusion_cap`. Experimental. **Changes output** |
 
 **MS1 denoising (`dnoise:`)** — a port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
 bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker
@@ -287,7 +289,7 @@ trace), `charge state`, the precursor's retention time and 1/K0, and the isolati
 header carries twenty-four `spx:` userParams that make any file attributable to the configuration that produced it: the
 detector and calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
 `spx:pearson_G` (the correlation support, always `frames`), `spx:im_weight_sigma`), the twin fold (`spx:twin_merge`: its relation and
-tolerance, or `off`), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`,
+tolerance, or `off`; `spx:post_fusion_cap` is added when `-assembly:post_fusion_cap` is on), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`,
 `spx:gate_colocation`, `spx:gate_short_traces`), the cap ranking (`spx:cap_rank`), the same-bin merges
 (`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
 `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
