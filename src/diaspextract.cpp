@@ -306,9 +306,9 @@ namespace
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
   /// [foreign] [0] precursors with a foreign candidate, [1] foreign envelopes matched, [2] spectra with a fragment
-  /// attenuated, [3] fragments attenuated, [4] candidates skipped as this precursor's own ion, [5] spectra of [2] that
-  /// the removal (weight 0) took from at least assembly:min_fragments to below it, [6] matched fragments' signed m/z
-  /// error summed in 0.001 ppm, [7] matches behind [6]
+  /// attenuated, [3] fragments attenuated, [4] candidates skipped as this precursor's own ion, [5] spectra of [2] with
+  /// at least assembly:min_fragments before the removal (weight 0) and fewer after it and the same-bin merge, [6]
+  /// matched fragments' signed m/z error summed in 0.001 ppm, [7] matches behind [6]
   inline std::array<std::atomic<long long>, 8>& foreignCount_() { static std::array<std::atomic<long long>, 8> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
@@ -2445,7 +2445,7 @@ protected:
     setValidStrings_("assembly:merge_same_bin", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
-    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 1.0, "Multiply the fragments that lie on the residual isotope envelope of ANOTHER precursor isolated with this one by w, before assembly:max_fragments (0 removes them, 1 = off); the cap key follows the attenuated intensity. A foreign precursor is one of the run's precursors in the same isolation window with its apex within the gate's RT window of this precursor's, 1/K0 within assembly:foreign_precursor_dim, and neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid, up to 3 steps). Its envelope counts when at least assembly:foreign_precursor_min_iso of its positions mono + k x 1.00335/z, k = 0..3, carry a fragment within assembly:foreign_precursor_ppm. Fragments on this precursor's own envelope (mono to M+3) are never touched. Logged as [foreign], stamped spx:foreign. Experimental.", false, true);
+    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 1.0, "Multiply the fragments that lie on the residual isotope envelope of ANOTHER precursor isolated with this one by w, before assembly:max_fragments (0 removes them, 1 = off); the cap key follows the attenuated intensity. A foreign precursor is one of the run's precursors in the same isolation window with its apex within the gate's RT window of this precursor's, 1/K0 within assembly:foreign_precursor_dim, and neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid, up to 3 steps, within 30 ppm). Its envelope counts when at least assembly:foreign_precursor_min_iso of its positions mono + k x 1.00335/z, k = 0..3, carry a fragment within assembly:foreign_precursor_ppm. Fragments within 30 ppm of this precursor's own envelope (mono to M+3) are never touched. Logged as [foreign], stamped spx:foreign. Experimental.", false, true);
     setMinFloat_("assembly:foreign_precursor_weight", 0.0);
     setMaxFloat_("assembly:foreign_precursor_weight", 1.0);
     registerDoubleOption_("assembly:foreign_precursor_ppm", "<ppm>", 10.0, "assembly:foreign_precursor_weight: m/z tolerance between a foreign envelope position and a fragment (ppm).", false, true);
@@ -3219,19 +3219,24 @@ protected:
   /// [foreign] assembly:foreign_precursor_weight: attenuate, among one precursor's admitted fragments, the residual
   /// (unfragmented) envelopes of the OTHER precursors isolated with it -- apex within drt of this one's, 1/K0 within
   /// foreign_dim_, neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope
-  /// grid, up to 3 steps). A candidate's positions are mono + k ISO/z, k = 0..3; a position is present when an
-  /// admitted fragment lies within foreign_ppm_ of it. With at least foreign_min_iso_ positions present, those
+  /// grid, up to 3 steps, within 30 ppm). A candidate's positions are mono + k ISO/z, k = 0..3; a position is present
+  /// when an admitted fragment lies within foreign_ppm_ of it. With at least foreign_min_iso_ positions present, those
   /// fragments are multiplied by foreign_w_ (0 removes them) and their cap key is recomputed from the attenuated
-  /// IM-weighted apex (@p frag_ai). A fragment on this precursor's own envelope (mono to M+3) neither counts nor is
-  /// touched: stripping the own isotopes lost 2.3 % of peptides (CHANGELOG). Returns the fragments attenuated.
+  /// IM-weighted apex (@p frag_ai). A fragment within 30 ppm of this precursor's own envelope (mono to M+3) neither
+  /// counts nor is touched: stripping the own isotopes lost 2.3 % of peptides (CHANGELOG). Returns the fragments
+  /// attenuated.
   size_t attenuateForeign_(const Precursor_& pc, double drt, const ForeignIdx_& fx, vector<pair<double, double>>& frags,
                            vector<double>& frag_scores, vector<uint32_t>& frag_bin, vector<pair<int, int>>& frag_span,
                            const vector<double>& frag_ai) const
   {
-    const double ISO = 1.0033548, ppm = foreign_ppm_ * 1e-6;
+    // The two own-ion tests take a wider tolerance than the envelope match: an ion's residual peaks scatter tens of
+    // ppm around the MS1 mono grid (HeLa_22: 31 % of the own-grid peaks within 60 ppm lie 20-60 ppm off), and with
+    // both tests at foreign_ppm_ (10) 15 % of the removed fragments sat 10-60 ppm off the precursor's own M..M+3
+    // (chance 0.06 %): the same ion called again with a mono just outside the sibling test took them.
+    const double ISO = 1.0033548, ppm = foreign_ppm_ * 1e-6, same = std::max(ppm, 30e-6);
     auto& cnt = foreignCount_();
-    auto on_grid = [&](double a, double b, int z) {                 // a within tolerance of b + j ISO/z, |j| <= 3
-      for (int j = -3; j <= 3; ++j) if (std::fabs(a - (b + j * ISO / z)) <= a * ppm) return true;
+    auto on_grid = [&](double a, double b, int z) {                 // a within `same` of b + j ISO/z, |j| <= 3
+      for (int j = -3; j <= 3; ++j) if (std::fabs(a - (b + j * ISO / z)) <= a * same) return true;
       return false; };
     vector<const Precursor_*> cand;
     long long n_skip = 0;                                            // added to the shared counter once per call
@@ -3252,7 +3257,7 @@ protected:
     std::sort(om.begin(), om.end(), [&](uint32_t a, uint32_t b) { return frags[a].first != frags[b].first ? frags[a].first < frags[b].first : a < b; });
     auto own = [&](double mz) {
       if (pc.charge <= 0) return false;
-      for (int k = 0; k <= 3; ++k) { const double m = pc.mono_mz + k * ISO / pc.charge; if (std::fabs(mz - m) <= m * ppm) return true; }
+      for (int k = 0; k <= 3; ++k) { const double m = pc.mono_mz + k * ISO / pc.charge; if (std::fabs(mz - m) <= m * same) return true; }
       return false; };
     vector<char> hit(frags.size(), 0);
     vector<uint32_t> at;
@@ -4838,7 +4843,7 @@ protected:
     out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
     if (foreign_w_ < 1.0)   // [foreign] stamped only when on: the default header is unchanged
       out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
-                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own envelope kept"));
+                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept (30 ppm)"));
     std::unique_ptr<TileWriter> writer;
     // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
     // structurally valid file holding the earlier tiles only (review, step 2)
