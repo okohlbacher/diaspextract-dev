@@ -297,7 +297,8 @@ tolerance, or `off`), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`
 `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
 (`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
-transform, on request) or `unset` (an mzML input, which carries its m/z as is).
+transform, on request) or `unset` (an mzML input, which carries its m/z as is). With
+`-charge:mono_profile_check true` the header also carries `spx:monocheck` (its settings and how many monoisotopes moved).
 
 ## Layout
 
