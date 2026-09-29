@@ -2440,7 +2440,7 @@ protected:
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
-    registerStringOption_("gate:anchor_rescue", "<true/false>", "false", "Rescue weak fragments of well-sampled precursors (not the faint ones of gate:adaptive). When at least gate:anchor_min_count fragments pass the gate with a correlation of gate:anchor_min_corr or more, their profiles, each scaled to unit maximum, are summed into a consensus over the window frames. A fragment trace inside the RT and 1/K0 windows that the gate rejected only for too few shared points or by gate:min_correlation, with at least 2 points, then joins when its apex is within one cycle of the consensus apex and its points correlate with the consensus at those frames (Pearson over its own points, not the full grid) by gate:anchor_rescue_corr or more; a 2-point trace instead needs both points in the consensus core (at least half its maximum) rising or falling with it, and scores gate:anchor_rescue_corr. The emitted intensity and the cap key use that score, capped at gate:anchor_min_corr; at most gate:anchor_max_rescued per spectrum, best score first. Logged as [anchor], stamped spx:anchor. Experimental.", false, true);
+    registerStringOption_("gate:anchor_rescue", "<true/false>", "false", "Rescue weak fragments of well-sampled precursors (signal in more than gate:faint_max_frames window frames, the faint test of gate:adaptive in every mode). When at least gate:anchor_min_count fragments pass the gate with a correlation of gate:anchor_min_corr or more, their profiles, each scaled to unit maximum, are summed into a consensus over the window frames. A fragment trace inside the RT and 1/K0 windows that the gate rejected only for too few shared points or by gate:min_correlation, with at least 2 points, then joins when its apex is within one cycle of the consensus apex and its points correlate with the consensus at those frames (Pearson over its own points, not the full grid) by gate:anchor_rescue_corr or more; a 2-point trace instead needs both points in the consensus core (at least half its maximum) rising or falling with it, and scores gate:anchor_rescue_corr. The emitted intensity and the cap key use that score, capped at gate:anchor_min_corr; at most gate:anchor_max_rescued per spectrum, best score first. Logged as [anchor], stamped spx:anchor. Experimental.", false, true);
     setValidStrings_("gate:anchor_rescue", {"true", "false"});
     registerIntOption_("gate:anchor_min_count", "<n>", 3, "gate:anchor_rescue: fewest anchors (accepted fragments at gate:anchor_min_corr or more) a precursor needs for the rescue.", false, true);
     setMinInt_("gate:anchor_min_count", 1);
@@ -3249,10 +3249,12 @@ protected:
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
-    // [anchor] gate:anchor_rescue, non-faint precursors: the accepted fragments that can anchor a consensus, and the ones
-    // the gate rejected only for support (point or overlap floor) or by the correlation cut, with at least 2 points
-    const bool g_anchor = anchor_rescue_ && !faint;
-    vector<uint32_t> anchors, cands;                                   // cands: index << 2 | rejection (0 points, 1 overlap, 2 corr)
+    // [anchor] gate:anchor_rescue, well-sampled precursors (signal in more than gate:faint_max_frames window frames, the
+    // faint test of gate:adaptive, whatever that mode is set to): the accepted fragments that can anchor a consensus, and
+    // the ones the gate rejected only for support (point or overlap floor) or by the correlation cut, with at least 2 points
+    const bool g_anchor = anchor_rescue_ && (int)touched.size() > faint_frames_;
+    vector<uint32_t> anchors, resc_fi;                                  // resc_fi: the rescued indices, sorted, for the gate dump
+    vector<size_t> cands;                                               // cands: index << 2 | rejection (0 points, 1 overlap, 2 corr)
     vector<char> resc;                                                  // [anchor] 1 = rescued, parallel to frags (empty: none)
     if (pinv > 0.0)
     {
@@ -3274,7 +3276,7 @@ protected:
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
         if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_))
-        { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi << 2); continue; }
+        { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2); continue; }
         int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
         float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
@@ -3308,7 +3310,7 @@ protected:
         else
         {
           if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts))    // overlap guard [H-4]; [shrink] its own floor
-          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi << 2 | 1u); continue; }
+          { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 1u); continue; }
           // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
           // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
           // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
@@ -3350,7 +3352,7 @@ protected:
             c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
           if (!(c >= min_corr))                                          // correlation gate (a NaN score is rejected too)
-          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi << 2 | 2u); continue; }
+          { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 2u); continue; }
         }
         // [E5] The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
         double inten = intensityOf(wst, f);
@@ -3399,9 +3401,9 @@ protected:
           const double core = 0.5 * cons[ca];
           struct Resc { double r, mz; uint32_t fi; int why, ov, t_lo, t_hi; };
           vector<Resc> rs;
-          for (uint32_t cw : cands)
+          for (size_t cw : cands)
           {
-            const uint32_t fi = cw >> 2;
+            const uint32_t fi = (uint32_t)(cw >> 2);
             const Trace& f = frag_traces[fi];
             if (std::abs((int)(f.frame0 + f.apex) - c_apex) > 1) continue;   // the raw apex, within one cycle
             // sums shifted by the first point, so a constant profile has exactly zero variance
@@ -3429,7 +3431,7 @@ protected:
               if (vx > 0.0 && vy > 0.0) r = (sxy - sx * sy / n) / std::sqrt(vx * vy);
             }
             if (!(r >= anchor_rescue_corr_)) continue;
-            rs.push_back({r, exportMz_(f.tof, bOf(wst, f), f.mz), fi, (int)(cw & 3u), ov, t_lo, t_hi});
+            rs.push_back({r, exportMz_(f.tof, bOf(wst, f), f.mz), fi, (int)(cw & 3), ov, t_lo, t_hi});
           }
           std::sort(rs.begin(), rs.end(), [](const Resc& a, const Resc& b) {
             if (a.r != b.r) return a.r > b.r;
@@ -3455,9 +3457,11 @@ protected:
             frag_span.emplace_back(q.t_lo, q.t_hi);
             frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.ov) : c * inten);
             resc.push_back(1);
+            resc_fi.push_back(q.fi);
             ++n_why[q.why];
           }
           for (int w = 0; w < 3; ++w) if (n_why[w]) ac[8 + w] += n_why[w];
+          std::sort(resc_fi.begin(), resc_fi.end());
         }
       }
     }
@@ -3490,7 +3494,9 @@ protected:
             const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
           const double c = fg.invnorm[fi] == 0.0 ? 0.0 : (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi];
           const char* fate = std::fabs(dim) > delta_im ? "im" : std::fabs(drt) > g_drt ? "rt" : fg.invnorm[fi] == 0.0 ? "degenerate"
-                           : std::fabs(f.mz - pc.mono_mz) < 0.01 ? "precursor_peak" : f.np() < (size_t)std::max(min_corr_pts, 0) ? "np"
+                           : std::fabs(f.mz - pc.mono_mz) < 0.01 ? "precursor_peak"
+                           : !resc_fi.empty() && std::binary_search(resc_fi.begin(), resc_fi.end(), (uint32_t)fi) ? "rescued"   // [anchor]
+                           : f.np() < (size_t)std::max(min_corr_pts, 0) ? "np"
                            : overlap < min_corr_pts ? "overlap" : c < min_corr ? "corr" : "kept";
           head(); rows << exportMz_(f.tof, bOf(wst, f), f.mz) << '\t' << dim << '\t' << drt << '\t' << f.np() << '\t' << overlap << '\t'
                        << c << '\t' << intensityOf(wst, f) << '\t' << fate << '\n';
