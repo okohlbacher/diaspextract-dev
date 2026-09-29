@@ -48,8 +48,8 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    spectrum carries two peaks at one m/z; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
    each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
-   (`-assembly:twin_im_tolerance`; with `-assembly:post_fusion_cap` a folded spectrum is cut back to the top 500 by
-   the same evidence key, which each peak carries through the merge and the fold), and the tile is serialised in parallel. The header records every setting that shaped the output.
+   (`-assembly:twin_im_tolerance`; with `-assembly:post_fusion_cap` a folded spectrum is cut back to `max_fragments` by
+   the same `cap_rank` key, which each peak carries through the merge and the fold), and the tile is serialised in parallel. The header records every setting that shaped the output.
 
 <p align="center"><img src="assets/algorithm.svg" alt="The co-elution gate and the assembly of one pseudo-spectrum" width="1000"></p>
 

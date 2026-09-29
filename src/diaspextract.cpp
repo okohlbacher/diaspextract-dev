@@ -2210,7 +2210,8 @@ namespace
         s.clear(false);
         s.reserve(fused.size());
         for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
-        s.getFloatDataArrays().assign(1, std::move(kk));
+        s.getFloatDataArrays().clear();
+        s.getFloatDataArrays().push_back(std::move(kk));   // moved, not copied (assign(1, x) copies)
         continue;
       }
       vector<pair<double, double>> ps;
@@ -5286,7 +5287,7 @@ protected:
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
                              gate_dim, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
                 if (!ms2.empty())
-                { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * 12)); pslot[(size_t)j] = std::move(ms2); }
+                { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * (post_fusion_cap_ ? 16 : 12))); pslot[(size_t)j] = std::move(ms2); }   // [recap] +4 B/peak key
               }
             }
           } catch (...) { taskErr_(asm_err); } }
@@ -5384,7 +5385,7 @@ protected:
       { size_t n_tot = 0; for (const auto& bucket : win_out) n_tot += bucket.size(); tile_out.reserve(n_tot); }
       for (auto& bucket : win_out) { for (auto& s : bucket) tile_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
       long long tile_spec_bytes = 0;
-      for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * 12);
+      for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * (post_fusion_cap_ ? 16 : 12));   // as charged at emission
       { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
       if (twin_im >= 0.0)
       {
