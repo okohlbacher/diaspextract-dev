@@ -232,6 +232,8 @@ namespace
   int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
   double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
   bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
+  int frag_int_ = 0;                 ///< [fragint] assembly:frag_intensity: 0 apex (legacy), 1 core, 2 sum
+  int frag_core_half_ = 1;           ///< [fragint] (assembly:frag_core_frames - 1) / 2
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -301,6 +303,8 @@ namespace
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
+  /// [fragint] [0] gate-passing fragments given the core/sum amplitude; [1] those of them with no point there (fallback)
+  inline std::array<std::atomic<long long>, 2>& fragIntCount_() { static std::array<std::atomic<long long>, 2> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -2436,6 +2440,11 @@ protected:
     setValidStrings_("assembly:merge_same_bin", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
+    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the assembly:cap_rank key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the twin fold's intensity-weighted m/z), so a few peaks move or change. Experimental.", false, true);
+    setValidStrings_("assembly:frag_intensity", {"apex", "core", "sum"});
+    registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: the number of window frames (odd) centred on the precursor's apex frame.", false, true);
+    setMinInt_("assembly:frag_core_frames", 1);
+    setMaxInt_("assembly:frag_core_frames", 15);
     registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
     registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
@@ -3219,6 +3228,17 @@ protected:
       p_lo = std::min(p_lo, gi); p_hi = std::max(p_hi, gi);
       if (p_apex < 0 || pdense[gi] > pdense[p_apex]) p_apex = gi;
     }
+    // [fragint] the frames a fragment's amplitude is summed over: core, the K frames centred on the precursor apex
+    // (ties to the earlier frame); sum, the precursor's span with its gaps: a faint MS1 trace has missing points and the
+    // concentric gate keeps fragments with no point where pdense != 0 (summed only there, 29% of HeLa 10 ng's had none)
+    int fint_apex = -1, fint_lo = 0, fint_hi = -1;
+    long long n_fint = 0, n_fint_fb = 0;
+    if (frag_int_ != 0)
+    {
+      for (int gi : touched) if (fint_apex < 0 || pdense[gi] > pdense[fint_apex] || (pdense[gi] == pdense[fint_apex] && gi < fint_apex)) fint_apex = gi;
+      fint_lo = frag_int_ == 1 ? fint_apex - frag_core_half_ : p_lo;
+      fint_hi = frag_int_ == 1 ? fint_apex + frag_core_half_ : p_hi;
+    }
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
     { const size_t n = touched.size(); pspanHist_()[n <= 4 ? (n ? n - 1 : 0) : n <= 6 ? 4 : n <= 10 ? 5 : n <= 20 ? 6 : 7]++; if (faint) pspanHist_()[8]++; }
@@ -3327,6 +3347,23 @@ protected:
         const double dim = frag_im[fi] - pc.im;
         if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
         double emit_inten = inten;
+        if (frag_int_ != 0)                                              // [fragint] base amplitude summed over frames; the cap key keeps the apex
+        {
+          const int f0 = (int)f.frame0, f1 = f0 + (int)f.span() - 1;
+          double b = 0.0;                                                // the same frames for every fragment of this precursor
+          for (int g = std::max(fint_lo, f0); g <= std::min(fint_hi, f1); ++g) b += xv(wst, f, (size_t)(g - f0));
+          if (!(b > 0.0))                                                // no point there: the point nearest the precursor apex (ties earlier),
+          {                                                              // so the peak set stays the apex mode's and no peak is written at 0
+            int kb = -1;
+            for (int k = 0; k < (int)f.span(); ++k)
+              if (real(wst, f, (size_t)k) && (kb < 0 || std::abs(f0 + k - fint_apex) < std::abs(f0 + kb - fint_apex))) kb = k;
+            if (kb >= 0) b = xv(wst, f, (size_t)kb);
+            ++n_fint_fb;
+          }
+          if (im_weight_sigma_ > 0.0) b *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
+          emit_inten = b;
+          ++n_fint;
+        }
         if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
@@ -3336,6 +3373,7 @@ protected:
                             : c * inten);                              // [cap] the max_fragments ranking key
       }
     }
+    if (n_fint) { fragIntCount_()[0] += n_fint; fragIntCount_()[1] += n_fint_fb; }   // [fragint] once per precursor x window
     if (GateDump_& gd = GateDump_::get(); gd.on)                       // [gate-dump] read-only; before the reset
     {
       std::ostringstream rows;
@@ -3670,6 +3708,10 @@ protected:
     cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
     im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
     merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
+    frag_int_ = getStringOption_("assembly:frag_intensity") == "core" ? 1 : getStringOption_("assembly:frag_intensity") == "sum" ? 2 : 0;
+    if (getIntOption_("assembly:frag_core_frames") % 2 == 0)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:frag_core_frames must be odd: the core is centred on the precursor's apex frame");
+    frag_core_half_ = getIntOption_("assembly:frag_core_frames") / 2;
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
@@ -4702,6 +4744,8 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
     out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
+    if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
+      out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
     std::unique_ptr<TileWriter> writer;
     // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
     // structurally valid file holding the earlier tiles only (review, step 2)
@@ -5359,6 +5403,10 @@ protected:
                     + " picked MS2 peaks merged away in " + String(m[1].load()) + " frames; assembly same-bin merge (" + (merge_same_bin_ ? "on" : "off") + "): "
                     + String(m[2].load()) + " fragments merged away");
     }
+    if (frag_int_ != 0)   // [fragint] what the fragment-intensity mode did (gate-passing fragments, before the merge and the cap)
+      writeLogInfo_("[fragint] assembly:frag_intensity " + (frag_int_ == 1 ? "core (" + String(2 * frag_core_half_ + 1) + " frames around the precursor apex)" : String("sum (the precursor's span)"))
+                    + ": " + String(fragIntCount_()[0].load()) + " fragments took the summed amplitude, " + String(fragIntCount_()[1].load())
+                    + " of them had no point there and took their point nearest the precursor apex");
     {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
       auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();
       writeLogInfo_("[pspan] precursors by MS1 span (window frames): 1:" + String(h[0].load()) + " 2:" + String(h[1].load()) + " 3:" + String(h[2].load())
