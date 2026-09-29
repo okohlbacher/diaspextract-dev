@@ -28,6 +28,12 @@
   spectrum count can still shift where a moved mass crosses a window edge or the twin fold). The test reads only
   the fixed trace arrays (no speculation dependencies) and sums in m/z order (deterministic). Logged as `[monocheck]`,
   stamped `spx:monocheck`. `false` output unchanged; `true` unchanged.
+  Screened 2026-09-29 (n = 1, K562 9905, HeLa 10 ng and 100 ng): with `-charge:mono_position_iterate` the isotope
+  error of identified K562 precursors falls from 18.5 % to 8.1 % (M-1 9.9 % to 1.4 %), peptides rise with both engines
+  on all three runs (Sage / MSFragger +1.0 / +0.7 %, +0.4 / +0.2 %, +1.5 / +4.8 %), entrapment is lower on all three,
+  and spectra fall by 1.6-5.6 % (seeds of one ion that sat one isotope apart now fold into twins). Without iterate:
+  10.3 %. On the 2019 HeLa py3 runs the isotope traces of one ion scatter about 3x wider in 1/K0 than on K562, and the
+  leftmost-step test rejects 12 % of true steps (K562 3 %): the identified 10 ng isotope error rises from 8.6 % to 9.8 %.
 
 ## v1.5.0 — 2026-09-29
 
