@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (tuning 2026-09-29)
+
+- **Fragment intensity definition (`-assembly:frag_intensity`, off by default).** The written fragment intensity is
+  the trace's apex in one frame, while a DDA spectrum sums the precursor's selection. `core` sums the fragment trace
+  over the `-assembly:frag_core_frames` (default 3, odd) window frames centred on the precursor's apex frame, the same
+  frames for every fragment of the precursor; `sum` over every frame where the precursor has signal. The 1/K0 weight
+  and corr^`corr_power` apply on top as before; the gate, the `max_fragments` cap key (still the apex) and the peaks
+  that exist are unchanged. A fragment with no point in those frames takes its point nearest the precursor's apex
+  rather than being dropped (a drop would change the peak set) or written at 0. Stamped `spx:fragint`; a `[fragint]`
+  log line counts the fragments and the fallbacks. `apex` is the 1.5.0 output (same semantic digest).
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion

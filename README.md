@@ -46,7 +46,9 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    points) — and the top 500 kept;
    fragments that still share a flight-time bin are merged into one peak first (`-assembly:merge_same_bin`), so no
    spectrum carries two peaks at one m/z; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
-   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`). Spectra are sorted per tile,
+   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`).
+   That intensity is the fragment trace's apex by default; `-assembly:frag_intensity core` sums the trace over the
+   frames around the precursor's apex instead, and `sum` over every frame where the precursor has signal. Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
    (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
 
@@ -261,6 +263,8 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
 | `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
 | `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
+| `-assembly:frag_intensity` | apex | the base amplitude of an emitted fragment, before the 1/K0 weight and `corr_power`: `apex` the trace's maximum in one frame; `core` the trace summed over the `frag_core_frames` window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor); `sum` the trace summed over every frame where the precursor has signal. A fragment with no point there takes its point nearest the precursor's apex, so the peaks are the same as with `apex`, only their intensities differ. Experimental; **changes output** when not `apex` |
+| `-assembly:frag_core_frames` | 3 | `frag_intensity core`: the number of window frames (odd, 1–15) |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
 | `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of the cluster's fragments, peaks within 10 ppm fused (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3 (0 still folds twins of identical 1/K0). On a 2-hour HeLa run (PXD029836): 24 % fewer spectra for 0.2 % of the peptides on both engines, entrapment FDR 0.98 % with the fold against 0.98 % without |
