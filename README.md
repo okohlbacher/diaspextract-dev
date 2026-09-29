@@ -32,7 +32,7 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    envelopes: the walk assigns the monoisotopic peak and a charge from 1 to 5, an ion-mobility veto re-calls a z = 1
    envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
    Optionally (`-charge:mono_profile_check true`, off by default) a lighter peak becomes the monoisotope only if its
-   elution profile and mobility match the seed's; otherwise the walk stops one isotope short and leaves that trace free.
+   elution profile and mobility match the seed's; otherwise the walk stops before that peak and leaves it free.
 3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
    mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
    Before tracing, the peaks of one frame that share a flight-time bin at nearly the same 1/K0 are merged into one
