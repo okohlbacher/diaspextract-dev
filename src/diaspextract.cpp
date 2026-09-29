@@ -308,9 +308,9 @@ namespace
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
   /// [anchor] gate:anchor_rescue: [0] non-faint precursors scored, [1] of them anchored, [2] candidates of the anchored,
   /// [3] rescued, [4] passed beyond gate:anchor_max_rescued, [5] precursors with a rescue, [6] rescued peaks in written
-  /// spectra (after the same-bin merge and the cap, before the twin fold), [7] written spectra holding one, [8] written
-  /// spectra that reach assembly:min_fragments only through rescues
-  inline std::array<std::atomic<long long>, 9>& anchorCount_() { static std::array<std::atomic<long long>, 9> c{}; return c; }
+  /// spectra (after the same-bin merge and the cap, before the twin fold), [7] written spectra holding one, [8..10] rescued
+  /// fragments the gate had rejected at the point floor, the overlap guard, the correlation cut
+  inline std::array<std::atomic<long long>, 11>& anchorCount_() { static std::array<std::atomic<long long>, 11> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -3252,7 +3252,7 @@ protected:
     // [anchor] gate:anchor_rescue, non-faint precursors: the accepted fragments that can anchor a consensus, and the ones
     // the gate rejected only for support (point or overlap floor) or by the correlation cut, with at least 2 points
     const bool g_anchor = anchor_rescue_ && !faint;
-    vector<uint32_t> anchors, cands;
+    vector<uint32_t> anchors, cands;                                   // cands: index << 2 | rejection (0 points, 1 overlap, 2 corr)
     vector<char> resc;                                                  // [anchor] 1 = rescued, parallel to frags (empty: none)
     if (pinv > 0.0)
     {
@@ -3274,7 +3274,7 @@ protected:
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
         if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_))
-        { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi); continue; }
+        { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi << 2); continue; }
         int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
         float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
@@ -3308,7 +3308,7 @@ protected:
         else
         {
           if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts))    // overlap guard [H-4]; [shrink] its own floor
-          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi); continue; }
+          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi << 2 | 1u); continue; }
           // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
           // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
           // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
@@ -3350,7 +3350,7 @@ protected:
             c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
           if (!(c >= min_corr))                                          // correlation gate (a NaN score is rejected too)
-          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi); continue; }
+          { if (g_anchor && f.np() >= 2) cands.push_back((uint32_t)fi << 2 | 2u); continue; }
         }
         // [E5] The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
         double inten = intensityOf(wst, f);
@@ -3371,7 +3371,8 @@ protected:
       // elution peak. Their profiles, each at unit maximum, are summed into a consensus over the window frames; a candidate
       // joins when its apex is within one cycle of the consensus apex and its own points follow the consensus (local
       // Pearson; with two points: both in the core, >= half the consensus maximum, and in its direction, scored at the
-      // threshold like a borderline fragment). The score, capped at anchor_min_corr, weighs it like any other fragment.
+      // threshold like a borderline fragment). The score, capped at anchor_min_corr, weighs it like any other fragment, and
+      // its cap key counts the frames it shares with the precursor, as every other fragment's does.
       // Deterministic: anchors and candidates come in index order, the budget sorts by (score, m/z, index).
       if (g_anchor)
       {
@@ -3396,15 +3397,16 @@ protected:
           for (size_t j = 1; j < cons.size(); ++j) if (cons[j] > cons[ca]) ca = j;   // the consensus apex (first maximum)
           const int c_apex = c_lo + (int)ca;
           const double core = 0.5 * cons[ca];
-          struct Resc { double r, mz; uint32_t fi; int sup, t_lo, t_hi; };
+          struct Resc { double r, mz; uint32_t fi; int why, ov, t_lo, t_hi; };
           vector<Resc> rs;
-          for (uint32_t fi : cands)
+          for (uint32_t cw : cands)
           {
+            const uint32_t fi = cw >> 2;
             const Trace& f = frag_traces[fi];
             if (std::abs((int)(f.frame0 + f.apex) - c_apex) > 1) continue;   // the raw apex, within one cycle
             // sums shifted by the first point, so a constant profile has exactly zero variance
             double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, x0 = 0, y0 = 0, dx1 = 0, dy1 = 0;
-            int n = 0, sup = 0, t_lo = -1, t_hi = -1;
+            int n = 0, ov = 0, t_lo = -1, t_hi = -1;
             bool in_core = true;
             for (size_t k = 0; k < f.span(); ++k)
             {
@@ -3413,7 +3415,7 @@ protected:
               const double y = g < c_lo || g > c_hi ? 0.0 : cons[(size_t)(g - c_lo)];
               if (t_lo < 0) { t_lo = g; x0 = x; y0 = y; }
               t_hi = g;
-              if (y > 0.0) ++sup;                                        // points on the consensus support: its shared points
+              if (pdense[g] != 0.0f) ++ov;                               // shared with the precursor (pdense is still live)
               if (y < core) in_core = false;
               const double dx = x - x0, dy = y - y0;
               if (n == 1) { dx1 = dx; dy1 = dy; }
@@ -3427,7 +3429,7 @@ protected:
               if (vx > 0.0 && vy > 0.0) r = (sxy - sx * sy / n) / std::sqrt(vx * vy);
             }
             if (!(r >= anchor_rescue_corr_)) continue;
-            rs.push_back({r, exportMz_(f.tof, bOf(wst, f), f.mz), fi, sup, t_lo, t_hi});
+            rs.push_back({r, exportMz_(f.tof, bOf(wst, f), f.mz), fi, (int)(cw & 3u), ov, t_lo, t_hi});
           }
           std::sort(rs.begin(), rs.end(), [](const Resc& a, const Resc& b) {
             if (a.r != b.r) return a.r > b.r;
@@ -3437,6 +3439,7 @@ protected:
           const size_t nk = std::min(rs.size(), (size_t)anchor_max_rescued_);
           ac[4] += (long long)(rs.size() - nk);
           if (nk) { ac[3] += (long long)nk; ++ac[5]; resc.assign(frags.size(), 0); }
+          long long n_why[3] = {0, 0, 0};
           for (size_t j = 0; j < nk; ++j)
           {
             const Resc& q = rs[j];
@@ -3450,9 +3453,11 @@ protected:
             frags.emplace_back(q.mz, emit_inten);
             frag_bin.push_back(f.tof);
             frag_span.emplace_back(q.t_lo, q.t_hi);
-            frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.sup) : c * inten);
+            frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.ov) : c * inten);
             resc.push_back(1);
+            ++n_why[q.why];
           }
+          for (int w = 0; w < 3; ++w) if (n_why[w]) ac[8 + w] += n_why[w];
         }
       }
     }
@@ -3543,11 +3548,7 @@ protected:
     }
     if (frags.size() < min_frags) return;
     long long n_resc = 0;                                               // [anchor] rescued peaks in this spectrum
-    if (!resc.empty())
-    {
-      for (char r : resc) n_resc += r;
-      if (frags.size() - (size_t)n_resc < min_frags) ++anchorCount_()[8];
-    }
+    for (char r : resc) n_resc += r;
     if (frags.size() > max_frags)
     {
       vector<size_t> idx(frags.size());
@@ -5509,12 +5510,12 @@ protected:
       auto& a = anchorCount_();
       char b[640];
       snprintf(b, sizeof b, "[anchor] %lld of %lld non-faint precursors anchored (>= %d fragments at r >= %g), %lld candidates; %lld fragments "
-                            "rescued (r >= %g) in %lld precursors, %.2f per anchored precursor, %lld more beyond %d per spectrum; %lld rescued peaks "
-                            "in %lld written spectra after the same-bin merge and the cap (%.2f per such spectrum), %lld spectra reach min_fragments "
-                            "only through rescues",
-               a[1].load(), a[0].load(), anchor_min_count_, anchor_min_corr_, a[2].load(), a[3].load(), anchor_rescue_corr_, a[5].load(),
-               a[1].load() ? (double)a[3].load() / a[1].load() : 0.0, a[4].load(), anchor_max_rescued_, a[6].load(), a[7].load(),
-               a[7].load() ? (double)a[6].load() / a[7].load() : 0.0, a[8].load());
+                            "rescued (r >= %g; rejected at the point floor %lld, overlap guard %lld, correlation cut %lld) in %lld precursors, "
+                            "%.2f per anchored precursor, %lld more beyond %d per spectrum; %lld rescued peaks in %lld written spectra after the "
+                            "same-bin merge and the cap (%.2f per such spectrum)",
+               a[1].load(), a[0].load(), anchor_min_count_, anchor_min_corr_, a[2].load(), a[3].load(), anchor_rescue_corr_, a[8].load(),
+               a[9].load(), a[10].load(), a[5].load(), a[1].load() ? (double)a[3].load() / a[1].load() : 0.0, a[4].load(),
+               anchor_max_rescued_, a[6].load(), a[7].load(), a[7].load() ? (double)a[6].load() / a[7].load() : 0.0);
       writeLogInfo_(b);
     }
     report_phases_(phase_clock_());

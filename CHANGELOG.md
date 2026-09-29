@@ -11,9 +11,10 @@
   2 points, join when their apex is within one cycle of the consensus apex and their own points correlate with the
   consensus by `-gate:anchor_rescue_corr` (0.7) or more (2 points: both in the consensus core, in its direction,
   scored at the threshold). Rescued fragments are weighted and cap-ranked like the others with that score, capped at
-  `anchor_min_corr`; at most `-gate:anchor_max_rescued` (50) per spectrum. An `[anchor]` log line counts anchored
-  precursors, candidates, rescues and rescued peaks in the written spectra; the header stamps `spx:anchor`. The
-  default output is unchanged (same semantic digest).
+  `anchor_min_corr`, and their cap key counts the frames shared with the precursor like every other fragment's; at
+  most `-gate:anchor_max_rescued` (50) per spectrum. An `[anchor]` log line counts anchored precursors, candidates,
+  rescues (by the gate step that had rejected them) and rescued peaks in the written spectra; the header stamps
+  `spx:anchor`. The default output is unchanged (same semantic digest).
 
 ## v1.5.0 — 2026-09-29
 
