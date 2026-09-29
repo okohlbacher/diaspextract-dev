@@ -63,6 +63,24 @@
   removed on HeLa_22 were the precursor's own isotopes, taken by the same ion called again with a mono just outside
   the test. A `[foreign]` log line counts what it did; the header stamps `spx:foreign`. The default output is
   unchanged (same semantic digest).
+- **Fragment fusion (`-assembly:fragment_fuse_ppm`, `-assembly:fragment_fuse_mode`, off by default): one peak per
+  fragment ion.** The mobility picker keeps 1.4–2.3 flight-time bins of a fragment ion that spans 3.8–6.9, so one ion
+  becomes several traces and several output peaks 5–20 ppm apart, each written with its own apex intensity: on K562
+  9905 49.8 % of the b/y ions have at least 2 peaks within 20 ppm (chance 12.9 %, DDA 0.6 %), and the 1.5.0 same-bin
+  merge, which reaches only an exact bin, does not change that. Above 0, a spectrum's fragments within that many ppm
+  (at most 50) are fused after the same-bin merge and before `min_fragments` and `max_fragments`: the fused peak takes
+  the sum of its members' emitted intensities, their intensity-weighted m/z and their best cap key, so the cap ranks
+  whole ions and the slots of an ion's pieces refill. `anchored` (the default mode) takes the fragments strongest first
+  (ties: lower m/z), each unfused one taking every unfused fragment within the tolerance of its own m/z; `linkage` joins
+  m/z neighbours within the tolerance of the previous member, the group's span capped at twice the tolerance (a
+  post-hoc single-linkage fusion chained past 20 ppm). Post hoc on the 1.5.0 K562 9905 output, 20 ppm gave MSFragger
+  +1.6 % (anchored) / +2.1 % (single linkage) and Sage +3.7 % / +5.6 %, Sage entrapment FDP 1.18 % to 1.21 % / 1.25 %;
+  a 25-ppm bound keeps 98 % of an ion, 15 ppm 72 %. A spectrum whose fragments fuse below `min_fragments` is not
+  written. With the other tuning options: the fused intensities are the `frag_intensity` amplitudes after the
+  `foreign_precursor_weight` attenuation; a fused peak is `anchor_rescue`-rescued when its strongest member was; with
+  `post_fusion_cap` it carries its fused key into the twin fold. A `[fuse]` log line counts the fragments in, the
+  peaks out, the groups fused, their mean size and the spectra that fell below `min_fragments`; the header stamps
+  `spx:fragment_fuse`. The default output is unchanged (same semantic digest).
 - **The five tuning options together (integration branch `tune/r1`).** Each option alone behaves as on its own
   branch; all five off is the 1.5.0 output. Where two act on the same fragments: `-gate:anchor_rescue` fragments take
   the `-assembly:frag_intensity` amplitude like gate-passing ones (their cap key stays the IM-weighted apex, as for every
