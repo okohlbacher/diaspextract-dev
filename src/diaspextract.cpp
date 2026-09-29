@@ -232,6 +232,10 @@ namespace
   int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
   double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
   bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
+  double foreign_w_ = 1.0;           ///< [foreign] assembly:foreign_precursor_weight (1 = off, 0 removes)
+  double foreign_ppm_ = 10.0;        ///< [foreign] assembly:foreign_precursor_ppm
+  double foreign_dim_ = 0.015;       ///< [foreign] assembly:foreign_precursor_dim
+  int foreign_min_iso_ = 2;          ///< [foreign] assembly:foreign_precursor_min_iso
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -301,6 +305,10 @@ namespace
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
+  /// [foreign] [0] precursors with a foreign candidate, [1] foreign envelopes matched, [2] spectra with a fragment
+  /// attenuated, [3] fragments attenuated, [4] candidates skipped as this precursor's own ion, [5] spectra of [2] left
+  /// below assembly:min_fragments, [6] matched fragments' signed m/z error summed in 0.001 ppm, [7] matches behind [6]
+  inline std::array<std::atomic<long long>, 8>& foreignCount_() { static std::array<std::atomic<long long>, 8> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -2436,6 +2444,16 @@ protected:
     setValidStrings_("assembly:merge_same_bin", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
+    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 1.0, "Multiply the fragments that lie on the residual isotope envelope of ANOTHER precursor isolated with this one by w, before assembly:max_fragments (0 removes them, 1 = off); the cap key follows the attenuated intensity. A foreign precursor is one of the run's precursors in the same isolation window with its apex within the gate's RT window of this precursor's, 1/K0 within assembly:foreign_precursor_dim, and neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid, up to 3 steps). Its envelope counts when at least assembly:foreign_precursor_min_iso of its positions mono + k x 1.00335/z, k = 0..3, carry a fragment within assembly:foreign_precursor_ppm. Fragments on this precursor's own envelope (mono to M+3) are never touched. Logged as [foreign], stamped spx:foreign. Experimental.", false, true);
+    setMinFloat_("assembly:foreign_precursor_weight", 0.0);
+    setMaxFloat_("assembly:foreign_precursor_weight", 1.0);
+    registerDoubleOption_("assembly:foreign_precursor_ppm", "<ppm>", 10.0, "assembly:foreign_precursor_weight: m/z tolerance between a foreign envelope position and a fragment (ppm).", false, true);
+    setMinFloat_("assembly:foreign_precursor_ppm", 0.0);
+    registerDoubleOption_("assembly:foreign_precursor_dim", "<1/K0>", 0.015, "assembly:foreign_precursor_weight: largest 1/K0 distance between this precursor and a foreign one.", false, true);
+    setMinFloat_("assembly:foreign_precursor_dim", 0.0);
+    registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
+    setMinInt_("assembly:foreign_precursor_min_iso", 1);
+    setMaxInt_("assembly:foreign_precursor_min_iso", 4);
     registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
     registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
@@ -3176,6 +3194,105 @@ protected:
     }
   };
 
+  /// [foreign] One window's precursors, the candidate foreign envelopes of its spectra: every precursor whose mono
+  /// m/z lies in the window, with a finite apex RT and 1/K0 and a charge, sorted by apex RT (ties by index). Built
+  /// from the run's precursor list, not from the tile's owned subset, so it is the same in any tiling.
+  struct ForeignIdx_
+  {
+    const vector<Precursor_>* p = nullptr;
+    vector<double> rt;       ///< apex RT, ascending
+    vector<uint32_t> idx;    ///< into *p, in rt order
+    void build(const vector<Precursor_>& v, size_t lo, size_t hi)
+    {
+      p = &v;
+      vector<pair<double, uint32_t>> o;
+      o.reserve(hi > lo ? hi - lo : 0);
+      for (size_t i = lo; i < hi; ++i)
+        if (std::isfinite(v[i].rt) && std::isfinite(v[i].im) && v[i].charge > 0) o.emplace_back(v[i].rt, (uint32_t)i);
+      std::sort(o.begin(), o.end());
+      rt.resize(o.size()); idx.resize(o.size());
+      for (size_t i = 0; i < o.size(); ++i) { rt[i] = o[i].first; idx[i] = o[i].second; }
+    }
+  };
+
+  /// [foreign] assembly:foreign_precursor_weight: attenuate, among one precursor's admitted fragments, the residual
+  /// (unfragmented) envelopes of the OTHER precursors isolated with it -- apex within drt of this one's, 1/K0 within
+  /// foreign_dim_, neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope
+  /// grid, up to 3 steps). A candidate's positions are mono + k ISO/z, k = 0..3; a position is present when an
+  /// admitted fragment lies within foreign_ppm_ of it. With at least foreign_min_iso_ positions present, those
+  /// fragments are multiplied by foreign_w_ (0 removes them) and their cap key is recomputed from the attenuated
+  /// IM-weighted apex (@p frag_ai). A fragment on this precursor's own envelope (mono to M+3) neither counts nor is
+  /// touched: stripping the own isotopes lost 2.3 % of peptides (CHANGELOG). Returns the fragments attenuated.
+  size_t attenuateForeign_(const Precursor_& pc, double drt, const ForeignIdx_& fx, vector<pair<double, double>>& frags,
+                           vector<double>& frag_scores, vector<uint32_t>& frag_bin, vector<pair<int, int>>& frag_span,
+                           const vector<double>& frag_ai) const
+  {
+    const double ISO = 1.0033548, ppm = foreign_ppm_ * 1e-6;
+    auto& cnt = foreignCount_();
+    auto on_grid = [&](double a, double b, int z) {                 // a within tolerance of b + j ISO/z, |j| <= 3
+      for (int j = -3; j <= 3; ++j) if (std::fabs(a - (b + j * ISO / z)) <= a * ppm) return true;
+      return false; };
+    vector<const Precursor_*> cand;
+    const size_t lo = std::lower_bound(fx.rt.begin(), fx.rt.end(), pc.rt - drt) - fx.rt.begin();
+    for (size_t j = lo; j < fx.rt.size() && fx.rt[j] <= pc.rt + drt; ++j)
+    {
+      const Precursor_& f = (*fx.p)[fx.idx[j]];
+      if (&f == &pc || std::fabs(f.rt - pc.rt) > drt || std::fabs(f.im - pc.im) > foreign_dim_) continue;
+      if (std::fabs(f.mono_mz - pc.mono_mz) < 0.01 || (pc.charge > 0 && on_grid(f.mono_mz, pc.mono_mz, pc.charge))
+          || on_grid(pc.mono_mz, f.mono_mz, f.charge)) { ++cnt[4]; continue; }
+      cand.push_back(&f);
+    }
+    if (cand.empty()) return 0;
+    ++cnt[0];
+    vector<uint32_t> om(frags.size());                               // the fragments by m/z, ties by index
+    for (size_t i = 0; i < om.size(); ++i) om[i] = (uint32_t)i;
+    std::sort(om.begin(), om.end(), [&](uint32_t a, uint32_t b) { return frags[a].first != frags[b].first ? frags[a].first < frags[b].first : a < b; });
+    auto own = [&](double mz) {
+      if (pc.charge <= 0) return false;
+      for (int k = 0; k <= 3; ++k) { const double m = pc.mono_mz + k * ISO / pc.charge; if (std::fabs(mz - m) <= m * ppm) return true; }
+      return false; };
+    vector<char> hit(frags.size(), 0);
+    vector<uint32_t> at;
+    long long n_env = 0, n_match = 0, err = 0;
+    for (const Precursor_* f : cand)
+    {
+      at.clear();
+      int present = 0; long long e = 0;
+      for (int k = 0; k <= 3; ++k)
+      {
+        const double m = f->mono_mz + k * ISO / f->charge, tol = m * ppm;
+        bool any = false;
+        auto it = std::lower_bound(om.begin(), om.end(), m - tol, [&](uint32_t i, double v) { return frags[i].first < v; });
+        for (; it != om.end() && frags[*it].first <= m + tol; ++it)
+          if (!own(frags[*it].first)) { at.push_back(*it); e += std::llround((frags[*it].first - m) / m * 1e9); any = true; }
+        present += any;
+      }
+      if (present < foreign_min_iso_) continue;
+      ++n_env; n_match += (long long)at.size(); err += e;
+      for (uint32_t i : at) hit[i] = 1;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < hit.size(); ++i)
+    {
+      if (!hit[i]) continue;
+      ++n;
+      if (foreign_w_ <= 0.0) continue;
+      frags[i].second *= foreign_w_;
+      const double L = std::log1p(frag_ai[i]);                       // corr_inten keys are linear in it, the others in its log
+      frag_scores[i] = cap_rank_ == 0 ? frag_scores[i] * foreign_w_ : L > 0.0 ? frag_scores[i] * std::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
+    }
+    if (n && foreign_w_ <= 0.0)                                      // remove: compact every parallel array
+    {
+      size_t w = 0;
+      for (size_t i = 0; i < hit.size(); ++i)
+        if (!hit[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; frag_bin[w] = frag_bin[i]; frag_span[w] = frag_span[i]; ++w; }
+      frags.resize(w); frag_scores.resize(w); frag_bin.resize(w); frag_span.resize(w);
+    }
+    cnt[1] += n_env; cnt[3] += (long long)n; cnt[6] += err; cnt[7] += n_match;
+    if (n) ++cnt[2];
+    return n;
+  }
+
   /// Per-precursor assembly: this precursor claims every fragment passing its gate (a fragment may
   /// be shared across precursors -> chimeric). Leaves @p out empty on failure.
   /// pdense is caller-owned scratch, so the caller decides the per-thread copy. Keeps the top max_frags
@@ -3185,10 +3302,12 @@ protected:
                     const FragRt& frag_rt,
                     const vector<Trace>& ms1_traces, const TraceStore& ms1st, const FragStats& fg,
                     double delta_im, double delta_rt, double min_corr, int min_corr_pts,
-                    Size min_frags, Size max_frags, vector<float>& pdense, MSSpectrum& out) const
+                    Size min_frags, Size max_frags, vector<float>& pdense, MSSpectrum& out,
+                    const ForeignIdx_* fx = nullptr) const
   {
     vector<pair<double, double>> frags;
     vector<double> frag_scores;
+    vector<double> frag_ai;      // [foreign] each fragment's IM-weighted apex, its cap key's intensity (only with fx)
     vector<uint32_t> frag_bin;   // [merge] the TOF bin of each fragment (0: OpenMS detector, no bin; a real bin 0, m/z just
                                  // below the usual 100 m/z floor, is compared by exact m/z like the OpenMS path)
     vector<pair<int, int>> frag_span;   // [merge] its detected window-frame span
@@ -3331,6 +3450,7 @@ protected:
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
         frag_span.emplace_back(f_lo, f_hi);
+        if (fx) frag_ai.push_back(inten);
         frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
                             : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
                             : c * inten);                              // [cap] the max_fragments ranking key
@@ -3374,6 +3494,8 @@ protected:
       if (rows.tellp() > 0) { std::lock_guard<std::mutex> lk(gd.mu); gd.out << rows.str(); gd.out.flush(); }
     }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
+    // [foreign] other precursors' residual envelopes, before the merge and the cap: a removed fragment frees its slot
+    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai) : 0;
     // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
     // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
     // RT span overlaps its span are summed (parallel slices of one ion), RT-disjoint pieces are dropped (the stronger
@@ -3418,7 +3540,7 @@ protected:
         mergeCount_()[2] += nm;
       }
     }
-    if (frags.size() < min_frags) return;
+    if (frags.size() < min_frags) { if (n_foreign) ++foreignCount_()[5]; return; }
     if (frags.size() > max_frags)
     {
       vector<size_t> idx(frags.size());
@@ -3670,6 +3792,10 @@ protected:
     cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
     im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
     merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
+    foreign_w_ = getDoubleOption_("assembly:foreign_precursor_weight");
+    foreign_ppm_ = getDoubleOption_("assembly:foreign_precursor_ppm");
+    foreign_dim_ = getDoubleOption_("assembly:foreign_precursor_dim");
+    foreign_min_iso_ = getIntOption_("assembly:foreign_precursor_min_iso");
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
@@ -4702,6 +4828,9 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
     out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
+    if (foreign_w_ < 1.0)   // [foreign] stamped only when on: the default header is unchanged
+      out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
+                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own envelope kept"));
     std::unique_ptr<TileWriter> writer;
     // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
     // structurally valid file holding the earlier tiles only (review, step 2)
@@ -5142,6 +5271,9 @@ protected:
         LedCharge _frag(LC_FRAG, (long long)(frag_im.capacity() * 8 + frag_rt.rt.capacity() * 8 + frag_rt.q.capacity() * 2
                                              + fg.mean.capacity() * 8 + fg.invnorm.capacity() * 8));
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
+        // [foreign] the window's precursors by apex RT, owned by this tile or not: the same candidates in any tiling
+        ForeignIdx_ fx;
+        if (foreign_w_ < 1.0) fx.build(precursors, plo, phi);
 
         vector<MSSpectrum>& bucket = win_out[wi];
         {
@@ -5179,7 +5311,8 @@ protected:
                 const Precursor_& pc = precursors[pidx[(size_t)j]];
                 MSSpectrum ms2;
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
-                             gate_dim, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
+                             gate_dim, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2,
+                             foreign_w_ < 1.0 ? &fx : nullptr);
                 if (!ms2.empty())
                 { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * 12)); pslot[(size_t)j] = std::move(ms2); }
               }
@@ -5358,6 +5491,17 @@ protected:
       writeLogInfo_("[merge] im-slice merge (trace:im_slice_merge " + (!integer_detector ? String("n/a, openms detector") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) : String("off")) + "): " + String(m[0].load())
                     + " picked MS2 peaks merged away in " + String(m[1].load()) + " frames; assembly same-bin merge (" + (merge_same_bin_ ? "on" : "off") + "): "
                     + String(m[2].load()) + " fragments merged away");
+    }
+    if (foreign_w_ < 1.0)
+    {   // [foreign] what assembly:foreign_precursor_weight did
+      auto& c = foreignCount_();
+      const long long nm = c[7].load();
+      writeLogInfo_("[foreign] assembly:foreign_precursor_weight " + String(foreign_w_) + " (" + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
+                    + ", min_iso " + String(foreign_min_iso_) + "): " + String(c[0].load()) + " precursors had a foreign candidate ("
+                    + String(c[4].load()) + " candidates skipped as the precursor's own ion); " + String(c[1].load()) + " foreign envelopes matched; "
+                    + String(c[3].load()) + " fragments " + (foreign_w_ > 0.0 ? "attenuated" : "removed") + " in " + String(c[2].load()) + " spectra, "
+                    + String(c[5].load()) + " of which then fell below assembly:min_fragments; mean m/z error of the " + String(nm)
+                    + " matches " + String(nm ? (double)c[6].load() / 1000.0 / (double)nm : 0.0) + " ppm");
     }
     {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
       auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();

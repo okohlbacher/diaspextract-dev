@@ -45,7 +45,10 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
 4. **Assembly and output.** The accepted fragments are ranked by evidence — max(r, 0) × ln(1 + intensity) × (1 + shared
    points) — and the top 500 kept;
    fragments that still share a flight-time bin are merged into one peak first (`-assembly:merge_same_bin`), so no
-   spectrum carries two peaks at one m/z; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
+   spectrum carries two peaks at one m/z. Before that merge, `-assembly:foreign_precursor_weight` below 1 (off by
+   default) attenuates the residual isotope envelope of another precursor isolated with this one: one of the run's own
+   precursors in the same window, co-eluting within the gate's window and 0.015 1/K0, with at least 2 of its mono…M+3
+   positions among the fragments; the precursor's own envelope is never touched; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
    each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
    (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
@@ -256,6 +259,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | option | default | meaning |
 |---|---|---|
 | `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments remain after the gate and the same-bin merge (checked before the cap below) |
+| `-assembly:foreign_precursor_weight` | 1 = off | multiply the fragments on the residual isotope envelope of ANOTHER precursor isolated with this one by this weight (0 removes them) before the same-bin merge and `max_fragments`; the cap key follows the attenuated intensity. A foreign precursor is one of the run's precursors in the same window, apex within the gate's retention-time window of this one's, 1/K0 within `-assembly:foreign_precursor_dim` (0.015), neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid); its envelope counts when at least `-assembly:foreign_precursor_min_iso` (2) of mono + k × 1.00335/z, k = 0…3, carry a fragment within `-assembly:foreign_precursor_ppm` (10). Fragments on the precursor's own mono…M+3 are never touched. Logged as `[foreign]`, stamped `spx:foreign`. Experimental |
 | `-assembly:merge_same_bin` | true | merge a spectrum's fragments of one flight-time bin (one exact m/z with the OpenMS detector) into one peak before `max_fragments`: members overlapping the strongest in retention time are summed, retention-time-disjoint pieces dropped. Two peaks at one m/z stall the fragment matching of OpenMS-based search engines. **Changes output** |
 | `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more |
 | `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
@@ -292,7 +296,7 @@ tolerance, or `off`), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`
 (`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
 `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
 `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
-(`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
+(`spx:frame_table`); `spx:foreign` is added when `-assembly:foreign_precursor_weight` is below 1. `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
 transform, on request) or `unset` (an mzML input, which carries its m/z as is).
 

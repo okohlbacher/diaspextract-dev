@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased (tuning 2026-09-29)
+
+- **Foreign precursor envelopes (`-assembly:foreign_precursor_weight`, off by default).** A diaPASEF window passes
+  every precursor inside it, and the unfragmented envelope of a co-isolated precursor lands in the spectrum as intense
+  fragments (about half of the 20 most intense peaks are not the peptide's, against 30 % in DDA). Below 1, fragments on
+  the envelope of another of the run's precursors in the same window (apex within the gate's retention-time window,
+  1/K0 within `-assembly:foreign_precursor_dim` 0.015, neither a twin nor this ion called again) are multiplied by the
+  weight before the same-bin merge and `max_fragments` (0 removes them, freeing their cap slots; the cap key follows
+  the attenuated intensity), when at least `-assembly:foreign_precursor_min_iso` (2) of its mono…M+3 positions carry a
+  fragment within `-assembly:foreign_precursor_ppm` (10). The precursor's own mono…M+3 is never touched (stripping it
+  lost 2.3 % of peptides, below). A `[foreign]` log line counts what it did; the header stamps `spx:foreign`. The
+  default output is unchanged (same semantic digest).
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
