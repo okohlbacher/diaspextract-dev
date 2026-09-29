@@ -80,10 +80,10 @@
   (1.71 M groups, mean size 2.4; linkage 8.5 %, 25 ppm 9.3 % / 9.9 %), 7 fewer spectra of 53,715 (12 fell below
   `min_fragments`), the written peaks with another peak within 20 ppm drop from 10.3 % to 3.9 % (among each spectrum's
   150 most intense from 19.9 % to 6.5 %; with the twin fold off from 12.3 % to 0.42 %, linkage 0.04 %: the rest are
-  the fold's union of its members' peaks, which it fuses only within 10 ppm), peaks per spectrum
-  404 to 402 (the freed slots refill), wall time unchanged. K562 9905: 18.6 % fused away, the spectrum count
-  unchanged, wall +3 % (3:37 to 3:43, the second run on a busier node), peak RSS -3.7 %. With the other tuning options: the fused intensities are the `frag_intensity` amplitudes after the
-  `foreign_precursor_weight` attenuation; a fused peak is `anchor_rescue`-rescued when its strongest member was; with
+  the fold's union of its members' peaks, which it fuses only within 10 ppm), peaks per spectrum 404 to 402 (the
+  freed slots refill), wall time unchanged. K562 9905: 18.6 % fused away, the spectrum count unchanged, wall +3 %
+  (3:37 to 3:43, the second run on a busier node), peak RSS -3.7 %. With the other tuning options: the fused
+  intensities are the `frag_intensity` amplitudes after the `foreign_precursor_weight` attenuation; a fused peak is `anchor_rescue`-rescued when its strongest member was; with
   `post_fusion_cap` it carries its fused key into the twin fold. A `[fuse]` log line counts the fragments in, the
   peaks out, the groups fused, their mean size and the spectra that fell below `min_fragments`; the header stamps
   `spx:fragment_fuse`. The default output is unchanged (same semantic digest).
