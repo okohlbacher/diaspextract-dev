@@ -5,11 +5,16 @@
 - **Fragment intensity definition (`-assembly:frag_intensity`, off by default).** The written fragment intensity is
   the trace's apex in one frame, while a DDA spectrum sums the precursor's selection. `core` sums the fragment trace
   over the `-assembly:frag_core_frames` (default 3, odd) window frames centred on the precursor's apex frame, the same
-  frames for every fragment of the precursor; `sum` over every frame where the precursor has signal. The 1/K0 weight
-  and corr^`corr_power` apply on top as before; the gate, the `max_fragments` cap key (still the apex) and the peaks
-  that exist are unchanged. A fragment with no point in those frames takes its point nearest the precursor's apex
-  rather than being dropped (a drop would change the peak set) or written at 0. Stamped `spx:fragint`; a `[fragint]`
-  log line counts the fragments and the fallbacks. `apex` is the 1.5.0 output (same semantic digest).
+  frames for every fragment of the precursor; `sum` over the precursor's span, from its first to its last frame with
+  signal, gaps included (summed only where the precursor has a point, 29 % of HeLa 10 ng's fragments had none: a faint
+  MS1 trace has missing points and the concentric gate keeps fragments that sit in them). The 1/K0 weight and
+  corr^`corr_power` apply on top as before. A fragment with no point in those frames takes its point nearest the
+  precursor's apex rather than being dropped or written at 0. The gate and the `max_fragments` cap key (still the
+  apex) are unchanged, so the spectra and the fragments passing the gate are the same; the steps after it that weigh
+  by intensity follow the new values (the same-bin merge keeps its strongest member's m/z and sums the members that
+  overlap it, the twin fold fuses peaks at their intensity-weighted m/z), so on HeLa 10 ng 99.9 % of the peaks lie
+  within 10 ppm of the `apex` run's. Stamped `spx:fragint`; a `[fragint]` log line counts the fragments and the
+  fallbacks. `apex` is the 1.5.0 output (same semantic digest).
 
 ## v1.5.0 — 2026-09-29
 
