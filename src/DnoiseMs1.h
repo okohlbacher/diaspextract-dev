@@ -357,13 +357,15 @@ inline bool opentimsCorrection(const std::string& text, double& corr)
 /// Why the raw counts of MS1 frame @p fid cannot be recovered through its correction @p corr, or empty when they can. At
 /// corr >= 1 (AccumulationTime <= 100 ms) raw counts below 2^24 do not collide (checked exhaustively at 19 values, 1 + 1 ulp
 /// among them), so recovery is exact; below 1 they do (from raw 3 at 125 ms, from raw 1191 at 100.042 ms) and recoverPoint
-/// takes the candidate nearest v / corr -- an approximation, accepted (user decision 2026-09-24). 1e6 is a plausibility bound.
+/// takes the candidate nearest v / corr -- an approximation, accepted (user decision 2026-09-24). 0.01 .. 1e6 is a plausibility
+/// range: below 0.01 (AccumulationTime above 10 s) recoverPoint would visit 1 / corr + 3 candidates per point.
 inline std::string correctionRefusal(std::size_t fid, double corr)
 {
-  if (corr < 1e6) return std::string();
+  if (corr >= 0.01 && corr < 1e6) return std::string();
   std::ostringstream m;   // the classic locale, as for every number this header reads
   m.imbue(std::locale::classic());
-  m << "MS1 frame " << fid << ": opentims' intensity correction 100 / AccumulationTime = " << corr << " is not invertible";
+  m << "MS1 frame " << fid << ": opentims' intensity correction 100 / AccumulationTime = " << corr
+    << " is outside the invertible range 0.01 .. 1e6 (AccumulationTime 0.0001 ms .. 10 s)";
   return m.str();
 }
 

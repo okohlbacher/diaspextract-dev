@@ -175,6 +175,7 @@ scan "specimen IDs FKL/K25423/QKL (word-bounded, _ is a boundary)" "" '(^|[^A-Za
 scan "local paths /Users/kohlbach" "" '/Users/kohlbach'
 scan "cohort project AGXT/PH1/liver (word-bounded)" "-i" '(^|[^A-Za-z0-9_])(AGXT|PH1|liver)([^A-Za-z0-9_]|$)'
 scan "private directories docs/reviews, docs/benchmarks" "" 'docs/reviews|docs/benchmarks'
+scan "K562 study (user decision 2026-09-23: no K562 result in any public file)" "-i" 'k[-_ ]?562|charkow'
 echo "== internal-development mentions (informational, not a gate)"
 ( cd "$DST_ABS" && tr '\n' '\0' < "$WORK/textfiles.txt" | xargs -0 -r grep -a -n -H -i -E -- 'codex|(^|[^A-Za-z0-9_])(kimi|vibe)([^A-Za-z0-9_]|$)|adversarial|ibminode|/ceph/|/scratch/kohlbach|\[adv-fix\]' ) 2>/dev/null | sed 's/^/     /' | head -40
 echo "   (end of informational scan)"

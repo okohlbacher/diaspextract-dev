@@ -758,6 +758,8 @@ static void testRecover()
   const std::string r1e6 = rc::correctionRefusal(7, 1e6);
   CHECK(r1e6.find("MS1 frame 7: opentims' intensity correction") == 0 && !rc::correctionRefusal(7, std::numeric_limits<double>::infinity()).empty(),
         "corr 1e6 and inf are refused: '%s'", r1e6.c_str());
+  CHECK(!rc::correctionRefusal(7, 0.005).empty() && rc::correctionRefusal(7, 0.01).empty() && !rc::correctionRefusal(7, 0.0).empty(),
+        "corr below 0.01 (AccumulationTime above 10 s) and 0 are refused, 0.01 is accepted");
 
   for (const RecoverFile& f : {recoverD(), recoverTnbc()})
   {

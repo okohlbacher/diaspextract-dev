@@ -132,8 +132,8 @@ namespace
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
   /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
-  /// 15 s, with the first gate it fails (pearson mode, default gate rules only: gate:short_traces, gate:colocation and
-  /// gate:shrinkage are not reflected in the fate). The spectra are unchanged; off unless both variables are set.
+  /// 15 s, with the first gate it fails (plain Pearson gate rules only, RT window as applied: gate:short_traces,
+  /// gate:colocation and gate:shrinkage are not reflected in the fate). The spectra are unchanged; off unless both variables are set.
   struct GateDump_
   {
     struct T { std::string id; double mz, rt, im; int z; };
@@ -958,7 +958,7 @@ namespace
   ///
   /// [merge] The IM picker's 1/K0 box (gate:delta_im) cuts an ion whose mobility peak is wider into several centroids per
   /// frame that land in ONE bin; the tracer takes one peak per frame, so each slice became its own trace and a spectrum
-  /// could carry the same m/z twice (docs/reviews/same-bin-traces-2026-09-27). Here, where the bin first exists, a
+  /// could carry the same m/z twice. Here, where the bin first exists, a
   /// frame's peaks that share a bin and chain within trace:im_slice_merge in 1/K0 become one peak: intensity summed,
   /// 1/K0 intensity-weighted. Frame-local, so thread and tile invariant; peaks stay ascending by bin within a frame.
   void toTof(PeakSlab& sl)
@@ -2421,7 +2421,7 @@ protected:
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Sum n neighbouring MS1 frames on each side in the .d reader, before peak picking: 0 = off, 1 = 3-frame sum, 2 = 5-frame sum. Needs perf:stream_load true and -dnoise:ms1 false. CHANGES OUTPUT: at 1 (2026-07-27, older defaults) Sage +7.8% for 2.7x the spectra.", false);
 
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
-    registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching.", false);
+    registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching. 'logoverlap' needs gate:shrinkage off (the default fisher refuses it).", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
     registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
@@ -2431,13 +2431,14 @@ protected:
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
     registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's picked MS2 peaks that fall in one flight-time bin into one peak (intensity summed, 1/K0 intensity-weighted). Peaks join when their 1/K0 is within this distance of the previous one and the group spans at most twice this distance: the IM picker (box gate:delta_im) cuts an ion with a wider mobility peak into several same-bin centroids, which would otherwise become separate traces and duplicate m/z in a spectrum. Negative = off.", false, true);
+    setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
     registerStringOption_("assembly:merge_same_bin", "<true/false>", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", false, true);
     setValidStrings_("assembly:merge_same_bin", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
-    registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else 'off' (the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': the modes apply to every precursor. Experimental.", false, true);
+    registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
-    registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, K562 250 ng 0.30, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
+    registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
     setMinFloat_("gate:auto_faint_fraction", 0.0);
     setMaxFloat_("gate:auto_faint_fraction", 1.0);
     registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive faint: most window frames with precursor signal for a faint precursor.", false, true);
@@ -3188,7 +3189,8 @@ protected:
   {
     vector<pair<double, double>> frags;
     vector<double> frag_scores;
-    vector<uint32_t> frag_bin;   // [merge] the TOF bin of each fragment (0: OpenMS detector, no bin)
+    vector<uint32_t> frag_bin;   // [merge] the TOF bin of each fragment (0: OpenMS detector, no bin; a real bin 0, m/z just
+                                 // below the usual 100 m/z floor, is compared by exact m/z like the OpenMS path)
     vector<pair<int, int>> frag_span;   // [merge] its detected window-frame span
     const double G = (double)fg.G;
     const Trace& p_tr = ms1_traces[pc.trace_idx];
@@ -4271,6 +4273,7 @@ protected:
       for (const Precursor_& pc : precursors) if ((int)ms1_traces[pc.trace_idx].np() <= faint_frames_) ++nf;
       const double frac = precursors.empty() ? 0.0 : (double)nf / (double)precursors.size();
       adaptive_ = frac >= auto_faint_frac_;
+      if (!adaptive_) shrink_ = coloc_ = short_conc_ = false;   // auto:off = the plain gate for every precursor, not 'off'
       writeLogInfo_("[adaptive] auto: " + String(nf) + " of " + String(precursors.size()) + " precursors span <= " + String(faint_frames_)
                     + " MS1 points (" + String(frac) + ", threshold " + String(auto_faint_frac_) + "): faint gate " + (adaptive_ ? "ON" : "OFF"));
     }
