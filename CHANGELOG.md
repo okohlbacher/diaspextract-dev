@@ -70,6 +70,18 @@
   `-assembly:im_weight_sigma 0.005`: K562 +8.8 / +5.0 %, 10 ng +3.1 / +3.4 %, 100 ng +5.8 / +5.6 %, entrapment +0.04,
   +0.05, +0.05 pt, K562 isotope error 7.6 % (M-1 1.4 %); peptides above `im_weight_sigma 0.005` alone on K562 (+1.5 /
   +1.1 %) and 100 ng (+1.1 / +0.7 %), level at 10 ng (+0.3 / −0.4 %).
+  **Review fix: v2 decides at the final charge.** `charge:im_charge_veto` (on by default) runs after the count walk and
+  re-calls 2+ the z=1 calls that sit on the run's 2+ mobility line (K562 9905: 156,781 of 219,342 z=1 calls), keeping
+  their monoisotope. v2 used to judge those walks at z=1 spacing, where a step of 1.003 m/z is two isotopes of the 2+
+  ion: on the 2,375 identified release keys from such walks the release monoisotope is wrong for 54.5 %, v2 left it
+  wrong for 55.7 % and moved 267 of them two or four isotopes (none onto the right one). v2 now runs after the veto
+  (`monoPositionPass_`), which therefore reads the walks' own monoisotopes as without v2, and judges each walk at its
+  precursor's final charge: a re-called walk's leftmost partner is position −2·nl at 2+, and the positions between are
+  read like any other (the tested sums do not need a claimed partner). The extension (B) also no longer fires after a
+  `charge:mono_averagine_guard` stop, which is not a miss, and the "back onto the seed" count no longer counts
+  monoisotopes that `charge:mono_averagine_select` had already put there. Offline replica on the fixed K562 keys
+  (agrees with the tool on 99.75 % of same-charge walks): re-called walks 55.7 % → 22.0 % not monoisotopic, all keys
+  10.6 % → 8.7 %.
 
 ## v1.5.0 — 2026-09-29
 
