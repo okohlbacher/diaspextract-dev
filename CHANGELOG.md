@@ -70,6 +70,34 @@
   removed on HeLa_22 were the precursor's own isotopes, taken by the same ion called again with a mono just outside
   the test. A `[foreign]` log line counts what it did; the header stamps `spx:foreign`. The default output is
   unchanged (same semantic digest).
+- **Fragment fusion (`-assembly:fragment_fuse_ppm`, `-assembly:fragment_fuse_mode`, off by default): one peak per
+  fragment ion.** The mobility picker keeps 1.4–2.3 flight-time bins of a fragment ion that spans 3.8–6.9, so one ion
+  becomes several traces and several output peaks 5–20 ppm apart, each written with its own apex intensity: on K562
+  9905 49.8 % of the b/y ions have at least 2 peaks within 20 ppm (chance 12.9 %, DDA 0.6 %), and the 1.5.0 same-bin
+  merge, which reaches only an exact bin, does not change that. Above 0, a spectrum's fragments within that many ppm
+  (at most 50) are fused after the same-bin merge and before `min_fragments` and `max_fragments`: the fused peak takes
+  the sum of its members' emitted intensities, their intensity-weighted m/z and their best cap key, so the cap ranks
+  whole ions and the slots of an ion's pieces refill. `anchored` (the default mode) takes the fragments strongest first
+  (ties: lower m/z), each unfused one taking every unfused fragment within the tolerance of its own m/z; `linkage` joins
+  m/z neighbours within the tolerance of the previous member, the group's span capped at twice the tolerance (a
+  post-hoc single-linkage fusion chained past 20 ppm). Post hoc on the 1.5.0 K562 9905 output, 20 ppm gave MSFragger
+  +1.6 % (anchored) / +2.1 % (single linkage) and Sage +3.7 % / +5.6 %, Sage entrapment FDP 1.18 % to 1.21 % / 1.25 %;
+  a 25-ppm bound keeps 98 % of an ion, 15 ppm 72 %. A spectrum whose fragments fuse below `min_fragments` is not
+  written. Smoke on HeLa_22 (10 ng, 64 threads), anchored 20 ppm: 7.8 % of the fragments reaching the cap fuse away
+  (1.71 M groups, mean size 2.4; linkage 8.5 %, 25 ppm 9.3 % / 9.9 %), 7 fewer spectra of 53,715 (12 fell below
+  `min_fragments`), the written peaks with another peak within 20 ppm drop from 10.3 % to 3.9 % (among each spectrum's
+  150 most intense from 19.9 % to 6.5 %; with the twin fold off from 12.3 % to 0.42 %, linkage 0.04 %: the rest are
+  the fold's union of its members' peaks, which it fuses only within 10 ppm), peaks per spectrum 404 to 402 (the
+  freed slots refill), wall time unchanged. K562 9905: 18.6 % fused away, the spectrum count unchanged, wall +3 %
+  (3:37 to 3:43, the second run on a busier node), peak RSS -3.7 %. With the other tuning options: the fused
+  intensities are the `frag_intensity` amplitudes after the `foreign_precursor_weight` attenuation; a fused peak is
+  `anchor_rescue`-rescued when its strongest member was; with `post_fusion_cap` it carries its fused key into the
+  twin fold. Fused together with `foreign_precursor_weight 0`, `anchor_rescue` and `post_fusion_cap` (anchored and
+  linkage, 20 ppm), and with all five tuning options (anchored 20 ppm; linkage 25 ppm with `frag_intensity sum` and
+  foreign weight 0.1), the output is the same at 16 and 100 threads (anchored 20 ppm also at 64 threads with 4 cells
+  per tile). A `[fuse]` log line counts the fragments in, the peaks out, the groups fused, their mean size and the
+  spectra that fell below `min_fragments`; the header stamps `spx:fragment_fuse`. The default output is unchanged
+  (same semantic digest).
 - **The five tuning options together (integration branch `tune/r1`).** Each option alone behaves as on its own
   branch; all five off is the 1.5.0 output. Where two act on the same fragments: `-gate:anchor_rescue` fragments take
   the `-assembly:frag_intensity` amplitude like gate-passing ones (their cap key stays the IM-weighted apex, as for every

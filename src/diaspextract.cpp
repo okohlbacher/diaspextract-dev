@@ -247,6 +247,8 @@ namespace
   double foreign_ppm_ = 10.0;        ///< [foreign] assembly:foreign_precursor_ppm
   double foreign_dim_ = 0.015;       ///< [foreign] assembly:foreign_precursor_dim
   int foreign_min_iso_ = 2;          ///< [foreign] assembly:foreign_precursor_min_iso
+  double fuse_ppm_ = 0.0;            ///< [fuse] assembly:fragment_fuse_ppm (0 = off)
+  bool fuse_linkage_ = false;        ///< [fuse] assembly:fragment_fuse_mode: false anchored, true linkage
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -330,6 +332,10 @@ namespace
   /// assembly:min_fragments before the removal (weight 0) and fewer after it and the same-bin merge, [6] matched
   /// fragments' signed m/z error summed in 0.001 ppm, [7] matches behind [6]
   inline std::array<std::atomic<long long>, 9>& foreignCount_() { static std::array<std::atomic<long long>, 9> c{}; return c; }
+  /// [fuse] assembly:fragment_fuse_ppm, per assembly (one precursor in one window) with at least one fragment: [0]
+  /// assemblies, [1] fragments in, [2] peaks out, [3] groups of >= 2 fused, [4] fragments in those groups, [5] assemblies
+  /// with at least assembly:min_fragments before the fusion and fewer after it
+  inline std::array<std::atomic<long long>, 6>& fuseCount_() { static std::array<std::atomic<long long>, 6> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -2559,6 +2565,11 @@ protected:
     registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
     setMinInt_("assembly:foreign_precursor_min_iso", 1);
     setMaxInt_("assembly:foreign_precursor_min_iso", 4);
+    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 0.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities, its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) their best, so the cap ranks fused peaks and the slots they free refill. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT. Experimental.", false, true);
+    setMinFloat_("assembly:fragment_fuse_ppm", 0.0);
+    setMaxFloat_("assembly:fragment_fuse_ppm", 50.0);
+    registerStringOption_("assembly:fragment_fuse_mode", "<mode>", "anchored", "assembly:fragment_fuse_ppm: 'anchored' takes the fragments by emitted intensity, strongest first (ties: lower m/z); each one not yet fused becomes an anchor and takes every unfused fragment within the tolerance of its own m/z. 'linkage' walks the fragments in m/z order and joins a fragment to the group of the previous one when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage, span capped).", false, true);
+    setValidStrings_("assembly:fragment_fuse_mode", {"anchored", "linkage"});
     registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
     registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
@@ -3456,6 +3467,92 @@ protected:
     return n;
   }
 
+  /// [fuse] assembly:fragment_fuse_ppm: one peak per fragment ion. The IM picker keeps 1-2 flight-time bins of an ion
+  /// that spans 4-7, so one ion becomes several traces and several peaks 5-20 ppm apart; the same-bin merge reaches only
+  /// exact bins. Groups the fragments within @p ppm (anchored: strongest first, each unfused fragment an anchor taking
+  /// every unfused one within ppm of its own m/z; @p linkage: m/z order, joined to the previous member within ppm and to
+  /// the group's first within 2 ppm). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
+  /// intensity = their sum, key = their best key, rescued flag = the strongest member's. It sits at its members' lowest
+  /// index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and @p resc (when not
+  /// empty) are parallel to @p frags and compacted with it. Deterministic: every order has a total tie-break and the sums
+  /// run in m/z order. Returns the groups of >= 2 fused and adds their members to @p n_members.
+  static long long fuseFragments_(vector<pair<double, double>>& frags, vector<double>& keys, vector<char>& resc,
+                                  double ppm, bool linkage, long long& n_members)
+  {
+    const size_t n = frags.size();
+    if (n < 2 || !(ppm > 0.0)) return 0;
+    const double tol = ppm * 1e-6;
+    constexpr uint32_t NONE = std::numeric_limits<uint32_t>::max();
+    vector<uint32_t> om(n);                                          // by m/z, ties by index
+    for (size_t i = 0; i < n; ++i) om[i] = (uint32_t)i;
+    std::sort(om.begin(), om.end(), [&](uint32_t a, uint32_t b) { return frags[a].first != frags[b].first ? frags[a].first < frags[b].first : a < b; });
+    vector<uint32_t> grp(n, NONE);
+    uint32_t ng = 0;
+    if (linkage)
+    {
+      size_t s = 0;                                                  // the current group's first member in om
+      for (size_t k = 0; k < n; ++k)
+      {
+        if (k > 0)
+        {
+          const double m = frags[om[k]].first, mp = frags[om[k - 1]].first, ms = frags[om[s]].first;
+          if (!(m - mp <= mp * tol && m - ms <= 2.0 * ms * tol)) { ++ng; s = k; }
+        }
+        grp[om[k]] = ng;
+      }
+      ++ng;
+    }
+    else
+    {
+      vector<uint32_t> oi(om);                                       // by intensity desc, then m/z asc, then index
+      std::sort(oi.begin(), oi.end(), [&](uint32_t a, uint32_t b) {
+        if (frags[a].second != frags[b].second) return frags[a].second > frags[b].second;
+        if (frags[a].first != frags[b].first) return frags[a].first < frags[b].first;
+        return a < b;
+      });
+      for (uint32_t a : oi)
+      {
+        if (grp[a] != NONE) continue;
+        const double m = frags[a].first, d = m * tol;
+        auto it = std::lower_bound(om.begin(), om.end(), m - d, [&](uint32_t i, double v) { return frags[i].first < v; });
+        for (; it != om.end() && frags[*it].first <= m + d; ++it) if (grp[*it] == NONE) grp[*it] = ng;
+        ++ng;
+      }
+    }
+    if (ng == n) return 0;                                           // nothing within ppm: unchanged
+    struct Acc { double w = 0.0, wmz = 0.0, key = -std::numeric_limits<double>::infinity(); uint32_t head = NONE, top = NONE, n = 0; };
+    vector<Acc> acc(ng);
+    for (uint32_t i : om)                                            // m/z order: a fixed summation order
+    {
+      Acc& g = acc[grp[i]];
+      g.w += frags[i].second; g.wmz += frags[i].second * frags[i].first;
+      g.key = std::max(g.key, keys[i]);
+      g.head = std::min(g.head, i);
+      if (g.top == NONE || frags[i].second > frags[g.top].second) g.top = i;   // the strongest; ties: lower m/z
+      ++g.n;
+    }
+    long long groups = 0;
+    size_t w = 0;
+    for (size_t i = 0; i < n; ++i)                                   // write position w <= i <= every unread member
+    {
+      const Acc& g = acc[grp[i]];
+      if (g.head != i) continue;
+      if (g.n == 1) { frags[w] = frags[i]; keys[w] = keys[i]; if (!resc.empty()) resc[w] = resc[i]; }
+      else
+      {
+        const double mz = g.w > 0.0 ? g.wmz / g.w : frags[g.top].first;
+        const char r = resc.empty() ? 0 : resc[g.top];
+        frags[w] = {mz, g.w}; keys[w] = g.key;
+        if (!resc.empty()) resc[w] = r;
+        ++groups; n_members += g.n;
+      }
+      ++w;
+    }
+    frags.resize(w); keys.resize(w);
+    if (!resc.empty()) resc.resize(w);
+    return groups;
+  }
+
   /// Per-precursor assembly: this precursor claims every fragment passing its gate (a fragment may
   /// be shared across precursors -> chimeric). Leaves @p out empty on failure.
   /// pdense is caller-owned scratch, so the caller decides the per-thread copy. Keeps the top max_frags
@@ -3847,9 +3944,21 @@ protected:
         mergeCount_()[2] += nm;
       }
     }
+    // [fuse] one peak per fragment ion, after the merge (frag_bin and frag_span are stale from here on) and before
+    // min_fragments and the cap: the cap ranks fused peaks, so the slots of an ion's pieces refill
+    const size_t n_merged = frags.size();                              // [foreign]/[fuse] the fell-below counts
+    if (fuse_ppm_ > 0.0 && n_merged > 0)
+    {
+      long long n_mem = 0;
+      const long long n_grp = fuseFragments_(frags, frag_scores, resc, fuse_ppm_, fuse_linkage_, n_mem);
+      auto& fc = fuseCount_();
+      ++fc[0]; fc[1] += (long long)n_merged; fc[2] += (long long)frags.size();
+      if (n_grp) { fc[3] += n_grp; fc[4] += n_mem; }
+      if (n_merged >= min_frags && frags.size() < min_frags) ++fc[5];
+    }
     if (frags.size() < min_frags)
     {   // [foreign] counted only when the removal (weight 0) took a spectrum that had enough fragments below the floor
-      if (n_foreign && foreign_w_ <= 0.0 && n_before >= min_frags) ++foreignCount_()[5];
+      if (n_foreign && foreign_w_ <= 0.0 && n_before >= min_frags && n_merged < min_frags) ++foreignCount_()[5];
       return;
     }
     long long n_resc = 0;                                               // [anchor] rescued peaks in this spectrum
@@ -4152,6 +4261,8 @@ protected:
     foreign_ppm_ = getDoubleOption_("assembly:foreign_precursor_ppm");
     foreign_dim_ = getDoubleOption_("assembly:foreign_precursor_dim");
     foreign_min_iso_ = getIntOption_("assembly:foreign_precursor_min_iso");
+    fuse_ppm_ = getDoubleOption_("assembly:fragment_fuse_ppm");
+    fuse_linkage_ = getStringOption_("assembly:fragment_fuse_mode") == "linkage";
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
@@ -5201,6 +5312,13 @@ protected:
     if (foreign_w_ < 1.0)   // [foreign] stamped only when on: the default header is unchanged
       out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
                                                  + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept (30 ppm)"));
+    if (fuse_ppm_ > 0.0)   // [fuse] stamped only when on: the default header is unchanged
+    {
+      String s = String(fuse_linkage_ ? "linkage " : "anchored ") + String(fuse_ppm_) + " ppm";
+      if (fuse_linkage_) s += String(" (group span <= ") + String(2.0 * fuse_ppm_) + " ppm)";
+      s += ", summed intensity, intensity-weighted m/z, best cap key; after the same-bin merge, before min_fragments and max_fragments";
+      out_exp.setMetaValue("spx:fragment_fuse", s);
+    }
     std::unique_ptr<TileWriter> writer;
     // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
     // structurally valid file holding the earlier tiles only (review, step 2)
@@ -5887,6 +6005,16 @@ protected:
                     + String(c[3].load()) + " fragments " + (foreign_w_ > 0.0 ? "attenuated" : "removed") + " in " + String(c[2].load()) + " assemblies, "
                     + String(c[5].load()) + " of which then fell below assembly:min_fragments; mean m/z error of the " + String(nm)
                     + " matches " + String(nm ? (double)c[6].load() / 1000.0 / (double)nm : 0.0, false) + " ppm");
+    }
+    if (fuse_ppm_ > 0.0)
+    {   // [fuse] what assembly:fragment_fuse_ppm did (per precursor-window assembly, before min_fragments and the cap)
+      auto& c = fuseCount_();
+      const long long g = c[3].load();
+      writeLogInfo_("[fuse] assembly:fragment_fuse_ppm " + String(fuse_ppm_) + " (" + (fuse_linkage_ ? "linkage" : "anchored") + "): "
+                    + String(c[1].load()) + " fragments in, " + String(c[2].load()) + " peaks out, in " + String(c[0].load())
+                    + " precursor-window assemblies; " + String(g) + " groups of >= 2 fused, mean size "
+                    + String(g ? (double)c[4].load() / (double)g : 0.0, false) + "; " + String(c[5].load())
+                    + " assemblies fell below assembly:min_fragments");
     }
     {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
       auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();
