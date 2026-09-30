@@ -33,6 +33,9 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
    Optionally (`-charge:mono_profile_check true`, off by default) a lighter peak becomes the monoisotope only if its
    elution profile and mobility match the seed's; otherwise the walk stops before that peak and leaves it free.
+   `-charge:mono_profile_check v2` instead compares the summed MS1 intensity at the isotope positions near the seed's
+   mobility: it rejects a leftmost step that is too weak for averagine and extends a walk that stopped one isotope
+   short; claims do not change.
 3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
    mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
    Before tracing, the peaks of one frame that share a flight-time bin at nearly the same 1/K0 are merged into one
@@ -238,6 +241,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-charge:iso_im_tolerance` | 0.05 | 1/K0 tolerance for isotope partners |
 | `-charge:mono_averagine_guard`, `-charge:mono_averagine_select` | 0, off | averagine-based corrections of the monoisotope; off by default, neither improves identifications |
 | `-charge:mono_profile_check`, `-charge:mono_profile_min_corr`, `-charge:mono_profile_max_dim` | false, 0.6, 0.015 | `true` checks each leftward step of the count walk for the winning charge: the lighter trace becomes the monoisotope only if its MS1 profile correlates with the seed's (Pearson ≥ min_corr; fewer than 3 shared frames pass unchecked) and its 1/K0 is within max_dim of the seed's; the walk stops at the first failure and the rejected trace stays unclaimed. Charge and envelope size are unchanged. **Changes output**; under evaluation |
+| `-charge:mono_profile_check v2`, `-charge:mono_position_min_ratio`, `-charge:mono_position_im_box`, `-charge:mono_position_extend`, `-charge:mono_position_iterate` | –, 0.2, 0 (auto), 0.6, true | `v2` tests isotope positions, not the claimed partner: PS(k) sums the apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (partner m/z tolerance, `gate:delta_rt`, im_box 1/K0 of the seed). im_box 0 (auto) sizes the box from the run's own isotope scatter: 3.5 × the 90th percentile of the 1/K0 gap between the brightest tenth of the seeds and their nearest trace one isotope heavier, clamped to [0.01, 0.03] (0.0101 on K562 9905, 0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs); a value > 0 fixes it. The walk's leftmost step j is rejected when PS(−j)/PS(−j+1) × λ < min_ratio (λ = max(0.1, 0.000594 × neutral mass); 0 = no test), and the monoisotope moves one isotope right; `iterate` (`true`) repeats the test on the new leftmost step while it fails, `false` tests one step only. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope (its most intense trace, not claimed) when its ratio is ≥ extend (0 = off). Each walk is judged at its precursor's final charge, after `charge:im_charge_veto` (a z=1 walk re-called 2+ is read at 2+ spacing). Claims, charge and envelope size are unchanged. **Changes output**; under evaluation |
 
 **Co-elution gate (`gate:`)**
 
@@ -323,7 +327,7 @@ tolerance, or `off`; `spx:post_fusion_cap` is added when `-assembly:post_fusion_
 (`spx:frame_table`); `-gate:anchor_rescue true` adds `spx:anchor`. `spx:foreign` is added when `-assembly:foreign_precursor_weight` is below 1, `spx:fragint` when `-assembly:frag_intensity` is not `apex`, `spx:fragment_fuse` when `-assembly:fragment_fuse_ppm` is above 0. `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
 transform, on request) or `unset` (an mzML input, which carries its m/z as is). With
-`-charge:mono_profile_check true` the header also carries `spx:monocheck` (its settings and how many monoisotopes moved).
+`-charge:mono_profile_check true` or `v2` the header also carries `spx:monocheck` (its settings and how many monoisotopes moved).
 
 ## Layout
 

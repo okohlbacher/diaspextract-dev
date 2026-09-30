@@ -113,6 +113,91 @@
   that position into a foreign envelope; the extra precursors seeded by released traces add candidates and spectra,
   so the `[foreign]` counts are not comparable across `mono_profile_check` settings.
 
+- **`-charge:mono_profile_check v2` (off by default): isotope-position monoisotope check.** `true` (v1) cut the M-1
+  calls on K562 9905 from 9.9 % to 3.7 % but raised the total isotope error from 18.5 % to 39.7 % (true monoisotopes
+  rejected) and the spectra by 28 %: `findPartner` takes the first candidate in m/z order, which for a third of true
+  steps sits more than 0.01 1/K0 from the seed, and ion-mobility slicing splits one isotope over several traces, so a
+  single trace's profile and intensity are noisy. `v2` sums the apex intensity of every MS1 trace, claimed or not, at
+  each isotope position of the seed (the partner m/z tolerance, `gate:delta_rt`, `-charge:mono_position_im_box` 0.02
+  1/K0). Only the walk's leftmost step is tested (an identified walk has at most one spurious step, and it is the
+  leftmost): it is rejected when PS(−j)/PS(−j+1) × λ, with averagine's λ = max(0.1, 0.000594 × neutral mass), is below
+  `-charge:mono_position_min_ratio` (0.15), and the monoisotope moves one isotope right;
+  `-charge:mono_position_iterate` (`true`; `false` = one step only) repeats the test on the new leftmost step while it
+  fails. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope,
+  without claiming its trace, when its ratio is ≥ `-charge:mono_position_extend` (0.5; 0 = off). Claims, charge and
+  `spx_n_isotopes` never change, so the same precursors are inferred (the spectrum count can still shift where a moved
+  mass crosses a window edge or the twin fold). The test reads only the fixed trace arrays (no speculation
+  dependencies) and sums in m/z order (deterministic). Logged as `[monocheck]`, stamped `spx:monocheck`. `false`
+  output unchanged; `true` unchanged. Screened 2026-09-29 (iteration 1: im_box 0.01, min_ratio 0.2, extend 0.6; n = 1,
+  K562 9905, HeLa 10 ng and 100 ng): with iterate the isotope error of identified K562 precursors falls from 18.5 % to
+  8.1 % (M-1 9.9 % to 1.4 %), peptides rise with both engines on all three runs (Sage / MSFragger +1.0 / +0.7 %, +0.4
+  / +0.2 %, +1.5 / +4.8 %), entrapment is lower on all three, and spectra fall by 1.6-5.6 % (seeds of one ion that sat
+  one isotope apart now fold into twins). Without iterate: 10.3 %. On the 2019 HeLa py3 runs the isotope traces of one
+  ion scatter about 3x wider in 1/K0 than on K562, and the leftmost-step test rejects 12 % of true steps (K562 3 %):
+  the identified 10 ng isotope error rises from 8.6 % to 9.8 %.
+  **Defaults re-tuned (iteration 2):** iterate is on (`-charge:mono_position_iterate` is now a `true`/`false` option,
+  default `true`), `im_box` 0.01 → 0.02, `min_ratio` 0.2 → 0.15, `extend` 0.6 → 0.5. Search-free sweep on the fixed
+  identified release keys (K562 MSFragger/DDA truth; HeLa Sage isotope_error), total isotope error K562 / HeLa 10 ng /
+  HeLa 100 ng: release 18.5 / 9.0 / 18.2 %; iteration-1 settings 7.7 / 10.3 / 14.8 %; new defaults 8.1 / 8.5 / 12.7 %
+  (extend 0.6: im_box 0.015 7.7 / 9.5 / 13.5; 0.02 8.0 / 9.3 / 13.1; 0.03 8.6 / 9.1 / 13.1; 0.02 with min_ratio 0.10
+  8.9 / 8.3 / 13.1). Of the ten settings tried the new defaults have the lowest error summed over the three runs; at the
+  iteration-1 settings (im_box 0.01) the HeLa 10 ng error stays above the release.
+  Screened (iteration 2, n = 1; Sage / MSFragger peptides vs release): K562 +0.6 / +0.3 %, HeLa 10 ng +0.4 / −0.8 %,
+  HeLa 100 ng +1.3 / +4.6 %; entrapment −0.09, +0.02, −0.06 pt; spectra −5.0, −1.9, −4.5 %. Identified K562 isotope
+  error 8.4 % (M-1 2.4 %; iteration 1 with iterate 8.1 %, M-1 1.4 %). Sage isotope error on the peptides both runs
+  identify: HeLa 10 ng 8.5 → 8.2 %, 100 ng 17.6 → 12.3 % (same measure, iteration 1: 8.5 → 9.7 %, 17.5 → 14.3 %).
+  Peptide counts are 0.2-0.5 % below iteration 1's, except at 10 ng (Sage equal, MSFragger −1.0 %); that MSFragger
+  loss sits at the 1 % cut (71 vs 72 decoys; target peptides above hyperscore 20, 22 and 25 equal iteration 1's within
+  4). With `-assembly:im_weight_sigma 0.005`: K562 +8.4 / +4.3 %, 10 ng +3.1 / +3.4 %, 100 ng +6.0 / +5.6 % (above
+  `im_weight_sigma 0.005` alone at 100 ng, which iteration 1 was not), entrapment −0.01, +0.05, +0.05 pt, K562 isotope
+  error 8.0 %.
+  **Iteration 3: the 1/K0 box follows the run.** `-charge:mono_position_im_box` 0 (the new default) = auto: 3.5 × the
+  90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds (commit order) and their nearest
+  MS1 trace one isotope heavier (partner m/z tolerance, `gate:delta_rt`, `charge:iso_im_tolerance`), clamped to
+  [0.01, 0.03]; a value > 0 fixes the box as before. The runs' own p90 is 0.0029 on K562 9905 (box 0.0101, i.e.
+  iteration 1's 0.01), 0.0053 on HeLa 10 ng (0.018) and 0.0063 on HeLa 100 ng (0.022). `min_ratio` and `extend` return
+  to iteration 1's 0.2 and 0.6, whose peptide counts were the higher ones (iterate stays on). To use the run-level box,
+  the v2 decision moved from the greedy loop to a pass after it; it reads the same immutable arrays and changes only
+  `mono_mz`. With a fixed box the output is unchanged: HeLa 10 ng digests equal iteration 2's defaults and iteration 1's
+  settings; 16 and 100 threads give the same digest. The log and `spx:monocheck` report the box and the percentile.
+  Search-free, fixed identified release keys, total isotope error K562 / HeLa 10 ng / HeLa 100 ng: 7.7 / 9.3 / 13.1 %
+  (release 18.5 / 9.0 / 18.2; iteration 1 7.7 / 10.3 / 14.8; iteration 2 8.1 / 8.5 / 12.7).
+  Screened (iteration 3, n = 1; Sage / MSFragger peptides vs release): K562 +1.0 / +0.6 %, HeLa 10 ng +0.5 / −0.6 %,
+  HeLa 100 ng +1.1 / +4.8 %; entrapment −0.09, −0.00, −0.07 pt; spectra −5.6, −1.8, −4.5 %. Identified K562 isotope
+  error 8.2 % (M-1 1.4 %). Sage isotope error on the peptides both runs identify: HeLa 10 ng 8.5 → 8.9 %, 100 ng 17.5 →
+  12.6 %. The 10 ng MSFragger loss (7,165 vs 7,211) is where the 1 % cut falls (71 decoys vs 72): above hyperscore 20,
+  22 and 25 the run keeps 3,171 / 2,353 / 1,436 target peptides, the release 3,143 / 2,318 / 1,418. With
+  `-assembly:im_weight_sigma 0.005`: K562 +8.8 / +5.0 %, 10 ng +3.1 / +3.4 %, 100 ng +5.8 / +5.6 %, entrapment +0.04,
+  +0.05, +0.05 pt, K562 isotope error 7.6 % (M-1 1.4 %); peptides above `im_weight_sigma 0.005` alone on K562 (+1.5 /
+  +1.1 %) and 100 ng (+1.1 / +0.7 %), level at 10 ng (+0.3 / −0.4 %).
+  **Review fix: v2 decides at the final charge.** `charge:im_charge_veto` (on by default) runs after the count walk and
+  re-calls 2+ the z=1 calls that sit on the run's 2+ mobility line (K562 9905: 156,781 of 219,342 z=1 calls), keeping
+  their monoisotope. v2 used to judge those walks at z=1 spacing, where a step of 1.003 m/z is two isotopes of the 2+
+  ion: on the 2,375 identified release keys from such walks the release monoisotope is wrong for 54.5 %, v2 left it
+  wrong for 55.7 % and moved 267 of them two or four isotopes (none onto the right one). v2 now runs after the veto
+  (`monoPositionPass_`), which therefore reads the walks' own monoisotopes as without v2, and judges each walk at its
+  precursor's final charge: a re-called walk's leftmost partner is position −2·nl at 2+, and the positions between are
+  read like any other (the tested sums do not need a claimed partner); where such an in-between position is empty
+  in the box, which is no evidence against a step the walk never took there, the step is compared over two positions
+  against the Poisson M+2/M0 = λ²/2. The extension (B) also no longer fires after a
+  `charge:mono_averagine_guard` stop, which is not a miss, and the "back onto the seed" count no longer counts
+  monoisotopes that `charge:mono_averagine_select` had already put there. Offline replica on the fixed K562 keys
+  (agrees with the tool on 99.75 % of same-charge walks): re-called walks 55.7 % → 22.0 % not monoisotopic, all keys
+  10.6 % → 8.7 %. With `-charge:mono_position_iterate false`, a rejected step of a re-called walk could leave the
+  monoisotope on an empty in-between position (a bare computed m/z, no trace); it now moves on to the walk's next own
+  position (HeLa 10 ng: 580 of 72,537 monoisotopes sat on no MS1 trace, now 0). The default (`true`) and every
+  same-charge walk are unaffected (HeLa 10 ng digests unchanged).
+  Search-free, fixed identified release keys, total isotope error K562 (DDA-matched) / HeLa 10 ng / HeLa 100 ng:
+  5.3 / 9.0 / 11.5 % (release 18.5 / 9.0 / 18.2; iteration 3 7.7 / 9.3 / 13.1); at 10 ng M-1 falls 2.4 → 1.2 % and
+  M+1 rises 6.2 → 7.0 %. Screened (review arm, n = 1; Sage / MSFragger peptides vs release): K562 +0.9 / +0.4 %,
+  HeLa 10 ng +0.5 / +0.1 %, HeLa 100 ng +0.9 / +4.4 %; entrapment −0.11, +0.16, −0.08 pt; spectra −6.5, −2.3, −5.6 %;
+  identified K562 isotope error 5.5 % (M-1 1.4 %; DDA 5.5 % on the same keys). The 10 ng entrapment rise (63 vs 55
+  entrapment peptides, CI 0.88-1.42 %) is the 1 % cut moving: the entrapment search is exactly reproducible on the same
+  mzML, and against the previous review build (0.95 %, 66 spectra different) 15 of the 16 extra entrapment peptides
+  come from spectra present unchanged in both, where they sat at q 0.010-0.021. With
+  `-assembly:im_weight_sigma 0.005`: K562 +8.6 / +4.9 %, 10 ng +3.1 / +3.7 %, 100 ng +5.6 / +4.3 %, entrapment +0.02,
+  +0.05, +0.02 pt, K562 isotope error 5.2 % (M-1 1.4 %).
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
