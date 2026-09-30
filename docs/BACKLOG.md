@@ -223,17 +223,30 @@ above).
 
 ## Slower than the reference implementation on the HeLa 2019 25pc scheme (added 2026-09-30, user request)
 
-**Status 2026-09-30:** open -- investigation started (tune-2026-09-29/hela25pc/ on the cluster; campaign log CAMPAIGN.md).
+**Status 2026-09-30:** open -- cause found from the harness logs (no new runs yet): the thread-scaling study's
+per-tile critical path, amplified by the 25pc method's 16 wide windows. Fix proposed, not built. Report:
+tune-2026-09-29/hela25pc/HELA25PC.md (section 0 lists the review's corrections). A clean kim measurement chain
+(hela25pc/tools/hela_chain.sh) is queued for when kim is free.
 
 On every other public scheme DIAspeXtract extracts 2.8-4.2x faster than the reference implementation, but on the nine 2019
 25pc runs (PXD017703, 120-min acquisitions) it is **slower**: within-pair wall ratio reference/ours 0.84x median (0.66-0.93)
 at 100 threads for 1.5.0 (v151sb2 plan), 0.88x for rc-a, 0.88x (HeLa_19) and 1.18x (HeLa_31) at 64 threads on ibminode05.
-Peak RSS is still ~17x lower. Source: tune-2026-09-29/perf/rt_rss_table.md.
+Peak RSS is still ~17x lower and we spend only 0.58-0.84x the reference's CPU-seconds: we lose parallelism, not work.
+Source: tune-2026-09-29/perf/rt_rss_table.md.
 
-Questions: which phase grows on 25pc against py3 at the same load (window loop critical path, MS1 tracing, precursor
-inference, load, write); what in the acquisition drives it (window scheme, frames per cycle, 1/K0 range, peaks per frame,
-run length); whether it is the one-heavy-window-per-tile floor found in the thread-scaling study (tune-2026-09-29/scaling/)
-or a separate term. Kill criterion: none -- this is a performance gap to explain, then fix if the cause is ours.
+**Cause.** 25pc isolates 16 windows of 50 Th, each visited 4 times per 1.79-s cycle; py3 uses 64 windows of 25 Th, each
+visited twice per 3.47 s. A 25pc window holds ~8x the MS2 peaks of a py3 window and 16-19 % of every 600-s tile's peaks
+(4-6 % on every other public scheme). Each tile's loop lasts as long as its heaviest window chain -- really a block of 2-3
+heavy windows at 450-600 m/z -- whose trace detection runs over at most 12 equal-width flight-time bands. That chain is
+2.9-8.5x the tile's balanced work, so we use 19-39 of 100 threads (the reference 46-51). The critical-path excess is
+100-166 s per run, more than the whole gap. Our CPU per MS2 peak also rises more than the reference's (ours 2.2-2.7x total
+CPU for 2.2x the peaks; its user CPU 1.5-1.9x). The band mechanism itself is not yet measured on 25pc (no timeline run).
+
+**Fix candidates** (all output-identical by construction, none built): concurrent cells within a window as one
+(cell x band) task pool -- optimistic estimate ~1.3x faster than the reference at 100 ng once the 1.94x score-worker CPU
+regression is counted, and it must beat the residency cost that made `tile:cells_per_tile 0` +32 % slower on K562 at 64
+threads; then the thread-scaling study's levers (heaviest band first, overlap LOAD/WRITE with the loop, exact split of the
+heaviest band). Balanced band edges would help most but change the output (both-engines + entrapment gate).
 
 ## Routes (2026-09-08)
 
