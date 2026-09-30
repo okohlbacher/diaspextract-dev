@@ -221,6 +221,20 @@ above).
   before (matched fragment ions per co-identified precursor), now on public data where the gap is
   widest.
 
+## Slower than the reference implementation on the HeLa 2019 25pc scheme (added 2026-09-30, user request)
+
+**Status 2026-09-30:** open -- investigation started (tune-2026-09-29/hela25pc/ on the cluster; campaign log CAMPAIGN.md).
+
+On every other public scheme DIAspeXtract extracts 2.8-4.2x faster than the reference implementation, but on the nine 2019
+25pc runs (PXD017703, 120-min acquisitions) it is **slower**: within-pair wall ratio reference/ours 0.84x median (0.66-0.93)
+at 100 threads for 1.5.0 (v151sb2 plan), 0.88x for rc-a, 0.88x (HeLa_19) and 1.18x (HeLa_31) at 64 threads on ibminode05.
+Peak RSS is still ~17x lower. Source: tune-2026-09-29/perf/rt_rss_table.md.
+
+Questions: which phase grows on 25pc against py3 at the same load (window loop critical path, MS1 tracing, precursor
+inference, load, write); what in the acquisition drives it (window scheme, frames per cycle, 1/K0 range, peaks per frame,
+run length); whether it is the one-heavy-window-per-tile floor found in the thread-scaling study (tune-2026-09-29/scaling/)
+or a separate term. Kill criterion: none -- this is a performance gap to explain, then fix if the cause is ours.
+
 ## Routes (2026-09-08)
 
 docs/BASELINE.md refers to "the routes list"; this is it.
