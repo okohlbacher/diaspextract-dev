@@ -77,7 +77,9 @@
   wrong for 55.7 % and moved 267 of them two or four isotopes (none onto the right one). v2 now runs after the veto
   (`monoPositionPass_`), which therefore reads the walks' own monoisotopes as without v2, and judges each walk at its
   precursor's final charge: a re-called walk's leftmost partner is position −2·nl at 2+, and the positions between are
-  read like any other (the tested sums do not need a claimed partner). The extension (B) also no longer fires after a
+  read like any other (the tested sums do not need a claimed partner); where such an in-between position is empty
+  in the box, which is no evidence against a step the walk never took there, the step is compared over two positions
+  against the Poisson M+2/M0 = λ²/2. The extension (B) also no longer fires after a
   `charge:mono_averagine_guard` stop, which is not a miss, and the "back onto the seed" count no longer counts
   monoisotopes that `charge:mono_averagine_select` had already put there. Offline replica on the fixed K562 keys
   (agrees with the tool on 99.75 % of same-charge walks): re-called walks 55.7 % → 22.0 % not monoisotopic, all keys

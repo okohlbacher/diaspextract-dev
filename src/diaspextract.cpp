@@ -3329,12 +3329,20 @@ protected:
           }
           return sum;
         };
-        // q of the step onto position -j: PS(-j) / PS(-j+1) x lambda(neutral mass of the mono after that step)
+        // q of the step onto position -j: PS(-j) / PS(-j+1) x lambda(neutral mass of the mono after that step). A walk
+        // re-read at a veto charge never stood on its in-between positions: an empty one there is no evidence against
+        // the step, so the step is compared over two positions, PS(-j) / PS(-j+2) x lambda^2 / 2 (Poisson M+2/M0).
         auto ratio = [&](int j, long* best) -> double {
           const double neutral = (s.mz - j * ISO / z) * z - z * PROTON_;
           const double lam = std::max(0.10, 0.000594 * neutral);
           const double den = PS(-j + 1, nullptr);
-          return den > 0.0 ? PS(-j, best) / den * lam : 0.0;
+          if (den > 0.0) return PS(-j, best) / den * lam;
+          if (mul > 1 && (j - 1) % mul != 0)
+          {
+            const double den2 = PS(-j + 2, nullptr);
+            return den2 > 0.0 ? PS(-j, best) / den2 * lam * lam / 2.0 : 0.0;
+          }
+          return 0.0;
         };
         // the m/z standing at position -i: the walk's own partner where the walk stepped, else the most intense trace
         // there in the box, else the position itself
