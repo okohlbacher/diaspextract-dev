@@ -3361,7 +3361,13 @@ protected:
           while (acc > 0 && ratio(acc, nullptr) < mono_pos_min_ratio_)
           {
             --acc; ++r;
-            if (!mono_pos_iterate_) break;
+            if (!mono_pos_iterate_)
+            {
+              // Leftmost step only, at a veto charge: an EMPTY in-between position cannot be the monoisotope (leftMz
+              // would report a bare position), so the mono moves on to the walk's next own position. mul == 1: no-op.
+              while (acc > 0 && acc % mul != 0 && PS(-acc, nullptr) <= 0.0) --acc;
+              break;
+            }
           }
           if (acc < nl)
           {
