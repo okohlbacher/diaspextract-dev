@@ -83,7 +83,20 @@
   `charge:mono_averagine_guard` stop, which is not a miss, and the "back onto the seed" count no longer counts
   monoisotopes that `charge:mono_averagine_select` had already put there. Offline replica on the fixed K562 keys
   (agrees with the tool on 99.75 % of same-charge walks): re-called walks 55.7 % → 22.0 % not monoisotopic, all keys
-  10.6 % → 8.7 %.
+  10.6 % → 8.7 %. With `-charge:mono_position_iterate false`, a rejected step of a re-called walk could leave the
+  monoisotope on an empty in-between position (a bare computed m/z, no trace); it now moves on to the walk's next own
+  position (HeLa 10 ng: 580 of 72,537 monoisotopes sat on no MS1 trace, now 0). The default (`true`) and every
+  same-charge walk are unaffected (HeLa 10 ng digests unchanged).
+  Search-free, fixed identified release keys, total isotope error K562 (DDA-matched) / HeLa 10 ng / HeLa 100 ng:
+  5.3 / 9.0 / 11.5 % (release 18.5 / 9.0 / 18.2; iteration 3 7.7 / 9.3 / 13.1); at 10 ng M-1 falls 2.4 → 1.2 % and
+  M+1 rises 6.2 → 7.0 %. Screened (review arm, n = 1; Sage / MSFragger peptides vs release): K562 +0.9 / +0.4 %,
+  HeLa 10 ng +0.5 / +0.1 %, HeLa 100 ng +0.9 / +4.4 %; entrapment −0.11, +0.16, −0.08 pt; spectra −6.5, −2.3, −5.6 %;
+  identified K562 isotope error 5.5 % (M-1 1.4 %; DDA 5.5 % on the same keys). The 10 ng entrapment rise (63 vs 55
+  entrapment peptides, CI 0.88-1.42 %) is the 1 % cut moving: the entrapment search is exactly reproducible on the same
+  mzML, and against the previous review build (0.95 %, 66 spectra different) 15 of the 16 extra entrapment peptides
+  come from spectra present unchanged in both, where they sat at q 0.010-0.021. With
+  `-assembly:im_weight_sigma 0.005`: K562 +8.6 / +4.9 %, 10 ng +3.1 / +3.7 %, 100 ng +5.6 / +4.3 %, entrapment +0.02,
+  +0.05, +0.02 pt, K562 isotope error 5.2 % (M-1 1.4 %).
 
 ## v1.5.0 — 2026-09-29
 
