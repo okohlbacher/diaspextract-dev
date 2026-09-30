@@ -54,12 +54,22 @@
   **Iteration 3: the 1/K0 box follows the run.** `-charge:mono_position_im_box` 0 (the new default) = auto: 3.5 × the
   90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds (commit order) and their nearest
   MS1 trace one isotope heavier (partner m/z tolerance, `gate:delta_rt`, `charge:iso_im_tolerance`), clamped to
-  [0.01, 0.03]; a value > 0 fixes the box as before. On the release traces that gap's p90 is 0.0028 on K562 9905 and
-  0.0053 on HeLa 10 ng, so K562 keeps iteration 1's 0.01 and the 2019 HeLa py3 runs get about 0.019. `min_ratio` and
-  `extend` return to iteration 1's 0.2 and 0.6, whose peptide counts were the higher ones (iterate stays on). To use the
-  run-level box, the v2 decision moved from the greedy loop to a pass after it; it reads the same immutable arrays and
-  changes only `mono_mz`, so a fixed box gives the same output as before. The log and `spx:monocheck` report the box
-  and the percentile.
+  [0.01, 0.03]; a value > 0 fixes the box as before. The runs' own p90 is 0.0029 on K562 9905 (box 0.0101, i.e.
+  iteration 1's 0.01), 0.0053 on HeLa 10 ng (0.018) and 0.0063 on HeLa 100 ng (0.022). `min_ratio` and `extend` return
+  to iteration 1's 0.2 and 0.6, whose peptide counts were the higher ones (iterate stays on). To use the run-level box,
+  the v2 decision moved from the greedy loop to a pass after it; it reads the same immutable arrays and changes only
+  `mono_mz`. With a fixed box the output is unchanged: HeLa 10 ng digests equal iteration 2's defaults and iteration 1's
+  settings; 16 and 100 threads give the same digest. The log and `spx:monocheck` report the box and the percentile.
+  Search-free, fixed identified release keys, total isotope error K562 / HeLa 10 ng / HeLa 100 ng: 7.7 / 9.3 / 13.1 %
+  (release 18.5 / 9.0 / 18.2; iteration 1 7.7 / 10.3 / 14.8; iteration 2 8.1 / 8.5 / 12.7).
+  Screened (iteration 3, n = 1; Sage / MSFragger peptides vs release): K562 +1.0 / +0.6 %, HeLa 10 ng +0.5 / −0.6 %,
+  HeLa 100 ng +1.1 / +4.8 %; entrapment −0.09, −0.00, −0.07 pt; spectra −5.6, −1.8, −4.5 %. Identified K562 isotope
+  error 8.2 % (M-1 1.4 %). Sage isotope error on the peptides both runs identify: HeLa 10 ng 8.5 → 8.9 %, 100 ng 17.5 →
+  12.6 %. The 10 ng MSFragger loss (7,165 vs 7,211) is where the 1 % cut falls (71 decoys vs 72): above hyperscore 20,
+  22 and 25 the run keeps 3,171 / 2,353 / 1,436 target peptides, the release 3,143 / 2,318 / 1,418. With
+  `-assembly:im_weight_sigma 0.005`: K562 +8.8 / +5.0 %, 10 ng +3.1 / +3.4 %, 100 ng +5.8 / +5.6 %, entrapment +0.04,
+  +0.05, +0.05 pt, K562 isotope error 7.6 % (M-1 1.4 %); peptides above `im_weight_sigma 0.005` alone on K562 (+1.5 /
+  +1.1 %) and 100 ng (+1.1 / +0.7 %), level at 10 ng (+0.3 / −0.4 %).
 
 ## v1.5.0 — 2026-09-29
 
