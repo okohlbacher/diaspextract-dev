@@ -2,6 +2,25 @@
 
 ## Unreleased (tuning 2026-09-29)
 
+- **Unreleased: rc-b (branch tune/rc-b = rc-a + tune/fuse + tune/monocheck): new defaults**
+  `-assembly:fragment_fuse_ppm 25` with `-assembly:fragment_fuse_mode anchored` (was 0 = off) and
+  `-charge:mono_profile_check v2` (was `false`), with v2's reviewed sub-defaults (`mono_position_min_ratio` 0.2,
+  `mono_position_im_box` 0 = auto, `mono_position_extend` 0.6, `mono_position_iterate` true); rc-a's
+  `-assembly:im_weight_sigma 0.005` and `-assembly:foreign_precursor_weight 0` stay. `-assembly:fragment_fuse_ppm 0
+  -charge:mono_profile_check false -assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1` restores the
+  1.5.0 output. Screening grade (n = 1 per sample; Sage / MSFragger peptides at 1 % FDR, Sage entrapment FDP;
+  release 1.5.0 = K562 9905 36,742 / 36,057 / 1.183 %, HeLa_22 8,837 / 7,211 / 0.969 %, HeLa_34 30,957 / 26,721 /
+  1.174 %). The two halves were screened apart, not together:
+  fusion with the rc-a defaults (fuse 25 ppm anchored + im_weight_sigma 0.005 + foreign 0): K562 42,236 (+15.0 %) /
+  38,602 (+7.1 %) / 1.227 %; HeLa_22 9,227 (+4.4 %) / 7,630 (+5.8 %) / 0.979 %; HeLa_34 34,144 (+10.3 %) / 30,253
+  (+13.2 %) / 1.050 %; on six further public runs (TNBC_009, K562 CAD_3197, HeLa 2450 / 2737 / 19 / 28) more peptides
+  with both engines on all six (Sage +8.2..+13.9 %, MSFragger +2.6..+14.5 %), entrapment +0.04..+0.17 pt on five and
+  −0.03 pt on HeLa 28. Monocheck v2 with im_weight_sigma 0.005 (review arm, no foreign weight, no fusion): K562 39,915
+  (+8.6 %) / 37,822 (+4.9 %) / 1.198 %; HeLa_22 9,111 (+3.1 %) / 7,477 (+3.7 %) / 1.016 %; HeLa_34 32,689 (+5.6 %) /
+  27,870 (+4.3 %) / 1.189 %; identified K562 isotope error 5.2 % (1.5.0: 18.5 %). The fused runs' entrapment rise and
+  the combination itself still need a harness-grade measurement. The default output changes: the release digest pins
+  do not apply to this branch.
+
 - **Release candidate A (branch tune/rc-a): new defaults** `-assembly:im_weight_sigma 0.005` (was 0 = off) and
   `-assembly:foreign_precursor_weight 0` (was 1 = off). Screen, both engines at 1 % FDR with Sage entrapment, versus 1.5.0: K562
   (two instruments) +8.2 % Sage / +4.2-5.1 % MSFragger, HeLa py3 10/50/100 ng +2.7-5.1 % / +3.6-4.6 %, HeLa 25pc 10 ng +6.4 / +3.9 %,
