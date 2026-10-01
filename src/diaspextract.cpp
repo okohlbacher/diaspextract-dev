@@ -2660,7 +2660,7 @@ protected:
                           "The tolerance is the one that admits the most isotope-position traces net of twice the control traces (true partners admitted minus chance partners admitted), "
                           "on a 0.001 grid, clamped to [0.01, 0.05]: about 0.01 on dense short-gradient runs, up to 0.05 on sparse low-load runs. A value > 0 fixes it. Logged as [isotol], stamped spx:iso_im_tolerance. CHANGES OUTPUT.", false);
     registerStringOption_("charge:iso_partner", "<first/closest>", "first", "Which candidate inside the isotope-partner box (m/z tolerance, gate:delta_rt, charge:iso_im_tolerance) the walk takes: "
-                          "'first' in m/z order (as in 1.5.0), or 'closest' to the seed in apex RT and 1/K0, each scaled by its tolerance (ties to the first in m/z). CHANGES OUTPUT.", false, true);
+                          "'first' in m/z order (as in 1.5.0), or 'closest' to the seed in apex RT and 1/K0, each scaled by its tolerance (ties to the first in m/z). Screened 2026-10-01: closest lost 1.6-5.0% MSFragger peptides on two 10 ng HeLa runs and wrote 14-15% more spectra on Evosep for about the same peptides; not recommended. CHANGES OUTPUT.", false, true);
     setValidStrings_("charge:iso_partner", {"first", "closest"});
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");

@@ -95,10 +95,15 @@ wall time is within 3 %. Each default can be set back.
   - the tolerance is the one that admits the most isotope-position traces net of twice the control traces (true
     partners admitted minus chance partners admitted), on a 0.001 grid clamped to [0.01, 0.05].
 
-  On the public HeLa runs it measures 0.010 on Evosep, 0.028 on 25pc at 10 ng and 0.045 on py3 at 10 ng. A value
-  above 0 fixes the tolerance; 0.05 is the 1.5.0 behaviour. `-charge:iso_partner closest` takes the candidate closest
-  to the seed in apex RT and 1/K0 (each scaled by its tolerance) instead of the first in m/z order. Logged as
-  `[isotol]`, stamped `spx:iso_im_tolerance` (the measured value and the partner rule).
+  It measures 0.010 on the four Evosep HeLa runs screened, 0.012 on TNBC, 0.019 on HeLa py3 at 100 ng, 0.027 on HeLa
+  25pc at 10 ng and 0.05 on HeLa py3 at 10 ng (that run's output is unchanged). In a screen (one extraction per run,
+  not the corpus), the Evosep runs gain 5.0–6.7 % Sage and 4.0–6.4 % MSFragger peptides with 6–8 % more spectra;
+  the other runs move between −0.4 % and +1.9 % on either engine, at the same wall time and memory. A value above 0
+  fixes the tolerance; 0.05 is the 1.5.0 behaviour. Logged as `[isotol]`, stamped `spx:iso_im_tolerance` (the
+  measured value and the partner rule). `-charge:iso_partner closest` takes the candidate closest to the seed in apex
+  RT and 1/K0 (each scaled by its tolerance) instead of the first in m/z order. It is off by default: in the same
+  screen it lost 1.6 and 5.0 % MSFragger peptides on the two 10 ng HeLa runs and wrote 14–15 % more spectra on Evosep
+  for about the same peptides.
 - **New options, off by default:**
   - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
     fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums
