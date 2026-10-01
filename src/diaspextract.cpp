@@ -111,8 +111,9 @@ namespace
   /// [perf-instr] Per-phase wall/CPU/RSS accounting, printed unconditionally at the end.
   struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; bool nested = false; };
   /// [perf-instr] A phase opened inside another (the tile loop's read/sort/write inside WINDOW_LOOP)
-  /// is marked enclosed and left out of the TOTAL. Phases are opened only on the master thread.
-  inline int& phase_depth_() { static int d = 0; return d; }
+  /// is marked enclosed and left out of the TOTAL. Phases are opened on the master thread, and with pipelined
+  /// tiles also by the writer task while the master reads (atomic depth, locked phaseAdd_).
+  inline std::atomic<int>& phase_depth_() { static std::atomic<int> d{0}; return d; }
   inline double& flush_wall_() { static double v = 0; return v; }   // [perf-load] pick inside LOAD
   /// [task-err] An exception escaping an OpenMP task terminates the process with no message. Task bodies catch
   /// everything and hand the first exception here; the code after the loop rethrows it once the tasks have joined.
@@ -128,6 +129,48 @@ namespace
     static const char* want = std::getenv("DIASPEXTRACT_TASK_THROW");
     if (want && String(want) == site)
       throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
+  }
+  /// [pipe] Helper tasks of teamFor_ created and not yet started, over every call: capped at the team size, so
+  /// stale helpers (started after their loop ran out) cannot pile up towards the libgomp cliff (64 x nthreads).
+  inline std::atomic<int>& teamHelpersQueued_() { static std::atomic<int> q{0}; return q; }
+  /// [pipe] A loop that the pipelined tile loop runs on the window team's driver (the tile reader and writer).
+  /// Outside a parallel region the call sites keep their `omp parallel for`. Inside the team a `parallel for`
+  /// would open a NESTED team -- fresh threads on the cores the windows use -- so the loop runs here instead:
+  /// the caller pulls `chunk` indices at a time from a shared cursor, and up to one helper task per team
+  /// thread pulls with it once a thread is free. The caller never reaches a task scheduling point, so it is
+  /// never handed a window task (libgomp lets a thread waiting at a taskgroup end run ANY child of its task),
+  /// and it never waits for a helper to START: a helper that starts after the cursor ran out touches nothing
+  /// but its own reference to the cursor, so only helpers that claimed a chunk are waited for (seq_cst: a
+  /// helper raises `busy` before it claims). f(i, slot): `slot` < omp_get_num_threads() is unique among the
+  /// concurrent pullers, for per-slot scratch where a thread number was used. Every caller writes
+  /// index-addressed results only, so the output is the parallel for's. The first exception is rethrown here,
+  /// after every claimed chunk has finished.
+  template <class F> static void teamFor_(long n, long chunk, F&& f)
+  {
+    if (n <= 0) return;
+    struct Pull { std::atomic<long> cur{0}; std::atomic<int> busy{0}; std::exception_ptr err; };
+    auto st = std::make_shared<Pull>();
+    auto* fp = &f;
+    const int team = std::max(1, omp_get_num_threads());
+    const int nt = (int)std::min<long>((n + chunk - 1) / chunk, (long)team);
+    for (int t = 1; t < nt && teamHelpersQueued_().load() < team; ++t)
+    {
+      ++teamHelpersQueued_();
+      #pragma omp task default(none) firstprivate(st, fp, t, n, chunk)
+      {
+        --teamHelpersQueued_();
+        st->busy.fetch_add(1);
+        for (long a; (a = st->cur.fetch_add(chunk)) < n; )
+        { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) (*fp)(i, t); }
+          catch (...) { taskErr_(st->err); st->cur.store(n); } }
+        st->busy.fetch_sub(1);
+      }
+    }
+    for (long a; (a = st->cur.fetch_add(chunk)) < n; )
+    { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) f(i, 0); }
+      catch (...) { taskErr_(st->err); st->cur.store(n); } }
+    while (st->busy.load() != 0) std::this_thread::yield();
+    if (st->err) std::rethrow_exception(st->err);
   }
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
@@ -175,6 +218,8 @@ namespace
   }
   static void phaseAdd_(const std::string& name, double w0, double c0, bool nested)
   {
+    // [pipe] the pipelined tile loop times the tile read (driver) and the tile write (writer task) concurrently
+    static std::mutex m; std::lock_guard<std::mutex> g(m);
     auto& st = phase_stats_()[name];
     if (st.n++ == 0) phase_order_().push_back(name);
     st.wall += phase_clock_() - w0; st.cpu += cpu_seconds_() - c0;
@@ -1861,15 +1906,13 @@ namespace
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
       std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
-      // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
-      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
-      for (int i = 0; i < n; ++i)
+      auto pickOne = [&](const int i, PeakPickerIM& pk)
       {
         try
         {
           auto& s = buf_[(size_t)i];
           ensureIMArrayName(s);
-          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) pk.pickIMCluster(s);
           ensureIMArrayName(s);
           frt[(size_t)i] = s.getRT();
           fid[(size_t)i] = frameIdOf(s.getNativeID());
@@ -1883,6 +1926,22 @@ namespace
           #pragma omp critical(pick_err)
           if (!pick_err) pick_err = std::current_exception();
         }
+      };
+      if (!omp_in_parallel())
+      {
+        // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
+        #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
+        for (int i = 0; i < n; ++i) pickOne(i, picker);
+      }
+      else
+      {
+        // [pipe] the pipelined tile reader, on the window team's driver: one picker copy per puller slot, made
+        // by the slot's first frame (a slot has one puller at a time)
+        std::vector<std::unique_ptr<PeakPickerIM>> pk((size_t)std::max(1, omp_get_num_threads()));
+        teamFor_(n, 1, [&](long i, int slot) {
+          std::unique_ptr<PeakPickerIM>& p = pk[(size_t)slot];
+          if (!p) p.reset(new PeakPickerIM(picker));
+          pickOne((int)i, *p); });
       }
       if (pick_err) std::rethrow_exception(pick_err);
       // Append in arrival order per window, the windows of this batch in parallel: a window's
@@ -1908,8 +1967,7 @@ namespace
       const size_t n_ms1 = ms1_.size();
       std::atomic<long long> slab_b{0};   // [ledger] what this batch actually touched
       std::exception_ptr pad_err;
-      #pragma omp parallel for schedule(dynamic, 1)
-      for (long w = 0; w < (long)per_win.size(); ++w)
+      auto appendWin = [&](const long w)
       {
         Batch& bw = per_win[(size_t)w];
         for (int i : bw.idx)
@@ -1927,7 +1985,13 @@ namespace
           bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
           slab_b += (long long)kept[(size_t)i] * 10 + 24;   // [ledger] touched bytes: 10 B/peak + the frame's table row
         }
+      };
+      if (!omp_in_parallel())
+      {
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (long w = 0; w < (long)per_win.size(); ++w) appendWin(w);
       }
+      else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
       ledAdd_(LC_SLAB, slab_b);
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
@@ -2111,8 +2175,7 @@ namespace
   {
     struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
     vector<SortKey> keys(v.size());
-#pragma omp parallel for schedule(static)
-    for (long i = 0; i < (long)v.size(); ++i)
+    auto key = [&](const long i)
     {
       const MSSpectrum& a = v[i];
       keys[i].rt = a.getRT();
@@ -2120,7 +2183,13 @@ namespace
       keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
       keys[i].n = (uint32_t)a.size();
       keys[i].idx = (uint32_t)i;
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(static)
+      for (long i = 0; i < (long)v.size(); ++i) key(i);
     }
+    else teamFor_((long)v.size(), 4096, [&](long i, int) { key(i); });   // [pipe] the pipelined tile writer
     sort(keys.begin(), keys.end(), [&v](const SortKey& ka, const SortKey& kb) {
       if (ka.rt != kb.rt) return ka.rt < kb.rt;
       if (ka.mz != kb.mz) return ka.mz < kb.mz;
@@ -2222,8 +2291,7 @@ namespace
     vector<vector<uint32_t>> members(surv.size());
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
     // fuse: each thread reads and writes one cluster's spectra only
-#pragma omp parallel for schedule(dynamic, 64)
-    for (long c = 0; c < (long)surv.size(); ++c)
+    auto fuse = [&](const long c)
     {
       if (keyed)
       {
@@ -2253,7 +2321,7 @@ namespace
         for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
         s.getFloatDataArrays().clear();
         s.getFloatDataArrays().push_back(std::move(kk));   // moved, not copied (assign(1, x) copies)
-        continue;
+        return;
       }
       vector<pair<double, double>> ps;
       for (uint32_t i : members[(size_t)c]) for (const auto& pk : v[i]) ps.emplace_back(pk.getMZ(), (double)pk.getIntensity());
@@ -2270,7 +2338,13 @@ namespace
       s.clear(false);   // peaks only: RT, precursor and userParams are the survivor's
       s.reserve(fused.size());
       for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(dynamic, 64)
+      for (long c = 0; c < (long)surv.size(); ++c) fuse(c);
     }
+    else teamFor_((long)surv.size(), 64, [&](long c, int) { fuse(c); });   // [pipe] the pipelined tile writer
     size_t w = 0;
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
     {
@@ -2291,8 +2365,8 @@ namespace
   static std::array<size_t, 3> capAfterFusion_(vector<MSSpectrum>& v, Size max_frags)
   {
     size_t n_sp = 0, n_pk = 0, n_max = 0;
-#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
-    for (long i = 0; i < (long)v.size(); ++i)
+    // the counters are parameters, not captures: inside the reduction loop they must be the thread's copies
+    auto capOne = [&v, max_frags](const long i, size_t& n_sp, size_t& n_pk, size_t& n_max)
     {
       MSSpectrum& s = v[(size_t)i];
       n_max = std::max(n_max, (size_t)s.size());
@@ -2314,6 +2388,18 @@ namespace
         s.select(idx);
       }
       s.getFloatDataArrays().clear();
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
+      for (long i = 0; i < (long)v.size(); ++i) capOne(i, n_sp, n_pk, n_max);
+    }
+    else
+    {
+      // [pipe] the pipelined tile writer: per-slot partial counters, summed here
+      vector<std::array<size_t, 3>> part((size_t)std::max(1, omp_get_num_threads()), std::array<size_t, 3>{0, 0, 0});
+      teamFor_((long)v.size(), 256, [&](long i, int slot) { auto& p = part[(size_t)slot]; capOne(i, p[0], p[1], p[2]); });
+      for (const auto& p : part) { n_sp += p[0]; n_pk += p[1]; n_max = std::max(n_max, p[2]); }
     }
     return {n_sp, n_pk, n_max};
   }
@@ -2366,8 +2452,11 @@ namespace
       // A handler is not reentrant (writeSpectrum_ memoises CV-term validation in cached_terms_),
       // so each thread encodes with its own; dps_ is shared read-only -- every spectrum carries the
       // one data-processing entry the header registered, so writeSpectrum_ never appends to it.
+      // [pipe] On the pipelined tile writer (inside the window team) the encoders are per puller slot of
+      // teamFor_, at most the team size; the chunks and their order are the same either way.
+      const bool in_team = omp_in_parallel();
       const Size CHUNK = 256;
-      const Size n_thr = (Size)std::max(1, omp_get_max_threads());
+      const Size n_thr = (Size)std::max(1, in_team ? omp_get_num_threads() : omp_get_max_threads());
       while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter("/dev/null")); enc_.back()->options_ = options_; }
       const Size wave = CHUNK * n_thr;
       for (Size w0 = 0; w0 < block.size(); w0 += wave)
@@ -2377,12 +2466,10 @@ namespace
         vector<std::string> text(n_chunk);
         vector<vector<pair<std::string, Int64>>> offs(n_chunk);
         std::exception_ptr err;
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (long c = 0; c < (long)n_chunk; ++c)
+        auto encode = [&](const long c, TileWriter& h)
         {
           try
           {
-            TileWriter& h = *enc_[(Size)omp_get_thread_num()];
             std::ostringstream buf; buf.copyfmt(ofs_);          // identical formatting state, or the numbers differ
             const Size lo = w0 + (Size)c * CHUNK, hi = std::min(lo + CHUNK, w1);
             const Size o0 = h.spectra_offsets_.size();
@@ -2396,7 +2483,13 @@ namespace
             #pragma omp critical(tile_writer_err)
             if (!err) err = std::current_exception();
           }
+        };
+        if (!in_team)
+        {
+          #pragma omp parallel for schedule(dynamic, 1)
+          for (long c = 0; c < (long)n_chunk; ++c) encode(c, *enc_[(Size)omp_get_thread_num()]);
         }
+        else teamFor_((long)n_chunk, 1, [&](long c, int slot) { encode(c, *enc_[(Size)slot]); });
         if (err) std::rethrow_exception(err);
         for (Size c = 0; c < n_chunk; ++c)
         {
@@ -5615,10 +5708,8 @@ protected:
     // DIASPEXTRACT_PIPE_TILES=<n> (default 2, 1 = the per-tile barrier) bounds the tiles whose windows may run
     // at once: tile j is read only after every window of tile j - n has finished, which bounds the slabs
     // resident and the chain of carry waits; the window cap and the memory admission below still apply to
-    // every window in flight, over all tiles. The reader's and writer's loops keep their `parallel for`: on the
-    // driver they open a NESTED team (max-active-levels is 2 with bands), so the OS shares the cores between
-    // them and the window team. As tasks of the window team they starved behind the band tasks (scal-pipe-1:
-    // a heavy K562 tile read in 36-41 s instead of ~8, the driver's read + write chain became the tile pace).
+    // every window in flight, over all tiles. The reader's and writer's loops run as tasks of the window team
+    // (teamFor_); only the vendor reader's own decode loop (libOpenMS) opens a nested team.
     const int pipe_depth = []() { const char* e = std::getenv("DIASPEXTRACT_PIPE_TILES");
                                   const long v = e && *e ? std::atol(e) : 2L; return (int)std::max(1L, std::min(v, 16L)); }();
     const bool pipe = pipe_depth > 1 && tiles.size() > 1 && n_threads > 1;
@@ -5688,9 +5779,7 @@ protected:
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
       { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes();
-        // [pipe] other tiles' slabs may still be live, so pipelined it adds (over-counting by the touched bytes
-        // flush_ charged during this read: a [ledger] diagnostics gap only, nothing reads it back)
-        if (pipe) ledAdd_(LC_SLAB, sb); else ledSet_(LC_SLAB, sb); }
+        if (pipe) ledAdd_(LC_SLAB, sb); else ledSet_(LC_SLAB, sb); }   // [pipe] other tiles' slabs may still be live
       if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
@@ -6295,24 +6384,42 @@ protected:
       }
     else
     {
-      // [pipe] The driver is the single thread of ONE parallel region over all tiles: it reads tiles ahead (up to
-      // pipe_depth with windows in flight), admits their windows, and finishes the tiles in tile order as each
-      // completes. It never runs a window itself: its only task scheduling points are the barriers of its own
-      // nested teams (the reader's and writer's loops), which run that team's tasks only, so its n_threads - 1
-      // team mates run the windows. Per tile it reads tile fin + pipe_depth - 1 (once tile fin - 1 is written),
-      // admits its windows as the cap and memory allow, waits for tile fin's windows and writes tile fin.
+      // [pipe] The driver is thread 0 of ONE parallel region over all tiles: it reads tile fin + pipe_depth - 1
+      // while tile fin's windows run, admits its windows as the cap and memory allow, and once tile fin's windows
+      // are done hands the tile to the WRITER, a task that finishes the tiles strictly in tile order. So the read
+      // of the next tile never waits behind a write (scal-pipe-1 ran both on the driver: on K562 at 100 threads
+      // read + write per heavy tile outlasted the tile's windows, which then sat idle at three boundaries).
+      // The driver never runs a window: it never reaches a task scheduling point (teamFor_), so its n_threads - 1
+      // team mates run the windows, the writer, and the reader's and writer's helper tasks when they are free.
+      // Thread 0 rather than `single`'s first arrival: the vendor reader's decode loop opens a nested team next
+      // to the driver's place, so under OMP_PROC_BIND=close it shares the window team's cores, never others.
       // Deadlock-free: a window waits only on its own previous tile (CarryGate), which was admitted earlier and
       // is dequeued earlier (the team queue is FIFO), and a tile is read only after tile j - pipe_depth finished,
-      // so that previous tile never waits itself.
+      // so that previous tile never waits itself; the writer of tile f waits only for the writer of tile f - 1,
+      // spawned (and dequeued) before it.
       omp_set_max_active_levels(std::max(2, omp_get_max_active_levels()));
       vector<std::unique_ptr<TileRun>> runs(tiles.size());
       std::exception_ptr drv_err;
-      // The driver is thread 0, not `single`'s first arrival: its nested teams are bound next to ITS place, so
-      // under OMP_PROC_BIND=close they share the window team's cores 0 .. n_threads - 1 instead of spilling onto
-      // cores the run was not given. The others go straight to the region's barrier and run the tasks.
+      auto drvFail = [&]() {
+        #pragma omp critical(pipe_err)
+        if (!drv_err) drv_err = std::current_exception();
+        pipe_abort.store(true);
+      };
+      std::atomic<size_t> written{0};   // tiles the writer has finished, in tile order
+      auto writeTile = [&](const size_t f)   // the writer: outside the region, so a queued task never outlives it
+      {
+        while (written.load(std::memory_order_acquire) < f) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        try { if (!pipe_abort.load()) finishTile(*runs[f]); } catch (...) { drvFail(); }
+        runs[f].reset();
+        written.store(f + 1, std::memory_order_release);   // on every exit: the next writer never waits forever
+      };
       #pragma omp parallel num_threads(n_threads)
       if (omp_get_thread_num() == 0)
       {
+        // A team of one (OMP_DYNAMIC, a thread limit) has nobody to run the windows while the driver polls: then
+        // one tile at a time, run by the driver's own taskwait and written by the driver -- the barrier's schedule.
+        const bool solo = omp_get_num_threads() < 2;
+        const size_t depth = solo ? 1 : (size_t)pipe_depth;
         size_t next = 0;   // the next tile to read
         auto issue = [&](const size_t upto)
         {
@@ -6328,23 +6435,26 @@ protected:
         {
           for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
           {
-            issue(fin + (size_t)pipe_depth);
+            issue(fin + depth);
             if (!runs[fin]) break;   // the reader stopped (a failure)
             TileRun& R = *runs[fin];
+            if (solo)
+            {
+              #pragma omp taskwait
+            }
             while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (pipe_abort.load()) break;
-            // written (and trimmed) BEFORE the next read, as with the barrier: its output and free pages are gone
-            // before tile fin + pipe_depth's slabs arrive; the read still lands while tile fin + 1 runs
-            finishTile(R);
-            runs[fin].reset();
+            if (solo) writeTile(fin);
+            else
+            {
+              auto* wt = &writeTile;
+              #pragma omp task default(none) firstprivate(wt, fin)
+              (*wt)(fin);
+            }
           }
         }
-        catch (...)
-        {
-          drv_err = std::current_exception();
-          pipe_abort.store(true);
-        }
-      }   // the region's barrier: every admitted window has finished
+        catch (...) { drvFail(); }
+      }   // the region's barrier: every admitted window and every writer has finished
       if (drv_err) std::rethrow_exception(drv_err);
       if (worker_err) std::rethrow_exception(worker_err);
     }
