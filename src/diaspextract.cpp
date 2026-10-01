@@ -797,6 +797,54 @@ namespace
     return t;
   }
 
+  /// [outer] The span length makeSpan gives @p mt: its points' frame range, 0 without points. Throws as makeSpan does.
+  inline size_t spanLength(const MassTrace& mt, const TraceStore& store)
+  {
+    const Size np = mt.getSize();
+    if (np == 0) return 0;
+    uint32_t f0 = std::numeric_limits<uint32_t>::max(), f1 = 0;
+    for (Size i = 0; i < np; ++i) { const uint32_t f = store.frameOf(mt[i].getRT()); f0 = std::min(f0, f); f1 = std::max(f1, f); }
+    const size_t L = (size_t)f1 - f0 + 1;
+    if (L >= 65536) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+    return L;
+  }
+
+  /// [outer] toTrace with the span placed at arena offset @p off (already sized and zero) instead of appended: the same
+  /// statements as toTrace + makeSpan, so the same Trace and the same arena bytes when @p off is where the append would
+  /// have put it. @p pts is the caller's scratch.
+  inline Trace toTraceAt(const MassTrace& mt, TraceStore& store, size_t off, vector<pair<uint32_t, float>>& pts)
+  {
+    const std::string& mz_est = mzEstimator();
+    double mz;
+    if (mz_est == "apex" && mt.getSize() > 0) mz = mt[mt.findMaxByIntPeak(false)].getMZ();
+    else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); mz = m2.getCentroidMZ(); }
+    else mz = mt.getCentroidMZ();
+    const Size np = mt.getSize();
+    pts.clear();
+    for (Size i = 0; i < np; ++i) pts.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
+    Trace t;
+    if (!pts.empty())
+    {
+      sort(pts.begin(), pts.end());
+      const uint32_t f0 = pts.front().first, f1 = pts.back().first;
+      const size_t L = (size_t)f1 - f0 + 1;
+      if (L >= 65536) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+      t.frame0 = f0; t.len = (uint16_t)L; t.off = (uint32_t)off;
+      float best = -1.0f; uint16_t npt = 0;
+      for (const auto& q : pts)
+      {
+        const size_t k = q.first - f0;
+        if (store.inten[t.off + k] == 0.0f) ++npt;      // one point per frame; a repeat overwrites
+        store.inten[t.off + k] = q.second;
+        if (q.second > best) { best = q.second; t.apex = (uint16_t)k; }
+      }
+      t.npts = npt;
+    }
+    t.mz = mz; t.im = mt.getCentroidIM();
+    setRtFrame(store, t, mt.getCentroidRT());   // [soa-rt] a frame time, stored as an offset
+    return t;
+  }
+
 
   /// [compact] Quantised per-peak store, 10 B/peak, far finer than every downstream tolerance:
   ///   m/z : uint32 at 1e-5 Da     (0.007 ppm at m/z 1400)
@@ -3081,15 +3129,64 @@ protected:
                   + String(tt_split) + " s");
     auto _tc0 = tt_now();
     vector<Trace> out;
-    out.reserve(n_tr);
-    // Each MassTrace is released as soon as it is converted. Serial on purpose: a parallel split was
-    // output-identical but 17% slower (docs/BASELINE.md, "Parallelising the MS1 trace conversion").
-    for (auto& sv : seg)   // [outer] the segments in order: the sequence the gathered vector held
+    // [outer] The MS1 call converts in parallel: pass 1 sizes every span (makeSpan's frame range), the offsets are the
+    // running sum from the arena's end -- exactly where the serial appends put them -- and pass 2 fills each span at
+    // its offset with toTrace's own statements. Every trace writes only its own span and its own slot, so the arena and
+    // the trace list are byte-identical to the serial loop's. Contiguous ranges per task keep the walk sequential. The
+    // two earlier parallel versions kept the arena append serial (docs/BASELINE.md, "Parallelising the MS1 trace
+    // conversion"); DIASPEXTRACT_MS1_CONVERT_SERIAL=1 runs the serial loop below.
+    static const bool conv_serial = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_CONVERT_SERIAL"); return e && *e && *e != '0'; }();
+    const bool conv_par = ms1_prune && !conv_serial && n_tr >= 4096 && omp_in_parallel() && omp_get_num_threads() > 1;
+    if (conv_par)
     {
-      for (size_t i = 0; i < sv.size(); ++i) { out.push_back(toTrace(sv[i], store)); sv[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
-      vector<MassTrace>().swap(sv);
+      vector<size_t> at(seg.size() + 1, 0);           // segment s holds positions [at[s], at[s+1]) of the sequence
+      for (size_t s = 0; s < seg.size(); ++s) at[s + 1] = at[s] + seg[s].size();
+      auto segOf = [&at](size_t g) { return (size_t)(std::upper_bound(at.begin(), at.end(), g) - at.begin()) - 1; };
+      const int ntask = std::max(1, std::min(4 * omp_get_num_threads(), (int)(n_tr / 1024)));   // bounded: no task-count cliff
+      vector<size_t> off(n_tr + 1, 0);                // span length per trace, then (below) its arena offset
+      std::exception_ptr conv_err;   // [task-err]
+      #pragma omp taskloop num_tasks(ntask) default(shared)
+      for (int c = 0; c < ntask; ++c)
+      { try {
+        const size_t lo = (size_t)c * n_tr / ntask, hi = (size_t)(c + 1) * n_tr / ntask;
+        if (lo >= hi) continue;
+        size_t s = segOf(lo);
+        for (size_t g = lo; g < hi; ++g) { while (g >= at[s + 1]) ++s; off[g + 1] = spanLength(seg[s][g - at[s]], store); }
+      } catch (...) { taskErr_(conv_err); } }
+      if (conv_err) std::rethrow_exception(conv_err);
+      off[0] = store.inten.size();
+      for (size_t g = 0; g < n_tr; ++g) off[g + 1] += off[g];   // off[g] = the arena size before trace g's append
+      store.inten.resize(off[n_tr], 0.0f);
+      out.resize(n_tr);
+      #pragma omp taskloop num_tasks(ntask) default(shared)
+      for (int c = 0; c < ntask; ++c)
+      { try {
+        const size_t lo = (size_t)c * n_tr / ntask, hi = (size_t)(c + 1) * n_tr / ntask;
+        if (lo >= hi) continue;
+        vector<pair<uint32_t, float>> pts;
+        size_t s = segOf(lo);
+        for (size_t g = lo; g < hi; ++g)
+        {
+          while (g >= at[s + 1]) ++s;
+          MassTrace& mt = seg[s][g - at[s]];
+          out[g] = toTraceAt(mt, store, off[g], pts);
+          mt = MassTrace();   // the payload goes now, as in the serial loop
+        }
+      } catch (...) { taskErr_(conv_err); } }
+      if (conv_err) std::rethrow_exception(conv_err);
+      vector<vector<MassTrace>>().swap(seg);
     }
-    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (serial)");
+    else
+    {
+      out.reserve(n_tr);
+      // Each MassTrace is released as soon as it is converted.
+      for (auto& sv : seg)   // [outer] the segments in order: the sequence the gathered vector held
+      {
+        for (size_t i = 0; i < sv.size(); ++i) { out.push_back(toTrace(sv[i], store)); sv[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
+        vector<MassTrace>().swap(sv);
+      }
+    }
+    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (" + (conv_par ? "parallel" : "serial") + ")");
     return out;
   }
 
