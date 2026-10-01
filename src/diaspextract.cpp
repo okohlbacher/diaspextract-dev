@@ -1348,6 +1348,9 @@ namespace
     const size_t s0 = segd ? tp.seg[band] : 0, s1 = segd ? tp.seg[band + 1] : tp.order.size();
     for (size_t si = s0; si < s1; ++si)
     {
+      // [pipe] a band runs for seconds without another break point: every 8192 seeds, help a live pipelined
+      // tile reader or writer with one chunk (one relaxed load when none is live)
+      if (((si - s0) & 8191) == 8191) teamAssist_(1);
       const uint32_t seed = tp.order[si];
       if (banded && (sl.tof[seed] < band_lo || sl.tof[seed] >= band_hi)) continue;   // not this band's core
       if (seen(seed)) continue;
