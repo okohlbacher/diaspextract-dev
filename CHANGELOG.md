@@ -1,12 +1,12 @@
 # Changelog
 
-## v1.6.0 — 2026-10-01
+## v1.6.0 — 2026-10-02
 
-Seven new defaults. With the first four, on 43 public runs, peptides at 1 % FDR rise by 12.3 % with Sage and by
-7.7 % with MSFragger over 1.5.0. No run loses peptides on either engine, entrapment FDR and memory are unchanged, and
-wall time is within 3 %. The last three measure a setting per run (the isotope-partner 1/K0 tolerance, the MS1 minimum
-trace length and the twin fold's frame tolerance); they were screened, not measured on the corpus. Each default can be
-set back.
+Seven new defaults and a faster, pipelined tile loop. On 43 public runs, peptides at 1 % FDR rise by 17.8 % with Sage
+and by 13.4 % with MSFragger over 1.5.0. No run loses peptides on either engine and entrapment FDR is unchanged. The
+extraction takes 28 % less wall time (median per run) and about 30 % more peak memory. Three of the defaults measure a
+setting per run (the isotope-partner 1/K0 tolerance, the MS1 minimum trace length and the twin fold's frame
+tolerance). Each default can be set back.
 
 - **New defaults.**
 
@@ -25,32 +25,31 @@ set back.
   exactly (same semantic digest, checked on two runs) and the 1.5.0 `spx:` header stamps (checked on one); the
   cross-frame twin fold needs v2, so these options switch it off too. The options new to the defaults are now listed
   by `--help`, not only `--helphelp`.
-- **Measured effect** (the first four defaults; the three per-run settings below were screened, not measured on the
-  corpus). The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window schemes, and Evosep
-  60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
-  with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage entrapment search for the
-  FDR check.
+- **Measured effect** (1.6.0 at its defaults against 1.5.0). The corpus is 43 public runs: PXD017703 (HeLa:
+  10/50/100 ng in the py3 and 25pc window schemes, and Evosep 60/100/200 samples per day) and PXD047793 (TNBC tissue).
+  Each run is extracted once with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage
+  entrapment search for the FDR check.
 
-  | runs | n | Sage | MSFragger | entrapment FDR change, median (largest rise) |
-  |---|---:|---:|---:|---|
-  | HeLa py3 | 9 | +10.0 % | +9.4 % | −0.02 pt (+0.05) |
-  | HeLa 25pc | 9 | +14.2 % | +12.6 % | −0.05 pt (+0.14) |
-  | HeLa Evosep | 9 | +14.6 % | +7.9 % | −0.08 pt (+0.08) |
-  | TNBC | 16 | +12.2 % | +5.8 % | −0.03 pt (+0.10) |
-  | **all** | **43** | **+12.3 %** | **+7.7 %** | **−0.03 pt (+0.14)** |
+  | runs | n | Sage | MSFragger | entrapment FDR change, median (largest rise) | extraction wall, 1.6.0 / 1.5.0 (median) | peak RSS, median (1.5.0) |
+  |---|---:|---:|---:|---|---:|---|
+  | HeLa py3 | 9 | +10.9 % | +10.2 % | −0.02 pt (+0.06) | 0.76 | 7.7 GB (6.6) |
+  | HeLa 25pc | 9 | +19.3 % | +18.3 % | −0.09 pt (+0.02) | 0.53 | 11.8 GB (8.6) |
+  | HeLa Evosep | 9 | +36.0 % | +29.0 % | −0.16 pt (+0.02) | 1.03 | 7.2 GB (7.0) |
+  | TNBC | 16 | +15.2 % | +9.0 % | −0.02 pt (+0.13) | 0.68 | 27.9 GB (20.9) |
+  | **all** | **43** | **+17.8 %** | **+13.4 %** | **−0.03 pt (+0.13)** | **0.72** | **11.1 GB (8.6)** |
 
-  - Per run, Sage gains +4.8 to +19.2 % and MSFragger +0.5 to +16.0 %.
-  - Pooled over the runs, the raw entrapment share is 1.93 % at z = 1 (1.5.0: 1.96 %) and 0.57 % at z ≥ 2 (0.58 %).
-  - The 1/K0 weight and the foreign-envelope removal together give +5.8 % Sage and +4.2 % MSFragger. Fragment fusion
-    and the monoisotope check add another +6.2 % and +3.4 % on top.
-  - There are 3.7 % fewer spectra (46.8 M against 48.6 M), mostly from the monoisotope check: seeds of one ion that
-    sat one isotope apart now resolve to one monoisotope and fold into twins.
-  - Median peak RSS is 8.7 GB (1.5.0: 8.6 GB). Walls are compared through the reference implementation, which ran on
-    the same node: the extraction takes 0.36 of its wall time (1.5.0: 0.35).
-  - The three per-run settings were screened together, with one extraction per run against the first four defaults
-    alone. The nine Evosep runs gain 12.7–27.6 % Sage and 13.6–29.6 % MSFragger peptides (60 SPD about 13 %, 100 and
-    200 SPD 22–30 %) with 37–54 % more spectra. HeLa 25pc at 10 ng gains 5.5 % and 1.6 %, TNBC 2.8 % and 1.8 %, and
-    HeLa py3 moves by 0.4 % or less. The Sage entrapment FDR changes by −0.27 to +0.13 pt.
+  - Per run, Sage gains +4.7 to +45.4 % and MSFragger +0.5 to +40.3 %.
+  - Pooled over the runs, the raw entrapment share is 1.95 % at z = 1 (1.5.0: 1.96 %) and 0.56 % at z ≥ 2 (0.58 %).
+  - Measured on the same corpus in steps: the 1/K0 weight and the foreign-envelope removal give +5.8 % Sage and
+    +4.2 % MSFragger; with fragment fusion and the monoisotope check, +12.3 % and +7.7 %. The three per-run settings,
+    the cross-frame twin fold and the cap ranking of fused peaks add the rest (+4.9 % and +5.3 % on top), most of it
+    on Evosep (+18.7 % and +19.5 %).
+  - The spectrum count is about the same (48.8 M against 48.6 M): 35 % more on Evosep, 6 % fewer on HeLa py3.
+  - The two releases ran on different nodes, so each run's extraction wall is taken relative to the reference
+    implementation's, run back to back on the same node, and the table gives the ratio of those relative walls. On
+    the HeLa 25pc scheme, where 1.5.0 took 1.08–1.52x the reference implementation's wall time, 1.6.0 takes 0.58–0.80x.
+  - Peak memory rises because a second tile is in flight (see "Speed and memory" below; `DIASPEXTRACT_PIPE_TILES=1`
+    restores one tile at a time). The largest run peaks at 32.3 GB (1.5.0: 22.7 GB).
 - **Foreign precursor envelopes** (`-assembly:foreign_precursor_weight`, `-assembly:foreign_precursor_ppm` 10,
   `-assembly:foreign_precursor_dim` 0.015, `-assembly:foreign_precursor_min_iso` 2). A diaPASEF window passes every
   precursor inside it, and the unfragmented envelope of a co-isolated precursor lands in the spectrum as intense
@@ -141,7 +140,7 @@ set back.
   0.01 ppm (one bin) or 0.3 ppm and more apart (distinct traces). Screened on top of the other two per-run settings
   (one extraction per run), the fold removes 0.7–2.4 % of the spectra and moves peptides by −0.5 to +0.4 % on either
   engine. Screened without them, one Evosep 200 SPD run lost 1.7 % with MSFragger; with them, that run lost 0.1 %.
-  The corpus numbers above predate it. `bin` (any one-bin pair across frames) and `ppm` (the
+  The corpus numbers above include it. `bin` (any one-bin pair across frames) and `ppm` (the
   fold's 20 ppm) are options; both lost peptides in the screen. Without v2 nothing folds across frames, so the 1.5.0
   options above still give the 1.5.0 spectra. `-1` restores the same-frame fold. Logged as `[twins]` (pairs joined at
   one frame and across frames, pairs left apart at a cell edge), stamped in `spx:twin_merge`.
@@ -200,10 +199,6 @@ set back.
     not been measured.
   - **Spectra over the cap.** A folded spectrum can still exceed `max_fragments`. `-assembly:post_fusion_cap true`
     prevents that but has not been measured at release grade.
-  - **Evosep.** On the short-gradient Evosep runs, the output searched with Sage identifies fewer peptides (0.94x)
-    than the reference implementation's output searched with MSFragger.
-  - **HeLa 25pc speed.** On the HeLa 25pc window scheme, the extraction takes 1.06–1.52x the reference
-    implementation's wall time, as in 1.5.0.
 
 ## v1.5.0 — 2026-09-29
 
