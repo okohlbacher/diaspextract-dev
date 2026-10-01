@@ -141,34 +141,68 @@ namespace
   /// never handed a window task (libgomp lets a thread waiting at a taskgroup end run ANY child of its task),
   /// and it never waits for a helper to START: a helper that starts after the cursor ran out touches nothing
   /// but its own reference to the cursor, so only helpers that claimed a chunk are waited for (seq_cst: a
-  /// helper raises `busy` before it claims). f(i, slot): `slot` < omp_get_num_threads() is unique among the
-  /// concurrent pullers, for per-slot scratch where a thread number was used. Every caller writes
-  /// index-addressed results only, so the output is the parallel for's. The first exception is rethrown here,
-  /// after every claimed chunk has finished.
+  /// helper raises `busy` before it claims). f(i, slot): `slot` = the puller's omp_get_thread_num(), unique
+  /// among the concurrent pullers (a thread pulls one chunk at a time and never nests a pull), for per-slot
+  /// scratch where a thread number was used. Every caller writes index-addressed results only, so the output
+  /// is the parallel for's. The first exception is rethrown here, after every claimed chunk has finished.
+  /// Helper tasks queue behind the band and score tasks, and while windows hold the threads they barely run
+  /// (scal-pipe-1 on kim: a heavy K562 tile read in 31-43 s at 64 threads, 5-7 s with the barrier). So the
+  /// loop is also published for teamAssist_: window code pulls a chunk at its natural break points, which
+  /// gives the I/O a share of the window threads without a nested team (libgomp starts fresh threads for every
+  /// nested region: scal-pipe-2).
+  struct PullJob_
+  {
+    std::atomic<long> cur{0}; std::atomic<int> busy{0}; std::exception_ptr err;
+    long n = 0, chunk = 1;
+    void (*call)(void*, long, int) = nullptr; void* fp = nullptr;
+    /// up to max_chunks chunks (all with max_chunks < 0), returns how many it claimed; `busy` is raised BEFORE
+    /// the first claim (see above)
+    long pull(const long max_chunks)
+    {
+      const int slot = omp_get_thread_num();
+      busy.fetch_add(1);
+      long a = 0, k = 0;
+      for (; (max_chunks < 0 || k < max_chunks) && (a = cur.fetch_add(chunk)) < n; ++k)
+      { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) call(fp, i, slot); }
+        catch (...) { taskErr_(err); cur.store(n); } }
+      busy.fetch_sub(1);
+      return k;
+    }
+  };
+  inline std::mutex& pullMu_() { static std::mutex m; return m; }
+  inline std::vector<std::shared_ptr<PullJob_>>& pullJobs_() { static std::vector<std::shared_ptr<PullJob_>> v; return v; }
+  inline std::atomic<int>& pullLive_() { static std::atomic<int> n{0}; return n; }
+  /// [pipe] Help a live teamFor_ loop (the pipelined tile reader or writer) with up to max_chunks chunks; true if
+  /// it did any. One relaxed load when none is live. Called inside the window team only (slot = thread number).
+  inline bool teamAssist_(const long max_chunks)
+  {
+    if (pullLive_().load(std::memory_order_relaxed) == 0) return false;
+    std::shared_ptr<PullJob_> j;   // the copy keeps the job alive; its loop body is the caller's until it returns
+    { std::lock_guard<std::mutex> g(pullMu_());
+      for (const auto& p : pullJobs_()) if (p->cur.load(std::memory_order_relaxed) < p->n) { j = p; break; } }
+    return j && j->pull(max_chunks) > 0;
+  }
   template <class F> static void teamFor_(long n, long chunk, F&& f)
   {
     if (n <= 0) return;
-    struct Pull { std::atomic<long> cur{0}; std::atomic<int> busy{0}; std::exception_ptr err; };
-    auto st = std::make_shared<Pull>();
-    auto* fp = &f;
+    using FT = std::remove_reference_t<F>;
+    auto st = std::make_shared<PullJob_>();
+    st->n = n; st->chunk = chunk; st->fp = (void*)&f;
+    st->call = [](void* p, long i, int slot) { (*static_cast<FT*>(p))(i, slot); };
+    { std::lock_guard<std::mutex> g(pullMu_()); pullJobs_().push_back(st); }
+    ++pullLive_();
     const int team = std::max(1, omp_get_num_threads());
     const int nt = (int)std::min<long>((n + chunk - 1) / chunk, (long)team);
     for (int t = 1; t < nt && teamHelpersQueued_().load() < team; ++t)
     {
       ++teamHelpersQueued_();
-      #pragma omp task default(none) firstprivate(st, fp, t, n, chunk)
-      {
-        --teamHelpersQueued_();
-        st->busy.fetch_add(1);
-        for (long a; (a = st->cur.fetch_add(chunk)) < n; )
-        { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) (*fp)(i, t); }
-          catch (...) { taskErr_(st->err); st->cur.store(n); } }
-        st->busy.fetch_sub(1);
-      }
+      #pragma omp task default(none) firstprivate(st)
+      { --teamHelpersQueued_(); st->pull(-1); }
     }
-    for (long a; (a = st->cur.fetch_add(chunk)) < n; )
-    { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) f(i, 0); }
-      catch (...) { taskErr_(st->err); st->cur.store(n); } }
+    st->pull(-1);
+    { std::lock_guard<std::mutex> g(pullMu_());
+      auto& v = pullJobs_(); v.erase(std::remove(v.begin(), v.end(), st), v.end()); }
+    --pullLive_();
     while (st->busy.load() != 0) std::this_thread::yield();
     if (st->err) std::rethrow_exception(st->err);
   }
@@ -5601,7 +5635,8 @@ protected:
     struct CarryGate
     {
       CarrySlot& s; const size_t tk; bool took = false, done = false;
-      void wait() const { while (s.ready.load(std::memory_order_acquire) < tk) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
+      void wait() const   // [pipe] idle until the carry arrives: help the tile reader or writer meanwhile
+      { while (s.ready.load(std::memory_order_acquire) < tk) if (!teamAssist_(4)) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
       Carry take() { wait(); took = true; Carry c = std::move(s.c); s.c = Carry(); ledAdd_(LC_CARRY, -c.bytes()); return c; }
       void put(Carry&& c) { ledAdd_(LC_CARRY, c.bytes()); s.c = std::move(c); }
       void publish()
@@ -6015,6 +6050,7 @@ protected:
               #pragma omp taskloop grainsize(1) default(shared)
               for (int b = 0; b < nb; ++b)
               { try {
+                teamAssist_(1);   // [pipe] a chunk of the pipelined tile reader or writer, if one is live
                 pc[b] = detectTracesInteger_(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_minlen,
                                              bnd[b], bnd[b + 1], b);
               } catch (...) { taskErr_(band_err); } }
@@ -6236,6 +6272,7 @@ protected:
             taskFault_("assemble");
             for (;;)
             {
+              teamAssist_(1);   // [pipe] a chunk of the pipelined tile reader or writer, if one is live
               const long cs = pcur.fetch_add(32);
               if (cs >= n_prec_w) break;
               const long ce = std::min(cs + 32, n_prec_w);
@@ -6442,7 +6479,8 @@ protected:
             {
               #pragma omp taskwait
             }
-            while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load())
+              if (!teamAssist_(8)) std::this_thread::sleep_for(std::chrono::milliseconds(1));   // help the writer meanwhile
             if (pipe_abort.load()) break;
             if (solo) writeTile(fin);
             else
