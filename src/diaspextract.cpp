@@ -1554,15 +1554,28 @@ namespace
     // No `in.size() < 2` guard: a lone parent must split as it would among others (tile invariance).
     if (split_valleys <= 0.0 || in.empty()) return std::move(in);
     const TofAxis& ax = tofAxis();
-    nchunk = std::max(1, std::min<int>(nchunk, (int)in.size()));
+    // [serial] Every parent splits on its own (below), so neither the chunk count nor the cut points can change the
+    // output. A large window (>= 8192 parents per chunk) gets up to one chunk per team thread instead of `nchunk`,
+    // and the cuts sit at equal cumulative cost (real points + 8 per trace) rather than equal counts: a window's
+    // parents come band by band, most intense (longest) first, so equal counts put the longest traces together.
+    const size_t n_in = in.size();
+    const int team = omp_in_parallel() ? omp_get_num_threads() : 1;
+    nchunk = std::max(nchunk, std::min<int>(team, (int)std::min<size_t>(n_in / 8192, 1 << 20)));
+    nchunk = std::max(1, std::min<int>(nchunk, (int)n_in));
+    vector<size_t> cut(nchunk + 1, n_in);
+    cut[0] = 0;
+    { uint64_t tot = 0, acc = 0; int c = 1;
+      for (const Trace& t : in) tot += (uint64_t)t.npts + 8;
+      for (size_t q = 0; q < n_in && c < nchunk; ++q)
+      { acc += (uint64_t)in[q].npts + 8;
+        while (c < nchunk && acc * (uint64_t)nchunk >= tot * (uint64_t)c) cut[c++] = q + 1; } }
     vector<vector<Trace>> parts(nchunk);
     vector<TraceStore> stores(nchunk);                         // chunk-private arenas, merged after
-    const size_t n_in = in.size();
     std::exception_ptr task_err;   // [task-err]
     #pragma omp taskloop grainsize(1) default(shared)
     for (int ci = 0; ci < nchunk; ++ci)
     { try {
-      const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
+      const size_t lo = cut[ci], hi = cut[ci + 1];
       TraceStore& cst = stores[ci];
       cst.setFrames(wst.rt_index, &wst.b);
       // One MassTrace in flight at a time. Per-trace detectPeaks equals the batch call: with
