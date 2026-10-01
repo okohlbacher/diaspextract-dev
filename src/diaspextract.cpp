@@ -148,7 +148,7 @@ namespace
   /// scratch where a thread number was used. Every caller writes index-addressed results only, so the output
   /// is the parallel for's. The first exception is rethrown here, after every claimed chunk has finished.
   /// Helper tasks queue behind the band and score tasks, and while windows hold the threads they barely run
-  /// (scal-pipe-1 on kim: a heavy K562 tile read in 31-43 s at 64 threads, 5-7 s with the barrier). So the
+  /// (scal-pipe-1 on kim: a heavy tile of a 60-min run read in 31-43 s at 64 threads, 5-7 s with the barrier). So the
   /// loop is also published for teamAssist_: window code pulls a chunk at its natural break points, which
   /// gives the I/O a share of the window threads without a nested team (libgomp starts fresh threads for every
   /// nested region: scal-pipe-2).
@@ -2641,7 +2641,7 @@ namespace
     std::exception_ptr w_err_;
     /// [outer] DIASPEXTRACT_MS1_ASYNC=1: the MS1 batches are picked on the worker, beside the reader's decode of the next
     /// batch. OFF by default: the worker's team is a second OpenMP team on the same places as the reader's (libgomp binds
-    /// a foreign thread's team from place 0), so at 64 threads K562's LOAD(stream) got 0.3 s slower, and its extra thread
+    /// a foreign thread's team from place 0), so at 64 threads a 60-min run's LOAD(stream) got 0.3 s slower, and its extra thread
     /// arenas raised HeLa_19's peak RSS by 6 % for 0.5-0.9 s (scalfix/outer timing, 2026-10-01). Default: the MS1 batches
     /// are picked inside the reader's hand-over, one full batch at a time (the behaviour before 2026-10-01).
     static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return e && *e && *e != '0'; }(); return v; }
@@ -3790,7 +3790,7 @@ protected:
   /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by std::sort on m/z alone.
   /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
   /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
-  /// With any equal (or unordered) neighbour -- K562 has 677,976, HeLa_19 19,200: quantised m/z -- the order of equal
+  /// With any equal (or unordered) neighbour -- a 60-min run has 677,976, a 2-h HeLa run 19,200: quantised m/z -- the order of equal
   /// m/z is std::sort's own, so it is std::sort's sequence, computed by stdSortPar_. Returns the neighbours that are not
   /// strictly increasing (0 = the identity was taken).
   static size_t mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
@@ -4124,8 +4124,8 @@ protected:
     };
 
     // [outer] 2048 (was 8192): the commit is serial and mostly fixed cost per seed, but each re-evaluation in it costs a
-    // whole seed (~10 us); a quarter of the batch re-evaluates a third of the seeds (K562: 17,853 vs 51,891) for 4x the
-    // fork/joins. K562 greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (kim/dax, 2026-10-01). Committing
+    // whole seed (~10 us); a quarter of the batch re-evaluates a third of the seeds (a 60-min run: 17,853 vs 51,891) for 4x the
+    // fork/joins. Its greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (kim/dax, 2026-10-01). Committing
     // beside the next batch's speculation was exact but slower (more re-evaluations, a contended commit): not kept.
     size_t spec_batch = 2048;
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
@@ -7425,7 +7425,7 @@ protected:
       // [pipe] The driver is thread 0 of ONE parallel region over all tiles: it reads tile fin + pipe_depth - 1
       // while tile fin's windows run, admits its windows as the cap and memory allow, and once tile fin's windows
       // are done hands the tile to the WRITER, a task that finishes the tiles strictly in tile order. So the read
-      // of the next tile never waits behind a write (scal-pipe-1 ran both on the driver: on K562 at 100 threads
+      // of the next tile never waits behind a write (scal-pipe-1 ran both on the driver: on a 60-min run at 100 threads
       // read + write per heavy tile outlasted the tile's windows, which then sat idle at three boundaries).
       // The driver does not run windows: it reaches no taskgroup end or taskwait (teamFor_, and parTasks_ keeps its
       // passes inline), so its n_threads - 1 team mates run the windows, the writer, and the reader's and writer's helper
