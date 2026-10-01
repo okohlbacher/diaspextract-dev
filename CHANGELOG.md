@@ -2,10 +2,11 @@
 
 ## v1.6.0 — 2026-10-01
 
-Six new defaults. With the first four, on 43 public runs, peptides at 1 % FDR rise by 12.3 % with Sage and by
+Seven new defaults. With the first four, on 43 public runs, peptides at 1 % FDR rise by 12.3 % with Sage and by
 7.7 % with MSFragger over 1.5.0. No run loses peptides on either engine, entrapment FDR and memory are unchanged, and
-wall time is within 3 %. The last two measure a setting per run (the isotope-partner 1/K0 tolerance and the MS1 minimum
-trace length); they were screened, not measured on the corpus. Each default can be set back.
+wall time is within 3 %. The last three measure a setting per run (the isotope-partner 1/K0 tolerance, the MS1 minimum
+trace length and the twin fold's frame tolerance); they were screened, not measured on the corpus. Each default can be
+set back.
 
 - **New defaults.**
 
@@ -17,12 +18,13 @@ trace length); they were screened, not measured on the corpus. Each default can 
   | `-charge:mono_profile_check` | false | v2 | checks the monoisotope against the summed MS1 intensity at the isotope positions |
   | `-charge:iso_im_tolerance` | 0.05 | 0 (auto) | measures the isotope-partner 1/K0 tolerance per run |
   | `-trace:min_length_sec` | 3 | −1 (auto) | sets the MS1 minimum trace length from the run's peak width |
+  | `-assembly:twin_rt_frames` | (new) | 0 (auto) | lets the twin fold join two spectra of one monoisotope from nearby MS1 frames |
 
   `-assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0
   -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3` gives the 1.5.0 spectra
-  exactly (same semantic digest, checked on two runs). The options new to the defaults are now listed by `--help`, not
-  only `--helphelp`.
-- **Measured effect** (the first four defaults; the two per-run settings below were screened, not measured on the
+  exactly (same semantic digest, checked on two runs); the cross-frame twin fold needs v2, so these options switch it
+  off too. The options new to the defaults are now listed by `--help`, not only `--helphelp`.
+- **Measured effect** (the first four defaults; the three per-run settings below were screened, not measured on the
   corpus). The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window schemes, and Evosep
   60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
   with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage entrapment search for the
@@ -119,6 +121,22 @@ trace length); they were screened, not measured on the corpus. Each default can 
   2.9 %, TNBC 1.4 % and 0.6 %. Logged as `[minlen]` (cycle, FWHM median, p10 and p90 in seconds and cycles, the
   minimum and the points it implies), stamped `spx:ms1_min_length`. Any value ≥ 0 fixes the minimum as before
   (`3` = 1.5.0, `0` = no filter).
+- **Twin fold across nearby frames** (`-assembly:twin_rt_frames` 0 = auto, `-assembly:twin_rt_match ext`). v2's
+  extension can put a monoisotope on a trace that is another precursor's monoisotope at another MS1 frame, so one ion
+  was written as two spectra that the same-frame fold could not join. The fold now also joins such a pair. Besides the
+  fold's charge and 1/K0 tests, the two must meet four conditions:
+  - their precursor m/z lie in one flight-time bin (within 0.05 ppm);
+  - the monoisotope of at least one of them was placed by the extension;
+  - their apexes are at most n MS1 cycles apart, with n the run's median MS1 peak width in cycles (2 on the public runs);
+  - they lie in one retention-time cell, so the output does not depend on the tiling or the thread count.
+
+  The survivor rule and the fusion are the fold's. Across frames, pairs of one charge and 1/K0 lie either within
+  0.01 ppm (one bin) or 0.3 ppm and more apart (distinct traces). In a screen of HeLa and TNBC runs the fold removes
+  0.7–1.8 % of the spectra; peptides stay within ±0.4 % on both engines, except one Evosep 200 SPD run
+  (−1.7 % with MSFragger). The corpus numbers above predate it. `bin` (any one-bin pair across frames) and `ppm` (the
+  fold's 20 ppm) are options; both lost peptides in the screen. Without v2 nothing folds across frames, so the 1.5.0
+  options above still give the 1.5.0 spectra. `-1` restores the same-frame fold. Logged as `[twins]` (pairs joined at
+  one frame and across frames, pairs left apart at a cell edge), stamped in `spx:twin_merge`.
 - **New options, off by default:**
   - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
     fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums
@@ -141,8 +159,9 @@ trace length); they were screened, not measured on the corpus. Each default can 
     empty position, which counts against the step. The monoisotope can then move one or more isotopes right of the
     true one (two for one empty position inside the walk, with `iterate`), mainly on runs with wide isotope 1/K0
     scatter.
-  - **Duplicate monoisotope after the extension.** v2's extension can put a monoisotope on a trace that is another
-    precursor's monoisotope. The twin fold joins the two spectra only when they come from the same MS1 frame.
+  - **Duplicate monoisotope after the extension, the rest.** The fold joins the extension's pair only within its
+    1/K0 tolerance (0.005) and the run's frame tolerance. A pair farther apart, or one that straddles a retention-time
+    cell edge, is still written as two spectra.
   - **Fusion and elution.** Fusion sums pieces whose elution does not overlap, unlike the same-bin merge.
   - **Fusion and twins.** Fusion is not reconciled across twins, so after the fold's 10-ppm merge one ion can still
     appear as two peaks a little over 10 ppm apart.

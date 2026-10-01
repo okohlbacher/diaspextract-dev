@@ -255,6 +255,13 @@ runs on kim (HELA25PC.md section 0b) show the excess is critical path (68-85 % o
 **Status 2026-10-01:** in release -- branch release-1.6.0 (rc-b + dev main), codex/kimi/vibe review done
 (docs/reviews/release-1.6.0/final-review-2026-10-01/; verdicts in the release fix commit's message), output-neutral
 fixes and docs committed; the release gate on the final binary, the export and public CI are still to run. Deferred review findings: "Open findings from the 1.6.0 release review" below.
+**Status 2026-10-01 (evening):** 1.6.0 scope per the user's 09:05 decision. Merged into release-1.6.0: F3 (fused cap
+key, fix160-fusecap), the adaptive MS1 minimum trace length (f160-minlen ba78a57: `trace:min_length_sec` -1 = auto),
+the per-run isotope-partner 1/K0 tolerance (f160-isotol 2409b0b: `charge:iso_im_tolerance` 0 = auto), the F1
+redesign (f160-f1fold 71bd6f5: `assembly:twin_rt_frames` 0 = auto, `twin_rt_match ext`; item 2 of the release-review
+findings below). Next: the scaling levers (tune/rc-b-scal 7e6acdc, see "Thread scaling"), the combined arms and
+screen, rc2, the CLI review of the full release diff, the 43-run harness on the combined defaults (the CHANGELOG's
+corpus table predates the three per-run defaults), the gate, the export.
 
 rc-b = branch tune/rc-b b2185db (tune/rc-a + tune/fuse + tune/monocheck d512026). Four default changes:
 `assembly:im_weight_sigma` 0 -> 0.005, `assembly:foreign_precursor_weight` -> 0, `assembly:fragment_fuse_ppm` 0 -> 25
@@ -283,6 +290,16 @@ shared nodes.
 ## Evosep: fewer peptides than the reference pipeline (added 2026-09-30)
 
 **Status 2026-09-30:** open -- in-depth analysis started (user request; tune-2026-09-29/evosep/).
+**Status 2026-10-01:** analysis done (tune-2026-09-29/evosep/EVOSEP.md): 67 % of the Evosep-specific loss is
+extraction, mainly two settings in seconds -- `trace:min_length_sec 3` (5 MS1 points at a 0.95-s cycle) and the
+isotope-partner box (`charge:iso_im_tolerance` 0.05 = 17-20x the run's isotope 1/K0 spread, first candidate in m/z
+order). Both are now per-run defaults in release-1.6.0 (user decision 09:05; branches f160-minlen, f160-isotol).
+SCREENING (n = 1, vs rel160_base, Sage / MSFragger): minlen auto Evosep 2450/2451/2735/2737 +8.3/+7.1, +7.0/+9.4,
++15.8/+17.9, +13.8/+15.9 %, controls >= -0.01 % (py3 output identical), K562 iso err 5.69 -> 5.47 %; isotol auto
++5.3/+4.2, +5.0/+5.6, +6.6/+4.0, +6.7/+6.4 %, controls >= -0.36 % (HeLa_19), K562 iso err 5.69 -> 6.15 %.
+`charge:iso_partner closest` was screened and is not recommended (-1.6 / -5.0 % MSFragger on the 10 ng HeLa runs).
+Combined screen: below. Remaining open: the rest of the emission gap (EVOSEP.md section 6, open questions), and a
+corpus (harness) measurement of the per-run defaults.
 
 On the nine Evosep runs (60 / 200 SPD, PXD017703) DIAspeXtract + Sage finds 0.94x the peptides of the reference + MSFragger
 for rc-b (0.82x for 1.5.0); per run 0.84-1.03x. Searched with MSFragger, our spectra give 0.83x the reference's (126,316 vs
@@ -321,7 +338,8 @@ release fix commit's message. All are listed as known limitations in the 1.6.0 C
 User decision 2026-10-01 07:15: fix 1-3 before releasing; 1 and 2 were tried on branch fix160-monocheck and rejected by
 the panel screen (see there); 3 was accepted (branch fix160-fusecap, merged into release-1.6.0). User decision 09:05:
 item 2 is redesigned for 1.6.0 (the twin fold joins same-mono pairs at nearby frames; the extension stays); item 1 stays
-a documented known limitation.
+a documented known limitation. The redesign (branch f160-f1fold, record under item 2) is merged into release-1.6.0 with
+its `ext` default.
 
 1. **OPEN -- fix tried 2026-10-01 (user decision 07:15: fix before release) and rejected by the screen. v2 counts an
    empty heavier position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returns 0 when PS(-j+1) is
@@ -353,6 +371,33 @@ a documented known limitation.
    checks show no consistent ID cost (K562 better, HeLa within +-0.4 pt either way) but raise the isotope error by 3-4 pt
    (all M+1; M-1 stays 1.5 %): the extension's value includes these same-mono pairs. A fix needs the fold to join them
    (one mono trace at nearby frames) rather than refusing the extension.
+   **Redesign screened 2026-10-01 (branch f160-f1fold; SCREENING n = 1 vs rel160_base, Sage / MSFragger; the panel's
+   ACCEPT rule: no control loses > 0.5 %, Evosep gains on both engines on average, K562 isotope error +<= 0.5 pt).**
+   New `assembly:twin_rt_frames` (0 = auto: the run's median MS1 FWHM in cycles, rounded; it came out 2 on all nine
+   panel runs, 1.95-2.41 cycles) widens the fold to apexes <= (n + 0.5) cycles apart inside one RT cell (the tile
+   loop's ownership test, so cells_per_tile and threads keep one digest). Off (-1) == rel160-base-1 on 9/9 runs, the
+   1.5.0 reset == 2b01bef4 / 5b383304, 16 / 100 threads and cells_per_tile 2 one digest (HeLa_22, HeLa_2450,
+   HeLa_2735, K562). Cross-frame pairs (same z, |d1/K0| <= 0.005, 1-3 frames) are bimodal in m/z: <= 0.01 ppm (one
+   flight-time bin; HeLa_22 1,023 / K562 37,784 at one frame apart) or >= 0.3 ppm (distinct traces; 15,900 / 230k);
+   bit-equal m/z catches only half of the one-bin pairs. Three relations (`assembly:twin_rt_match`):
+   - `ppm` (20 ppm, the original proposal; arm f160-f1fold-1): spectra -25..-44 %, K562 -7.85 / -3.60 %, HeLa_34
+     -4.31 / -3.54 %, HeLa_22 +0.13 / -1.66 %, TNBC_009 -4.83 / +0.14 %, HeLa_19 +2.80 / +3.67 % (the only gain),
+     Evosep -1.1..-2.9 % on both, isotope error 5.69 -> 8.52 %. Rejected.
+   - `bin` (any one-bin pair; arm f160-f1fold-2): spectra -6..-15 %, K562 -0.74 / +0.28 %, isotope error 6.46 %,
+     HeLa_22/34/19 MSFragger -0.44..-0.48 %, Evosep 2450/2451/2737 Sage -0.25..-0.34 %, MSFragger -2.26/+0.04/-1.29 %.
+     Rejected.
+   - `ext` (one bin and one member's mono placed by the extension, the F1 pairs only; arm f160-f1fold-3, b25d42f,
+     the branch default): spectra -0.7..-3.0 %; controls HeLa_19 +0.01 / +0.39, HeLa_22 +0.00 / -0.21, HeLa_34
+     +0.01 / +0.23, TNBC_009 -0.24 / -0.07, K562 -0.35 / +0.15 %; isotope error 5.69 -> 5.83 %; Evosep 2450 -0.08 /
+     +0.16, 2451 -0.18 / -0.09, 2735 -0.28 / +0.03, 2737 -0.15 / -1.69 % (mean -0.17 / -0.40 %); wall and RSS
+     unchanged. Passes the control and isotope-error limits, fails "Evosep gains": a de-duplication is ID-neutral at
+     best. K562 one-bin pairs one frame apart 37,784 -> 24,771 (bit-equal 23,865 -> 12,832); the rest are seeds of
+     one ion with two mono traces, which `bin` folds at a cost.
+   **Merged 2026-10-01 with `ext` as the default** (workflow decision following the user's 09:05 request to redesign
+   item 2 for 1.6.0): it fails only "Evosep gains", which a de-duplication cannot be expected to meet; the HeLa_2737
+   MSFragger -1.69 % is unreplicated and the 43-run harness on the combined defaults decides. The way back is one
+   default: `-assembly:twin_rt_frames -1` reproduces the same-frame fold bit for bit (OFF == rel160-base-1, 9/9 runs).
+   What remains of the item (pairs beyond 0.005 1/K0 or across a cell edge) stays a CHANGELOG known limitation.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranked below an unfused peak of equal total intensity at the 500-peak cap. **Fixed before the release (user,
    2026-10-01; branch fix160-fusecap):** each fragment carries its key's intensity term (the IM-weighted apex, the
