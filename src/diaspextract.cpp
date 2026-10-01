@@ -129,6 +129,48 @@ namespace
     if (want && String(want) == site)
       throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
   }
+  /// [pipe] Helper tasks of teamFor_ created and not yet started, over every call: capped at the team size, so
+  /// stale helpers (started after their loop ran out) cannot pile up towards the libgomp cliff (64 x nthreads).
+  inline std::atomic<int>& teamHelpersQueued_() { static std::atomic<int> q{0}; return q; }
+  /// [pipe] A loop that the pipelined tile loop runs on the window team's driver (the tile reader and writer).
+  /// Outside a parallel region the call sites keep their `omp parallel for`. Inside the team a `parallel for`
+  /// would open a NESTED team -- fresh threads on the cores the windows use -- so the loop runs here instead:
+  /// the caller pulls `chunk` indices at a time from a shared cursor, and up to one helper task per team
+  /// thread pulls with it once a thread is free. The caller never reaches a task scheduling point, so it is
+  /// never handed a window task (libgomp lets a thread waiting at a taskgroup end run ANY child of its task),
+  /// and it never waits for a helper to START: a helper that starts after the cursor ran out touches nothing
+  /// but its own reference to the cursor, so only helpers that claimed a chunk are waited for (seq_cst: a
+  /// helper raises `busy` before it claims). f(i, slot): `slot` < omp_get_num_threads() is unique among the
+  /// concurrent pullers, for per-slot scratch where a thread number was used. Every caller writes
+  /// index-addressed results only, so the output is the parallel for's. The first exception is rethrown here,
+  /// after every claimed chunk has finished.
+  template <class F> static void teamFor_(long n, long chunk, F&& f)
+  {
+    if (n <= 0) return;
+    struct Pull { std::atomic<long> cur{0}; std::atomic<int> busy{0}; std::exception_ptr err; };
+    auto st = std::make_shared<Pull>();
+    auto* fp = &f;
+    const int team = std::max(1, omp_get_num_threads());
+    const int nt = (int)std::min<long>((n + chunk - 1) / chunk, (long)team);
+    for (int t = 1; t < nt && teamHelpersQueued_().load() < team; ++t)
+    {
+      ++teamHelpersQueued_();
+      #pragma omp task default(none) firstprivate(st, fp, t, n, chunk)
+      {
+        --teamHelpersQueued_();
+        st->busy.fetch_add(1);
+        for (long a; (a = st->cur.fetch_add(chunk)) < n; )
+        { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) (*fp)(i, t); }
+          catch (...) { taskErr_(st->err); st->cur.store(n); } }
+        st->busy.fetch_sub(1);
+      }
+    }
+    for (long a; (a = st->cur.fetch_add(chunk)) < n; )
+    { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) f(i, 0); }
+      catch (...) { taskErr_(st->err); st->cur.store(n); } }
+    while (st->busy.load() != 0) std::this_thread::yield();
+    if (st->err) std::rethrow_exception(st->err);
+  }
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
   /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
@@ -1861,15 +1903,13 @@ namespace
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
       std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
-      // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
-      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
-      for (int i = 0; i < n; ++i)
+      auto pickOne = [&](const int i, PeakPickerIM& pk)
       {
         try
         {
           auto& s = buf_[(size_t)i];
           ensureIMArrayName(s);
-          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) pk.pickIMCluster(s);
           ensureIMArrayName(s);
           frt[(size_t)i] = s.getRT();
           fid[(size_t)i] = frameIdOf(s.getNativeID());
@@ -1883,6 +1923,22 @@ namespace
           #pragma omp critical(pick_err)
           if (!pick_err) pick_err = std::current_exception();
         }
+      };
+      if (!omp_in_parallel())
+      {
+        // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
+        #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
+        for (int i = 0; i < n; ++i) pickOne(i, picker);
+      }
+      else
+      {
+        // [pipe] the pipelined tile reader, on the window team's driver: one picker copy per puller slot, made
+        // by the slot's first frame (a slot has one puller at a time)
+        std::vector<std::unique_ptr<PeakPickerIM>> pk((size_t)std::max(1, omp_get_num_threads()));
+        teamFor_(n, 1, [&](long i, int slot) {
+          std::unique_ptr<PeakPickerIM>& p = pk[(size_t)slot];
+          if (!p) p.reset(new PeakPickerIM(picker));
+          pickOne((int)i, *p); });
       }
       if (pick_err) std::rethrow_exception(pick_err);
       // Append in arrival order per window, the windows of this batch in parallel: a window's
@@ -1908,8 +1964,7 @@ namespace
       const size_t n_ms1 = ms1_.size();
       std::atomic<long long> slab_b{0};   // [ledger] what this batch actually touched
       std::exception_ptr pad_err;
-      #pragma omp parallel for schedule(dynamic, 1)
-      for (long w = 0; w < (long)per_win.size(); ++w)
+      auto appendWin = [&](const long w)
       {
         Batch& bw = per_win[(size_t)w];
         for (int i : bw.idx)
@@ -1927,7 +1982,13 @@ namespace
           bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
           slab_b += (long long)kept[(size_t)i] * 10 + 24;   // [ledger] touched bytes: 10 B/peak + the frame's table row
         }
+      };
+      if (!omp_in_parallel())
+      {
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (long w = 0; w < (long)per_win.size(); ++w) appendWin(w);
       }
+      else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
       ledAdd_(LC_SLAB, slab_b);
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
@@ -2111,8 +2172,7 @@ namespace
   {
     struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
     vector<SortKey> keys(v.size());
-#pragma omp parallel for schedule(static)
-    for (long i = 0; i < (long)v.size(); ++i)
+    auto key = [&](const long i)
     {
       const MSSpectrum& a = v[i];
       keys[i].rt = a.getRT();
@@ -2120,7 +2180,13 @@ namespace
       keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
       keys[i].n = (uint32_t)a.size();
       keys[i].idx = (uint32_t)i;
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(static)
+      for (long i = 0; i < (long)v.size(); ++i) key(i);
     }
+    else teamFor_((long)v.size(), 4096, [&](long i, int) { key(i); });   // [pipe] the pipelined tile writer
     sort(keys.begin(), keys.end(), [&v](const SortKey& ka, const SortKey& kb) {
       if (ka.rt != kb.rt) return ka.rt < kb.rt;
       if (ka.mz != kb.mz) return ka.mz < kb.mz;
@@ -2222,8 +2288,7 @@ namespace
     vector<vector<uint32_t>> members(surv.size());
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
     // fuse: each thread reads and writes one cluster's spectra only
-#pragma omp parallel for schedule(dynamic, 64)
-    for (long c = 0; c < (long)surv.size(); ++c)
+    auto fuse = [&](const long c)
     {
       if (keyed)
       {
@@ -2253,7 +2318,7 @@ namespace
         for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
         s.getFloatDataArrays().clear();
         s.getFloatDataArrays().push_back(std::move(kk));   // moved, not copied (assign(1, x) copies)
-        continue;
+        return;
       }
       vector<pair<double, double>> ps;
       for (uint32_t i : members[(size_t)c]) for (const auto& pk : v[i]) ps.emplace_back(pk.getMZ(), (double)pk.getIntensity());
@@ -2270,7 +2335,13 @@ namespace
       s.clear(false);   // peaks only: RT, precursor and userParams are the survivor's
       s.reserve(fused.size());
       for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(dynamic, 64)
+      for (long c = 0; c < (long)surv.size(); ++c) fuse(c);
     }
+    else teamFor_((long)surv.size(), 64, [&](long c, int) { fuse(c); });   // [pipe] the pipelined tile writer
     size_t w = 0;
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
     {
@@ -2291,8 +2362,8 @@ namespace
   static std::array<size_t, 3> capAfterFusion_(vector<MSSpectrum>& v, Size max_frags)
   {
     size_t n_sp = 0, n_pk = 0, n_max = 0;
-#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
-    for (long i = 0; i < (long)v.size(); ++i)
+    // the counters are parameters, not captures: inside the reduction loop they must be the thread's copies
+    auto capOne = [&v, max_frags](const long i, size_t& n_sp, size_t& n_pk, size_t& n_max)
     {
       MSSpectrum& s = v[(size_t)i];
       n_max = std::max(n_max, (size_t)s.size());
@@ -2314,6 +2385,18 @@ namespace
         s.select(idx);
       }
       s.getFloatDataArrays().clear();
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
+      for (long i = 0; i < (long)v.size(); ++i) capOne(i, n_sp, n_pk, n_max);
+    }
+    else
+    {
+      // [pipe] the pipelined tile writer: per-slot partial counters, summed here
+      vector<std::array<size_t, 3>> part((size_t)std::max(1, omp_get_num_threads()), std::array<size_t, 3>{0, 0, 0});
+      teamFor_((long)v.size(), 256, [&](long i, int slot) { auto& p = part[(size_t)slot]; capOne(i, p[0], p[1], p[2]); });
+      for (const auto& p : part) { n_sp += p[0]; n_pk += p[1]; n_max = std::max(n_max, p[2]); }
     }
     return {n_sp, n_pk, n_max};
   }
@@ -2366,8 +2449,11 @@ namespace
       // A handler is not reentrant (writeSpectrum_ memoises CV-term validation in cached_terms_),
       // so each thread encodes with its own; dps_ is shared read-only -- every spectrum carries the
       // one data-processing entry the header registered, so writeSpectrum_ never appends to it.
+      // [pipe] On the pipelined tile writer (inside the window team) the encoders are per puller slot of
+      // teamFor_, at most the team size; the chunks and their order are the same either way.
+      const bool in_team = omp_in_parallel();
       const Size CHUNK = 256;
-      const Size n_thr = (Size)std::max(1, omp_get_max_threads());
+      const Size n_thr = (Size)std::max(1, in_team ? omp_get_num_threads() : omp_get_max_threads());
       while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter("/dev/null")); enc_.back()->options_ = options_; }
       const Size wave = CHUNK * n_thr;
       for (Size w0 = 0; w0 < block.size(); w0 += wave)
@@ -2377,12 +2463,10 @@ namespace
         vector<std::string> text(n_chunk);
         vector<vector<pair<std::string, Int64>>> offs(n_chunk);
         std::exception_ptr err;
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (long c = 0; c < (long)n_chunk; ++c)
+        auto encode = [&](const long c, TileWriter& h)
         {
           try
           {
-            TileWriter& h = *enc_[(Size)omp_get_thread_num()];
             std::ostringstream buf; buf.copyfmt(ofs_);          // identical formatting state, or the numbers differ
             const Size lo = w0 + (Size)c * CHUNK, hi = std::min(lo + CHUNK, w1);
             const Size o0 = h.spectra_offsets_.size();
@@ -2396,7 +2480,13 @@ namespace
             #pragma omp critical(tile_writer_err)
             if (!err) err = std::current_exception();
           }
+        };
+        if (!in_team)
+        {
+          #pragma omp parallel for schedule(dynamic, 1)
+          for (long c = 0; c < (long)n_chunk; ++c) encode(c, *enc_[(Size)omp_get_thread_num()]);
         }
+        else teamFor_((long)n_chunk, 1, [&](long c, int slot) { encode(c, *enc_[(Size)slot]); });
         if (err) std::rethrow_exception(err);
         for (Size c = 0; c < n_chunk; ++c)
         {
@@ -5494,13 +5584,38 @@ protected:
     }
     // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
     // the once-only ownership check per precursor (a window's m/z range is tile-independent)
-    struct Carry { vector<Trace> rec; vector<float> inten; };
-    map<WinKey, Carry> carry_in, carry_out;
+    struct Carry { vector<Trace> rec; vector<float> inten;
+                   long long bytes() const { return (long long)(rec.capacity() * sizeof(Trace) + inten.capacity() * 4); } };
+    // [pipe] One slot per window: `c` is carry_out(w, k - 1), and `ready` counts the window's tiles that have
+    // published theirs, so tile k may take `c` once ready == k. Under the per-tile barrier that always holds;
+    // with pipelined tiles it is the one dependency between a window's tiles -- tile k + 1 may slab, prepare,
+    // detect, merge and split while tile k still runs; it waits only where it takes the carry (assembly).
+    struct CarrySlot { Carry c; std::atomic<size_t> ready{0}; };
+    // [pipe] A window's handle on its slot for one tile. take() waits until the window's previous tile has
+    // published, then moves that carry out; publish() hands this tile's carry (put() before it, or none) to
+    // the next tile. The destructor publishes on every exit of the window body, waiting first if the body left
+    // before take(), so a slot is never published out of order and the next tile never waits forever.
+    struct CarryGate
+    {
+      CarrySlot& s; const size_t tk; bool took = false, done = false;
+      void wait() const { while (s.ready.load(std::memory_order_acquire) < tk) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
+      Carry take() { wait(); took = true; Carry c = std::move(s.c); s.c = Carry(); ledAdd_(LC_CARRY, -c.bytes()); return c; }
+      void put(Carry&& c) { ledAdd_(LC_CARRY, c.bytes()); s.c = std::move(c); }
+      void publish()
+      {
+        if (done) return;
+        if (!took) { (void)take(); }   // the body left early: drop the previous tile's carry, in order
+        done = true;
+        s.ready.store(tk + 1, std::memory_order_release);
+      }
+      ~CarryGate() { publish(); }
+    };
+    map<WinKey, CarrySlot> carry;
     map<WinKey, uint64_t> slab_chain;   // [det] the per-window slab digest, chained across tiles
     map<WinKey, vector<uint8_t>> visited;
     for (const WinKey& k : fkeys)
     {
-      carry_out[k];
+      carry[k];
       const double lo = k[0] / 100.0, hi = k[1] / 100.0;
       const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), lo) - prec_mz.begin();
       const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), hi) - prec_mz.begin();
@@ -5581,15 +5696,45 @@ protected:
     // window is an OpenMP task, so idle threads steal across windows. Results go to index-addressed slots
     // (win_out[wi], pslot[j], per[ci][b]), never appended in completion order.
     std::atomic<int> active{0};
-    for (size_t tk = 0; tk < tiles.size(); ++tk)
+    // [pipe] Pipelined tiles. With the per-tile barrier, every tile waits for its slowest window chain and the
+    // read, sort, merge, write and trim between two tiles overlap nothing. Pipelined, ONE parallel region
+    // spans the whole loop and its single thread drives it: it reads tile k + 1 and admits its windows while
+    // tile k's still run, and finishes (sorts, merges, writes, trims) the tiles strictly in tile order as each
+    // completes. A window's tiles depend on each other only through the carry (CarryGate); tiles own disjoint
+    // precursors and are sorted and written per tile as before, so the output is the barrier's, bit for bit.
+    // DIASPEXTRACT_PIPE_TILES=<n> (default 2, 1 = the per-tile barrier) bounds the tiles whose windows may run
+    // at once: tile j is read only after every window of tile j - n has finished, which bounds the slabs
+    // resident and the chain of carry waits; the window cap and the memory admission below still apply to
+    // every window in flight, over all tiles. The reader's and writer's loops run as tasks of the window team
+    // (teamFor_); only the vendor reader's own decode loop (libOpenMS) opens a nested team.
+    const int pipe_depth = []() { const char* e = std::getenv("DIASPEXTRACT_PIPE_TILES");
+                                  const long v = e && *e ? std::atol(e) : 2L; return (int)std::max(1L, std::min(v, 16L)); }();
+    const bool pipe = pipe_depth > 1 && tiles.size() > 1 && n_threads > 1;
+    std::atomic<bool> pipe_abort{false};   // a window or the driver failed: admit nothing more, skip unstarted windows
+    writeLogInfo_("[pipe] " + (pipe ? "tiles pipelined, up to " + String(pipe_depth) + " with windows in flight"
+                                    : String("off (") + (pipe_depth <= 1 ? "DIASPEXTRACT_PIPE_TILES=1" : tiles.size() <= 1 ? "one tile" : "one thread")
+                                      + "): a barrier after every tile"));
+    // [pipe] One tile in flight: its slabs, its windows heaviest-first, their output slots, and how many of its
+    // windows have not finished yet (the driver finishes the tile once that is 0).
+    struct TileRun
     {
+      size_t tk = 0;
+      map<WinKey, PeakSlab> tile_slabs;
+      vector<pair<WinKey, PeakSlab*>> wl;
+      vector<vector<MSSpectrum>> win_out;
+      Size win_done = 0;
+      std::atomic<size_t> left{0};
+    };
+    auto loadTile = [&](TileRun& R)
+    {
+    const size_t tk = R.tk;
     const Tile& tile = tiles[tk];
     ledPhaseTile_("tile", tk + 1);
     // [tile] the tile's slabs: one tile = the resident slabs themselves (moved out by the body, as
     // today); several = a slice of each window's frames in [lo, hi) (the resident source keeps the
     // whole run: this arm is the exactness gate, not the memory configuration)
-    map<WinKey, PeakSlab> tile_slabs;
-    vector<pair<WinKey, PeakSlab*>> wl;
+    map<WinKey, PeakSlab>& tile_slabs = R.tile_slabs;
+    vector<pair<WinKey, PeakSlab*>>& wl = R.wl;
     if (tile_source)
     {
       // [3b] read the tile: a fresh consumer over the loader's RT range, lockstep-padded against
@@ -5630,7 +5775,8 @@ protected:
         n_peaks += sl.peaks();
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
-      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledSet_(LC_SLAB, sb); }
+      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes();
+        if (pipe) ledAdd_(LC_SLAB, sb); else ledSet_(LC_SLAB, sb); }   // [pipe] other tiles' slabs may still be live
       if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
@@ -5675,26 +5821,42 @@ protected:
       std::stable_sort(wl.begin(), wl.end(), heavyFirst);
     }
     else wl = window_list;
-    vector<vector<MSSpectrum>> win_out(wl.size());
-    Size win_done = 0;
-    #pragma omp parallel num_threads(n_threads)
-    #pragma omp single
-    for (long wi = 0; wi < (long)wl.size(); ++wi)
+    R.win_out.resize(wl.size());
+    R.left.store(wl.size());
+    };   // loadTile
+    // [pipe] the window body, defined below the admission that spawns it
+    std::function<void(TileRun*, long, size_t)> runWindow;
+    auto admitTile = [&](TileRun* R)
     {
-      const size_t need = project(*wl[wi].second);
+    auto* rw = &runWindow;
+    for (long wi = 0; wi < (long)R->wl.size() && !pipe_abort.load(); ++wi)
+    {
+      const size_t need = project(*R->wl[wi].second);
       for (;;)
       {
         const size_t budget = (size_t)(availableBytes_() * mem_frac);
         // [dyn-mem] admit while fewer than n_conc windows are in flight and the projection fits mem_fraction
         // of MemAvailable (re-read at every admission); an empty pipeline always admits, however large the window
         if ((active.load() == 0) || (active.load() < n_conc && inflight.load() + need <= budget)) break;
-        #pragma omp taskyield
+        if (!pipe)   // [pipe] the driver must not be handed a window here (a no-op in libgomp, not in every runtime)
+        {
+          #pragma omp taskyield
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       }
       inflight += need; ++active;
       if (active.load() > adm_hwm.load()) adm_hwm.store(active.load());
-      #pragma omp task default(shared) firstprivate(wi, need)
-      {
+      #pragma omp task default(none) firstprivate(rw, R, wi, need)
+      (*rw)(R, wi, need);
+    }
+    };   // admitTile
+    runWindow = [&](TileRun* R, const long wi, const size_t need)
+    {
+      const size_t tk = R->tk;
+      const Tile& tile = tiles[tk];
+      vector<pair<WinKey, PeakSlab*>>& wl = R->wl;
+      vector<vector<MSSpectrum>>& win_out = R->win_out;
+      Size& win_done = R->win_done;
       // A lambda, because `continue` is not a legal exit from a task's structured block and the
       // window body has one early exit (a window whose fragments all fail the finiteness filter).
       [&]() {
@@ -5705,6 +5867,9 @@ protected:
         // admitted by the master before this task existed; release both charges however we leave
         struct Release { std::atomic<size_t>& b; std::atomic<int>& a; size_t n;
                          ~Release() { b -= n; --a; } } rel{inflight, active, need};
+        // [pipe] this window's carry slot: its destructor publishes this tile's carry on every exit
+        CarryGate gate{carry.at(wl[wi].first), tk};
+        if (pipe_abort.load()) return;   // [pipe] a window or the driver failed: the run is ending
         // Per-window stage seconds and the completion line, printed on EVERY exit of the body
         // (empty window, any assembly arm, exception): what the profile could only infer. [mem]
         double w_prep = 0, w_trace = 0, w_split = 0, w_score = 0, w_emit = 0;
@@ -5928,11 +6093,12 @@ protected:
         // [tile] the previous tile's boundary fragments join this window's list, spans copied
         // onto its arena; their frame indices are the frozen table's already (the same table in
         // every tile), and they enter BEFORE the content sort, so they take their canonical places.
+        // [pipe] take() waits for this window's previous tile to publish them: the one point where a
+        // window's tiles meet (everything above ran on this tile's slab alone).
         size_t n_carried_in = 0;
-        { const auto cit = carry_in.find(wl[wi].first);
-          if (cit != carry_in.end() && !cit->second.rec.empty())
+        { const Carry ci = gate.take();
+          if (!ci.rec.empty())
           {
-            const Carry& ci = cit->second;
             frag_traces.reserve(frag_traces.size() + ci.rec.size());
             for (const Trace& r : ci.rec)
             {
@@ -5990,6 +6156,37 @@ protected:
           if (a.rt_at != b.rt_at) return a.rt_at < b.rt_at;
           return false;
         });
+        // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
+        // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
+        // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
+        // A precursor a later tile owns has (T - rt) <= tile_drt, its candidates x have
+        // (rt - x) <= tile_drt: x >= T - 2 tile_drt up to two roundings of ~1e-12 s. The slack
+        // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
+        // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
+        // [pipe] Taken and published HERE, after the content sort: scoring below only reads frag_traces
+        // and the arena, so this is the carry the end of the body would produce, and the window's next
+        // tile may assemble while this one scores.
+        static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
+        if (!tile.last && !no_carry)
+        {
+          Carry co;
+          const double keep_from = tile.hi - 2.0 * tile_drt - 1e-6;
+          for (const Trace& t : frag_traces)
+            if (rtOf(wst, t) >= keep_from)
+            {
+              Trace c = t; c.off = (uint32_t)co.inten.size();
+              co.inten.insert(co.inten.end(), wst.inten.begin() + t.off, wst.inten.begin() + t.off + t.len);
+              co.rec.push_back(c);
+            }
+          if (n_carried_in || !co.rec.empty())
+          {
+            #pragma omp critical(winlog)
+            writeLogInfo_("[tile] window " + String(win_lo) + "-" + String(win_hi) + " tile " + String(tk + 1) + ": carried in "
+                          + String(n_carried_in) + ", carrying out " + String(co.rec.size()) + " fragments (" + String((co.rec.size() * sizeof(Trace) + co.inten.size() * 4) / 1024) + " KB)");
+          }
+          gate.put(std::move(co));
+        }
+        gate.publish();
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
         FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt);   // [adaptive] buckets cover the wider window
@@ -6059,42 +6256,23 @@ protected:
           const auto _t7 = std::chrono::steady_clock::now();
           w_emit = secs(_t7 - _t6);
         }
-        // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
-        // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
-        // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
-        // A precursor a later tile owns has (T - rt) <= tile_drt, its candidates x have
-        // (rt - x) <= tile_drt: x >= T - 2 tile_drt up to two roundings of ~1e-12 s. The slack
-        // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
-        // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
-        static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
-        if (!tile.last && !no_carry)
-        {
-          Carry& co = carry_out.at(wl[wi].first);
-          const double keep_from = tile.hi - 2.0 * tile_drt - 1e-6;
-          for (const Trace& t : frag_traces)
-            if (rtOf(wst, t) >= keep_from)
-            {
-              Trace c = t; c.off = (uint32_t)co.inten.size();
-              co.inten.insert(co.inten.end(), wst.inten.begin() + t.off, wst.inten.begin() + t.off + t.len);
-              co.rec.push_back(c);
-            }
-          if (n_carried_in || !co.rec.empty())
-          {
-            #pragma omp critical(winlog)
-            writeLogInfo_("[tile] window " + String(win_lo) + "-" + String(win_hi) + " tile " + String(tk + 1) + ": carried in "
-                          + String(n_carried_in) + ", carrying out " + String(co.rec.size()) + " fragments (" + String((co.rec.size() * sizeof(Trace) + co.inten.size() * 4) / 1024) + " KB)");
-          }
-        }
       }
       catch (...)
       {
         #pragma omp critical
         if (!worker_err) worker_err = std::current_exception();
+        pipe_abort.store(true);
       }
       }();   // window body
-      }      // omp task
-    }
-    if (worker_err) std::rethrow_exception(worker_err);
+      R->left.fetch_sub(1, std::memory_order_acq_rel);   // [pipe] last: the driver may finish the tile after this
+    };   // runWindow
+    // [pipe] After every window of the tile has finished: the coverage check (last tile), the canonical sort,
+    // the twin fold, the post-fusion cap and the write of the tile's block, then the between-tile trim.
+    auto finishTile = [&](TileRun& R)
+    {
+    const size_t tk = R.tk;
+    const Tile& tile = tiles[tk];
+    vector<vector<MSSpectrum>>& win_out = R.win_out;
     if (tile.last)
     {
       // [tile] coverage: every finite precursor of every window was owned by exactly one tile
@@ -6176,22 +6354,80 @@ protected:
         for (auto& sp : tile_out) all_out.push_back(std::move(sp));   // [ledger] the same bytes, still charged
       }
     }
-    carry_in = std::move(carry_out);
-    { long long cb = 0; for (const auto& kv : carry_in) cb += (long long)(kv.second.rec.capacity() * sizeof(Trace) + kv.second.inten.capacity() * 4);
-      ledSet_(LC_CARRY, cb); }
-    carry_out.clear();
-    for (const WinKey& k : fkeys) carry_out[k];
 #ifdef __GLIBC__
     // [trim] Between tiles, under perf:malloc_trim: nothing else returns the allocator's free pages here -- the in-loop
     // trim above runs only when there is one tile -- so a tiled loop's RSS would ratchet toward the arena pass 1 sized.
     // After tile k is written, before tile k+1 is read; about 4 GB off TNBC 009 and 0.5 GB off dataset D. Output-identical.
+    // [pipe] Pipelined, the later tiles in flight keep their pages: the trim returns what tile k left behind.
     if (trim_on && tk + 1 < tiles.size())
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
       malloc_trim(0);
       writeLogInfo_("[trim] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
                     + String(phase_clock_() - _tt) + " s" + mem_()); }
 #endif
-    }   // tiles
+    };   // finishTile
+
+    if (!pipe)
+      for (size_t tk = 0; tk < tiles.size(); ++tk)
+      {
+        TileRun R;
+        R.tk = tk;
+        loadTile(R);
+        #pragma omp parallel num_threads(n_threads)
+        #pragma omp single
+        admitTile(&R);
+        if (worker_err) std::rethrow_exception(worker_err);
+        finishTile(R);
+      }
+    else
+    {
+      // [pipe] The driver is the single thread of ONE parallel region over all tiles: it reads tiles ahead (up to
+      // pipe_depth with windows in flight), admits their windows, and finishes the tiles in tile order as each
+      // completes. It never runs a window itself: it never reaches a task scheduling point (teamFor_), so its
+      // n_threads - 1 team mates run the windows, and the reader's and writer's helper tasks when they are free.
+      // Deadlock-free: a window waits only on its own previous tile (CarryGate), which was admitted earlier and
+      // is dequeued earlier (the team queue is FIFO), and a tile is read only after tile j - pipe_depth finished,
+      // so that previous tile never waits itself. The vendor reader's decode loop opens a nested team.
+      omp_set_max_active_levels(std::max(2, omp_get_max_active_levels()));
+      vector<std::unique_ptr<TileRun>> runs(tiles.size());
+      std::exception_ptr drv_err;
+      #pragma omp parallel num_threads(n_threads)
+      #pragma omp single
+      {
+        size_t next = 0;   // the next tile to read
+        auto issue = [&](const size_t upto)
+        {
+          for (; next < tiles.size() && next < upto && !pipe_abort.load(); ++next)
+          {
+            runs[next].reset(new TileRun);
+            runs[next]->tk = next;
+            loadTile(*runs[next]);
+            admitTile(runs[next].get());
+          }
+        };
+        try
+        {
+          for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
+          {
+            issue(fin + (size_t)pipe_depth);
+            if (!runs[fin]) break;   // the reader stopped (a failure)
+            TileRun& R = *runs[fin];
+            while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (pipe_abort.load()) break;
+            issue(fin + 1 + (size_t)pipe_depth);   // tile fin's windows are done: its slot goes to the next tile first
+            finishTile(R);
+            runs[fin].reset();
+          }
+        }
+        catch (...)
+        {
+          drv_err = std::current_exception();
+          pipe_abort.store(true);
+        }
+      }   // the region's barrier: every admitted window has finished
+      if (drv_err) std::rethrow_exception(drv_err);
+      if (worker_err) std::rethrow_exception(worker_err);
+    }
 
     win_phase.reset();   // [perf-instr] WINDOW_LOOP ends here: the tile loop's own phases were enclosed in it, the final write is not
     writeLogInfo_("[soa-rt] off-grid " + String(rtOffGrid().load())
