@@ -328,18 +328,21 @@ the release (user decision 2026-10-01 07:15; the CHANGELOG lists them as fixed).
    two-position comparison has no denominator either) and the step stands; counter "tests stopped at an empty heavier
    position" in [monocheck]. Chosen on the K562 9905 replica (monocheck_v2/analysis walkrep4 + mc2_repeval4, release
    dump, identified keys held fixed; ceph tune-2026-09-29/monocheck_v2/fix160/): scorecard-A-subset isotope error 7.90 %
-   (shipped) -> 7.85 % 'stop' (chosen), 7.87 % 'two positions', 7.87 % 'own partner as denominator'; with the F1 check
-   10.18 / 10.27 / 10.33 % (10.42 % with the old rejection); 'stop' also pushes the fewest keys outside -1..2. The clamp
+   (shipped) -> 7.85 % 'stop' (chosen), 7.87 % 'two positions', 7.87 % 'own partner as denominator'; with the strict F1
+   check 10.18 / 10.27 / 10.33 % (10.42 % with the old rejection), with the fold-aware one ('stop') 9.57 %; 'stop' also pushes the fewest keys outside -1..2. The clamp
    was not raised: the auto box is 0.0101 on K562 and 0.018/0.022 on HeLa py3 (none clamped), and wider boxes were worse
    in the v2 analysis.
 2. **FIXED 2026-10-01 (same branch). v2 extension onto another precursor's mono** (kimi F1, codex Q12; medium). B took
    `bt` from PS, which sums claimed traces, so the new mono could be another precursor's mono at a different frame or
    1/K0, which the twin fold (same MS1 frame) cannot join. Now B's candidates are applied after every A, serially by
-   (m/z, index): refused when `bt`'s m/z is a mono another precursor holds after A or an earlier (brighter) extension took
-   (counter "extensions refused onto another precursor's monoisotope"). On the K562 replica this refuses ~62 % of the
-   extensions (43,273 of 69,973) and raises the predicted isotope error 7.85 -> 10.18 % (M+1 5.38 -> 7.64 %): most
-   extensions landed on a duplicate precursor's mono (see monocheck_v2 analysis 'M+1 mechanism'). Position-level check
-   (any trace in the box is a mono): 10.66 %, not taken.
+   (m/z, index): an extension onto a mono another precursor holds after A (or an earlier, brighter extension took) is
+   kept only when the twin fold will join the two (same frame, same charge, |d1/K0| <= assembly:twin_im_tolerance),
+   else refused (counter "extensions refused onto another precursor's monoisotope that the twin fold would not join").
+   The strict reading (refuse every extension onto another mono; arm fix160-monocheck-1, 4c2b88a) failed the screen:
+   K562 9905 Sage -0.58 % / MSFragger -0.18 %, HeLa_34 -0.47 % / -0.63 % vs rcb1, because most refused extensions WERE
+   twins the fold joins (HeLa_34 folds 601,844 -> 583,887, spectra +17,917 = +3.0 %; K562 spectra +3.7 %). The K562
+   replica had put the foldable share at 16 % (6,957 of 43,273; it under-counts same-frame pairs). Position-level check
+   (any trace in the box is a mono): replica 10.66 %, not taken.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranks below an unfused peak of equal total intensity at the 500-peak cap. Fix: carry the best member's r and overlap
    and recompute the key from the summed IM-weighted apex (the frag_ai pattern).

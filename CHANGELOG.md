@@ -72,11 +72,12 @@ Each default can be set back.
   - The walk's leftmost step j is rejected when PS(−j) / PS(−j+1) × λ is below `min_ratio`, with PS the position sum
     and λ = max(0.1, 0.000594 × neutral mass), averagine's M−1/M0 bound. The monoisotope then moves one isotope right,
     and with `iterate` the test repeats on the new leftmost step. The walk accepts partners up to
-    `-charge:iso_im_tolerance` (0.05) away, outside the box, so an empty heavier position decides nothing: the step
-    stands.
+    `-charge:iso_im_tolerance` (0.05) away, so its own partner can lie outside the box: an empty heavier position
+    therefore decides nothing, and the step stands.
   - When nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope if its
-    ratio is at least `extend`. Its trace is not claimed, and it is never another precursor's monoisotope (nor that of
-    an earlier, brighter extension), so the extension does not give two precursors one monoisotope.
+    ratio is at least `extend`. Its trace is not claimed. When that trace is already another precursor's monoisotope
+    (or an earlier, brighter extension's), the extension is kept only if the twin fold will join the two spectra
+    (same MS1 frame, same charge, 1/K0 within `-assembly:twin_im_tolerance`).
   - Each walk is judged at its precursor's final charge, after `-charge:im_charge_veto`. A z = 1 walk that the veto
     re-calls 2+ is read at 2+ spacing.
   - Only the reported monoisotope moves. Claims, charge and `spx_n_isotopes` are unchanged.
@@ -107,7 +108,7 @@ Each default can be set back.
     isotopes right. It now decides nothing and the step stands.
   - **Duplicate monoisotope after the extension.** The extension could put a monoisotope on a trace that is another
     precursor's monoisotope, and the twin fold joins two spectra only when they come from the same MS1 frame. The
-    extension now leaves such a precursor where it is.
+    extension now lands there only when the fold will join the two.
 - **Known limitations.**
   - **Fusion and the cap.** A fused peak is ranked under the cap by its best piece's key, not by its summed
     intensity. Fusion also sums pieces whose elution does not overlap, unlike the same-bin merge.
