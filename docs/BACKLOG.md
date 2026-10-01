@@ -259,9 +259,11 @@ fixes and docs committed; the release gate on the final binary, the export and p
 key, fix160-fusecap), the adaptive MS1 minimum trace length (f160-minlen ba78a57: `trace:min_length_sec` -1 = auto),
 the per-run isotope-partner 1/K0 tolerance (f160-isotol 2409b0b: `charge:iso_im_tolerance` 0 = auto), the F1
 redesign (f160-f1fold 71bd6f5: `assembly:twin_rt_frames` 0 = auto, `twin_rt_match ext`; item 2 of the release-review
-findings below). Next: the scaling levers (tune/rc-b-scal 7e6acdc, see "Thread scaling"), the combined arms and
-screen, rc2, the CLI review of the full release diff, the 43-run harness on the combined defaults (the CHANGELOG's
-corpus table predates the three per-run defaults), the gate, the export.
+findings below) and the scaling levers (tune/rc-b-scal 7e6acdc, see "Thread scaling"). Combined arms:
+rel160-comb-1 (55d72d6: minlen + isotol only), rel160-comb-noscal (the features without the scaling levers) and
+rel160-comb-2 (features + scaling, the release candidate's code); the combined screen is recorded under "Evosep"
+below. Next: rc2, the CLI review of the full release diff, the 43-run harness on the combined defaults (the
+CHANGELOG's corpus table predates the three per-run defaults), the gate, the export.
 
 rc-b = branch tune/rc-b b2185db (tune/rc-a + tune/fuse + tune/monocheck d512026). Four default changes:
 `assembly:im_weight_sigma` 0 -> 0.005, `assembly:foreign_precursor_weight` -> 0, `assembly:fragment_fuse_ppm` 0 -> 25
@@ -274,6 +276,14 @@ RCB_VS_DIATRACER.md, CAMPAIGN.md. Before a release: the codex/kimi/vibe review o
 ## Thread scaling: levers from the 2026-09-30 study (added 2026-09-30)
 
 **Status 2026-09-30:** in progress -- user: implement the levers in parallel (tune/scal-* branches on top of tune/rc-b); study in tune-2026-09-29/scaling/SCALING.md (read section 0 first).
+**Status 2026-10-01:** levers (1), (3) and (4) done and merged into release-1.6.0 as tune/rc-b-scal 7e6acdc (pipe =
+pipelined tiles with read-ahead / write-behind, depth 2, `DIASPEXTRACT_PIPE_TILES`; serial = the heavy window's serial
+stages as bounded tasks; outer = MS1 conversion / sorts and PRECURSOR_INFER batches in parallel); (2) lpt was neutral
+and is not included. Digest-identical to rc-b-1 on 12/12 runs, e2e 30/30. Interleaved timing rc-b-1 -> rc-b-scal-1:
+HeLa_19 -44..-48 % at 32-192 threads, TNBC_009 -36 % (100 threads), K562 -5.7 / -13.1 / -24.5 / -29.1 % at 32 / 64 /
+128 / 192 threads; peak RSS +34..+67 % on K562, TNBC 20 -> 28 GB. On the 1.6.0 combined defaults: digest gate
+rel160-comb-2 == rel160-comb-noscal (tune-2026-09-29/rel160comb/B). Open: the RSS rise (pipe depth 2 keeps a second
+tile's slabs); the ordered-speculation item below stays closed.
 
 At 64 threads the ~65 s that stops shrinking is between-tile serial work (LOAD(tile), WRITE, SORT/MERGE/trim; 58 % of the loss)
 and the phases before the loop (MS1_TRACE, PRECURSOR_INFER, LOAD(stream); 24 %). From 96 threads one heavy band-7 task per

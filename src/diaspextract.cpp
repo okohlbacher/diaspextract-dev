@@ -37,6 +37,7 @@
 #include <fstream>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>   // [outer] the MS1 pick worker
 #include <thread>
 #include <map>
 #include <string>
@@ -44,6 +45,7 @@
 #include <cstdlib>     // getenv
 #include <cstring>     // memcpy
 #include <optional>
+#include <memory>      // [outer] unique_ptr
 #include <time.h>      // clock_gettime(CLOCK_THREAD_CPUTIME_ID): [dnoise] filter CPU
 #ifdef __GLIBC__
 #include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
@@ -111,8 +113,9 @@ namespace
   /// [perf-instr] Per-phase wall/CPU/RSS accounting, printed unconditionally at the end.
   struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; bool nested = false; };
   /// [perf-instr] A phase opened inside another (the tile loop's read/sort/write inside WINDOW_LOOP)
-  /// is marked enclosed and left out of the TOTAL. Phases are opened only on the master thread.
-  inline int& phase_depth_() { static int d = 0; return d; }
+  /// is marked enclosed and left out of the TOTAL. Phases are opened on the master thread, and with pipelined
+  /// tiles also by the writer task while the master reads (atomic depth, locked phaseAdd_).
+  inline std::atomic<int>& phase_depth_() { static std::atomic<int> d{0}; return d; }
   inline double& flush_wall_() { static double v = 0; return v; }   // [perf-load] pick inside LOAD
   /// [task-err] An exception escaping an OpenMP task terminates the process with no message. Task bodies catch
   /// everything and hand the first exception here; the code after the loop rethrows it once the tasks have joined.
@@ -128,6 +131,289 @@ namespace
     static const char* want = std::getenv("DIASPEXTRACT_TASK_THROW");
     if (want && String(want) == site)
       throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
+  }
+  /// [pipe] Helper tasks of teamFor_ created and not yet started, over every call: capped at the team size, so
+  /// stale helpers (started after their loop ran out) cannot pile up towards the libgomp cliff (64 x nthreads).
+  inline std::atomic<int>& teamHelpersQueued_() { static std::atomic<int> q{0}; return q; }
+  /// [pipe] A loop that the pipelined tile loop runs on the window team's driver (the tile reader and writer).
+  /// Outside a parallel region the call sites keep their `omp parallel for`. Inside the team a `parallel for`
+  /// would open a NESTED team -- fresh threads on the cores the windows use -- so the loop runs here instead:
+  /// the caller pulls `chunk` indices at a time from a shared cursor, and up to one helper task per team
+  /// thread pulls with it once a thread is free. The caller never reaches a task scheduling point, so it is
+  /// never handed a window task (libgomp lets a thread waiting at a taskgroup end run ANY child of its task),
+  /// and it never waits for a helper to START: a helper that starts after the cursor ran out touches nothing
+  /// but its own reference to the cursor, so only helpers that claimed a chunk are waited for (seq_cst: a
+  /// helper raises `busy` before it claims). f(i, slot): `slot` = the puller's omp_get_thread_num(), unique
+  /// among the concurrent pullers (a thread pulls one chunk at a time and never nests a pull), for per-slot
+  /// scratch where a thread number was used. Every caller writes index-addressed results only, so the output
+  /// is the parallel for's. The first exception is rethrown here, after every claimed chunk has finished.
+  /// Helper tasks queue behind the band and score tasks, and while windows hold the threads they barely run
+  /// (scal-pipe-1 on kim: a heavy K562 tile read in 31-43 s at 64 threads, 5-7 s with the barrier). So the
+  /// loop is also published for teamAssist_: window code pulls a chunk at its natural break points, which
+  /// gives the I/O a share of the window threads without a nested team (libgomp starts fresh threads for every
+  /// nested region: scal-pipe-2).
+  struct PullJob_
+  {
+    std::atomic<long> cur{0}; std::atomic<int> busy{0}; std::exception_ptr err;
+    long n = 0, chunk = 1;
+    void (*call)(void*, long, int) = nullptr; void* fp = nullptr;
+    /// up to max_chunks chunks (all with max_chunks < 0), returns how many it claimed; `busy` is raised BEFORE
+    /// the first claim (see above)
+    long pull(const long max_chunks)
+    {
+      const int slot = omp_get_thread_num();
+      busy.fetch_add(1);
+      long a = 0, k = 0;
+      for (; (max_chunks < 0 || k < max_chunks) && (a = cur.fetch_add(chunk)) < n; ++k)
+      { try { for (long i = a, e = std::min(a + chunk, n); i < e; ++i) call(fp, i, slot); }
+        catch (...) { taskErr_(err); cur.store(n); } }
+      busy.fetch_sub(1);
+      return k;
+    }
+  };
+  inline std::mutex& pullMu_() { static std::mutex m; return m; }
+  inline std::vector<std::shared_ptr<PullJob_>>& pullJobs_() { static std::vector<std::shared_ptr<PullJob_>> v; return v; }
+  inline std::atomic<int>& pullLive_() { static std::atomic<int> n{0}; return n; }
+  /// [pipe] Help a live teamFor_ loop (the pipelined tile reader or writer) with up to max_chunks chunks; true if
+  /// it did any. One relaxed load when none is live. Called inside the window team only (slot = thread number).
+  inline bool teamAssist_(const long max_chunks)
+  {
+    if (pullLive_().load(std::memory_order_relaxed) == 0) return false;
+    std::shared_ptr<PullJob_> j;   // the copy keeps the job alive; its loop body is the caller's until it returns
+    { std::lock_guard<std::mutex> g(pullMu_());
+      for (const auto& p : pullJobs_()) if (p->cur.load(std::memory_order_relaxed) < p->n) { j = p; break; } }
+    return j && j->pull(max_chunks) > 0;
+  }
+  template <class F> static void teamFor_(long n, long chunk, F&& f)
+  {
+    if (n <= 0) return;
+    using FT = std::remove_reference_t<F>;
+    auto st = std::make_shared<PullJob_>();
+    st->n = n; st->chunk = chunk; st->fp = (void*)&f;
+    st->call = [](void* p, long i, int slot) { (*static_cast<FT*>(p))(i, slot); };
+    { std::lock_guard<std::mutex> g(pullMu_()); pullJobs_().push_back(st); }
+    ++pullLive_();
+    const int team = std::max(1, omp_get_num_threads());
+    const int nt = (int)std::min<long>((n + chunk - 1) / chunk, (long)team);
+    for (int t = 1; t < nt && teamHelpersQueued_().load() < team; ++t)
+    {
+      ++teamHelpersQueued_();
+      #pragma omp task default(none) firstprivate(st)
+      { --teamHelpersQueued_(); st->pull(-1); }
+    }
+    st->pull(-1);
+    { std::lock_guard<std::mutex> g(pullMu_());
+      auto& v = pullJobs_(); v.erase(std::remove(v.begin(), v.end(), st), v.end()); }
+    --pullLive_();
+    while (st->busy.load() != 0) std::this_thread::yield();
+    if (st->err) std::rethrow_exception(st->err);
+  }
+  /// [review] True on the pipelined tile loop's driver while it drives. Every window task is a child of the driver's
+  /// implicit task, so a taskloop's taskgroup end on the driver (libgomp then runs ANY queued child of the waiting task)
+  /// could hand it a whole window, stalling the reads and admissions: the [det] toTof() in the tile read reached one.
+  /// parTasks_ keeps every pass the driver reaches inline instead (nt = 1 is forTasks_'s serial branch: the same result).
+  inline bool& onPipeDriver_() { static thread_local bool v = false; return v; }
+  /// [serial] Task count for one of a window's data-parallel passes over n items: at most 16 and none smaller than
+  /// min_per; 1 (run inline) outside a parallel region and on the pipe driver. A bounded COUNT, never a grainsize over
+  /// data: libgomp runs a whole taskloop inline once the team's task count passes 64 x nthreads ([gomp-cliff]).
+  inline long parTasks_(size_t n, size_t min_per)
+  {
+    const long cap = omp_in_parallel() && !onPipeDriver_() ? std::min(16, omp_get_num_threads()) : 1;
+    return std::max(1L, std::min(cap, (long)(n / std::max<size_t>(min_per, 1))));
+  }
+  /// [serial] body(c) for c in [0, nt): nt tasks of the current team (the creating thread waits in the taskloop's
+  /// taskgroup and runs its own children, so a busy pool degrades to the serial loop), or inline for nt <= 1.
+  /// The first exception is rethrown once every task has joined.
+  template <class F> void forTasks_(long nt, F&& body)
+  {
+    if (nt <= 1) { body(0L); return; }
+    std::exception_ptr err;
+    #pragma omp taskloop num_tasks(nt) default(shared)
+    for (long c = 0; c < nt; ++c)
+    { try { body(c); } catch (...) { taskErr_(err); } }
+    if (err) std::rethrow_exception(err);
+  }
+  /// [serial] Merge-path co-rank: how many of the first r elements of the STABLE merge of a[0, m) and b[0, k) come
+  /// from a (a first on ties, as std::merge takes them).
+  template <class T, class Less> size_t coRank_(size_t r, const T* a, size_t m, const T* b, size_t k, const Less& less)
+  {
+    size_t lo = r > k ? r - k : 0, hi = std::min(r, m);
+    while (lo < hi)
+    {
+      const size_t i = lo + (hi - lo) / 2, j = r - i;   // i < m and 1 <= j <= k here
+      if (!less(b[j - 1], a[i])) lo = i + 1; else hi = i;
+    }
+    return lo;
+  }
+  /// [serial] Sort a[0, n) as nt tasks: nt chunks std::sort-ed, then pairwise std::merge levels, each pair's output
+  /// cut at merge-path co-ranks into pieces of about n / nt, ping-ponging with one scratch buffer of n elements.
+  /// The result equals std::sort's whenever `less` is a TOTAL order (no two elements equivalent: the sorted sequence
+  /// is then unique). Under a weaker order equivalent elements may come out in another order.
+  template <class T, class Less> void parallelSort_(T* a, size_t n, const Less& less, long nt)
+  {
+    static_assert(std::is_trivially_copyable<T>::value, "parallelSort_ moves elements through raw scratch memory");
+    if (nt <= 1 || n < 2 * (size_t)nt) { std::sort(a, a + n, less); return; }
+    vector<size_t> run(nt + 1);
+    for (long c = 0; c <= nt; ++c) run[c] = (size_t)c * n / (size_t)nt;
+    forTasks_(nt, [&](long c) { std::sort(a + run[c], a + run[c + 1], less); });
+    // uninitialised scratch, first touched by the merge tasks (an implicit-lifetime type: malloc creates the objects)
+    std::unique_ptr<T, void (*)(T*)> buf(static_cast<T*>(std::malloc(n * sizeof(T))), [](T* p) { std::free(p); });
+    if (!buf) throw std::bad_alloc();
+    T* src = a; T* dst = buf.get();
+    struct Piece { size_t s, mid, e, r0, r1; };   // merge src[s, mid) with src[mid, e); output ranks [r0, r1)
+    while (run.size() > 2)
+    {
+      const size_t nr = run.size() - 1;
+      vector<size_t> nxt{0};
+      vector<Piece> pcs;
+      for (size_t p = 0; p < nr; p += 2)
+      {
+        const size_t s = run[p], mid = run[p + 1], e = p + 1 < nr ? run[p + 2] : mid;   // an odd last run is copied
+        const size_t len = e - s, np = std::max<size_t>(1, (len * (size_t)nt + n - 1) / n);
+        for (size_t q = 0; q < np; ++q) pcs.push_back({s, mid, e, q * len / np, (q + 1) * len / np});
+        nxt.push_back(e);
+      }
+      forTasks_((long)pcs.size(), [&](long c) {
+        const Piece& p = pcs[(size_t)c];
+        const T* A = src + p.s; const T* B = src + p.mid;
+        const size_t m = p.mid - p.s, k = p.e - p.mid;
+        const size_t i0 = coRank_(p.r0, A, m, B, k, less), i1 = coRank_(p.r1, A, m, B, k, less);
+        std::merge(A + i0, A + i1, B + (p.r0 - i0), B + (p.r1 - i1), dst + p.s + p.r0, less);
+      });
+      std::swap(src, dst); run.swap(nxt);
+    }
+    if (src != a)
+      forTasks_(nt, [&](long c) { const size_t lo = (size_t)c * n / (size_t)nt, hi = (size_t)(c + 1) * n / (size_t)nt;
+                                  std::copy(src + lo, src + hi, a + lo); });
+  }
+
+  /// [outer] std::sort's result, computed in parallel, for a comparator that is a strict TOTAL order on the elements
+  /// present (no two equivalent): the sorted sequence is then unique, so any correct sort returns exactly what std::sort
+  /// returns. Chunks are sorted concurrently and merged pairwise; each merge is cut into equal output pieces by merge path
+  /// (exactly std::merge's sequence). Serial std::sort when small, on one thread, or inside a parallel region. Callers
+  /// guarantee the total order by construction (a unique last key) or check the result (sortExact_).
+  template <typename T, typename Less>
+  void parallelSortTotal_(std::vector<T>& v, Less less)
+  {
+    const size_t n = v.size();
+    const int nt = omp_get_max_threads();
+    if (n < ((size_t)1 << 15) || nt < 2 || omp_in_parallel()) { std::sort(v.begin(), v.end(), less); return; }
+    size_t nc = 1;                                              // a power of two, about one chunk per thread
+    while (nc < (size_t)nt && n / (2 * nc) >= 4096) nc *= 2;
+    auto bound = [n, nc](size_t c) { return c * n / nc; };     // chunk c is [bound(c), bound(c + 1))
+    std::vector<T> buf(n);
+    T* src = v.data(); T* dst = buf.data();
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (long c = 0; c < (long)nc; ++c) std::sort(src + bound((size_t)c), src + bound((size_t)c + 1), less);
+    for (size_t w = 1; w < nc; w *= 2)                          // runs of w chunks, merged pairwise
+    {
+      const size_t nm = nc / (2 * w), np = std::max<size_t>(1, (2 * (size_t)nt + nm - 1) / nm);   // merges, pieces per merge
+      #pragma omp parallel for schedule(dynamic, 1)
+      for (long q = 0; q < (long)(nm * np); ++q)
+      {
+        const size_t m = (size_t)q / np, p = (size_t)q % np;
+        const size_t a0 = bound(2 * m * w), b0 = bound((2 * m + 1) * w), b1 = bound((2 * m + 2) * w);
+        const T* a = src + a0; const T* b = src + b0;
+        const size_t na = b0 - a0, nb = b1 - b0, k0 = p * (na + nb) / np, k1 = (p + 1) * (na + nb) / np;
+        // merge path: how many of std::merge(a, b)'s first k outputs come from a (a[i] precedes b[j] iff !less(b[j], a[i]))
+        auto corank = [&](size_t k) {
+          size_t lo = k > nb ? k - nb : 0, hi = std::min(k, na);
+          while (lo < hi) { const size_t i = lo + (hi - lo) / 2; if (!less(b[k - i - 1], a[i])) lo = i + 1; else hi = i; }
+          return lo;
+        };
+        const size_t i0 = corank(k0), i1 = corank(k1);
+        std::merge(a + i0, a + i1, b + (k0 - i0), b + (k1 - i1), dst + a0 + k0, less);
+      }
+      std::swap(src, dst);
+    }
+    if (src != v.data()) v.swap(buf);
+  }
+
+  /// [outer] Sorts @p v exactly as std::sort(v.begin(), v.end(), less) does, in parallel whenever that is provably the
+  /// same result: a permutation is sorted in parallel (index as the last key, so a total order) and, when no two
+  /// neighbours are equivalent under @p less (every element then has one place, and std::sort's sequence is that one),
+  /// gathered. With an equivalent pair, @p v -- still untouched -- goes through std::sort, so the order of equal keys is
+  /// std::sort's own. Returns the number of equal-key neighbours of the result (the same count either way).
+  template <typename T, typename Less>
+  size_t sortExact_(std::vector<T>& v, Less less)
+  {
+    const size_t n = v.size();
+    auto serial = [&]() { std::sort(v.begin(), v.end(), less); size_t t = 0;
+                          for (size_t i = 1; i < n; ++i) if (!less(v[i - 1], v[i])) ++t;
+                          return t; };
+    if (n < ((size_t)1 << 15) || n > (size_t)std::numeric_limits<uint32_t>::max() || omp_get_max_threads() < 2 || omp_in_parallel())
+      return serial();
+    std::vector<uint32_t> perm(n);
+    #pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)n; ++i) perm[(size_t)i] = (uint32_t)i;
+    parallelSortTotal_(perm, [&v, &less](uint32_t a, uint32_t b) {
+      if (less(v[a], v[b])) return true;
+      if (less(v[b], v[a])) return false;
+      return a < b; });
+    size_t ties = 0;
+    #pragma omp parallel for schedule(static) reduction(+ : ties)
+    for (long i = 1; i < (long)n; ++i) if (!less(v[perm[(size_t)i - 1]], v[perm[(size_t)i]])) ++ties;
+    if (ties) return serial();
+    std::vector<T> out(n);
+    #pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)n; ++i) out[(size_t)i] = v[perm[(size_t)i]];
+    v.swap(out);
+    return 0;
+  }
+
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
+  /// [outer] libstdc++ 13's std::__introsort_loop with the right part of each cut handed to a task: the two parts are
+  /// disjoint and each is processed by the same calls in the same order as in the serial loop, so the array ends
+  /// exactly as std::sort leaves it, equal keys included. Small parts run inline (bounded task count).
+  template <typename It, typename Size, typename Cmp>
+  void introsortLoopPar_(It first, It last, Size depth, Cmp cmp)
+  {
+    while (last - first > 16)   // libstdc++'s _S_threshold
+    {
+      if (depth == 0) { std::__partial_sort(first, last, last, cmp); return; }
+      --depth;
+      It cut = std::__unguarded_partition_pivot(first, last, cmp);
+      if (last - cut >= 16384)
+      {
+        #pragma omp task default(shared) firstprivate(cut, last, depth, cmp)
+        introsortLoopPar_(cut, last, depth, cmp);
+      }
+      else introsortLoopPar_(cut, last, depth, cmp);
+      last = cut;
+    }
+  }
+#endif
+
+  /// [outer] std::sort(v.begin(), v.end(), less), equal keys in std::sort's own order, in parallel where the standard
+  /// library is libstdc++ 13 (the release compiler): its std::__sort is introsort loop + final insertion sort, replayed
+  /// here with tasks (introsortLoopPar_) and the same final pass. Any other library, small inputs or a caller already
+  /// inside a parallel region: std::sort itself.
+  template <typename T, typename Less>
+  void stdSortPar_(std::vector<T>& v, Less less)
+  {
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
+    if (v.size() >= ((size_t)1 << 15) && omp_get_max_threads() > 1 && !omp_in_parallel())
+    {
+      // DIASPEXTRACT_OUTER_VERIFY: also sort a copy with std::sort and report whether the two sequences are identical
+      static const bool verify = std::getenv("DIASPEXTRACT_OUTER_VERIFY") != nullptr;
+      std::vector<T> ref;
+      if (verify) { ref = v; std::sort(ref.begin(), ref.end(), less); }
+      auto cmp = __gnu_cxx::__ops::__iter_comp_iter(less);
+      const auto first = v.begin(), last = v.end();
+      const auto depth = std::__lg(last - first) * 2;   // as std::__sort
+      #pragma omp parallel
+      #pragma omp single
+      {
+        #pragma omp taskgroup
+        introsortLoopPar_(first, last, depth, cmp);
+      }
+      std::__final_insertion_sort(first, last, cmp);
+      if (verify) std::fprintf(stderr, "[outer] stdSortPar_ verify: %zu elements, %s\n", v.size(),
+                               ref == v ? "identical to std::sort" : "DIFFERENT from std::sort");
+      return;
+    }
+#endif
+    std::sort(v.begin(), v.end(), less);
   }
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
@@ -175,6 +461,8 @@ namespace
   }
   static void phaseAdd_(const std::string& name, double w0, double c0, bool nested)
   {
+    // [pipe] the pipelined tile loop times the tile read (driver) and the tile write (writer task) concurrently
+    static std::mutex m; std::lock_guard<std::mutex> g(m);
     auto& st = phase_stats_()[name];
     if (st.n++ == 0) phase_order_().push_back(name);
     st.wall += phase_clock_() - w0; st.cpu += cpu_seconds_() - c0;
@@ -507,6 +795,64 @@ namespace
   static_assert(sizeof(Trace) == 40, "Trace must stay 40 bytes: it is the largest structure in the tool "
                                     "(2.1e9 records on a 2-h file), and a silent 8-byte regrowth costs ~16 GiB");
 
+  /// [serial] `dst.absorb()` of every source in order, each source's records rebased (off += its base; frame0 and
+  /// bframe += its frame shift) and appended to `out`: the serial loop's result byte for byte (sizes and capacities
+  /// included), with the copies run as bounded tasks at prefix-summed offsets. The parallel form needs an empty
+  /// `dst` and `out` and every source's bins index-parallel to its inten (or absent) -- what every caller has; any
+  /// other input runs the serial loop. The sources are emptied either way.
+  inline void absorbAll_(TraceStore& dst, vector<Trace>& out, const vector<std::pair<TraceStore*, vector<Trace>*>>& src,
+                         const vector<uint32_t>& fshift)
+  {
+    const size_t ns = src.size();
+    vector<size_t> ib(ns + 1, 0), tb(ns + 1, 0);   // arena / record prefix sums
+    bool par = dst.inten.empty() && dst.bins.empty() && out.empty(), any_bins = false;
+    for (size_t s = 0; s < ns; ++s)
+    {
+      const TraceStore& o = *src[s].first;
+      if (!o.bins.empty()) { any_bins = true; par &= (o.bins.size() == o.inten.size()); }
+      ib[s + 1] = ib[s] + o.inten.size(); tb[s + 1] = tb[s] + src[s].second->size();
+    }
+    if (!par)
+    {
+      out.reserve(out.size() + tb[ns]);
+      for (size_t s = 0; s < ns; ++s)
+      {
+        const uint32_t base = dst.absorb(*src[s].first), fs = fshift[s];
+        for (auto& t : *src[s].second) { t.off += base; t.frame0 += fs; t.bframe += fs; out.push_back(std::move(t)); }
+        vector<Trace>().swap(*src[s].second);
+      }
+      return;
+    }
+    // absorb() throws at the first source that would reach 2^32 - 1 floats; the prefix sums are monotone
+    if (ib[ns] >= (size_t)std::numeric_limits<uint32_t>::max())
+      throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+    // absorb()'s bins: once any source carries bins they are index-parallel to inten, zero where a source has none
+    dst.inten.resize(ib[ns]); if (any_bins) dst.bins.resize(ib[ns], 0);
+    out.resize(tb[ns]);
+    // call f(s, a, e) for the part [a, e) of source s that falls in slice c of nt of the concatenation `pre`
+    auto slices = [ns](const vector<size_t>& pre, long c, long nt, auto&& f) {
+      const size_t N = pre[ns], lo = (size_t)c * N / (size_t)nt, hi = (size_t)(c + 1) * N / (size_t)nt;
+      size_t s = (size_t)(std::upper_bound(pre.begin(), pre.end(), lo) - pre.begin()) - 1;
+      for (; s < ns && pre[s] < hi; ++s)
+      { const size_t a = std::max(lo, pre[s]) - pre[s], e = std::min(hi, pre[s + 1]) - pre[s]; if (a < e) f(s, a, e); }
+    };
+    const long nt = parTasks_(ib[ns] + 8 * tb[ns], 1 << 20);   // a record is ~8 floats of copying
+    forTasks_(nt, [&](long c) {
+      slices(ib, c, nt, [&](size_t s, size_t a, size_t e) {
+        const TraceStore& o = *src[s].first;
+        std::copy(o.inten.begin() + a, o.inten.begin() + e, dst.inten.begin() + ib[s] + a);
+        if (!o.bins.empty()) std::copy(o.bins.begin() + a, o.bins.begin() + e, dst.bins.begin() + ib[s] + a);
+      });
+      slices(tb, c, nt, [&](size_t s, size_t a, size_t e) {
+        const uint32_t base = (uint32_t)ib[s], fs = fshift[s];
+        const vector<Trace>& r = *src[s].second;
+        for (size_t q = a; q < e; ++q) { Trace t = r[q]; t.off += base; t.frame0 += fs; t.bframe += fs; out[tb[s] + q] = t; }
+      });
+    });
+    for (size_t s = 0; s < ns; ++s)
+    { vector<float>().swap(src[s].first->inten); vector<int16_t>().swap(src[s].first->bins); vector<Trace>().swap(*src[s].second); }
+  }
+
   /// Span accessors take the owning store explicitly (no per-record back-pointer); bounds asserted in debug builds.
   inline float xv(const TraceStore& s, const Trace& t, size_t k)
   { assert(t.off + k < s.inten.size()); return s.inten[t.off + k]; }
@@ -641,7 +987,9 @@ namespace
       if (!needed[i]) { if (tr[i].np() > 0) ++freed; tr[i].freeProfile(); continue; }
       if (tr[i].len > 0) ids.push_back((uint32_t)i);     // a zero-length span owns no bytes
     }
-    sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) { return tr[a].off < tr[b].off; });
+    // [outer] valid spans have distinct offsets (equal ones overlap and throw below either way), so with the index as a
+    // last key the order is total and the parallel sort returns std::sort's
+    parallelSortTotal_(ids, [&](uint32_t a, uint32_t b) { return tr[a].off != tr[b].off ? tr[a].off < tr[b].off : a < b; });
     uint64_t prev_end = 0;
     for (uint32_t i : ids)
     {
@@ -746,6 +1094,54 @@ namespace
     pts.reserve(np);
     for (Size i = 0; i < np; ++i) pts.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
     Trace t = makeSpan(pts, store);
+    t.mz = mz; t.im = mt.getCentroidIM();
+    setRtFrame(store, t, mt.getCentroidRT());   // [soa-rt] a frame time, stored as an offset
+    return t;
+  }
+
+  /// [outer] The span length makeSpan gives @p mt: its points' frame range, 0 without points. Throws as makeSpan does.
+  inline size_t spanLength(const MassTrace& mt, const TraceStore& store)
+  {
+    const Size np = mt.getSize();
+    if (np == 0) return 0;
+    uint32_t f0 = std::numeric_limits<uint32_t>::max(), f1 = 0;
+    for (Size i = 0; i < np; ++i) { const uint32_t f = store.frameOf(mt[i].getRT()); f0 = std::min(f0, f); f1 = std::max(f1, f); }
+    const size_t L = (size_t)f1 - f0 + 1;
+    if (L >= 65536) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+    return L;
+  }
+
+  /// [outer] toTrace with the span placed at arena offset @p off (already sized and zero) instead of appended: the same
+  /// statements as toTrace + makeSpan, so the same Trace and the same arena bytes when @p off is where the append would
+  /// have put it. @p pts is the caller's scratch.
+  inline Trace toTraceAt(const MassTrace& mt, TraceStore& store, size_t off, vector<pair<uint32_t, float>>& pts)
+  {
+    const std::string& mz_est = mzEstimator();
+    double mz;
+    if (mz_est == "apex" && mt.getSize() > 0) mz = mt[mt.findMaxByIntPeak(false)].getMZ();
+    else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); mz = m2.getCentroidMZ(); }
+    else mz = mt.getCentroidMZ();
+    const Size np = mt.getSize();
+    pts.clear();
+    for (Size i = 0; i < np; ++i) pts.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
+    Trace t;
+    if (!pts.empty())
+    {
+      sort(pts.begin(), pts.end());
+      const uint32_t f0 = pts.front().first, f1 = pts.back().first;
+      const size_t L = (size_t)f1 - f0 + 1;
+      if (L >= 65536) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+      t.frame0 = f0; t.len = (uint16_t)L; t.off = (uint32_t)off;
+      float best = -1.0f; uint16_t npt = 0;
+      for (const auto& q : pts)
+      {
+        const size_t k = q.first - f0;
+        if (store.inten[t.off + k] == 0.0f) ++npt;      // one point per frame; a repeat overwrites
+        store.inten[t.off + k] = q.second;
+        if (q.second > best) { best = q.second; t.apex = (uint16_t)k; }
+      }
+      t.npts = npt;
+    }
     t.mz = mz; t.im = mt.getCentroidIM();
     setRtFrame(store, t, mt.getCentroidRT());   // [soa-rt] a frame time, stored as an offset
     return t;
@@ -1045,18 +1441,24 @@ namespace
     // single linkage along 1/K0 with a link of im_slice_merge_, the whole group within 2x that (one ion's 2-3 slices;
     // measured slice spacing median 0.008, q90 0.014, max 0.019 at the 0.01 picker box)
     const long tol_q = im_slice_merge_ >= 0.0 ? (long)llround(im_slice_merge_ * IM_Q) : -1, span_q = 2 * tol_q;
+    // [serial] Frames convert and merge independently, so they run as tasks over frame chunks, each frame compacted
+    // within its own range (its cursor starts at its first peak and never passes the read position, as the global
+    // cursor never did); the frames are then closed up in order -- the one-cursor loop's layout, byte for byte.
+    const long nt = parTasks_(sl.tof.size(), 1 << 17);
+    vector<uint32_t> nkept(F);                               // the frame's peaks after the merge
+    vector<long long> mc(nt, 0), fmc(nt, 0);                 // per task: peaks merged away, frames with a merge
+    forTasks_(nt, [&](long ch) {
     vector<pair<uint16_t, uint32_t>> run;                    // (imq, slab index) of one same-bin run
     vector<std::tuple<uint32_t, float, uint16_t>> cl;        // (first slab index, intensity, imq) of the run's groups
-    uint32_t w = 0;
     long long merged = 0, frames_merged = 0;
-    for (size_t i = 0; i < F; ++i)
+    for (size_t i = (size_t)ch * F / (size_t)nt; i < (size_t)(ch + 1) * F / (size_t)nt; ++i)
     {
       const double b = ax.factor(sl.frame_id[i]);
       sl.b[i] = b;
       const uint32_t lo = sl.frame_off[i], hi = sl.frame_off[i + 1];
       for (uint32_t k = lo; k < hi; ++k)
         sl.tof[k] = ax.tofOf((double)sl.tof[k] / MZ_Q, b);
-      sl.frame_off[i] = w;
+      uint32_t w = lo;
       bool any = false;
       for (uint32_t k = lo; k < hi;)
       {
@@ -1096,7 +1498,24 @@ namespace
         for (const auto& c : cl) { sl.tof[w] = t; sl.inten[w] = std::get<1>(c); sl.imq[w] = std::get<2>(c); ++w; }
         k = e;
       }
+      nkept[i] = w - lo;
       frames_merged += any;
+    }
+    mc[ch] = merged; fmc[ch] = frames_merged;
+    });
+    long long merged = 0, frames_merged = 0;
+    for (long c = 0; c < nt; ++c) { merged += mc[c]; frames_merged += fmc[c]; }
+    uint32_t w = 0;
+    for (size_t i = 0; i < F; ++i)                           // close up: every destination lies at or before its source
+    {
+      const uint32_t lo = sl.frame_off[i], n = nkept[i];
+      if (w != lo)
+      {
+        std::copy(sl.tof.begin() + lo, sl.tof.begin() + lo + n, sl.tof.begin() + w);
+        std::copy(sl.inten.begin() + lo, sl.inten.begin() + lo + n, sl.inten.begin() + w);
+        std::copy(sl.imq.begin() + lo, sl.imq.begin() + lo + n, sl.imq.begin() + w);
+      }
+      sl.frame_off[i] = w; w += n;
     }
     if (F) sl.frame_off[F] = w;
     sl.tof.resize(w); sl.inten.resize(w); sl.imq.resize(w);
@@ -1173,10 +1592,6 @@ namespace
     // Membership IS inten > noise (no per-peak map); seeds are counted first so `order` is sized exactly.
     tp.frame_live.assign(F, 0);
     const double min_apex = snr * noise;
-    size_t n_seed = 0;
-    for (size_t f = 0; f < F; ++f)
-      for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
-        if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++n_seed; }
     // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
     // intensities the LATER peak seeds first.
     auto cmp = [&](uint32_t a, uint32_t b) {
@@ -1184,16 +1599,8 @@ namespace
       return a > b;
     };
     const int nb = (int)bnd.size() - 1;
-    tp.order.resize(n_seed);
-    if (nb < 2)                                          // unbanded: one globally sorted list
-    {
-      size_t w = 0;
-      for (uint32_t k = 0; k < P; ++k)
-        if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[w++] = k;
-      sort(tp.order.begin(), tp.order.end(), cmp);
-      tp.seg = {0, n_seed};
-      return tp;
-    }
+    const bool banded = nb >= 2;                         // unbanded: one globally sorted list
+    const size_t nseg = banded ? (size_t)nb : 1;
     // Band of a peak: the same half-open [bnd[b], bnd[b+1]) partition the detector applies, found
     // by upper_bound so that empty bands (bnd[b] == bnd[b+1], reachable when nb exceeds the tof
     // range) are skipped exactly as the detector's own range test skips them.
@@ -1201,21 +1608,54 @@ namespace
     // bounds. The window's edges are asserted to enclose every cell's bins before this runs (a
     // loud throw); the clamp is the memory-safety floor under that assert.
     auto bandOf = [&](TofIdx t) {
+      if (!banded) return (size_t)0;
       const auto it = std::upper_bound(bnd.begin(), bnd.end(), t);
       if (it == bnd.begin()) return (size_t)0;
       return std::min((size_t)(it - bnd.begin() - 1), (size_t)(nb - 1));
     };
-    vector<size_t> cnt(nb, 0);
-    for (uint32_t k = 0; k < P; ++k)
-      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) ++cnt[bandOf(sl.tof[k])];
-    tp.seg.assign(nb + 1, 0);
-    for (int b = 0; b < nb; ++b) tp.seg[b + 1] = tp.seg[b] + cnt[b];
-    vector<size_t> cur(tp.seg.begin(), tp.seg.end() - 1);
-    for (uint32_t k = 0; k < P; ++k)
-      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[cur[bandOf(sl.tof[k])]++] = k;
+    // [serial] Count, then distribute, as tasks over peak-balanced FRAME chunks (frame_live stays chunk-private):
+    // chunk c counts its seeds per band, the prefix over (band, chunk) is its write cursor, so every band receives
+    // its seeds in ascending peak index -- what the one-pass loops wrote. Chunk c owns peaks [kb(c), kb(c + 1)).
+    const long nt = parTasks_(P, 1 << 17);
+    vector<size_t> fc(nt + 1, F);
+    fc[0] = 0;
+    for (long c = 1; c < nt; ++c)
+      fc[c] = (size_t)(std::lower_bound(sl.frame_off.begin(), sl.frame_off.begin() + F, (uint32_t)((size_t)c * P / (size_t)nt)) - sl.frame_off.begin());
+    auto kb = [&](long c) { return fc[c] >= F ? (uint32_t)P : sl.frame_off[fc[c]]; };
+    vector<size_t> cnt((size_t)nt * nseg, 0);
+    forTasks_(nt, [&](long c) {
+      size_t* cc = &cnt[(size_t)c * nseg];
+      for (size_t f = fc[c]; f < fc[c + 1]; ++f)
+        for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
+          if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++cc[bandOf(sl.tof[k])]; }
+    });
+    tp.seg.assign(nseg + 1, 0);
+    vector<size_t> cur((size_t)nt * nseg);
+    size_t n_seed = 0;
+    for (size_t b = 0; b < nseg; ++b)
+    {
+      tp.seg[b] = n_seed;
+      for (long c = 0; c < nt; ++c) { cur[(size_t)c * nseg + b] = n_seed; n_seed += cnt[(size_t)c * nseg + b]; }
+    }
+    tp.seg[nseg] = n_seed;
+    tp.order.resize(n_seed);
+    forTasks_(nt, [&](long c) {
+      size_t* cc = &cur[(size_t)c * nseg];
+      for (uint32_t k = kb(c), ke = kb(c + 1); k < ke; ++k)
+        if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[cc[bandOf(sl.tof[k])]++] = k;
+    });
+    // [serial] A segment holding many seeds (the dense band) is itself sorted as tasks. The comparator is a TOTAL
+    // order (the index breaks every tie), so the sorted segment is unique: parallelSort_ returns std::sort's result.
+    auto sortSeg = [&](size_t b) {
+      const size_t n = tp.seg[b + 1] - tp.seg[b];
+      parallelSort_(tp.order.data() + tp.seg[b], n, cmp, parTasks_(n, 1 << 18));
+    };
+    if (!banded) { sortSeg(0); return tp; }
+    std::exception_ptr sort_err;   // [task-err]
     #pragma omp taskloop grainsize(1) default(shared)
     for (int b = 0; b < nb; ++b)
-      sort(tp.order.begin() + tp.seg[b], tp.order.begin() + tp.seg[b + 1], cmp);
+    { try { sortSeg((size_t)b); } catch (...) { taskErr_(sort_err); } }
+    if (sort_err) std::rethrow_exception(sort_err);
     buildTofIndex(sl, tp, tlo, thi);
     return tp;
   }
@@ -1411,15 +1851,28 @@ namespace
     // No `in.size() < 2` guard: a lone parent must split as it would among others (tile invariance).
     if (split_valleys <= 0.0 || in.empty()) return std::move(in);
     const TofAxis& ax = tofAxis();
-    nchunk = std::max(1, std::min<int>(nchunk, (int)in.size()));
+    // [serial] Every parent splits on its own (below), so neither the chunk count nor the cut points can change the
+    // output. A large window (>= 8192 parents per chunk) gets up to one chunk per team thread instead of `nchunk`,
+    // and the cuts sit at equal cumulative cost (real points + 8 per trace) rather than equal counts: a window's
+    // parents come band by band, most intense (longest) first, so equal counts put the longest traces together.
+    const size_t n_in = in.size();
+    const int team = omp_in_parallel() ? omp_get_num_threads() : 1;
+    nchunk = std::max(nchunk, std::min<int>(team, (int)std::min<size_t>(n_in / 8192, 1 << 20)));
+    nchunk = std::max(1, std::min<int>(nchunk, (int)n_in));
+    vector<size_t> cut(nchunk + 1, n_in);
+    cut[0] = 0;
+    { uint64_t tot = 0, acc = 0; int c = 1;
+      for (const Trace& t : in) tot += (uint64_t)t.npts + 8;
+      for (size_t q = 0; q < n_in && c < nchunk; ++q)
+      { acc += (uint64_t)in[q].npts + 8;
+        while (c < nchunk && acc * (uint64_t)nchunk >= tot * (uint64_t)c) cut[c++] = q + 1; } }
     vector<vector<Trace>> parts(nchunk);
     vector<TraceStore> stores(nchunk);                         // chunk-private arenas, merged after
-    const size_t n_in = in.size();
     std::exception_ptr task_err;   // [task-err]
     #pragma omp taskloop grainsize(1) default(shared)
     for (int ci = 0; ci < nchunk; ++ci)
     { try {
-      const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
+      const size_t lo = cut[ci], hi = cut[ci + 1];
       TraceStore& cst = stores[ci];
       cst.setFrames(wst.rt_index, &wst.b);
       // One MassTrace in flight at a time. Per-trace detectPeaks equals the batch call: with
@@ -1473,12 +1926,9 @@ namespace
     // Reserve the merged arena once (absorb() does not); the chunk arenas stay live until absorbed.
     wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);
     vector<Trace> out; out.reserve(tot);
-    for (int ci = 0; ci < nchunk; ++ci)
-    {
-      const uint32_t base = wst.absorb(stores[ci]);
-      for (auto& t : parts[ci]) { t.off += base; out.push_back(std::move(t)); }
-      vector<Trace>().swap(parts[ci]);
-    }
+    vector<std::pair<TraceStore*, vector<Trace>*>> src(nchunk);   // [serial] absorbed in chunk order, copies as tasks
+    for (int ci = 0; ci < nchunk; ++ci) src[ci] = {&stores[ci], &parts[ci]};
+    absorbAll_(wst, out, src, vector<uint32_t>(nchunk, 0));
     return out;
   }
 
@@ -1833,8 +2283,11 @@ namespace
     PickCompactConsumer(PeakPickerIM& picker, map<WinKey, PeakSlab>& windows,
                         PeakMap& ms1, CompactStats& stats)
       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats) {}
+    /// [outer] the MS1 worker ends with the consumer, also when an exception leaves the load early
+    ~PickCompactConsumer() { stopMs1Worker_(); }
 
     size_t frames_seen = 0;
+    String ms1_pick_mode_;   ///< [outer] how the MS1 batches were picked, for the log (set by finish())
 
     /// [frames] A window's FROZEN frame table (rt, vendor id) with the lockstep cursor: every table
     /// frame the reader skipped (no raw peaks, an empty mobility slice) is appended EMPTY with the
@@ -1893,15 +2346,13 @@ namespace
       std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
       PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
       std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
-      // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
-      #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
-      for (int i = 0; i < n; ++i)
+      auto pickOne = [&](const int i, PeakPickerIM& pk)
       {
         try
         {
           auto& s = buf_[(size_t)i];
           ensureIMArrayName(s);
-          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
+          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) pk.pickIMCluster(s);
           ensureIMArrayName(s);
           frt[(size_t)i] = s.getRT();
           fid[(size_t)i] = frameIdOf(s.getNativeID());
@@ -1915,6 +2366,22 @@ namespace
           #pragma omp critical(pick_err)
           if (!pick_err) pick_err = std::current_exception();
         }
+      };
+      if (!omp_in_parallel())
+      {
+        // chunk 1: with chunk 8 a 64-frame batch made only 8 chunks = 8 workers
+        #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
+        for (int i = 0; i < n; ++i) pickOne(i, picker);
+      }
+      else
+      {
+        // [pipe] the pipelined tile reader, on the window team's driver: one picker copy per puller slot, made
+        // by the slot's first frame (a slot has one puller at a time)
+        std::vector<std::unique_ptr<PeakPickerIM>> pk((size_t)std::max(1, omp_get_num_threads()));
+        teamFor_(n, 1, [&](long i, int slot) {
+          std::unique_ptr<PeakPickerIM>& p = pk[(size_t)slot];
+          if (!p) p.reset(new PeakPickerIM(picker));
+          pickOne((int)i, *p); });
       }
       if (pick_err) std::rethrow_exception(pick_err);
       // Append in arrival order per window, the windows of this batch in parallel: a window's
@@ -1940,8 +2407,7 @@ namespace
       const size_t n_ms1 = ms1_.size();
       std::atomic<long long> slab_b{0};   // [ledger] what this batch actually touched
       std::exception_ptr pad_err;
-      #pragma omp parallel for schedule(dynamic, 1)
-      for (long w = 0; w < (long)per_win.size(); ++w)
+      auto appendWin = [&](const long w)
       {
         Batch& bw = per_win[(size_t)w];
         for (int i : bw.idx)
@@ -1959,7 +2425,13 @@ namespace
           bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
           slab_b += (long long)kept[(size_t)i] * 10 + 24;   // [ledger] touched bytes: 10 B/peak + the frame's table row
         }
+      };
+      if (!omp_in_parallel())
+      {
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (long w = 0; w < (long)per_win.size(); ++w) appendWin(w);
       }
+      else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
       ledAdd_(LC_SLAB, slab_b);
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
@@ -1976,17 +2448,76 @@ namespace
       if (dnoise && dnoise->on && !dn_loader_checked_) { dnoise->checkLoader(); dn_loader_checked_ = true; }
       ms1_buf_.push_back(std::move(s));
       ++frames_seen;
-      if (ms1_buf_.size() >= kBatchMS1_()) flushMS1_();
+      if (ms1_buf_.size() >= ms1BatchNow_()) flushMS1Async_();
     }
 
+    /// Picks the buffered MS1 frames now, after the worker's batch (if any): the order of the MS1 map is the arrival order.
     void flushMS1_()
     {
-      const int n = (int)ms1_buf_.size();
+      waitMs1Worker_();
+      pickMS1Batch_(ms1_buf_);
+    }
+
+    /// [outer] Hands the buffered MS1 frames to the worker thread and returns to the reader, which decodes the next batch
+    /// meanwhile. The previous batch is picked and appended first, so batches still reach the MS1 map in arrival order,
+    /// and every frame is processed exactly as by flushMS1_: batch composition does not change the output (kBatch_).
+    void flushMS1Async_()
+    {
+      if (!ms1Async_()) { flushMS1_(); return; }
+      waitMs1Worker_();
+      ms1_inflight_.swap(ms1_buf_);   // ms1_buf_ takes the picked (empty) buffer back
+      ms1_buf_.clear();
+      if (!w_th_.joinable())
+      {
+        const int nthr = std::max(1, omp_get_max_threads());   // a new thread starts from the global default team size
+        w_th_ = std::thread([this, nthr] {
+          omp_set_num_threads(nthr);
+          std::unique_lock<std::mutex> lk(w_mu_);
+          for (;;)
+          {
+            w_cv_.wait(lk, [this] { return w_job_ || w_quit_; });
+            if (!w_job_) return;   // quit, nothing pending
+            lk.unlock();
+            std::exception_ptr err;
+            try { pickMS1Batch_(ms1_inflight_); } catch (...) { err = std::current_exception(); }
+            lk.lock();
+            w_err_ = err; w_job_ = false;
+            w_cv_.notify_all();
+          }
+        });
+      }
+      { std::lock_guard<std::mutex> g(w_mu_); w_job_ = true; }
+      w_cv_.notify_all();
+    }
+
+    /// [outer] Waits for the worker's batch and rethrows its error, if any.
+    void waitMs1Worker_()
+    {
+      if (!w_th_.joinable()) return;
+      std::unique_lock<std::mutex> lk(w_mu_);
+      w_cv_.wait(lk, [this] { return !w_job_; });
+      if (w_err_) { std::exception_ptr e = w_err_; w_err_ = nullptr; lk.unlock(); std::rethrow_exception(e); }
+    }
+
+    /// [outer] Lets the worker finish its batch and ends it (finish() and the destructor; an unreported error is dropped
+    /// here only when an exception is already unwinding the load).
+    void stopMs1Worker_()
+    {
+      if (!w_th_.joinable()) return;
+      { std::lock_guard<std::mutex> g(w_mu_); w_quit_ = true; }
+      w_cv_.notify_all();
+      w_th_.join();
+      w_quit_ = false;
+    }
+
+    void pickMS1Batch_(std::vector<MapType::SpectrumType>& buf)   // one MS1 batch, picked and appended to the MS1 map, then emptied
+    {
+      const int n = (int)buf.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
       // [ledger] the buffered RAW MS1 frames, 20 B per raw peak, held until picked: pass 1's largest transient.
       long long raw_b = 0;
-      for (const auto& sp : ms1_buf_) raw_b += (long long)sp.size() * 20;
+      for (const auto& sp : buf) raw_b += (long long)sp.size() * 20;
       LedCharge _raw(LC_SCRATCH, raw_b);
       PeakPickerIM picker = picker_;
       std::exception_ptr pick_err;
@@ -2000,7 +2531,7 @@ namespace
       {
         try
         {
-          auto& s = ms1_buf_[(size_t)i];
+          auto& s = buf[(size_t)i];
           ensureIMArrayName(s);
           if (dn) dnoise->frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);   // [dnoise] the raw points, before the pick
           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
@@ -2016,7 +2547,7 @@ namespace
       if (pick_err) std::rethrow_exception(pick_err);
       if (dn) dnoise->add(dn_cnt);
       if (ms1HistOn_())
-        for (const auto& sp : ms1_buf_)
+        for (const auto& sp : buf)
         {
           long long c[5] = {0, 0, 0, 0, 0};
           for (const auto& pk : sp) { const float v = pk.getIntensity(); ++c[v < 100 ? 0 : v < 300 ? 1 : v < 1000 ? 2 : v < 10000 ? 3 : 4]; }
@@ -2024,10 +2555,10 @@ namespace
         }
       // [ms1-prune] after [ms1-hist] (which counts what was PICKED), before the charge below (which is then
       // the kept bytes)
-      if (ms1_prune && ms1_prune->on) ms1_prune->batch(ms1_buf_, [](const MSSpectrum&) { return true; });
-      { long long mb = 0; for (const auto& s : ms1_buf_) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
-      for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
-      ms1_buf_.clear();
+      if (ms1_prune && ms1_prune->on) ms1_prune->batch(buf, [](const MSSpectrum&) { return true; });
+      { long long mb = 0; for (const auto& s : buf) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
+      for (auto& s : buf) ms1_.addSpectrum(std::move(s));
+      buf.clear();
       flush_wall_() += phase_clock_() - _tf0;
       loadTrim_();
     }
@@ -2055,6 +2586,9 @@ namespace
     void finish()
     {
       flushMS1_(); flush_();
+      stopMs1Worker_();
+      ms1_pick_mode_ = ms1Async_() ? "beside the reader on a worker thread, batches of " + String(ms1BatchNow_())
+                                   : "inside the reader's hand-over, batches of " + String(kBatchMS1_());
       // [frames] the tail of every delivered window's table; a table window that delivered nothing
       // gets no slab (it is counted as absent by the caller)
       for (auto& kv : tables_)
@@ -2096,6 +2630,24 @@ namespace
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
     bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
+    /// [outer] The MS1 worker: picks ms1_inflight_ while the reader fills ms1_buf_. w_job_ is set by the reader's thread
+    /// and cleared by the worker, both under w_mu_; the worker touches only its batch, the MS1 map, the prune, the dnoise
+    /// counts and the ledger (atomic), none of which the reader's thread uses before waitMs1Worker_ has returned.
+    std::vector<MapType::SpectrumType> ms1_inflight_;
+    std::thread w_th_;
+    std::mutex w_mu_;
+    std::condition_variable w_cv_;
+    bool w_job_ = false, w_quit_ = false;
+    std::exception_ptr w_err_;
+    /// [outer] DIASPEXTRACT_MS1_ASYNC=1: the MS1 batches are picked on the worker, beside the reader's decode of the next
+    /// batch. OFF by default: the worker's team is a second OpenMP team on the same places as the reader's (libgomp binds
+    /// a foreign thread's team from place 0), so at 64 threads K562's LOAD(stream) got 0.3 s slower, and its extra thread
+    /// arenas raised HeLa_19's peak RSS by 6 % for 0.5-0.9 s (scalfix/outer timing, 2026-10-01). Default: the MS1 batches
+    /// are picked inside the reader's hand-over, one full batch at a time (the behaviour before 2026-10-01).
+    static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return e && *e && *e != '0'; }(); return v; }
+    /// [outer] Beside the reader two batches are in memory (one being picked, one filling), so each is half the
+    /// synchronous batch and the raw-frame residency stays what it was.
+    static size_t ms1BatchNow_() { return ms1Async_() ? std::max<size_t>(1, kBatchMS1_() / 2) : kBatchMS1_(); }
     map<WinKey, PeakSlab>& windows_;
     PeakMap& ms1_;
     CompactStats& stats_;
@@ -2143,8 +2695,7 @@ namespace
   {
     struct SortKey { double rt, mz; int charge; uint32_t n, idx; };
     vector<SortKey> keys(v.size());
-#pragma omp parallel for schedule(static)
-    for (long i = 0; i < (long)v.size(); ++i)
+    auto key = [&](const long i)
     {
       const MSSpectrum& a = v[i];
       keys[i].rt = a.getRT();
@@ -2152,7 +2703,13 @@ namespace
       keys[i].charge = a.getPrecursors().empty() ? 0 : a.getPrecursors()[0].getCharge();
       keys[i].n = (uint32_t)a.size();
       keys[i].idx = (uint32_t)i;
+    };
+    if (!omp_in_parallel())
+    {
+#pragma omp parallel for schedule(static)
+      for (long i = 0; i < (long)v.size(); ++i) key(i);
     }
+    else teamFor_((long)v.size(), 4096, [&](long i, int) { key(i); });   // [pipe] the pipelined tile writer
     sort(keys.begin(), keys.end(), [&v](const SortKey& ka, const SortKey& kb) {
       if (ka.rt != kb.rt) return ka.rt < kb.rt;
       if (ka.mz != kb.mz) return ka.mz < kb.mz;
@@ -2300,10 +2857,8 @@ namespace
         if (r1 - r0 > rt_tol) ++(*st)[4];
       }
     // fuse: each thread reads and writes one cluster's spectra only
-    std::exception_ptr fold_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
-#pragma omp parallel for schedule(dynamic, 64)
-    for (long c = 0; c < (long)surv.size(); ++c)
-    { try {
+    auto fuse = [&](const long c)
+    {
       if (keyed)
       {
         // [recap] the same fusion over (m/z, intensity, key) triples. Peaks equal in m/z and intensity add equal terms
@@ -2332,7 +2887,7 @@ namespace
         for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
         s.getFloatDataArrays().clear();
         s.getFloatDataArrays().push_back(std::move(kk));   // moved, not copied (assign(1, x) copies)
-        continue;
+        return;
       }
       vector<pair<double, double>> ps;
       for (uint32_t i : members[(size_t)c]) for (const auto& pk : v[i]) ps.emplace_back(pk.getMZ(), (double)pk.getIntensity());
@@ -2349,8 +2904,15 @@ namespace
       s.clear(false);   // peaks only: RT, precursor and userParams are the survivor's
       s.reserve(fused.size());
       for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
-    } catch (...) { taskErr_(fold_err); } }
-    if (fold_err) std::rethrow_exception(fold_err);
+    };
+    if (!omp_in_parallel())
+    {
+      std::exception_ptr fold_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
+#pragma omp parallel for schedule(dynamic, 64)
+      for (long c = 0; c < (long)surv.size(); ++c) { try { fuse(c); } catch (...) { taskErr_(fold_err); } }
+      if (fold_err) std::rethrow_exception(fold_err);
+    }
+    else teamFor_((long)surv.size(), 64, [&](long c, int) { fuse(c); });   // [pipe] the pipelined tile writer; teamFor_ rethrows the first exception
     size_t w = 0;
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
     {
@@ -2372,10 +2934,9 @@ namespace
   static std::array<size_t, 3> capAfterFusion_(vector<MSSpectrum>& v, Size max_frags)
   {
     size_t n_sp = 0, n_pk = 0, n_max = 0;
-    std::exception_ptr cap_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
-#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
-    for (long i = 0; i < (long)v.size(); ++i)
-    { try {
+    // the counters are parameters, not captures: inside the reduction loop they must be the thread's copies
+    auto capOne = [&v, max_frags](const long i, size_t& n_sp, size_t& n_pk, size_t& n_max)
+    {
       MSSpectrum& s = v[(size_t)i];
       n_max = std::max(n_max, (size_t)s.size());
       if (s.size() > max_frags && !s.getFloatDataArrays().empty())
@@ -2396,8 +2957,21 @@ namespace
         s.select(idx);
       }
       s.getFloatDataArrays().clear();
-    } catch (...) { taskErr_(cap_err); } }
-    if (cap_err) std::rethrow_exception(cap_err);
+    };
+    if (!omp_in_parallel())
+    {
+      std::exception_ptr cap_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
+      for (long i = 0; i < (long)v.size(); ++i) { try { capOne(i, n_sp, n_pk, n_max); } catch (...) { taskErr_(cap_err); } }
+      if (cap_err) std::rethrow_exception(cap_err);
+    }
+    else
+    {
+      // [pipe] the pipelined tile writer: per-slot partial counters, summed here
+      vector<std::array<size_t, 3>> part((size_t)std::max(1, omp_get_num_threads()), std::array<size_t, 3>{0, 0, 0});
+      teamFor_((long)v.size(), 256, [&](long i, int slot) { auto& p = part[(size_t)slot]; capOne(i, p[0], p[1], p[2]); });
+      for (const auto& p : part) { n_sp += p[0]; n_pk += p[1]; n_max = std::max(n_max, p[2]); }
+    }
     return {n_sp, n_pk, n_max};
   }
 
@@ -2449,8 +3023,11 @@ namespace
       // A handler is not reentrant (writeSpectrum_ memoises CV-term validation in cached_terms_),
       // so each thread encodes with its own; dps_ is shared read-only -- every spectrum carries the
       // one data-processing entry the header registered, so writeSpectrum_ never appends to it.
+      // [pipe] On the pipelined tile writer (inside the window team) the encoders are per puller slot of
+      // teamFor_, at most the team size; the chunks and their order are the same either way.
+      const bool in_team = omp_in_parallel();
       const Size CHUNK = 256;
-      const Size n_thr = (Size)std::max(1, omp_get_max_threads());
+      const Size n_thr = (Size)std::max(1, in_team ? omp_get_num_threads() : omp_get_max_threads());
       while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter("/dev/null")); enc_.back()->options_ = options_; }
       const Size wave = CHUNK * n_thr;
       for (Size w0 = 0; w0 < block.size(); w0 += wave)
@@ -2460,12 +3037,10 @@ namespace
         vector<std::string> text(n_chunk);
         vector<vector<pair<std::string, Int64>>> offs(n_chunk);
         std::exception_ptr err;
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (long c = 0; c < (long)n_chunk; ++c)
+        auto encode = [&](const long c, TileWriter& h)
         {
           try
           {
-            TileWriter& h = *enc_[(Size)omp_get_thread_num()];
             std::ostringstream buf; buf.copyfmt(ofs_);          // identical formatting state, or the numbers differ
             const Size lo = w0 + (Size)c * CHUNK, hi = std::min(lo + CHUNK, w1);
             const Size o0 = h.spectra_offsets_.size();
@@ -2479,7 +3054,13 @@ namespace
             #pragma omp critical(tile_writer_err)
             if (!err) err = std::current_exception();
           }
+        };
+        if (!in_team)
+        {
+          #pragma omp parallel for schedule(dynamic, 1)
+          for (long c = 0; c < (long)n_chunk; ++c) encode(c, *enc_[(Size)omp_get_thread_num()]);
         }
+        else teamFor_((long)n_chunk, 1, [&](long c, int slot) { encode(c, *enc_[(Size)slot]); });
         if (err) std::rethrow_exception(err);
         for (Size c = 0; c < n_chunk; ++c)
         {
@@ -2829,6 +3410,10 @@ protected:
     mtd.setParameters(p);
 
     vector<MassTrace> mts;
+    // [outer] The traces as consecutive segments (the bands, then the valley-split chunks): their concatenation is the
+    // sequence the serial gather and the serial re-concatenation used to build, and every later step walks it in that
+    // order, so neither copy is needed.
+    vector<vector<MassTrace>> seg;
     // [tstage] Sub-stage seconds of this phase, logged as one line.
     double tt_edge = 0, tt_dist = 0, tt_mtd = 0, tt_gather = 0, tt_split = 0;
     auto tt_now = []() { return std::chrono::steady_clock::now(); };
@@ -2968,9 +3553,7 @@ protected:
       if (band_err) std::rethrow_exception(band_err);
       tt_mtd = tt_s(_tm0, tt_now());
       auto _tg0 = tt_now();
-      size_t tot = 0; for (const auto& v : per) tot += v.size();
-      mts.reserve(tot);
-      for (auto& v : per) { for (auto& t : v) mts.push_back(std::move(t)); vector<MassTrace>().swap(v); }
+      seg = std::move(per);   // [outer] the bands, in band order, are the segments: no serial gather
       tt_gather = tt_s(_tg0, tt_now());
     }
     else
@@ -2978,17 +3561,21 @@ protected:
       if (map.size() >= 3) mtd.run(map, mts);   // MTD aborts below 3 spectra; a tiny input is not an error
       map.clear(true); // [compact] dead from here; ~1.1 GB/window freed before the EPD peak
       if (in_cat >= 0) ledSet_(in_cat, 0);
+      seg.resize(1); seg[0].swap(mts);
     }
+    size_t n_tr = 0; for (const auto& s : seg) n_tr += s.size();
 
     // [way-2] Split mass traces at chromatographic valleys: MassTraceDetection never splits at a local
     // minimum, so co-eluting neighbours within the m/z tolerance merge. width_filtering is forced off
     // (a deletion filter). Per-trace and deterministic, so it runs as a balanced parallel loop (4 chunks
     // per band); both consumers re-sort (MS2 after detectTraces_, MS1 before inferPrecursors_).
     auto _ts0 = tt_now();
-    if (split_valleys > 0.0 && mts.size() > 1)
+    if (split_valleys > 0.0 && n_tr > 1)
     {
       const int nchunk = std::max(1, bands * 4);      // 4 chunks per band -> dynamic load balance
-      const size_t n_in = mts.size();
+      const size_t n_in = n_tr;
+      vector<size_t> at(seg.size() + 1, 0);           // [outer] segment s holds positions [at[s], at[s+1]) of the sequence
+      for (size_t s = 0; s < seg.size(); ++s) at[s + 1] = at[s] + seg[s].size();
       vector<vector<MassTrace>> parts(nchunk);
       std::exception_ptr split_err;   // [task-err]
       #pragma omp taskloop grainsize(1) default(shared)
@@ -2996,28 +3583,93 @@ protected:
       { try {
         const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
         if (lo >= hi) continue;
-        vector<MassTrace> chunk(std::make_move_iterator(mts.begin() + lo),
-                                std::make_move_iterator(mts.begin() + hi));
+        // [outer] positions [lo, hi) of the segment sequence, moved out segment by segment: the chunk the gathered
+        // vector gave (distinct chunks move distinct elements)
+        vector<MassTrace> chunk; chunk.reserve(hi - lo);
+        size_t s = (size_t)(std::upper_bound(at.begin(), at.end(), lo) - at.begin()) - 1;
+        for (size_t g = lo; g < hi; ++g) { while (g >= at[s + 1]) ++s; chunk.push_back(std::move(seg[s][g - at[s]])); }
         ElutionPeakDetection epd; setSplitter(epd, split_valleys, split_scan_time);
         parts[ci].reserve(chunk.size());
         epd.detectPeaks(chunk, parts[ci]);
       } catch (...) { taskErr_(split_err); } }
       if (split_err) std::rethrow_exception(split_err);
-      size_t tot = 0; for (auto& pth : parts) tot += pth.size();
-      vector<MassTrace> out; out.reserve(tot);
-      for (auto& pth : parts) { for (auto& t : pth) out.push_back(std::move(t)); vector<MassTrace>().swap(pth); }
-      mts.swap(out);
+      seg.swap(parts);   // [outer] the chunks' outputs, in chunk order, are the segments now: no serial re-concatenation
+      n_tr = 0; for (const auto& s : seg) n_tr += s.size();
     }
     tt_split = tt_s(_ts0, tt_now());
-    writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(mts.size()) + " traces: edges "
+    writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(n_tr) + " traces: edges "
                   + String(tt_edge) + " s | distribute " + String(tt_dist) + " s | detect "
                   + String(tt_mtd) + " s | gather " + String(tt_gather) + " s (serial) | valley-split "
                   + String(tt_split) + " s");
+    auto _tc0 = tt_now();
     vector<Trace> out;
-    out.reserve(mts.size());
-    // Each MassTrace is released as soon as it is converted. Serial on purpose: a parallel split was
-    // output-identical but 17% slower (docs/BASELINE.md, "Parallelising the MS1 trace conversion").
-    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); mts[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
+    // [outer] The MS1 call converts in parallel: pass 1 sizes every span (makeSpan's frame range), the offsets are the
+    // running sum from the arena's end -- exactly where the serial appends put them -- and pass 2 fills each span at
+    // its offset with toTrace's own statements. Every trace writes only its own span and its own slot, so the arena and
+    // the trace list are byte-identical to the serial loop's. Contiguous ranges per task keep the walk sequential. The
+    // two earlier parallel versions kept the arena append serial (docs/BASELINE.md, "Parallelising the MS1 trace
+    // conversion"); DIASPEXTRACT_MS1_CONVERT_SERIAL=1 runs the serial loop below.
+    static const bool conv_serial = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_CONVERT_SERIAL"); return e && *e && *e != '0'; }();
+    bool conv_par = ms1_prune && !conv_serial && n_tr >= 4096 && omp_in_parallel() && omp_get_num_threads() > 1;
+    const char* conv_why = "";
+    vector<size_t> at, off;   // segment s holds positions [at[s], at[s+1]) of the sequence; off: span length, then offset
+    auto segOf = [&at](size_t g) { return (size_t)(std::upper_bound(at.begin(), at.end(), g) - at.begin()) - 1; };
+    const int ntask = conv_par ? std::max(1, std::min(4 * omp_get_num_threads(), (int)(n_tr / 1024))) : 1;   // bounded: no task-count cliff
+    std::exception_ptr conv_err;   // [task-err]
+    if (conv_par)
+    {
+      at.assign(seg.size() + 1, 0);
+      for (size_t s = 0; s < seg.size(); ++s) at[s + 1] = at[s] + seg[s].size();
+      off.assign(n_tr + 1, 0);
+      #pragma omp taskloop num_tasks(ntask) default(shared)
+      for (int c = 0; c < ntask; ++c)
+      { try {
+        const size_t lo = (size_t)c * n_tr / ntask, hi = (size_t)(c + 1) * n_tr / ntask;
+        if (lo >= hi) continue;
+        size_t s = segOf(lo);
+        for (size_t g = lo; g < hi; ++g) { while (g >= at[s + 1]) ++s; off[g + 1] = spanLength(seg[s][g - at[s]], store); }
+      } catch (...) { taskErr_(conv_err); } }
+      if (conv_err) std::rethrow_exception(conv_err);
+      off[0] = store.inten.size();
+      for (size_t g = 0; g < n_tr; ++g) off[g + 1] += off[g];   // off[g] = the arena size before trace g's append
+      // [review] Trace::off is 32-bit and makeSpan narrows the arena size without a check. Past 2^32 - 1 floats two
+      // traces' narrowed offsets would alias and their tasks would race on the same span; the serial loop below keeps
+      // the old (deterministic) result there instead.
+      if (off[n_tr] > (size_t)std::numeric_limits<uint32_t>::max()) { conv_par = false; conv_why = ", the arena passes 2^32 floats"; }
+    }
+    if (conv_par)
+    {
+      store.inten.resize(off[n_tr], 0.0f);
+      out.resize(n_tr);
+      #pragma omp taskloop num_tasks(ntask) default(shared)
+      for (int c = 0; c < ntask; ++c)
+      { try {
+        const size_t lo = (size_t)c * n_tr / ntask, hi = (size_t)(c + 1) * n_tr / ntask;
+        if (lo >= hi) continue;
+        vector<pair<uint32_t, float>> pts;
+        size_t s = segOf(lo);
+        for (size_t g = lo; g < hi; ++g)
+        {
+          while (g >= at[s + 1]) ++s;
+          MassTrace& mt = seg[s][g - at[s]];
+          out[g] = toTraceAt(mt, store, off[g], pts);
+          mt = MassTrace();   // the payload goes now, as in the serial loop
+        }
+      } catch (...) { taskErr_(conv_err); } }
+      if (conv_err) std::rethrow_exception(conv_err);
+      vector<vector<MassTrace>>().swap(seg);
+    }
+    else
+    {
+      out.reserve(n_tr);
+      // Each MassTrace is released as soon as it is converted.
+      for (auto& sv : seg)   // [outer] the segments in order: the sequence the gathered vector held
+      {
+        for (size_t i = 0; i < sv.size(); ++i) { out.push_back(toTrace(sv[i], store)); sv[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
+        vector<MassTrace>().swap(sv);
+      }
+    }
+    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (" + (conv_par ? "parallel" : "serial") + conv_why + ")");
     return out;
   }
 
@@ -3135,6 +3787,25 @@ protected:
     return tol;
   }
 
+  /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by std::sort on m/z alone.
+  /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
+  /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
+  /// With any equal (or unordered) neighbour -- K562 has 677,976, HeLa_19 19,200: quantised m/z -- the order of equal
+  /// m/z is std::sort's own, so it is std::sort's sequence, computed by stdSortPar_. Returns the neighbours that are not
+  /// strictly increasing (0 = the identity was taken).
+  static size_t mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
+  {
+    const size_t N = ms1.size();
+    by_mz.resize(N);
+    #pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)N; ++i) by_mz[(size_t)i] = (size_t)i;
+    size_t nonincr = 0;
+    #pragma omp parallel for schedule(static) reduction(+ : nonincr)
+    for (long i = 1; i < (long)N; ++i) if (!(ms1[(size_t)i - 1].mz < ms1[(size_t)i].mz)) ++nonincr;
+    if (nonincr) stdSortPar_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    return nonincr;
+  }
+
   /// [route-1] Isotope/charge inference on MS1 traces. Scores each (charge, monoisotope) hypothesis
   /// by averagine-shape agreement x isotope-XIC co-elution, instead of counting partners.
   vector<Precursor_> inferPrecursors_(const vector<Trace>& ms1, const TraceStore& ms1st, int max_charge,
@@ -3147,14 +3818,14 @@ protected:
 
     // m/z-sorted index for O(log N) isotope-partner lookup (avoids O(N^2) over all MS1 traces).
     auto _pi_t0 = std::chrono::steady_clock::now();
-    vector<size_t> by_mz(N);
-    for (size_t i = 0; i < N; ++i) by_mz[i] = i;
-    sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    vector<size_t> by_mz;
+    const size_t mz_nonincr = mzOrder_(ms1, by_mz);   // [outer]
     vector<double> sorted_mz(N);
-    for (size_t i = 0; i < N; ++i) sorted_mz[i] = ms1[by_mz[i]].mz;
     // [soa] The candidate scan's RT and IM, laid out in m/z order beside sorted_mz (sequential reads).
     vector<double> sorted_rt(N), sorted_im(N);
-    for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
+    #pragma omp parallel for schedule(static)
+    for (long ii = 0; ii < (long)N; ++ii)
+    { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
     // [mzidx] Bucket index over sorted_mz keyed on the top bits of the IEEE-754 pattern: monotone for
     // positive doubles, so the bucket width is relative (ppm-shaped) and the std search on the bucket's
     // sub-range returns the same position as on the whole array. docs/BASELINE.md, "Computed indices
@@ -3172,8 +3843,15 @@ protected:
     };
     vector<uint32_t> bstart(kspan + 2, 0);
     {
-      size_t i = 0;
-      for (size_t b = 0; b <= kspan; ++b) { while (i < N && bucketOf(sorted_mz[i]) < b) ++i; bstart[b] = (uint32_t)i; }
+      // bstart[b] = the first i with bucketOf(sorted_mz[i]) >= b, else N. [outer] bucketOf is monotone over sorted_mz, so
+      // the buckets (bucketOf(sorted_mz[i-1]), bucketOf(sorted_mz[i])] start at i: every b is written by exactly one i.
+      #pragma omp parallel for schedule(static)
+      for (long ii = 0; ii < (long)N; ++ii)
+      {
+        const size_t i = (size_t)ii, b_hi = std::min(bucketOf(sorted_mz[i]), kspan);
+        for (size_t b = (i == 0 ? 0 : bucketOf(sorted_mz[i - 1]) + 1); b <= b_hi; ++b) bstart[b] = (uint32_t)i;
+      }
+      for (size_t b = (N ? std::min(bucketOf(sorted_mz[N - 1]), kspan) + 1 : 0); b <= kspan; ++b) bstart[b] = (uint32_t)N;
       bstart[kspan + 1] = (uint32_t)N;
     }
     auto lbmz = [&](double x) -> size_t {
@@ -3192,10 +3870,12 @@ protected:
 
     // Apex intensities in one contiguous array: the sort and every isotope walk read them.
     vector<float> inten(N);
-    for (size_t i = 0; i < N; ++i) inten[i] = (float)intensityOf(ms1st, ms1[i]);
     vector<size_t> order(N);
-    for (size_t i = 0; i < N; ++i) order[i] = i;
-    sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    #pragma omp parallel for schedule(static)
+    for (long ii = 0; ii < (long)N; ++ii) { const size_t i = (size_t)ii; inten[i] = (float)intensityOf(ms1st, ms1[i]); order[i] = i; }
+    // [outer] a total order (the index breaks every tie; the coordinates are finite, non-finite traces were dropped before
+    // the content sort), so the sorted sequence is unique and the parallel sort returns std::sort's
+    parallelSortTotal_(order, [&](size_t a, size_t b) {
       if (inten[a] != inten[b]) return inten[a] > inten[b];
       if (ms1[a].mz != ms1[b].mz) return ms1[a].mz < ms1[b].mz;
       return a < b; // total order so greedy isotope assignment is deterministic
@@ -3443,17 +4123,26 @@ protected:
       } while (0);
     };
 
-    size_t spec_batch = 8192;
+    // [outer] 2048 (was 8192): the commit is serial and mostly fixed cost per seed, but each re-evaluation in it costs a
+    // whole seed (~10 us); a quarter of the batch re-evaluates a third of the seeds (K562: 17,853 vs 51,891) for 4x the
+    // fork/joins. K562 greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (kim/dax, 2026-10-01). Committing
+    // beside the next batch's speculation was exact but slower (more re-evaluations, a contended commit): not kept.
+    size_t spec_batch = 2048;
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
+    // [outer] about four speculation chunks per thread (at most 16 seeds, as before), so a small batch feeds every thread
+    const int spec_chunk = (int)std::max<size_t>(1, std::min<size_t>(16, spec_batch / (4 * (size_t)std::max(1, omp_get_max_threads()))));
     vector<SeedRes> res(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
     std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     vector<MonoV2In_> v2in;           // [monocheck-v2] parallel to `out` when mono_check_ == 2
+    double t_spec = 0.0, t_commit = 0.0, t_reeval = 0.0;   // [outer] the walk's sub-steps, log only
+    auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
     {
       const size_t b1 = std::min(b0 + spec_batch, order.size());
+      const double ts0 = now_s();
       // Phase 1: speculate. Nothing here writes `used`, so the concurrent reads are safe.
-      #pragma omp parallel for schedule(dynamic, 16)
+      #pragma omp parallel for schedule(dynamic, spec_chunk)
       for (long ii = (long)b0; ii < (long)b1; ++ii)
       {
         SeedRes& R = res[(size_t)ii - b0];
@@ -3461,6 +4150,8 @@ protected:
         if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); R.mc.fill(0); R.v2 = MonoV2In_(); continue; }
         evalSeed(seed, R);
       }
+      const double tc0 = now_s();
+      t_spec += tc0 - ts0;
       // Phase 2: commit in the original seed order.
       for (size_t ii = b0; ii < b1; ++ii)
       {
@@ -3469,13 +4160,14 @@ protected:
         SeedRes& R = res[ii - b0];
         bool stale = false;
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
-        if (stale) { evalSeed(seed, R); ++n_conflict; }
+        if (stale) { const double tr0 = now_s(); evalSeed(seed, R); ++n_conflict; t_reeval += now_s() - tr0; }
         for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
         if (mono_check_) for (size_t q = 0; q < mc_tot.size(); ++q) mc_tot[q] += R.mc[q];
         used[seed] = true;
         for (size_t j : R.claims) used[j] = true;
         ++n_committed;
       }
+      t_commit += now_s() - tc0;
     }
     // [z1-diag] DIASPEXTRACT_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
     // (a halved 2+ ion's M+1) or +ISO/3, and was it already claimed.
@@ -3520,6 +4212,10 @@ protected:
                     + String(spec_batch) + ": " + String(n_committed) + " committed, " + String(n_conflict)
                     + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
                     + "%), " + String(n_skipped) + " already claimed)");
+      writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort's order (stdSortPar_)"
+                                                              : String("strictly increasing, identity"))
+                    + "; greedy walk: " + String((order.size() + spec_batch - 1) / spec_batch) + " batches, chunk " + String(spec_chunk)
+                    + " | speculate " + String(t_spec) + " s | commit " + String(t_commit) + " s (re-evaluation " + String(t_reeval) + " s)");
     }
     if (mono_check_ == 1)
     {
@@ -3571,13 +4267,14 @@ protected:
       // The m/z-sorted index of inferPrecursors_ (same comparator on the same container, so the same order; the plain
       // std searches return the positions its bucket index returns).
       const size_t N = ms1.size();
-      vector<size_t> by_mz(N);
-      for (size_t i = 0; i < N; ++i) by_mz[i] = i;
-      sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+      vector<size_t> by_mz;
+      mzOrder_(ms1, by_mz);   // [outer] the same helper, so the same order
       vector<double> sorted_mz(N), sorted_rt(N), sorted_im(N);
-      for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
       vector<float> inten(N);
-      for (size_t i = 0; i < N; ++i) inten[i] = (float)intensityOf(ms1st, ms1[i]);
+      #pragma omp parallel for schedule(static)
+      for (long ii = 0; ii < (long)N; ++ii)
+      { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im;
+        inten[i] = (float)intensityOf(ms1st, ms1[i]); }
       auto lbmz = [&](double x) -> size_t { return (size_t)(std::lower_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
       auto ubmz = [&](double x) -> size_t { return (size_t)(std::upper_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
       if (v2_box <= 0.0)
@@ -3748,13 +4445,29 @@ protected:
     /// inv == 0 is the DISABLED state, not an error: every bucket is then 0, every dq is 0, and
     /// the exact test alone decides. That is the fallback for every degenerate parameter below,
     /// and it costs no branch in the scan.
-    void build(const vector<Trace>& fr, const TraceStore& st, double delta_rt)
+    void build(const vector<Trace>& fr, const TraceStore& st, double delta_rt, long nt = 1)
     {
       const size_t n = fr.size();
       rt.resize(n); q.assign(n, 0);
       rt0 = 0.0; inv = 0.0;
-      double lo = 0.0, hi = 0.0;
-      for (size_t i = 0; i < n; ++i) { rt[i] = rtOf(st, fr[i]); if (!i || rt[i] < lo) lo = rt[i]; if (!i || rt[i] > hi) hi = rt[i]; }
+      // [serial] As nt tasks. The serial fold takes the first value, then any value strictly below (above) it, so
+      // chunk 0 folds serially and every later chunk contributes its smallest (largest) non-NaN value, earliest on
+      // ties, folded in chunk order: the same lo and hi for any values (a NaN first value sticks, a later NaN never
+      // replaces).
+      vector<double> clo(nt, 0.0), chi(nt, 0.0);
+      vector<char> has(nt, 0);
+      forTasks_(nt, [&](long c) {
+        double l = 0.0, h = 0.0; bool any = false;
+        for (size_t i = (size_t)c * n / (size_t)nt; i < (size_t)(c + 1) * n / (size_t)nt; ++i)
+        {
+          rt[i] = rtOf(st, fr[i]);
+          if (c == 0) { if (!i || rt[i] < l) l = rt[i]; if (!i || rt[i] > h) h = rt[i]; }
+          else if (rt[i] == rt[i]) { if (!any || rt[i] < l) l = rt[i]; if (!any || rt[i] > h) h = rt[i]; any = true; }
+        }
+        clo[c] = l; chi[c] = h; has[c] = any;
+      });
+      double lo = clo[0], hi = chi[0];
+      for (long c = 1; c < nt; ++c) if (has[c]) { if (clo[c] < lo) lo = clo[c]; if (chi[c] > hi) hi = chi[c]; }
       // A denormal delta_rt makes 1/delta_rt infinite, and an RT range spanning +/-DBL_MAX makes
       // the span infinite; both then produce inf*0 = NaN inside bucketOf. Neither survives real
       // acquisition, but both are reachable and both were UB, so every one degrades to disabled.
@@ -3768,7 +4481,8 @@ protected:
       if (span > 0.0 && span * iv > 65000.0) iv = 65000.0 / span;
       if (!std::isfinite(iv) || !(iv > 0.0)) return;
       rt0 = lo; inv = iv;
-      for (size_t i = 0; i < n; ++i) q[i] = (uint16_t)bucketOf(rt[i]);
+      forTasks_(nt, [&](long c) {
+        for (size_t i = (size_t)c * n / (size_t)nt; i < (size_t)(c + 1) * n / (size_t)nt; ++i) q[i] = (uint16_t)bucketOf(rt[i]); });
     }
   };
 
@@ -4989,6 +5703,7 @@ protected:
           }
           return t; };
       }
+      writeLogInfo_("[outer] start-up before the stream reader: " + String(phase_clock_()) + " s");
       try
       {
         if (in_mzpeak)
@@ -5010,6 +5725,7 @@ protected:
                         + String(h[3].load()) + " (" + pc(h[3].load()) + "%), >=10000 " + String(h[4].load()) + " (" + pc(h[4].load()) + "%)"); }
         phaseAdd_("LOAD(stream)", 0.0, 0.0, false);                // [perf-instr] start-to-here
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
+        writeLogInfo_("[outer] MS1 pick " + consumer.ms1_pick_mode_);
         if (std::getenv("DIASPEXTRACT_LOAD_ONLY"))
         { if (tile_source) writeLogInfo_("[perf-load] DIASPEXTRACT_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
           report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
@@ -5244,7 +5960,18 @@ protected:
     //-------------------------------------------------------------
     // MS1 traces + precursor/charge inference (shared, once) [H-8,H-10]
     //-------------------------------------------------------------
-    ms1_map.sortSpectra();
+    // [outer] sortSpectra() = the RT sort, then each spectrum's own m/z sort (a no-op check on a picked spectrum). The
+    // per-spectrum sorts are independent, so they run in parallel after the same RT sort.
+    {
+      const double _tss = phase_clock_();
+      ms1_map.sortSpectra(false);
+      std::exception_ptr ss_err;
+      #pragma omp parallel for schedule(dynamic, 16)
+      for (long i = 0; i < (long)ms1_map.size(); ++i)
+      { try { ms1_map[(Size)i].sortByPosition(); } catch (...) { taskErr_(ss_err); } }
+      if (ss_err) std::rethrow_exception(ss_err);
+      writeLogInfo_("[outer] MS1 spectra sorted in " + String(phase_clock_() - _tss) + " s");
+    }
     const double ms1_snr = getDoubleOption_("trace:ms1_chrom_peak_snr");
     const double ms2_snr = getDoubleOption_("trace:ms2_chrom_peak_snr");
     const double ms2_minlen = getDoubleOption_("trace:ms2_min_length_sec");
@@ -5403,7 +6130,15 @@ protected:
     catch (...) { ms1_err = std::current_exception(); }
     if (ms1_err) std::rethrow_exception(ms1_err);
     { const double cap = max_span;
-      if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
+      // [outer] per trace, reading the store and writing only its own span fields: in parallel
+      std::exception_ptr trim_err;
+      if (cap > 0.0)
+      {
+        #pragma omp parallel for schedule(static)
+        for (long i = 0; i < (long)ms1_traces.size(); ++i)
+        { try { trimToSpan(ms1_store, ms1_traces[(size_t)i], cap); } catch (...) { taskErr_(trim_err); } }
+      }
+      if (trim_err) std::rethrow_exception(trim_err); }
     vector<double>().swap(ms1_prune.sample);   // [ms1-prune] consumed by the band edges, or unused at one band
     ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace)) + ms1_store.bytes());
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
@@ -5439,13 +6174,13 @@ protected:
       if (a.len != b.len) return a.len < b.len;
       return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
     };
-    sort(ms1_traces.begin(), ms1_traces.end(), traceLess);
     {
-      size_t ties = 0;
-      for (size_t i = 1; i < ms1_traces.size(); ++i)
-        if (!traceLess(ms1_traces[i - 1], ms1_traces[i])) ++ties;
+      // [outer] in parallel when that is provably std::sort's order (no equal-key neighbours), else std::sort itself
+      const double _tcs = phase_clock_();
+      const size_t ties = sortExact_(ms1_traces, traceLess);
       writeLogInfo_("[det] MS1 traces sorted by content: " + String(ms1_traces.size()) + " traces, "
                     + String(ties) + " equal-key neighbours");
+      writeLogInfo_("[outer] MS1 content sort " + String(phase_clock_() - _tcs) + " s (" + (ties ? "equal keys: std::sort" : "unique order") + ")");
     }
     if (iso_im_tol <= 0.0) iso_im_tol = autoIsoImTol_(ms1_traces, ms1_store, max_charge, delta_rt, mass_ppm, iso_tol_stamp);   // [isotol]
     else writeLogInfo_("[isotol] 1/K0 tolerance for isotope partners " + String(iso_im_tol) + " (fixed)");
@@ -5455,6 +6190,7 @@ protected:
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring, mono_check_ == 2 ? &mono_v2in : nullptr);
+    const double _t_inf_fn = phase_clock_();   // [outer] sub-step clock of PRECURSOR_INFER, log only
     if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
     {
       size_t nf = 0;
@@ -5526,11 +6262,13 @@ protected:
     }
     // [monocheck-v2] At the final charge: after the veto (which reads the walks' own monoisotopes, as without v2),
     // before the charge-less precursors are defaulted or dropped (the veto edits in place, so the order still matches).
+    const double _t_inf_v2a = phase_clock_();   // [outer]
     if (mono_check_ == 2)
     {
       monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm, env_scoring);
       vector<MonoV2In_>().swap(mono_v2in);
     }
+    const double _t_inf_v2b = phase_clock_();   // [outer]
     const int default_charge = getIntOption_("assembly:default_charge");
     Size n_default = 0;
     // [way-4] A GUESSED charge and an isotope-SUPPORTED charge must not be emitted identically.
@@ -5624,15 +6362,20 @@ protected:
     }
     // sort precursors by mono m/z so each window can binary-search its members instead of
     // rescanning all ~1M precursors per window (total order for determinism).
-    sort(precursors.begin(), precursors.end(), [](const Precursor_& a, const Precursor_& b) {
+    // [outer] trace_idx is unique (one precursor per committed seed), so the order is total and sortExact_ sorts in
+    // parallel; an equal-key pair (a non-finite key) would send it to std::sort itself.
+    const double _t_inf_srt = phase_clock_();
+    const size_t prec_ties = sortExact_(precursors, [](const Precursor_& a, const Precursor_& b) {
       if (a.mono_mz != b.mono_mz) return a.mono_mz < b.mono_mz;
       if (a.rt != b.rt) return a.rt < b.rt;
       if (a.im != b.im) return a.im < b.im;
       return a.trace_idx < b.trace_idx;
     });
+    const double _t_inf_cmp = phase_clock_();
     ledSet_(LC_PRECURSOR, (long long)(precursors.capacity() * sizeof(Precursor_) + precursors.size() * 8));
     vector<double> prec_mz(precursors.size());
     for (size_t i = 0; i < precursors.size(); ++i) prec_mz[i] = precursors[i].mono_mz;
+    double _t_inf_trim = 0.0;
     // [mem] Scoring reads only the profiles of traces a precursor points at: release the rest.
     // (ms1_map is already empty: detectTraces_ consumed it.)
     {
@@ -5643,10 +6386,15 @@ protected:
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
       ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace)) + ms1_store.bytes());
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
+      _t_inf_trim = phase_clock_();
 #ifdef __GLIBC__
     if (trim_on) trimLogged_("MS1 -> window loop");
 #endif
     }
+    writeLogInfo_("[outer] PRECURSOR_INFER steps: inferPrecursors_ " + String(_t_inf_fn - _t_inf) + " s | veto " + String(_t_inf_v2a - _t_inf_fn)
+                  + " s | monocheck v2 " + String(_t_inf_v2b - _t_inf_v2a) + " s | filters " + String(_t_inf_srt - _t_inf_v2b) + " s | precursor sort "
+                  + String(_t_inf_cmp - _t_inf_srt) + " s (" + (prec_ties ? "equal keys: std::sort" : "unique order") + ") | compaction "
+                  + String(_t_inf_trim - _t_inf_cmp) + " s | trim " + String(phase_clock_() - _t_inf_trim) + " s");
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
                   + " precursor hypotheses (" + String(n_default) + " assigned default charge)." + rss_());
     std::exception_ptr worker_err;
@@ -5851,13 +6599,39 @@ protected:
     }
     // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
     // the once-only ownership check per precursor (a window's m/z range is tile-independent)
-    struct Carry { vector<Trace> rec; vector<float> inten; };
-    map<WinKey, Carry> carry_in, carry_out;
+    struct Carry { vector<Trace> rec; vector<float> inten;
+                   long long bytes() const { return (long long)(rec.capacity() * sizeof(Trace) + inten.capacity() * 4); } };
+    // [pipe] One slot per window: `c` is carry_out(w, k - 1), and `ready` counts the window's tiles that have
+    // published theirs, so tile k may take `c` once ready == k. Under the per-tile barrier that always holds;
+    // with pipelined tiles it is the one dependency between a window's tiles -- tile k + 1 may slab, prepare,
+    // detect, merge and split while tile k still runs; it waits only where it takes the carry (assembly).
+    struct CarrySlot { Carry c; std::atomic<size_t> ready{0}; };
+    // [pipe] A window's handle on its slot for one tile. take() waits until the window's previous tile has
+    // published, then moves that carry out; publish() hands this tile's carry (put() before it, or none) to
+    // the next tile. The destructor publishes on every exit of the window body, waiting first if the body left
+    // before take(), so a slot is never published out of order and the next tile never waits forever.
+    struct CarryGate
+    {
+      CarrySlot& s; const size_t tk; bool took = false, done = false;
+      void wait() const   // [pipe] idle until the carry arrives: help the tile reader or writer meanwhile
+      { while (s.ready.load(std::memory_order_acquire) < tk) if (!teamAssist_(4)) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
+      Carry take() { wait(); took = true; Carry c = std::move(s.c); s.c = Carry(); ledAdd_(LC_CARRY, -c.bytes()); return c; }
+      void put(Carry&& c) { ledAdd_(LC_CARRY, c.bytes()); s.c = std::move(c); }
+      void publish()
+      {
+        if (done) return;
+        if (!took) { (void)take(); }   // the body left early: drop the previous tile's carry, in order
+        done = true;
+        s.ready.store(tk + 1, std::memory_order_release);
+      }
+      ~CarryGate() { publish(); }
+    };
+    map<WinKey, CarrySlot> carry;
     map<WinKey, uint64_t> slab_chain;   // [det] the per-window slab digest, chained across tiles
     map<WinKey, vector<uint8_t>> visited;
     for (const WinKey& k : fkeys)
     {
-      carry_out[k];
+      carry[k];
       const double lo = k[0] / 100.0, hi = k[1] / 100.0;
       const size_t plo = lower_bound(prec_mz.begin(), prec_mz.end(), lo) - prec_mz.begin();
       const size_t phi = upper_bound(prec_mz.begin(), prec_mz.end(), hi) - prec_mz.begin();
@@ -5944,15 +6718,45 @@ protected:
     // window is an OpenMP task, so idle threads steal across windows. Results go to index-addressed slots
     // (win_out[wi], pslot[j], per[ci][b]), never appended in completion order.
     std::atomic<int> active{0};
-    for (size_t tk = 0; tk < tiles.size(); ++tk)
+    // [pipe] Pipelined tiles. With the per-tile barrier, every tile waits for its slowest window chain and the
+    // read, sort, merge, write and trim between two tiles overlap nothing. Pipelined, ONE parallel region
+    // spans the whole loop and its single thread drives it: it reads tile k + 1 and admits its windows while
+    // tile k's still run, and finishes (sorts, merges, writes, trims) the tiles strictly in tile order as each
+    // completes. A window's tiles depend on each other only through the carry (CarryGate); tiles own disjoint
+    // precursors and are sorted and written per tile as before, so the output is the barrier's, bit for bit.
+    // DIASPEXTRACT_PIPE_TILES=<n> (default 2, 1 = the per-tile barrier) bounds the tiles whose windows may run
+    // at once: tile j is read only after every window of tile j - n has finished, which bounds the slabs
+    // resident and the chain of carry waits; the window cap and the memory admission below still apply to
+    // every window in flight, over all tiles. The reader's and writer's loops run as tasks of the window team
+    // (teamFor_); only the vendor reader's own decode loop (libOpenMS) opens a nested team.
+    const int pipe_depth = []() { const char* e = std::getenv("DIASPEXTRACT_PIPE_TILES");
+                                  const long v = e && *e ? std::atol(e) : 2L; return (int)std::max(1L, std::min(v, 16L)); }();
+    const bool pipe = pipe_depth > 1 && tiles.size() > 1 && n_threads > 1;
+    std::atomic<bool> pipe_abort{false};   // a window or the driver failed: admit nothing more, skip unstarted windows
+    writeLogInfo_("[pipe] " + (pipe ? "tiles pipelined, up to " + String(pipe_depth) + " with windows in flight"
+                                    : String("off (") + (pipe_depth <= 1 ? "DIASPEXTRACT_PIPE_TILES=1" : tiles.size() <= 1 ? "one tile" : "one thread")
+                                      + "): a barrier after every tile"));
+    // [pipe] One tile in flight: its slabs, its windows heaviest-first, their output slots, and how many of its
+    // windows have not finished yet (the driver finishes the tile once that is 0).
+    struct TileRun
     {
+      size_t tk = 0;
+      map<WinKey, PeakSlab> tile_slabs;
+      vector<pair<WinKey, PeakSlab*>> wl;
+      vector<vector<MSSpectrum>> win_out;
+      Size win_done = 0;
+      std::atomic<size_t> left{0};
+    };
+    auto loadTile = [&](TileRun& R)
+    {
+    const size_t tk = R.tk;
     const Tile& tile = tiles[tk];
     ledPhaseTile_("tile", tk + 1);
     // [tile] the tile's slabs: one tile = the resident slabs themselves (moved out by the body, as
     // today); several = a slice of each window's frames in [lo, hi) (the resident source keeps the
     // whole run: this arm is the exactness gate, not the memory configuration)
-    map<WinKey, PeakSlab> tile_slabs;
-    vector<pair<WinKey, PeakSlab*>> wl;
+    map<WinKey, PeakSlab>& tile_slabs = R.tile_slabs;
+    vector<pair<WinKey, PeakSlab*>>& wl = R.wl;
     if (tile_source)
     {
       // [3b] read the tile: a fresh consumer over the loader's RT range, lockstep-padded against
@@ -5993,7 +6797,8 @@ protected:
         n_peaks += sl.peaks();
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
-      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledSet_(LC_SLAB, sb); }
+      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes();
+        if (pipe) ledAdd_(LC_SLAB, sb); else ledSet_(LC_SLAB, sb); }   // [pipe] other tiles' slabs may still be live
       if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
@@ -6038,26 +6843,51 @@ protected:
       std::stable_sort(wl.begin(), wl.end(), heavyFirst);
     }
     else wl = window_list;
-    vector<vector<MSSpectrum>> win_out(wl.size());
-    Size win_done = 0;
-    #pragma omp parallel num_threads(n_threads)
-    #pragma omp single
-    for (long wi = 0; wi < (long)wl.size(); ++wi)
+    R.win_out.resize(wl.size());
+    R.left.store(wl.size());
+    };   // loadTile
+    // [pipe] the window body, defined below the admission that spawns it
+    std::function<void(TileRun*, long, size_t)> runWindow;
+    auto admitTile = [&](TileRun* R)
     {
-      const size_t need = project(*wl[wi].second);
+    auto* rw = &runWindow;
+    for (long wi = 0; wi < (long)R->wl.size() && !pipe_abort.load(); ++wi)
+    {
+      const size_t need = project(*R->wl[wi].second);
       for (;;)
       {
         const size_t budget = (size_t)(availableBytes_() * mem_frac);
         // [dyn-mem] admit while fewer than n_conc windows are in flight and the projection fits mem_fraction
         // of MemAvailable (re-read at every admission); an empty pipeline always admits, however large the window
         if ((active.load() == 0) || (active.load() < n_conc && inflight.load() + need <= budget)) break;
-        #pragma omp taskyield
+        // [review] A team of ONE (-threads 1, OMP_THREAD_LIMIT=1, OMP_DYNAMIC) has nobody else to run the windows admitted
+        // so far, and libgomp's taskyield is a no-op: once the window cap or the memory budget held, this loop spun forever
+        // (the barrier path since before the pipeline, and the pipeline's solo fallback). In a team of one every queued
+        // window is a child of this thread, so taskwait runs them, which releases their admission charges.
+        if (omp_get_num_threads() < 2)
+        {
+          #pragma omp taskwait
+          continue;
+        }
+        if (!pipe)   // [pipe] the driver must not be handed a window here (a no-op in libgomp, not in every runtime)
+        {
+          #pragma omp taskyield
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       }
       inflight += need; ++active;
       if (active.load() > adm_hwm.load()) adm_hwm.store(active.load());
-      #pragma omp task default(shared) firstprivate(wi, need)
-      {
+      #pragma omp task default(none) firstprivate(rw, R, wi, need)
+      (*rw)(R, wi, need);
+    }
+    };   // admitTile
+    runWindow = [&](TileRun* R, const long wi, const size_t need)
+    {
+      const size_t tk = R->tk;
+      const Tile& tile = tiles[tk];
+      vector<pair<WinKey, PeakSlab*>>& wl = R->wl;
+      vector<vector<MSSpectrum>>& win_out = R->win_out;
+      Size& win_done = R->win_done;
       // A lambda, because `continue` is not a legal exit from a task's structured block and the
       // window body has one early exit (a window whose fragments all fail the finiteness filter).
       [&]() {
@@ -6068,6 +6898,9 @@ protected:
         // admitted by the master before this task existed; release both charges however we leave
         struct Release { std::atomic<size_t>& b; std::atomic<int>& a; size_t n;
                          ~Release() { b -= n; --a; } } rel{inflight, active, need};
+        // [pipe] this window's carry slot: its destructor publishes this tile's carry on every exit
+        CarryGate gate{carry.at(wl[wi].first), tk};
+        if (pipe_abort.load()) return;   // [pipe] a window or the driver failed: the run is ending
         // Per-window stage seconds and the completion line, printed on EVERY exit of the body
         // (empty window, any assembly arm, exception): what the profile could only infer. [mem]
         double w_prep = 0, w_trace = 0, w_split = 0, w_score = 0, w_emit = 0;
@@ -6190,7 +7023,14 @@ protected:
               // the window's band edges must enclose the cell's bins: bandOf() and the tof index
               // wrap for a bin below tlo (review M2). A run-level freeze must be a superset. In
               // every mode, one cell included (review 3a: the acquisition edges are metadata).
-              TofIdx clo = 0xFFFFFFFFu, chi = 0; for (TofIdx t : cs.tof) { clo = std::min(clo, t); chi = std::max(chi, t); }
+              // [serial] the extremes as tasks: min and max are exact in any order
+              const size_t np = cs.tof.size();
+              const long nr = parTasks_(np, 1 << 18);
+              vector<TofIdx> clos(nr, 0xFFFFFFFFu), chis(nr, 0);
+              forTasks_(nr, [&](long c) {
+                for (size_t k = (size_t)c * np / (size_t)nr; k < (size_t)(c + 1) * np / (size_t)nr; ++k)
+                { clos[c] = std::min(clos[c], cs.tof[k]); chis[c] = std::max(chis[c], cs.tof[k]); } });
+              const TofIdx clo = *std::min_element(clos.begin(), clos.end()), chi = *std::max_element(chis.begin(), chis.end());
               if (clo < tlo || chi > thi) throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                     "cell bins outside the window's band edges", String(clo) + "-" + String(chi) + " vs " + String(tlo) + "-" + String(thi));
             }
@@ -6210,6 +7050,7 @@ protected:
               #pragma omp taskloop grainsize(1) default(shared)
               for (int b = 0; b < nb; ++b)
               { try {
+                teamAssist_(1);   // [pipe] a chunk of the pipelined tile reader or writer, if one is live
                 pc[b] = detectTracesInteger_(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_minlen,
                                              bnd[b], bnd[b + 1], b);
               } catch (...) { taskErr_(band_err); } }
@@ -6247,16 +7088,11 @@ protected:
           if (nb > 1)
             writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + " merge: " + String(n_cells) + " cell(s) x " + String(nb) + " band arenas, "
                           + String(arena) + " floats (" + String(arena * (any_bins ? 6 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
-          for (size_t ci = 0; ci < n_cells; ++ci)
-          {
-            const uint32_t f0 = (uint32_t)f0z[ci];             // the cell's first frame in the frozen table
-            for (int b = 0; b < nb; ++b)
-            {
-              const uint32_t base = wst.absorb(bst[ci][b]);
-              for (auto& t : per[ci][b]) { t.off += base; t.frame0 += f0; t.bframe += f0; frag_traces.push_back(std::move(t)); }
-              vector<Trace>().swap(per[ci][b]);
-            }
-          }
+          { // [serial] absorbed in (cell, band) order, rebased by the cell's first frame in the frozen table; copies as tasks
+            vector<std::pair<TraceStore*, vector<Trace>*>> src; vector<uint32_t> fsh;
+            for (size_t ci = 0; ci < n_cells; ++ci)
+              for (int b = 0; b < nb; ++b) { src.push_back({&bst[ci][b], &per[ci][b]}); fsh.push_back((uint32_t)f0z[ci]); }
+            absorbAll_(wst, frag_traces, src, fsh); }
           w_merge = secs(std::chrono::steady_clock::now() - _tm0);
           ledAdd_(LC_BAND, -band_bytes); ledAdd_(LC_PARENT, -parent_bytes); ledStore();
           }                                                  // the band stores die here
@@ -6265,7 +7101,10 @@ protected:
           auto _ts = std::chrono::steady_clock::now();
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, n_bands * 4, split_scan_time);
           w_split = secs(std::chrono::steady_clock::now() - _ts); ledStore();
-          if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
+          if (max_span > 0.0)   // [serial] per trace, independent: as tasks over trace chunks
+          { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 16);
+            forTasks_(nr, [&](long c) { for (size_t i = (size_t)c * n / (size_t)nr; i < (size_t)(c + 1) * n / (size_t)nr; ++i)
+                                          trimToSpan(wst, frag_traces[i], max_span); }); }
           vector<int16_t>().swap(wst.bins); ledStore();
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
                         + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
@@ -6291,11 +7130,12 @@ protected:
         // [tile] the previous tile's boundary fragments join this window's list, spans copied
         // onto its arena; their frame indices are the frozen table's already (the same table in
         // every tile), and they enter BEFORE the content sort, so they take their canonical places.
+        // [pipe] take() waits for this window's previous tile to publish them: the one point where a
+        // window's tiles meet (everything above ran on this tile's slab alone).
         size_t n_carried_in = 0;
-        { const auto cit = carry_in.find(wl[wi].first);
-          if (cit != carry_in.end() && !cit->second.rec.empty())
+        { const Carry ci = gate.take();
+          if (!ci.rec.empty())
           {
-            const Carry& ci = cit->second;
             frag_traces.reserve(frag_traces.size() + ci.rec.size());
             for (const Trace& r : ci.rec)
             {
@@ -6338,7 +7178,9 @@ protected:
 
         // Content-only and TOTAL: traces equal in (im, mz, rt, apex intensity) fall through to the remaining
         // fields, so their order never depends on what else is resident; exact duplicates are interchangeable.
-        sort(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& a, const Trace& b) {
+        // [serial] Sorted as tasks (parallelSort_): it may order exact duplicates differently from std::sort, which
+        // the comparator already allows -- the order of what else is resident moves them too.
+        parallelSort_(frag_traces.data(), frag_traces.size(), [&wst](const Trace& a, const Trace& b) {
           if (a.im != b.im) return a.im < b.im;
           if (a.mz != b.mz) return a.mz < b.mz;
           { const double ra = rtOf(wst, a), rb = rtOf(wst, b); if (ra != rb) return ra < rb; }
@@ -6352,10 +7194,42 @@ protected:
           if (a.bframe != b.bframe) return a.bframe < b.bframe;
           if (a.rt_at != b.rt_at) return a.rt_at < b.rt_at;
           return false;
-        });
+        }, parTasks_(frag_traces.size(), 1 << 15));
+        // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
+        // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
+        // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
+        // A precursor a later tile owns has (T - rt) <= tile_drt, its candidates x have
+        // (rt - x) <= tile_drt: x >= T - 2 tile_drt up to two roundings of ~1e-12 s. The slack
+        // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
+        // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
+        // [pipe] Taken and published HERE, after the content sort: scoring below only reads frag_traces
+        // and the arena, so this is the carry the end of the body would produce, and the window's next
+        // tile may assemble while this one scores.
+        static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
+        if (!tile.last && !no_carry)
+        {
+          Carry co;
+          const double keep_from = tile.hi - 2.0 * tile_drt - 1e-6;
+          for (const Trace& t : frag_traces)
+            if (rtOf(wst, t) >= keep_from)
+            {
+              Trace c = t; c.off = (uint32_t)co.inten.size();
+              co.inten.insert(co.inten.end(), wst.inten.begin() + t.off, wst.inten.begin() + t.off + t.len);
+              co.rec.push_back(c);
+            }
+          if (n_carried_in || !co.rec.empty())
+          {
+            #pragma omp critical(winlog)
+            writeLogInfo_("[tile] window " + String(win_lo) + "-" + String(win_hi) + " tile " + String(tk + 1) + ": carried in "
+                          + String(n_carried_in) + ", carrying out " + String(co.rec.size()) + " fragments (" + String((co.rec.size() * sizeof(Trace) + co.inten.size() * 4) / 1024) + " KB)");
+          }
+          gate.put(std::move(co));
+        }
+        gate.publish();
         vector<double> frag_im(frag_traces.size());
-        for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
-        FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt);   // [adaptive] buckets cover the wider window
+        { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 17);   // [serial] as tasks
+          forTasks_(nr, [&](long c) { for (size_t i = (size_t)c * n / (size_t)nr; i < (size_t)(c + 1) * n / (size_t)nr; ++i) frag_im[i] = frag_traces[i].im; }); }
+        FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt, parTasks_(frag_traces.size(), 1 << 17));   // [adaptive] buckets cover the wider window
         w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
@@ -6399,6 +7273,7 @@ protected:
             taskFault_("assemble");
             for (;;)
             {
+              teamAssist_(1);   // [pipe] a chunk of the pipelined tile reader or writer, if one is live
               const long cs = pcur.fetch_add(32);
               if (cs >= n_prec_w) break;
               const long ce = std::min(cs + 32, n_prec_w);
@@ -6422,42 +7297,23 @@ protected:
           const auto _t7 = std::chrono::steady_clock::now();
           w_emit = secs(_t7 - _t6);
         }
-        // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
-        // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
-        // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
-        // A precursor a later tile owns has (T - rt) <= tile_drt, its candidates x have
-        // (rt - x) <= tile_drt: x >= T - 2 tile_drt up to two roundings of ~1e-12 s. The slack
-        // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
-        // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
-        static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
-        if (!tile.last && !no_carry)
-        {
-          Carry& co = carry_out.at(wl[wi].first);
-          const double keep_from = tile.hi - 2.0 * tile_drt - 1e-6;
-          for (const Trace& t : frag_traces)
-            if (rtOf(wst, t) >= keep_from)
-            {
-              Trace c = t; c.off = (uint32_t)co.inten.size();
-              co.inten.insert(co.inten.end(), wst.inten.begin() + t.off, wst.inten.begin() + t.off + t.len);
-              co.rec.push_back(c);
-            }
-          if (n_carried_in || !co.rec.empty())
-          {
-            #pragma omp critical(winlog)
-            writeLogInfo_("[tile] window " + String(win_lo) + "-" + String(win_hi) + " tile " + String(tk + 1) + ": carried in "
-                          + String(n_carried_in) + ", carrying out " + String(co.rec.size()) + " fragments (" + String((co.rec.size() * sizeof(Trace) + co.inten.size() * 4) / 1024) + " KB)");
-          }
-        }
       }
       catch (...)
       {
         #pragma omp critical
         if (!worker_err) worker_err = std::current_exception();
+        pipe_abort.store(true);
       }
       }();   // window body
-      }      // omp task
-    }
-    if (worker_err) std::rethrow_exception(worker_err);
+      R->left.fetch_sub(1, std::memory_order_acq_rel);   // [pipe] last: the driver may finish the tile after this
+    };   // runWindow
+    // [pipe] After every window of the tile has finished: the coverage check (last tile), the canonical sort,
+    // the twin fold, the post-fusion cap and the write of the tile's block, then the between-tile trim.
+    auto finishTile = [&](TileRun& R)
+    {
+    const size_t tk = R.tk;
+    const Tile& tile = tiles[tk];
+    vector<vector<MSSpectrum>>& win_out = R.win_out;
     if (tile.last)
     {
       // [tile] coverage: every finite precursor of every window was owned by exactly one tile
@@ -6539,22 +7395,120 @@ protected:
         for (auto& sp : tile_out) all_out.push_back(std::move(sp));   // [ledger] the same bytes, still charged
       }
     }
-    carry_in = std::move(carry_out);
-    { long long cb = 0; for (const auto& kv : carry_in) cb += (long long)(kv.second.rec.capacity() * sizeof(Trace) + kv.second.inten.capacity() * 4);
-      ledSet_(LC_CARRY, cb); }
-    carry_out.clear();
-    for (const WinKey& k : fkeys) carry_out[k];
 #ifdef __GLIBC__
     // [trim] Between tiles, under perf:malloc_trim: nothing else returns the allocator's free pages here -- the in-loop
     // trim above runs only when there is one tile -- so a tiled loop's RSS would ratchet toward the arena pass 1 sized.
     // After tile k is written, before tile k+1 is read; about 4 GB off TNBC 009 and 0.5 GB off dataset D. Output-identical.
+    // [pipe] Pipelined, the later tiles in flight keep their pages: the trim returns what tile k left behind.
     if (trim_on && tk + 1 < tiles.size())
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
       malloc_trim(0);
       writeLogInfo_("[trim] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
                     + String(phase_clock_() - _tt) + " s" + mem_()); }
 #endif
-    }   // tiles
+    };   // finishTile
+
+    if (!pipe)
+      for (size_t tk = 0; tk < tiles.size(); ++tk)
+      {
+        TileRun R;
+        R.tk = tk;
+        loadTile(R);
+        #pragma omp parallel num_threads(n_threads)
+        #pragma omp single
+        admitTile(&R);
+        if (worker_err) std::rethrow_exception(worker_err);
+        finishTile(R);
+      }
+    else
+    {
+      // [pipe] The driver is thread 0 of ONE parallel region over all tiles: it reads tile fin + pipe_depth - 1
+      // while tile fin's windows run, admits its windows as the cap and memory allow, and once tile fin's windows
+      // are done hands the tile to the WRITER, a task that finishes the tiles strictly in tile order. So the read
+      // of the next tile never waits behind a write (scal-pipe-1 ran both on the driver: on K562 at 100 threads
+      // read + write per heavy tile outlasted the tile's windows, which then sat idle at three boundaries).
+      // The driver does not run windows: it reaches no taskgroup end or taskwait (teamFor_, and parTasks_ keeps its
+      // passes inline), so its n_threads - 1 team mates run the windows, the writer, and the reader's and writer's helper
+      // tasks when they are free. One exception remains: past libgomp's task cliff (team task count > 64 x nthreads) a
+      // spawned window or writer runs undeferred in the driver -- a stall, not a deadlock (review 2026-10-01).
+      // Thread 0 rather than `single`'s first arrival: the vendor reader's decode loop opens a nested team next
+      // to the driver's place, so under OMP_PROC_BIND=close it shares the window team's cores, never others.
+      // Deadlock-free: a window waits only on its own previous tile (CarryGate), which was admitted earlier and
+      // is dequeued earlier (the team queue is FIFO), and a tile is read only after tile j - pipe_depth finished,
+      // so that previous tile never waits itself; the writer of tile f waits only for the writer of tile f - 1,
+      // spawned (and dequeued) before it.
+      omp_set_max_active_levels(std::max(2, omp_get_max_active_levels()));
+      vector<std::unique_ptr<TileRun>> runs(tiles.size());
+      std::exception_ptr drv_err;
+      auto drvFail = [&]() {
+        #pragma omp critical(pipe_err)
+        if (!drv_err) drv_err = std::current_exception();
+        pipe_abort.store(true);
+      };
+      std::atomic<size_t> written{0};   // tiles the writer has finished, in tile order
+      auto writeTile = [&](const size_t f)   // the writer: outside the region, so a queued task never outlives it
+      {
+        while (written.load(std::memory_order_acquire) < f) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        try { if (!pipe_abort.load()) finishTile(*runs[f]); } catch (...) { drvFail(); }
+        runs[f].reset();
+        written.store(f + 1, std::memory_order_release);   // on every exit: the next writer never waits forever
+      };
+      #pragma omp parallel num_threads(n_threads)
+      if (omp_get_thread_num() == 0)
+      {
+        // A team of one (OMP_DYNAMIC, a thread limit) has nobody to run the windows while the driver polls: then
+        // one tile at a time, run by the driver's own taskwait and written by the driver -- the barrier's schedule.
+        const bool solo = omp_get_num_threads() < 2;
+        const size_t depth = solo ? 1 : (size_t)pipe_depth;
+        size_t next = 0;   // the next tile to read
+        auto issue = [&](const size_t upto)
+        {
+          for (; next < tiles.size() && next < upto && !pipe_abort.load(); ++next)
+          {
+            runs[next].reset(new TileRun);
+            runs[next]->tk = next;
+            loadTile(*runs[next]);
+            admitTile(runs[next].get());
+          }
+        };
+        onPipeDriver_() = !solo;   // [review] no taskloop on the driver (parTasks_); solo runs its windows itself anyway
+        try
+        {
+          for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
+          {
+            // [review] Backpressure on the writer: at most `depth` tiles whose windows are done wait for their write. Without
+            // it the driver kept reading and admitting while the writer lagged (slow output storage), so finished spectra and
+            // writer tasks spinning on their predecessor piled up without a bound. Never binds while the writer keeps pace:
+            // by the read/write order in their logs it would not have bound in any of the 38 pipelined scalfix/integrate
+            // runs. Deadlock-free: writers 0..fin-1 are spawned, and they wait only on each other, in spawn order.
+            while (written.load(std::memory_order_acquire) + depth < fin && !pipe_abort.load())
+              if (!teamAssist_(8)) std::this_thread::sleep_for(std::chrono::milliseconds(1));   // help the writer meanwhile
+            if (pipe_abort.load()) break;
+            issue(fin + depth);
+            if (!runs[fin]) break;   // the reader stopped (a failure)
+            TileRun& R = *runs[fin];
+            if (solo)
+            {
+              #pragma omp taskwait
+            }
+            while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load())
+              if (!teamAssist_(8)) std::this_thread::sleep_for(std::chrono::milliseconds(1));   // help the writer meanwhile
+            if (pipe_abort.load()) break;
+            if (solo) writeTile(fin);
+            else
+            {
+              auto* wt = &writeTile;
+              #pragma omp task default(none) firstprivate(wt, fin)
+              (*wt)(fin);
+            }
+          }
+        }
+        catch (...) { drvFail(); }
+        onPipeDriver_() = false;
+      }   // the region's barrier: every admitted window and every writer has finished
+      if (drv_err) std::rethrow_exception(drv_err);
+      if (worker_err) std::rethrow_exception(worker_err);
+    }
 
     win_phase.reset();   // [perf-instr] WINDOW_LOOP ends here: the tile loop's own phases were enclosed in it, the final write is not
     writeLogInfo_("[soa-rt] off-grid " + String(rtOffGrid().load())

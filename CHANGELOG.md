@@ -137,6 +137,17 @@ set back.
   fold's 20 ppm) are options; both lost peptides in the screen. Without v2 nothing folds across frames, so the 1.5.0
   options above still give the 1.5.0 spectra. `-1` restores the same-frame fold. Logged as `[twins]` (pairs joined at
   one frame and across frames, pairs left apart at a cell edge), stamped in `spx:twin_merge`.
+- **Speed and memory.** The parallel structure changed, the output did not: the same semantic digest as without these
+  changes, at 16 and 100 threads and with one or two cells per tile.
+  - The retention-time tiles are pipelined. Up to two tiles have windows in flight; the next tile is read, and the
+    finished one sorted, folded and written, while the windows run. `DIASPEXTRACT_PIPE_TILES=1` restores one tile at
+    a time.
+  - The serial stages of a heavy window run as bounded tasks.
+  - The MS1 conversion and sorts and the precursor-inference batches run in parallel.
+
+  Measured before the per-run defaults, with two or three runs per build on one node: HeLa 25pc at 10 ng takes 44–48 %
+  less wall time at 32 to 192 threads, TNBC 36 % less at 100 threads. Peak memory rises with the second tile in
+  flight: TNBC from 20 to 28 GB, HeLa 25pc by 1–17 %.
 - **New options, off by default:**
   - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
     fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums

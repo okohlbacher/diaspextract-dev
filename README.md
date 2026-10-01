@@ -90,8 +90,10 @@ so search it as written.
 
 Memory, not CPU, decides whether a run fits a machine. The window loop therefore runs **tile by tile**: the run is cut
 into fixed 600-s retention-time cells at MS1 frame times, each tile (one cell by default) is read, traced, scored,
-sorted and written before the next one starts, and the fragments that straddle a cut are carried over. Tiling
-bounds the fragment working set; the MS1 traces and precursors of the whole run stay resident throughout. Within a
+sorted and written, and the fragments that straddle a cut are carried over. Since 1.6.0 the tiles are pipelined: up
+to two tiles have windows in flight, the next tile is read and the finished one sorted, folded and written while the
+windows run, with the same output as one tile at a time (`DIASPEXTRACT_PIPE_TILES=1` restores that, at less memory).
+Tiling bounds the fragment working set; the MS1 traces and precursors of the whole run stay resident throughout. Within a
 tile, isolation windows are admitted while they fit in 75 % of the machine's free RAM, so the run adapts to
 neighbours on a shared machine; one window is always admitted whatever the memory says, so a single oversized window cannot deadlock the run. Between tiles the allocator's free pages are returned to the OS.
 
@@ -182,8 +184,8 @@ procedure cannot stratify by charge, filter the search results per precursor cha
 charge, gate, assembly and denoising options shape the spectra by definition; in the memory and concurrency table,
 only the options marked **changes output** move the spectrum list, the others cost or save time and memory.
 
-**Which option for what.** Memory: `-tile:cells_per_tile` (1 is the smallest footprint), `-perf:max_concurrent_windows`
-and `-perf:mem_fraction`; avoid `.mzpeak` output and `-trace:detector openms` on a small machine, both process the
+**Which option for what.** Memory: `-tile:cells_per_tile` (1 is the smallest footprint), `-perf:max_concurrent_windows`,
+`-perf:mem_fraction` and `DIASPEXTRACT_PIPE_TILES=1` (one tile at a time); avoid `.mzpeak` output and `-trace:detector openms` on a small machine, both process the
 whole run at once. Time: `-threads`, and `-perf:malloc_trim false` when memory is not the constraint. Sensitivity:
 `-perf:stream_load false` on a machine with the memory for it, and trying `-trace:detector openms` on your own data.
 Charge and FDR: `-charge:min_charge`. The spectra of 1.5.0: `-assembly:im_weight_sigma 0
