@@ -318,18 +318,41 @@ screen (1.177 %).
 the 43-run harness evidence (corpus_v3_rcb_public). Each needs a counter first, then a both-engines + entrapment A/B.
 Reviewer outputs: docs/reviews/release-1.6.0/final-review-2026-10-01/ (codex.md, kimi.md, vibe.md); verdicts in the
 release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG (item 3 fixed before the release).
+User decision 2026-10-01 07:15: fix 1-3 before releasing; 1 and 2 were tried on branch fix160-monocheck and rejected by
+the panel screen (see there); 3 was accepted (branch fix160-fusecap, merged into release-1.6.0). User decision 09:05:
+item 2 is redesigned for 1.6.0 (the twin fold joins same-mono pairs at nearby frames; the extension stays); item 1 stays
+a documented known limitation.
 
-1. **v2 counts an empty heavier position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returns 0
-   when PS(-j+1) is 0 at mul == 1, and the box (auto, clamped to at most 0.03) is narrower than the walk's own partner
-   tolerance (charge:iso_im_tolerance 0.05), so a walk's own partner outside the box rejects its step; with iterate one
-   empty position inside the walk moves the mono two isotopes right. Measure: a [monocheck] counter of rejections with
-   an empty denominator or numerator that the walk itself stood on. Fixes: treat an absent denominator as no evidence
-   (skip, or compare over two positions as the veto path does), or count the walk's own partner whatever the box, or
-   derive the clamp from iso_im_tolerance.
-2. **v2 extension onto another precursor's mono** (kimi F1, codex Q12; medium). B takes `bt` from PS, which sums
-   claimed traces, so the new mono can be another precursor's mono at a different frame or 1/K0; the twin fold
-   (same MS1 frame) cannot join them. Measure: count extensions whose `bt` is another precursor's mono trace at the same
-   charge. Fix: skip or flag those, or extend the twin relation to this provenance.
+1. **OPEN -- fix tried 2026-10-01 (user decision 07:15: fix before release) and rejected by the screen. v2 counts an
+   empty heavier position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returns 0 when PS(-j+1) is
+   0, and the box (auto, at most 0.03) is narrower than the walk's own partner tolerance (charge:iso_im_tolerance 0.05);
+   with iterate one empty position inside the walk moves the mono two isotopes right. Variant chosen on the K562 9905
+   replica (monocheck_v2/fix160/: walkrep4 + mc2_repeval4, release dump, identified keys held fixed; scorecard-A-subset
+   isotope error): shipped 7.90 %, 'stop' (empty heavier position = no decision, the step stands) 7.85 %, 'two
+   positions' 7.87 %, 'own partner as denominator' 7.87 %. Built as `ratio()` -> -1 with a [monocheck] counter (47,488
+   tests stopped on K562, 222 on HeLa_22, 9,745 on HeLa_34). Screen (SCREENING n = 1, vs rcb1, Sage / MSFragger /
+   entrapment; arm fix160-monocheck-3, 9fb23fc = this change alone): K562 -0.81 / -0.66 % / +0.00 pt, HeLa_22 -0.03 /
+   -0.14 % / -0.02 pt, HeLa_34 -0.45 / -0.58 % / -0.01 pt; K562 isotope error 5.54 -> 5.60 %, spectra +1.5 % (15k fewer
+   twin folds). Every build with this change lost 0.4-0.8 % on HeLa_34 and K562 -> not shipped. Reading: an empty
+   in-box position inside the walk means the walk stepped onto off-mobility traces (isotope 1/K0 scatter p90 is 0.003 on
+   K562 against the walk's 0.05), so rc-b's double move right is the outcome of "an empty lighter position rejects the
+   step onto it and every step beyond"; 'stop' keeps steps across that position. The clamp was not raised: the auto box
+   is 0.0101 on K562 and 0.018/0.022 on HeLa py3 (none clamped), and wider boxes were worse in the v2 analysis. If
+   revisited: count the walk's own partner whatever the box (both positions), behind the same screen.
+2. **OPEN -- two fixes tried 2026-10-01 and rejected by the screen. v2 extension onto another precursor's mono** (kimi
+   F1, codex Q12; medium). B takes `bt` from PS, which sums claimed traces, so the new mono can be another precursor's
+   mono at a different frame or 1/K0, which the twin fold (same MS1 frame) cannot join. Tried together with the item-1
+   change (SCREENING n = 1 vs rcb1, Sage / MSFragger):
+   - strict claim check, refuse every extension onto a mono another precursor holds after A or an earlier extension
+     took (4c2b88a, arm fix160-monocheck-1): K562 9905 -0.58 / -0.18 %, HeLa_22 -0.02 / +0.01 %, HeLa_34 -0.47 /
+     -0.63 %; K562 isotope error 5.54 -> 9.78 %, spectra +3.7 % (HeLa_34 +3.0 % = 17,957 fewer twin folds: most refused
+     extensions were twins the fold DOES join);
+   - fold-aware claim check, refuse only when the twin fold would not join the two (994fa91, arm fix160-monocheck-2):
+     K562 -0.67 / -0.38 %, HeLa_22 -0.04 / -0.53 %, HeLa_34 -0.41 / -0.76 %; isotope error 8.63 %, spectra +2.6 %.
+   Against build 3 (item 1 alone: K562 -0.81 / -0.66 %, HeLa_22 -0.03 / -0.14 %, HeLa_34 -0.45 / -0.58 %) the claim
+   checks show no consistent ID cost (K562 better, HeLa within +-0.4 pt either way) but raise the isotope error by 3-4 pt
+   (all M+1; M-1 stays 1.5 %): the extension's value includes these same-mono pairs. A fix needs the fold to join them
+   (one mono trace at nearby frames) rather than refusing the extension.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranked below an unfused peak of equal total intensity at the 500-peak cap. **Fixed before the release (user,
    2026-10-01; branch fix160-fusecap):** each fragment carries its key's intensity term (the IM-weighted apex, the
