@@ -3506,15 +3506,17 @@ protected:
     // two earlier parallel versions kept the arena append serial (docs/BASELINE.md, "Parallelising the MS1 trace
     // conversion"); DIASPEXTRACT_MS1_CONVERT_SERIAL=1 runs the serial loop below.
     static const bool conv_serial = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_CONVERT_SERIAL"); return e && *e && *e != '0'; }();
-    const bool conv_par = ms1_prune && !conv_serial && n_tr >= 4096 && omp_in_parallel() && omp_get_num_threads() > 1;
+    bool conv_par = ms1_prune && !conv_serial && n_tr >= 4096 && omp_in_parallel() && omp_get_num_threads() > 1;
+    const char* conv_why = "";
+    vector<size_t> at, off;   // segment s holds positions [at[s], at[s+1]) of the sequence; off: span length, then offset
+    auto segOf = [&at](size_t g) { return (size_t)(std::upper_bound(at.begin(), at.end(), g) - at.begin()) - 1; };
+    const int ntask = conv_par ? std::max(1, std::min(4 * omp_get_num_threads(), (int)(n_tr / 1024))) : 1;   // bounded: no task-count cliff
+    std::exception_ptr conv_err;   // [task-err]
     if (conv_par)
     {
-      vector<size_t> at(seg.size() + 1, 0);           // segment s holds positions [at[s], at[s+1]) of the sequence
+      at.assign(seg.size() + 1, 0);
       for (size_t s = 0; s < seg.size(); ++s) at[s + 1] = at[s] + seg[s].size();
-      auto segOf = [&at](size_t g) { return (size_t)(std::upper_bound(at.begin(), at.end(), g) - at.begin()) - 1; };
-      const int ntask = std::max(1, std::min(4 * omp_get_num_threads(), (int)(n_tr / 1024)));   // bounded: no task-count cliff
-      vector<size_t> off(n_tr + 1, 0);                // span length per trace, then (below) its arena offset
-      std::exception_ptr conv_err;   // [task-err]
+      off.assign(n_tr + 1, 0);
       #pragma omp taskloop num_tasks(ntask) default(shared)
       for (int c = 0; c < ntask; ++c)
       { try {
@@ -3526,6 +3528,13 @@ protected:
       if (conv_err) std::rethrow_exception(conv_err);
       off[0] = store.inten.size();
       for (size_t g = 0; g < n_tr; ++g) off[g + 1] += off[g];   // off[g] = the arena size before trace g's append
+      // [review] Trace::off is 32-bit and makeSpan narrows the arena size without a check. Past 2^32 - 1 floats two
+      // traces' narrowed offsets would alias and their tasks would race on the same span; the serial loop below keeps
+      // the old (deterministic) result there instead.
+      if (off[n_tr] > (size_t)std::numeric_limits<uint32_t>::max()) { conv_par = false; conv_why = ", the arena passes 2^32 floats"; }
+    }
+    if (conv_par)
+    {
       store.inten.resize(off[n_tr], 0.0f);
       out.resize(n_tr);
       #pragma omp taskloop num_tasks(ntask) default(shared)
@@ -3556,7 +3565,7 @@ protected:
         vector<MassTrace>().swap(sv);
       }
     }
-    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (" + (conv_par ? "parallel" : "serial") + ")");
+    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (" + (conv_par ? "parallel" : "serial") + conv_why + ")");
     return out;
   }
 
@@ -6483,6 +6492,15 @@ protected:
         // [dyn-mem] admit while fewer than n_conc windows are in flight and the projection fits mem_fraction
         // of MemAvailable (re-read at every admission); an empty pipeline always admits, however large the window
         if ((active.load() == 0) || (active.load() < n_conc && inflight.load() + need <= budget)) break;
+        // [review] A team of ONE (-threads 1, OMP_THREAD_LIMIT=1, OMP_DYNAMIC) has nobody else to run the windows admitted
+        // so far, and libgomp's taskyield is a no-op: once the window cap or the memory budget held, this loop spun forever
+        // (the barrier path since before the pipeline, and the pipeline's solo fallback). In a team of one every queued
+        // window is a child of this thread, so taskwait runs them, which releases their admission charges.
+        if (omp_get_num_threads() < 2)
+        {
+          #pragma omp taskwait
+          continue;
+        }
         if (!pipe)   // [pipe] the driver must not be handed a window here (a no-op in libgomp, not in every runtime)
         {
           #pragma omp taskyield
@@ -7087,6 +7105,14 @@ protected:
         {
           for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
           {
+            // [review] Backpressure on the writer: at most `depth` tiles whose windows are done wait for their write. Without
+            // it the driver kept reading and admitting while the writer lagged (slow output storage), so finished spectra and
+            // writer tasks spinning on their predecessor piled up without a bound. Never binds while the writer keeps pace:
+            // by the read/write order in their logs it would not have bound in any of the 38 pipelined scalfix/integrate
+            // runs. Deadlock-free: writers 0..fin-1 are spawned, and they wait only on each other, in spawn order.
+            while (written.load(std::memory_order_acquire) + depth < fin && !pipe_abort.load())
+              if (!teamAssist_(8)) std::this_thread::sleep_for(std::chrono::milliseconds(1));   // help the writer meanwhile
+            if (pipe_abort.load()) break;
             issue(fin + depth);
             if (!runs[fin]) break;   // the reader stopped (a failure)
             TileRun& R = *runs[fin];
