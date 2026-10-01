@@ -2641,7 +2641,7 @@ protected:
                           "'true' (v1): a lighter trace becomes the monoisotope only if its MS1 elution profile correlates with the seed trace's (Pearson >= charge:mono_profile_min_corr over the frames both have; below 3 shared frames the correlation test passes unchecked) and its 1/K0 is within charge:mono_profile_max_dim of the seed's. "
                           "The walk stops at the first failed step: the monoisotope is the last accepted peak, and the rejected trace and the ones beyond it stay unclaimed for other precursors. "
                           "'v2': isotope-position intensity sums (charge:mono_position_*). PS(k) = summed apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (the partner tolerance in m/z, gate:delta_rt, charge:mono_position_im_box 1/K0 of the seed, by default from the run's own isotope scatter). "
-                          "The walk's leftmost step j is rejected when PS(-j) / PS(-j+1) x lambda < charge:mono_position_min_ratio (lambda = max(0.1, 0.000594 x neutral mass), averagine's M-1/M0 bound; an empty heavier position decides nothing and the step stands, an empty lighter one counts as 0); "
+                          "The walk's leftmost step j is rejected when PS(-j) / PS(-j+1) x lambda < charge:mono_position_min_ratio (lambda = max(0.1, 0.000594 x neutral mass), averagine's M-1/M0 bound; an empty heavier position counts as 0); "
                           "the monoisotope moves one isotope right, the rejected trace stays claimed, and (charge:mono_position_iterate true) the new leftmost step is tested in turn. If nothing was rejected and the walk ended on a miss (not a charge:mono_averagine_guard stop), the next lighter position is accepted without claiming when its ratio is >= charge:mono_position_extend (0 = off). "
                           "v2 judges each walk at its precursor's final charge, after charge:im_charge_veto: a z=1 walk re-called 2+ stepped 1.003 m/z, two isotopes at 2+, and is read at 2+ spacing. "
                           "Both 'true' and 'v2' keep the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, false);
@@ -2649,7 +2649,7 @@ protected:
     registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check true: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
     registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check true: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
     registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: the walk's leftmost step is rejected when its averagine-scaled position ratio PS(-j) / PS(-j+1) x lambda is below this.", false, true);
-    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance (0.05) away, so a walk's own partner can lie outside the box: an empty heavier position then decides nothing (the step stands), an empty lighter one rejects the step.", false, true);
+    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance (0.05) away, so a walk's own partner can lie outside the box and then counts as an empty position.", false, true);
     registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when no step was rejected and the walk ended on a miss, move the monoisotope one isotope lighter (the most intense trace there, not claimed) if that position's ratio is >= this. 0 = off.", false, true);
     registerStringOption_("charge:mono_position_iterate", "<true/false>", "true", "charge:mono_profile_check v2: after a rejected leftmost step, test the new leftmost step too, and repeat while steps fail. false tests the leftmost step only.", false, true);
     setValidStrings_("charge:mono_position_iterate", {"true", "false"});
@@ -3365,12 +3365,10 @@ protected:
   /// position k within im_box 1/K0, in m/z order (deterministic): findPartner takes the first box candidate in m/z
   /// order and IM slicing splits one isotope over several traces, so single-trace ratios are noisy. A: an identified
   /// walk carries at most one spurious step and it is the leftmost (engines search -1..2), so step j = the leftmost is
-  /// rejected when PS(-j) / PS(-j+1) x lambda < min_ratio and the mono moves one isotope right (iterate: repeat); an
-  /// empty heavier position decides nothing and the step stands (the walk found its partner within iso_im_tol, which
-  /// can lie outside the box). B: when A rejected nothing and the walk ended on a miss (< 5 steps, not a
-  /// charge:mono_averagine_guard stop), the true mono may be claimed by a brighter precursor, so the next lighter
-  /// position becomes the mono, unclaimed, on a ratio >= extend. Only mono_mz changes: claims, charge and n_isotopes
-  /// are the greedy loop's and the veto's.
+  /// rejected when PS(-j) / PS(-j+1) x lambda < min_ratio and the mono moves one isotope right (iterate: repeat).
+  /// B: when A rejected nothing and the walk ended on a miss (< 5 steps, not a charge:mono_averagine_guard stop), the
+  /// true mono may be claimed by a brighter precursor, so the next lighter position becomes the mono, unclaimed, on a
+  /// ratio >= extend. Only mono_mz changes: claims, charge and n_isotopes are the greedy loop's and the veto's.
   /// im_box 0 (auto): 3.5 x the 90th percentile of |d 1/K0| between the brightest decile of the walks (commit order is
   /// seed-intensity order) and their nearest trace one isotope heavier at the walk's charge (partner m/z tolerance,
   /// delta_rt, iso_im_tol), clamped to [0.01, 0.03]. `pcs` must be inferPrecursors_'s output in its order (the veto
@@ -3382,7 +3380,7 @@ protected:
     const double ISO = 1.0033548;
     const double PROTON_ = 1.00727646;
     // walks tested, moved right, steps rejected, extensions tested, moved left, walks read at a veto-changed charge,
-    // moved back onto the seed, walks whose test stopped at an empty heavier position
+    // moved back onto the seed
     std::array<size_t, 8> mc_tot{};
     double v2_box = mono_pos_im_box_, v2_p90 = -1.0;
     size_t v2_nb = 0, v2_nhit = 0;
@@ -3439,8 +3437,7 @@ protected:
         v2_box = v2_p90 < 0.0 ? 0.01 : std::min(0.03, std::max(0.01, 3.5 * v2_p90));
       }
       // Per precursor: bit 0 walk tested, 1 moved right, 2 moved back onto the seed, 3 extension tested, 4 moved left,
-      // 5 read at a veto-changed charge, 6 test stopped at an empty heavier position; rej = steps rejected. Summed below
-      // in index order.
+      // 5 read at a veto-changed charge; rej = steps rejected. Summed below in index order.
       vector<uint8_t> flag(pcs.size(), 0), rej(pcs.size(), 0);
       #pragma omp parallel for schedule(dynamic, 1024)
       for (long ii = 0; ii < (long)pcs.size(); ++ii)
@@ -3470,8 +3467,6 @@ protected:
         // q of the step onto position -j: PS(-j) / PS(-j+1) x lambda(neutral mass of the mono after that step). A walk
         // re-read at a veto charge never stood on its in-between positions: an empty one there is no evidence against
         // the step, so the step is compared over two positions, PS(-j) / PS(-j+2) x lambda^2 / 2 (Poisson M+2/M0).
-        // An empty heavier position is no evidence either way (the walk's own partner there can lie outside the box,
-        // up to iso_im_tol away): -1 = no decision, the step stands (it used to count as q = 0, a rejection).
         auto ratio = [&](int j, long* best) -> double {
           const double neutral = (s.mz - j * ISO / z) * z - z * PROTON_;
           const double lam = std::max(0.10, 0.000594 * neutral);
@@ -3480,9 +3475,9 @@ protected:
           if (mul > 1 && (j - 1) % mul != 0)
           {
             const double den2 = PS(-j + 2, nullptr);
-            if (den2 > 0.0) return PS(-j, best) / den2 * lam * lam / 2.0;
+            return den2 > 0.0 ? PS(-j, best) / den2 * lam * lam / 2.0 : 0.0;
           }
-          return -1.0;
+          return 0.0;
         };
         // the m/z standing at position -i: the walk's own partner where the walk stepped, else the most intense trace
         // there in the box, else the position itself
@@ -3498,11 +3493,8 @@ protected:
         if (nl > 0)
         {
           f |= 1;
-          while (acc > 0)
+          while (acc > 0 && ratio(acc, nullptr) < mono_pos_min_ratio_)
           {
-            const double q = ratio(acc, nullptr);
-            if (q < 0.0) { f |= 64; break; }   // empty heavier position: no evidence, the step stands
-            if (q >= mono_pos_min_ratio_) break;
             --acc; ++r;
             if (!mono_pos_iterate_)
             {
@@ -3535,7 +3527,7 @@ protected:
       {
         const uint8_t f = flag[i];
         mc_tot[0] += f & 1; mc_tot[1] += (f >> 1) & 1; mc_tot[6] += (f >> 2) & 1; mc_tot[3] += (f >> 3) & 1; mc_tot[4] += (f >> 4) & 1;
-        mc_tot[5] += (f >> 5) & 1; mc_tot[7] += (f >> 6) & 1; mc_tot[2] += rej[i];
+        mc_tot[5] += (f >> 5) & 1; mc_tot[2] += rej[i];
       }
     }
     String box = String(mono_pos_im_box_);
@@ -3552,8 +3544,7 @@ protected:
     mono_check_stamp_ = (envelope_scoring ? String("n/a (charge:scoring envelope), ") : String("")) + cfg + ": " + String(mc_tot[1]) + " of "
                         + String(mc_tot[0]) + " monos moved right, " + String(mc_tot[4]) + " of " + String(mc_tot[3]) + " moved left";
     writeLogInfo_("[monocheck] " + cfg + ": " + String(mc_tot[0]) + " count walks with a leftward partner tested, " + String(mc_tot[2])
-                  + " steps rejected, " + String(mc_tot[1]) + " monoisotopes moved right (" + String(mc_tot[6]) + " back onto the seed), "
-                  + String(mc_tot[7]) + " tests stopped at an empty heavier position; "
+                  + " steps rejected, " + String(mc_tot[1]) + " monoisotopes moved right (" + String(mc_tot[6]) + " back onto the seed); "
                   + String(mc_tot[3]) + " walks tested for extension, " + String(mc_tot[4]) + " monoisotopes moved left (unclaimed); "
                   + String(mc_tot[5]) + " walks read at the charge the IM veto gave them; claims unchanged"
                   + (envelope_scoring ? " (charge:scoring envelope: not applied)" : ""));
