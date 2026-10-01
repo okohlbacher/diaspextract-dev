@@ -208,12 +208,17 @@ namespace
     while (st->busy.load() != 0) std::this_thread::yield();
     if (st->err) std::rethrow_exception(st->err);
   }
+  /// [review] True on the pipelined tile loop's driver while it drives. Every window task is a child of the driver's
+  /// implicit task, so a taskloop's taskgroup end on the driver (libgomp then runs ANY queued child of the waiting task)
+  /// could hand it a whole window, stalling the reads and admissions: the [det] toTof() in the tile read reached one.
+  /// parTasks_ keeps every pass the driver reaches inline instead (nt = 1 is forTasks_'s serial branch: the same result).
+  inline bool& onPipeDriver_() { static thread_local bool v = false; return v; }
   /// [serial] Task count for one of a window's data-parallel passes over n items: at most 16 and none smaller than
-  /// min_per; 1 (run inline) outside a parallel region. A bounded COUNT, never a grainsize over data: libgomp runs a
-  /// whole taskloop inline once the team's task count passes 64 x nthreads ([gomp-cliff]).
+  /// min_per; 1 (run inline) outside a parallel region and on the pipe driver. A bounded COUNT, never a grainsize over
+  /// data: libgomp runs a whole taskloop inline once the team's task count passes 64 x nthreads ([gomp-cliff]).
   inline long parTasks_(size_t n, size_t min_per)
   {
-    const long cap = omp_in_parallel() ? std::min(16, omp_get_num_threads()) : 1;
+    const long cap = omp_in_parallel() && !onPipeDriver_() ? std::min(16, omp_get_num_threads()) : 1;
     return std::max(1L, std::min(cap, (long)(n / std::max<size_t>(min_per, 1))));
   }
   /// [serial] body(c) for c in [0, nt): nt tasks of the current team (the creating thread waits in the taskloop's
@@ -7059,8 +7064,10 @@ protected:
       // are done hands the tile to the WRITER, a task that finishes the tiles strictly in tile order. So the read
       // of the next tile never waits behind a write (scal-pipe-1 ran both on the driver: on K562 at 100 threads
       // read + write per heavy tile outlasted the tile's windows, which then sat idle at three boundaries).
-      // The driver never runs a window: it never reaches a task scheduling point (teamFor_), so its n_threads - 1
-      // team mates run the windows, the writer, and the reader's and writer's helper tasks when they are free.
+      // The driver does not run windows: it reaches no taskgroup end or taskwait (teamFor_, and parTasks_ keeps its
+      // passes inline), so its n_threads - 1 team mates run the windows, the writer, and the reader's and writer's helper
+      // tasks when they are free. One exception remains: past libgomp's task cliff (team task count > 64 x nthreads) a
+      // spawned window or writer runs undeferred in the driver -- a stall, not a deadlock (review 2026-10-01).
       // Thread 0 rather than `single`'s first arrival: the vendor reader's decode loop opens a nested team next
       // to the driver's place, so under OMP_PROC_BIND=close it shares the window team's cores, never others.
       // Deadlock-free: a window waits only on its own previous tile (CarryGate), which was admitted earlier and
@@ -7101,6 +7108,7 @@ protected:
             admitTile(runs[next].get());
           }
         };
+        onPipeDriver_() = !solo;   // [review] no taskloop on the driver (parTasks_); solo runs its windows itself anyway
         try
         {
           for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
@@ -7133,6 +7141,7 @@ protected:
           }
         }
         catch (...) { drvFail(); }
+        onPipeDriver_() = false;
       }   // the region's barrier: every admitted window and every writer has finished
       if (drv_err) std::rethrow_exception(drv_err);
       if (worker_err) std::rethrow_exception(worker_err);
