@@ -37,6 +37,7 @@
 #include <fstream>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>   // [outer] the MS1 pick worker
 #include <thread>
 #include <map>
 #include <string>
@@ -44,6 +45,7 @@
 #include <cstdlib>     // getenv
 #include <cstring>     // memcpy
 #include <optional>
+#include <memory>      // [outer] unique_ptr
 #include <time.h>      // clock_gettime(CLOCK_THREAD_CPUTIME_ID): [dnoise] filter CPU
 #ifdef __GLIBC__
 #include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
@@ -1877,8 +1879,11 @@ namespace
     PickCompactConsumer(PeakPickerIM& picker, map<WinKey, PeakSlab>& windows,
                         PeakMap& ms1, CompactStats& stats)
       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats) {}
+    /// [outer] the MS1 worker ends with the consumer, also when an exception leaves the load early
+    ~PickCompactConsumer() { stopMs1Worker_(); }
 
     size_t frames_seen = 0;
+    String ms1_pick_mode_;   ///< [outer] how the MS1 batches were picked, for the log (set by finish())
 
     /// [frames] A window's FROZEN frame table (rt, vendor id) with the lockstep cursor: every table
     /// frame the reader skipped (no raw peaks, an empty mobility slice) is appended EMPTY with the
@@ -2020,17 +2025,76 @@ namespace
       if (dnoise && dnoise->on && !dn_loader_checked_) { dnoise->checkLoader(); dn_loader_checked_ = true; }
       ms1_buf_.push_back(std::move(s));
       ++frames_seen;
-      if (ms1_buf_.size() >= kBatchMS1_()) flushMS1_();
+      if (ms1_buf_.size() >= ms1BatchNow_()) flushMS1Async_();
     }
 
+    /// Picks the buffered MS1 frames now, after the worker's batch (if any): the order of the MS1 map is the arrival order.
     void flushMS1_()
     {
-      const int n = (int)ms1_buf_.size();
+      waitMs1Worker_();
+      pickMS1Batch_(ms1_buf_);
+    }
+
+    /// [outer] Hands the buffered MS1 frames to the worker thread and returns to the reader, which decodes the next batch
+    /// meanwhile. The previous batch is picked and appended first, so batches still reach the MS1 map in arrival order,
+    /// and every frame is processed exactly as by flushMS1_: batch composition does not change the output (kBatch_).
+    void flushMS1Async_()
+    {
+      if (!ms1Async_()) { flushMS1_(); return; }
+      waitMs1Worker_();
+      ms1_inflight_.swap(ms1_buf_);   // ms1_buf_ takes the picked (empty) buffer back
+      ms1_buf_.clear();
+      if (!w_th_.joinable())
+      {
+        const int nthr = std::max(1, omp_get_max_threads());   // a new thread starts from the global default team size
+        w_th_ = std::thread([this, nthr] {
+          omp_set_num_threads(nthr);
+          std::unique_lock<std::mutex> lk(w_mu_);
+          for (;;)
+          {
+            w_cv_.wait(lk, [this] { return w_job_ || w_quit_; });
+            if (!w_job_) return;   // quit, nothing pending
+            lk.unlock();
+            std::exception_ptr err;
+            try { pickMS1Batch_(ms1_inflight_); } catch (...) { err = std::current_exception(); }
+            lk.lock();
+            w_err_ = err; w_job_ = false;
+            w_cv_.notify_all();
+          }
+        });
+      }
+      { std::lock_guard<std::mutex> g(w_mu_); w_job_ = true; }
+      w_cv_.notify_all();
+    }
+
+    /// [outer] Waits for the worker's batch and rethrows its error, if any.
+    void waitMs1Worker_()
+    {
+      if (!w_th_.joinable()) return;
+      std::unique_lock<std::mutex> lk(w_mu_);
+      w_cv_.wait(lk, [this] { return !w_job_; });
+      if (w_err_) { std::exception_ptr e = w_err_; w_err_ = nullptr; lk.unlock(); std::rethrow_exception(e); }
+    }
+
+    /// [outer] Lets the worker finish its batch and ends it (finish() and the destructor; an unreported error is dropped
+    /// here only when an exception is already unwinding the load).
+    void stopMs1Worker_()
+    {
+      if (!w_th_.joinable()) return;
+      { std::lock_guard<std::mutex> g(w_mu_); w_quit_ = true; }
+      w_cv_.notify_all();
+      w_th_.join();
+      w_quit_ = false;
+    }
+
+    void pickMS1Batch_(std::vector<MapType::SpectrumType>& buf)   // one MS1 batch, picked and appended to the MS1 map, then emptied
+    {
+      const int n = (int)buf.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
       // [ledger] the buffered RAW MS1 frames, 20 B per raw peak, held until picked: pass 1's largest transient.
       long long raw_b = 0;
-      for (const auto& sp : ms1_buf_) raw_b += (long long)sp.size() * 20;
+      for (const auto& sp : buf) raw_b += (long long)sp.size() * 20;
       LedCharge _raw(LC_SCRATCH, raw_b);
       PeakPickerIM picker = picker_;
       std::exception_ptr pick_err;
@@ -2044,7 +2108,7 @@ namespace
       {
         try
         {
-          auto& s = ms1_buf_[(size_t)i];
+          auto& s = buf[(size_t)i];
           ensureIMArrayName(s);
           if (dn) dnoise->frame(s, dn_work.at((size_t)omp_get_thread_num()), dn_cnt[(size_t)i]);   // [dnoise] the raw points, before the pick
           if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) picker.pickIMCluster(s);
@@ -2060,7 +2124,7 @@ namespace
       if (pick_err) std::rethrow_exception(pick_err);
       if (dn) dnoise->add(dn_cnt);
       if (ms1HistOn_())
-        for (const auto& sp : ms1_buf_)
+        for (const auto& sp : buf)
         {
           long long c[5] = {0, 0, 0, 0, 0};
           for (const auto& pk : sp) { const float v = pk.getIntensity(); ++c[v < 100 ? 0 : v < 300 ? 1 : v < 1000 ? 2 : v < 10000 ? 3 : 4]; }
@@ -2068,10 +2132,10 @@ namespace
         }
       // [ms1-prune] after [ms1-hist] (which counts what was PICKED), before the charge below (which is then
       // the kept bytes)
-      if (ms1_prune && ms1_prune->on) ms1_prune->batch(ms1_buf_, [](const MSSpectrum&) { return true; });
-      { long long mb = 0; for (const auto& s : ms1_buf_) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
-      for (auto& s : ms1_buf_) ms1_.addSpectrum(std::move(s));
-      ms1_buf_.clear();
+      if (ms1_prune && ms1_prune->on) ms1_prune->batch(buf, [](const MSSpectrum&) { return true; });
+      { long long mb = 0; for (const auto& s : buf) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
+      for (auto& s : buf) ms1_.addSpectrum(std::move(s));
+      buf.clear();
       flush_wall_() += phase_clock_() - _tf0;
       loadTrim_();
     }
@@ -2099,6 +2163,9 @@ namespace
     void finish()
     {
       flushMS1_(); flush_();
+      stopMs1Worker_();
+      ms1_pick_mode_ = ms1Async_() ? "beside the reader on a worker thread, batches of " + String(ms1BatchNow_())
+                                   : "inside the reader's hand-over, batches of " + String(kBatchMS1_());
       // [frames] the tail of every delivered window's table; a table window that delivered nothing
       // gets no slab (it is counted as absent by the caller)
       for (auto& kv : tables_)
@@ -2140,6 +2207,21 @@ namespace
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
     bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
+    /// [outer] The MS1 worker: picks ms1_inflight_ while the reader fills ms1_buf_. w_job_ is set by the reader's thread
+    /// and cleared by the worker, both under w_mu_; the worker touches only its batch, the MS1 map, the prune, the dnoise
+    /// counts and the ledger (atomic), none of which the reader's thread uses before waitMs1Worker_ has returned.
+    std::vector<MapType::SpectrumType> ms1_inflight_;
+    std::thread w_th_;
+    std::mutex w_mu_;
+    std::condition_variable w_cv_;
+    bool w_job_ = false, w_quit_ = false;
+    std::exception_ptr w_err_;
+    /// [outer] DIASPEXTRACT_MS1_ASYNC=0: the MS1 batches are picked inside the reader's hand-over, one full batch at a
+    /// time (the behaviour before 2026-10-01). Default: on the worker, beside the reader's decode of the next batch.
+    static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return !(e && *e == '0'); }(); return v; }
+    /// [outer] Beside the reader two batches are in memory (one being picked, one filling), so each is half the
+    /// synchronous batch and the raw-frame residency stays what it was.
+    static size_t ms1BatchNow_() { return ms1Async_() ? std::max<size_t>(1, kBatchMS1_() / 2) : kBatchMS1_(); }
     map<WinKey, PeakSlab>& windows_;
     PeakMap& ms1_;
     CompactStats& stats_;
@@ -3143,10 +3225,18 @@ protected:
     });
 
     auto _pi_t2 = std::chrono::steady_clock::now();
-    vector<bool> used(N, false);
+    // [outer] `used` as relaxed atomic bytes: the commit of one batch (the only writer) runs beside the speculation of the
+    // next, which then reads a mix of old and new claims (see the commit loop for why that stays exact).
+    struct UsedMap
+    {
+      std::unique_ptr<std::atomic<uint8_t>[]> a;
+      explicit UsedMap(size_t n) : a(new std::atomic<uint8_t>[n]()) {}
+      bool operator[](size_t i) const { return a[i].load(std::memory_order_relaxed) != 0; }
+      void set(size_t i) { a[i].store(1, std::memory_order_relaxed); }
+    } used(N);
     vector<Precursor_> out;
     // [spec] Ordered speculation, exact: the only mutable state a seed reads is `used`, which is monotone.
-    // A batch of seeds is evaluated concurrently against a frozen `used`, recording the partners each
+    // A batch of seeds is evaluated concurrently against `used` (growing under the previous batch's commit, [outer]), recording the partners each
     // search returned; the commit walks the batch in the original order, skips a seed that is now used,
     // and re-evaluates one whose recorded partner has since been claimed. A search that returned -1 saw
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
@@ -3375,25 +3465,31 @@ protected:
       } while (0);
     };
 
-    size_t spec_batch = 8192;
+    // [outer] 4096 (was 8192): the speculation of a batch now runs beside the commit of the one before, so it is stale by
+    // about two batches; half the batch keeps the re-evaluated share (serial, on the committing thread) where it was.
+    size_t spec_batch = 4096;
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
-    vector<SeedRes> res(spec_batch);
+    vector<SeedRes> res_a(spec_batch), res_b(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
     std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     vector<MonoV2In_> v2in;           // [monocheck-v2] parallel to `out` when mono_check_ == 2
-    for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
+    const size_t n_order = order.size(), n_batch = (n_order + spec_batch - 1) / spec_batch;
+    auto bnd = [&](size_t k) { return std::min(k * spec_batch, n_order); };   // batch k is [bnd(k), bnd(k + 1))
+    // Phase 1: speculate. Nothing here writes `used`.
+    auto speculate = [&](long ii, size_t b0, vector<SeedRes>& res)
     {
-      const size_t b1 = std::min(b0 + spec_batch, order.size());
-      // Phase 1: speculate. Nothing here writes `used`, so the concurrent reads are safe.
-      #pragma omp parallel for schedule(dynamic, 16)
-      for (long ii = (long)b0; ii < (long)b1; ++ii)
-      {
-        SeedRes& R = res[(size_t)ii - b0];
-        const size_t seed = order[(size_t)ii];
-        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); continue; }
-        evalSeed(seed, R);
-      }
-      // Phase 2: commit in the original seed order.
+      SeedRes& R = res[(size_t)ii - b0];
+      const size_t seed = order[(size_t)ii];
+      if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); return; }
+      evalSeed(seed, R);
+    };
+    // Phase 2: commit in the original seed order. [outer] It may run while the next batch is speculated: `used` only ever
+    // goes 0 -> 1 and only this loop writes it, so a speculating seed sees a subset of the claims made by the time it
+    // commits. A claim it saw stays (a skipped candidate stays skipped, a used seed is skipped here too); a claim it missed
+    // can only hit the partner it returned, which is a recorded dependency and makes it re-evaluate here against the exact
+    // state. So every committed result equals the serial walk's, whatever mix of claims the speculation read.
+    auto commit = [&](size_t b0, size_t b1, vector<SeedRes>& res)
+    {
       for (size_t ii = b0; ii < b1; ++ii)
       {
         const size_t seed = order[ii];
@@ -3404,10 +3500,28 @@ protected:
         if (stale) { evalSeed(seed, R); ++n_conflict; }
         for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
         if (mono_check_) for (size_t q = 0; q < mc_tot.size(); ++q) mc_tot[q] += R.mc[q];
-        used[seed] = true;
-        for (size_t j : R.claims) used[j] = true;
+        used.set(seed);
+        for (size_t j : R.claims) used.set(j);
         ++n_committed;
       }
+    };
+    #pragma omp parallel for schedule(dynamic, 16)
+    for (long ii = (long)bnd(0); ii < (long)bnd(1); ++ii) speculate(ii, bnd(0), res_a);
+    for (size_t k = 0; k < n_batch; ++k)
+    {
+      // [outer] one thread commits batch k, the others speculate batch k+1 (the committer joins them when done)
+      vector<SeedRes>& cur = (k % 2 == 0) ? res_a : res_b;
+      vector<SeedRes>& nxt = (k % 2 == 0) ? res_b : res_a;
+      const size_t c0 = bnd(k), c1 = bnd(k + 1), n0 = bnd(k + 1), n1 = bnd(k + 2);
+      std::exception_ptr commit_err;
+      #pragma omp parallel
+      {
+        #pragma omp single nowait
+        { try { commit(c0, c1, cur); } catch (...) { commit_err = std::current_exception(); } }
+        #pragma omp for schedule(dynamic, 16)
+        for (long ii = (long)n0; ii < (long)n1; ++ii) speculate(ii, n0, nxt);
+      }
+      if (commit_err) std::rethrow_exception(commit_err);
     }
     // [z1-diag] DIASPEXTRACT_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
     // (a halved 2+ ion's M+1) or +ISO/3, and was it already claimed.
@@ -3453,7 +3567,8 @@ protected:
                     + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
                     + "%), " + String(n_skipped) + " already claimed)");
       writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort"
-                                                              : String("strictly increasing, identity")));
+                                                              : String("strictly increasing, identity"))
+                    + "; greedy walk: each batch committed beside the next batch's speculation, " + String(n_batch) + " batches");
     }
     if (mono_check_ == 1)
     {
@@ -4871,6 +4986,7 @@ protected:
                         + String(h[3].load()) + " (" + pc(h[3].load()) + "%), >=10000 " + String(h[4].load()) + " (" + pc(h[4].load()) + "%)"); }
         phaseAdd_("LOAD(stream)", 0.0, 0.0, false);                // [perf-instr] start-to-here
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
+        writeLogInfo_("[outer] MS1 pick " + consumer.ms1_pick_mode_);
         if (std::getenv("DIASPEXTRACT_LOAD_ONLY"))
         { if (tile_source) writeLogInfo_("[perf-load] DIASPEXTRACT_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
           report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
