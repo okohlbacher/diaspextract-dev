@@ -75,9 +75,7 @@ Each default can be set back.
     `-charge:iso_im_tolerance` (0.05) away, so its own partner can lie outside the box: an empty heavier position
     therefore decides nothing, and the step stands.
   - When nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope if its
-    ratio is at least `extend`. Its trace is not claimed. When that trace is already another precursor's monoisotope
-    (or an earlier, brighter extension's), the extension is kept only if the twin fold will join the two spectra
-    (same MS1 frame, same charge, 1/K0 within `-assembly:twin_im_tolerance`).
+    ratio is at least `extend`. Its trace is not claimed.
   - Each walk is judged at its precursor's final charge, after `-charge:im_charge_veto`. A z = 1 walk that the veto
     re-calls 2+ is read at 2+ spacing.
   - Only the reported monoisotope moves. Claims, charge and `spx_n_isotopes` are unchanged.
@@ -101,15 +99,14 @@ Each default can be set back.
 - `-assembly:frag_core_frames` must be odd only with `-assembly:frag_intensity core`, the only mode that uses it.
 - An exception inside the parallel twin fold or the post-fusion cap now ends the run with an error message, not an
   abort. An allocation failure is one example.
-- **Fixed in the monoisotope check v2 before release** (found in the release review).
-  - **Box narrower than the walk.** The v2 box is at most 0.03 1/K0, but the count walk accepts isotope partners up to
-    `-charge:iso_im_tolerance` (0.05) away. An empty heavier position, where the walk's own partner lies outside the
-    box, counted against the step, and with `iterate` one such position inside the walk moved the monoisotope two
-    isotopes right. It now decides nothing and the step stands.
-  - **Duplicate monoisotope after the extension.** The extension could put a monoisotope on a trace that is another
-    precursor's monoisotope, and the twin fold joins two spectra only when they come from the same MS1 frame. The
-    extension now lands there only when the fold will join the two.
+- **Fixed in the monoisotope check v2 before release** (found in the release review): **box narrower than the walk.**
+  The v2 box is at most 0.03 1/K0, but the count walk accepts isotope partners up to `-charge:iso_im_tolerance` (0.05)
+  away. An empty heavier position, where the walk's own partner lies outside the box, counted against the step, and
+  with `iterate` one such position inside the walk moved the monoisotope two isotopes right. It now decides nothing
+  and the step stands.
 - **Known limitations.**
+  - **Duplicate monoisotope after the extension.** v2's extension can put a monoisotope on a trace that is another
+    precursor's monoisotope. The twin fold joins the two spectra only when they come from the same MS1 frame.
   - **Fusion and the cap.** A fused peak is ranked under the cap by its best piece's key, not by its summed
     intensity. Fusion also sums pieces whose elution does not overlap, unlike the same-bin merge.
   - **Fusion and twins.** Fusion is not reconciled across twins, so after the fold's 10-ppm merge one ion can still

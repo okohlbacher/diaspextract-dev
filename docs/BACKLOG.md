@@ -317,8 +317,8 @@ screen (1.177 %).
 **Status 2026-10-01:** open -- deferred at release because every fix changes the default output and would invalidate
 the 43-run harness evidence (corpus_v3_rcb_public). Each needs a counter first, then a both-engines + entrapment A/B.
 Reviewer outputs: docs/reviews/release-1.6.0/final-review-2026-10-01/ (codex.md, kimi.md, vibe.md); verdicts in the
-release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG, except 1 and 2, fixed before
-the release (user decision 2026-10-01 07:15; the CHANGELOG lists them as fixed).
+release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG, except 1, fixed before the
+release (user decision 2026-10-01 07:15: fix 1-3 before releasing; 2 was tried and rejected by the screen, see there).
 
 1. **FIXED 2026-10-01 (branch fix160-monocheck, user decision 07:15: fix before release). v2 counted an empty heavier
    position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returned 0 when PS(-j+1) was 0, and the
@@ -332,17 +332,18 @@ the release (user decision 2026-10-01 07:15; the CHANGELOG lists them as fixed).
    check 10.18 / 10.27 / 10.33 % (10.42 % with the old rejection), with the fold-aware one ('stop') 9.57 %; 'stop' also pushes the fewest keys outside -1..2. The clamp
    was not raised: the auto box is 0.0101 on K562 and 0.018/0.022 on HeLa py3 (none clamped), and wider boxes were worse
    in the v2 analysis.
-2. **FIXED 2026-10-01 (same branch). v2 extension onto another precursor's mono** (kimi F1, codex Q12; medium). B took
-   `bt` from PS, which sums claimed traces, so the new mono could be another precursor's mono at a different frame or
-   1/K0, which the twin fold (same MS1 frame) cannot join. Now B's candidates are applied after every A, serially by
-   (m/z, index): an extension onto a mono another precursor holds after A (or an earlier, brighter extension took) is
-   kept only when the twin fold will join the two (same frame, same charge, |d1/K0| <= assembly:twin_im_tolerance),
-   else refused (counter "extensions refused onto another precursor's monoisotope that the twin fold would not join").
-   The strict reading (refuse every extension onto another mono; arm fix160-monocheck-1, 4c2b88a) failed the screen:
-   K562 9905 Sage -0.58 % / MSFragger -0.18 %, HeLa_34 -0.47 % / -0.63 % vs rcb1, because most refused extensions WERE
-   twins the fold joins (HeLa_34 folds 601,844 -> 583,887, spectra +17,917 = +3.0 %; K562 spectra +3.7 %). The K562
-   replica had put the foldable share at 16 % (6,957 of 43,273; it under-counts same-frame pairs). Position-level check
-   (any trace in the box is a mono): replica 10.66 %, not taken.
+2. **OPEN -- two fixes tried 2026-10-01 and rejected by the screen. v2 extension onto another precursor's mono** (kimi
+   F1, codex Q12; medium). B takes `bt` from PS, which sums claimed traces, so the new mono can be another precursor's
+   mono at a different frame or 1/K0, which the twin fold (same MS1 frame) cannot join. Tried on branch fix160-monocheck
+   (both with the item-1 fix; SCREENING n = 1 vs rcb1, Sage / MSFragger):
+   - strict claim check, refuse every extension onto a mono another precursor holds after A or an earlier extension
+     took (4c2b88a, arm fix160-monocheck-1): K562 9905 -0.58 / -0.18 %, HeLa_22 -0.02 / +0.01 %, HeLa_34 -0.47 /
+     -0.63 %; K562 isotope error 5.54 -> 9.78 %, spectra +3.7 % (HeLa_34 +3.0 % = 17,957 fewer twin folds: most refused
+     extensions were twins the fold DOES join);
+   - fold-aware claim check, refuse only when the twin fold would not join the two (994fa91, arm fix160-monocheck-2):
+     K562 -0.67 / -0.38 %, HeLa_22 -0.04 / -0.53 %, isotope error 8.63 %, spectra +2.6 % (folds 1,090,270 -> 1,064,306).
+   The extension's ID value includes these same-mono pairs; a fix needs the fold to join them (extend the twin relation
+   to one mono trace at nearby frames) rather than refusing the extension. Replica tools: monocheck_v2/fix160/.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranks below an unfused peak of equal total intensity at the 500-peak cap. Fix: carry the best member's r and overlap
    and recompute the key from the summed IM-weighted apex (the frag_ai pattern).
