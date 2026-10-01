@@ -219,6 +219,7 @@ namespace
   double mono_pos_min_ratio_ = 0.2, mono_pos_im_box_ = 0.0, mono_pos_extend_ = 0.6;   ///< [monocheck-v2] charge:mono_position_* (im_box 0 = auto)
   bool mono_pos_iterate_ = true;     ///< [monocheck-v2] charge:mono_position_iterate
   String mono_check_stamp_;          ///< [monocheck] the spx:monocheck run stamp, filled by inferPrecursors_
+  bool iso_closest_ = false;         ///< [isotol] charge:iso_partner == "closest": the nearest candidate in RT and 1/K0, not the first in m/z
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   bool short_conc_ = false;          ///< [short] gate:short_traces == "concentric": span test for traces too short for Pearson
   double short_center_tol_ = 0.5;    ///< [short] gate:short_center_tol, fraction of the precursor half-span
@@ -2682,11 +2683,18 @@ protected:
     registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check true: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
     registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check true: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
     registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: the walk's leftmost step is rejected when its averagine-scaled position ratio PS(-j) / PS(-j+1) x lambda is below this.", false, true);
-    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance (0.05) away, so a walk's own partner can lie outside the box and then counts as an empty position.", false, true);
+    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance away (auto: 0.01-0.05 per run), so a walk's own partner can lie outside the box and then counts as an empty position.", false, true);
     registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when no step was rejected and the walk ended on a miss, move the monoisotope one isotope lighter (the most intense trace there, not claimed) if that position's ratio is >= this. 0 = off.", false, true);
     registerStringOption_("charge:mono_position_iterate", "<true/false>", "true", "charge:mono_profile_check v2: after a rejected leftmost step, test the new leftmost step too, and repeat while steps fail. false tests the leftmost step only.", false, true);
     setValidStrings_("charge:mono_position_iterate", {"true", "false"});
-    registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.05, "1/K0 tolerance for matching isotope partners. Only 0.05 has been measured; change it behind a peptide-set gate.", false);
+    registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.0, "1/K0 tolerance for matching isotope partners (default 0 = auto since 1.6.0; 0.05 = the fixed value of 1.5.0). "
+                          "auto measures it per run before the isotope walk: a stride sample of the MS1 traces is probed at each charge's +1 isotope position (the partner m/z tolerance, gate:delta_rt) "
+                          "and at two control positions 50 ppm either side, where no isotope of the probe can sit; the nearest trace's 1/K0 gap is recorded at each. "
+                          "The tolerance is the one that admits the most isotope-position traces net of twice the control traces (true partners admitted minus chance partners admitted), "
+                          "on a 0.001 grid, clamped to [0.01, 0.05]: about 0.01 on dense short-gradient runs, up to 0.05 on sparse low-load runs. A value > 0 fixes it. Logged as [isotol], stamped spx:iso_im_tolerance. CHANGES OUTPUT.", false);
+    registerStringOption_("charge:iso_partner", "<first/closest>", "first", "Which candidate inside the isotope-partner box (m/z tolerance, gate:delta_rt, charge:iso_im_tolerance) the walk takes: "
+                          "'first' in m/z order (as in 1.5.0), or 'closest' to the seed in apex RT and 1/K0, each scaled by its tolerance (ties to the first in m/z). Screened 2026-10-01: closest lost 1.6-5.0% MSFragger peptides on two 10 ng HeLa runs and wrote 14-15% more spectra on Evosep for about the same peptides; not recommended. CHANGES OUTPUT.", false, true);
+    setValidStrings_("charge:iso_partner", {"first", "closest"});
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
     registerStringOption_("dnoise:ms1", "<true/false>", "true",
@@ -2998,6 +3006,82 @@ protected:
     return (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : -2.0;
   }
 
+  /// [isotol] charge:iso_im_tolerance 0 (auto): the run's isotope-partner 1/K0 tolerance, measured on its own MS1 traces
+  /// before the greedy walk. `ms1` is the content-sorted list (m/z ascending), so the sample and every search are the same
+  /// at any thread count and tiling. Every ceil(N / 200000)-th trace is a probe. At each charge z <= max_charge it is
+  /// probed at its +1 isotope position (m/z + 1.0033548 / z) and at two controls 50 ppm either side, where no isotope of the
+  /// probe can sit, in the walk's partner window (probe m/z x mass_ppm, gate:delta_rt), and the nearest other trace's
+  /// |d 1/K0| is kept. A tolerance t then admits P_iso(t) traces per isotope probe, of which about P_ctl(t) (the mean of
+  /// the two controls) are chance traces: t* maximises P_iso(t) - 2 P_ctl(t), the true partners admitted minus the chance
+  /// partners admitted, on a 0.001 grid over [0.002, 0.050] (ties to the wider), then clamped to [0.01, 0.05] (0.01: the
+  /// tightest value screened without loss on dense runs; 0.05: the fixed value of 1.5.0). `info` gets the stamp text.
+  double autoIsoImTol_(const vector<Trace>& ms1, const TraceStore& ms1st, int max_charge, double delta_rt, double mass_ppm, String& info)
+  {
+    const double ISO = 1.0033548, CTL = 50e-6, LO = 0.01, HI = 0.05;
+    const int NG = 49;                                    // grid t_x = 0.002 + 0.001 x, x = 0..48
+    auto tg = [](int x) { return 0.002 + 0.001 * x; };
+    const size_t N = ms1.size();
+    if (N < 2 || max_charge < 1)
+    {
+      info = "auto 0.05 (too few MS1 traces to measure)";
+      writeLogInfo_("[isotol] auto: " + String(N) + " MS1 traces, too few to measure; 1/K0 tolerance 0.05");
+      return HI;
+    }
+    vector<double> mz(N), rt(N), im(N);
+    for (size_t i = 0; i < N; ++i) { mz[i] = ms1[i].mz; rt[i] = rtOf(ms1st, ms1[i]); im[i] = ms1[i].im; }
+    if (!std::is_sorted(mz.begin(), mz.end()))
+      throw Exception::Precondition(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[isotol] the MS1 traces are not sorted by m/z");
+    const size_t stride = std::max<size_t>(1, (N + 199999) / 200000), ns = (N + stride - 1) / stride;
+    const int Z = max_charge;
+    vector<int8_t> gx(ns * (size_t)Z * 3, -1);            // per (probe, z, kind): first grid index x with gap <= t_x, -1 none
+    #pragma omp parallel for schedule(dynamic, 256)
+    for (long q = 0; q < (long)ns; ++q)
+    {
+      const size_t s = (size_t)q * stride;
+      const double tol = mz[s] * mass_ppm * 1e-6;
+      for (int z = 1; z <= Z; ++z)
+        for (int c = 0; c < 3; ++c)
+        {
+          const double base = mz[s] + ISO / z;
+          const double target = c == 0 ? base : c == 1 ? base * (1.0 + CTL) : base * (1.0 - CTL);
+          const size_t klo = (size_t)(std::lower_bound(mz.begin(), mz.end(), target - tol) - mz.begin());
+          const size_t khi = (size_t)(std::upper_bound(mz.begin(), mz.end(), target + tol) - mz.begin());
+          double g = 1.0;
+          for (size_t k = klo; k < khi; ++k)
+          {
+            if (k == s || fabs(rt[k] - rt[s]) > delta_rt) continue;
+            const double d = fabs(im[k] - im[s]);
+            if (d < g) g = d;
+          }
+          int8_t b = -1;
+          for (int x = 0; x < NG; ++x) if (g <= tg(x)) { b = (int8_t)x; break; }
+          gx[((size_t)q * (size_t)Z + (size_t)(z - 1)) * 3 + (size_t)c] = b;
+        }
+    }
+    vector<long long> cum(3 * NG, 0);                     // kind c, grid x: probes whose nearest gap is <= t_x
+    for (size_t i = 0; i < gx.size(); ++i) if (gx[i] >= 0) ++cum[(i % 3) * NG + (size_t)gx[i]];
+    for (int c = 0; c < 3; ++c) for (int x = 1; x < NG; ++x) cum[c * NG + x] += cum[c * NG + x - 1];
+    int best = 0; long long bj = 0;
+    for (int x = 0; x < NG; ++x)
+    {
+      const long long J = cum[x] - cum[NG + x] - cum[2 * NG + x];
+      if (x == 0 || J >= bj) { best = x; bj = J; }
+    }
+    const double tstar = tg(best), tol = std::min(HI, std::max(LO, tstar));
+    const int xc = (int)std::lround((tol - 0.002) / 0.001);
+    const double np = (double)ns * Z;
+    auto rate = [&](int c, int x) { return (double)cum[c * NG + x] / np; };
+    char b[400];
+    std::snprintf(b, sizeof b, "auto %.3f (t* %.3f of isotope minus 2 x control traces, clamped to [0.01, 0.05]; per probe within %.3f: isotope %.3f, control %.3f; %zu probes x %d charges)",
+                  tol, tstar, tol, rate(0, xc), 0.5 * (rate(1, xc) + rate(2, xc)), ns, Z);
+    info = String(b);
+    std::snprintf(b, sizeof b, "[isotol] auto: 1/K0 tolerance %.3f for isotope partners (t* %.3f, clamped to [0.01, 0.05]). %zu probes (stride %zu over %zu MS1 traces) x %d charges: "
+                  "the nearest trace lies within the tolerance at the +1 isotope position for %.3f of the probes, at the +-50 ppm controls for %.3f (within 0.05: %.3f, %.3f)",
+                  tol, tstar, ns, stride, N, Z, rate(0, xc), 0.5 * (rate(1, xc) + rate(2, xc)), rate(0, NG - 1), 0.5 * (rate(1, NG - 1) + rate(2, NG - 1)));
+    writeLogInfo_(String(b));
+    return tol;
+  }
+
   /// [route-1] Isotope/charge inference on MS1 traces. Scores each (charge, monoisotope) hypothesis
   /// by averagine-shape agreement x isotope-XIC co-elution, instead of counting partners.
   vector<Precursor_> inferPrecursors_(const vector<Trace>& ms1, const TraceStore& ms1st, int max_charge,
@@ -3094,16 +3178,25 @@ protected:
 
       // Find an unused isotope partner near `target` m/z, co-localized in RT and IM (binary-search
       // the m/z index, scan only the ppm-window candidates); -1 if none.
+      // [isotol] charge:iso_partner closest: the unused candidate nearest the seed in (dRT / delta_rt)^2 + (d1/K0 / iso_im_tol)^2,
+      // ties to the first in m/z. Recording only the chosen partner as the dependency stays exact: `used` is monotone, so a
+      // candidate claimed later that was not chosen cannot change the minimum while the chosen one stays unused.
       auto findPartner = [&](double target) -> long {
         size_t klo = lbmz(target - tol), khi = ubmz(target + tol);   // [mzidx] same positions, local search
+        long best = -1; double bd = 0.0;
         for (size_t k = klo; k < khi; ++k)
         {
           if (fabs(sorted_rt[k] - s_rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
           size_t j = by_mz[k];
           if (used[j] || j == seed) continue;
-          { R.deps.push_back((size_t)j); return (long)j; }
+          if (!iso_closest_) { R.deps.push_back((size_t)j); return (long)j; }
+          const double dr = delta_rt > 0.0 ? (sorted_rt[k] - s_rt) / delta_rt : 0.0;
+          const double di = iso_im_tol > 0.0 ? (sorted_im[k] - s.im) / iso_im_tol : 0.0;
+          const double d = dr * dr + di * di;
+          if (best < 0 || d < bd) { best = (long)j; bd = d; }
         }
-        return -1;
+        if (best >= 0) R.deps.push_back((size_t)best);
+        return best;
       };
 
       // charge:scoring=count end to end, sharing nothing with the envelope path below (no gapped walk, no
@@ -4548,6 +4641,7 @@ protected:
     mono_pos_im_box_ = getDoubleOption_("charge:mono_position_im_box");
     mono_pos_extend_ = getDoubleOption_("charge:mono_position_extend");
     mono_pos_iterate_ = getStringOption_("charge:mono_position_iterate") == "true";
+    iso_closest_ = getStringOption_("charge:iso_partner") == "closest";
     var_support_ = getFlag_("gate:variance_support");
     short_conc_ = (getStringOption_("gate:short_traces") == "concentric");
     short_center_tol_ = getDoubleOption_("gate:short_center_tol");
@@ -5226,7 +5320,8 @@ protected:
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
     phaseAdd_("MS1_TRACE", _t_ms1, _c_ms1, false);
 
-    const double iso_im_tol = getDoubleOption_("charge:iso_im_tolerance");
+    double iso_im_tol = getDoubleOption_("charge:iso_im_tolerance");   // [isotol] 0 = auto, resolved after the content sort
+    String iso_tol_stamp = String(iso_im_tol);
     const double ms2_noise = getDoubleOption_("trace:ms2_noise_threshold_int");
     writeLogInfo_("MS2 trace gate: apex > " + String(ms2_snr * ms2_noise) + " (snr " + String(ms2_snr)
                   + " x noise " + String(ms2_noise) + "), membership > " + String(ms2_noise)
@@ -5263,6 +5358,9 @@ protected:
       writeLogInfo_("[det] MS1 traces sorted by content: " + String(ms1_traces.size()) + " traces, "
                     + String(ties) + " equal-key neighbours");
     }
+    if (iso_im_tol <= 0.0) iso_im_tol = autoIsoImTol_(ms1_traces, ms1_store, max_charge, delta_rt, mass_ppm, iso_tol_stamp);   // [isotol]
+    else writeLogInfo_("[isotol] 1/K0 tolerance for isotope partners " + String(iso_im_tol) + " (fixed)");
+    writeLogInfo_(String("[isotol] partner rule: ") + (iso_closest_ ? "closest to the seed in apex RT and 1/K0 (charge:iso_partner closest)" : "first in m/z order"));
     std::optional<Phase> win_phase;                            // [perf-instr] the window loop (function scope)
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
@@ -5688,6 +5786,8 @@ protected:
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
     if (!minlen_stamp.empty()) out_exp.setMetaValue("spx:ms1_min_length", minlen_stamp);   // [minlen] auto only: a fixed value leaves the header unchanged
     if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
+    if (getDoubleOption_("charge:iso_im_tolerance") <= 0.0 || iso_closest_)       // [isotol] only when not the 1.5.0 behaviour
+      out_exp.setMetaValue("spx:iso_im_tolerance", iso_tol_stamp + (iso_closest_ ? ", closest partner in RT and 1/K0" : ", first partner in m/z"));
     if (post_fusion_cap_)   // [recap] only when on: the default header is unchanged
       out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the "
                            + (cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten") + " cap key");
