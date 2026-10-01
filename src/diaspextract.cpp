@@ -148,10 +148,10 @@ namespace
   /// scratch where a thread number was used. Every caller writes index-addressed results only, so the output
   /// is the parallel for's. The first exception is rethrown here, after every claimed chunk has finished.
   /// Helper tasks queue behind the band and score tasks, and while windows hold the threads they barely run
-  /// (scal-pipe-1 on kim: a heavy tile of a 60-min run read in 31-43 s at 64 threads, 5-7 s with the barrier). So the
+  /// (a first pipelined build: a heavy tile of a 60-min run read in 31-43 s at 64 threads, 5-7 s with the barrier). So the
   /// loop is also published for teamAssist_: window code pulls a chunk at its natural break points, which
   /// gives the I/O a share of the window threads without a nested team (libgomp starts fresh threads for every
-  /// nested region: scal-pipe-2).
+  /// nested region, measured in a second build).
   struct PullJob_
   {
     std::atomic<long> cur{0}; std::atomic<int> busy{0}; std::exception_ptr err;
@@ -2287,6 +2287,7 @@ namespace
     ~PickCompactConsumer() { stopMs1Worker_(); }
 
     size_t frames_seen = 0;
+    long long slab_charged_ = 0;   ///< [ledger] LC_SLAB bytes this consumer's MS2 batches charged (the pipelined tile read replaces them)
     String ms1_pick_mode_;   ///< [outer] how the MS1 batches were picked, for the log (set by finish())
 
     /// [frames] A window's FROZEN frame table (rt, vendor id) with the lockstep cursor: every table
@@ -2328,6 +2329,7 @@ namespace
       if (!tables_init_) { tables_init_ = true; if (tablefn) tables_ = tablefn(); }
       const int n = (int)buf_.size();
       if (n == 0) return;
+      waitMs1Worker_();   // [review] DIASPEXTRACT_MS1_ASYNC: the worker appends to ms1_ (read below) and adds to flush_wall_()
       const double _tf0 = phase_clock_();
       // [ledger] the batch's RAW frames, 20 B per raw peak (Peak1D 16 + IM float 4), freed one by one in the pick loop
       long long raw_b = 0;
@@ -2432,7 +2434,7 @@ namespace
         for (long w = 0; w < (long)per_win.size(); ++w) appendWin(w);
       }
       else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
-      ledAdd_(LC_SLAB, slab_b);
+      ledAdd_(LC_SLAB, slab_b); slab_charged_ += slab_b;
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
@@ -2642,7 +2644,7 @@ namespace
     /// [outer] DIASPEXTRACT_MS1_ASYNC=1: the MS1 batches are picked on the worker, beside the reader's decode of the next
     /// batch. OFF by default: the worker's team is a second OpenMP team on the same places as the reader's (libgomp binds
     /// a foreign thread's team from place 0), so at 64 threads a 60-min run's LOAD(stream) got 0.3 s slower, and its extra thread
-    /// arenas raised HeLa_19's peak RSS by 6 % for 0.5-0.9 s (scalfix/outer timing, 2026-10-01). Default: the MS1 batches
+    /// arenas raised a 2-h HeLa run's peak RSS by 6 % for 0.5-0.9 s (timed 2026-10-01). Default: the MS1 batches
     /// are picked inside the reader's hand-over, one full batch at a time (the behaviour before 2026-10-01).
     static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return e && *e && *e != '0'; }(); return v; }
     /// [outer] Beside the reader two batches are in memory (one being picked, one filling), so each is half the
@@ -3242,7 +3244,7 @@ protected:
     registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
     setMinInt_("assembly:foreign_precursor_min_iso", 1);
     setMaxInt_("assembly:foreign_precursor_min_iso", 4);
-    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 with assembly:fragment_fuse_mode anchored since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) the key of one fragment applied to the whole ion: the best-keyed member's score (and, under evidence, its shared frames) with the sum of the members' IM-weighted apex intensities, never below that member's own key; a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
+    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 with assembly:fragment_fuse_mode anchored since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) the key of one fragment applied to the whole ion: the best-keyed member's score (and, under evidence, its shared frames) with the sum of the members' IM-weighted apex intensities, never below that member's own key (non-negative keys, up to rounding); a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
     setMinFloat_("assembly:fragment_fuse_ppm", 0.0);
     setMaxFloat_("assembly:fragment_fuse_ppm", 50.0);
     registerStringOption_("assembly:fragment_fuse_mode", "<mode>", "anchored", "assembly:fragment_fuse_ppm: 'anchored' takes the fragments by emitted intensity, strongest first (ties: lower m/z); each one not yet fused becomes an anchor and takes every unfused fragment within the tolerance of its own m/z. 'linkage' walks the fragments in m/z order and joins a fragment to the group of the previous one when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage, span capped).", false, true);
@@ -3321,7 +3323,7 @@ protected:
     setValidStrings_("charge:mono_position_iterate", {"true", "false"});
     registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.0, "1/K0 tolerance for matching isotope partners (default 0 = auto since 1.6.0; 0.05 = the fixed value of 1.5.0). "
                           "auto measures it per run before the isotope walk: a stride sample of the MS1 traces is probed at each charge's +1 isotope position (the partner m/z tolerance, gate:delta_rt) "
-                          "and at two control positions 50 ppm either side, where no isotope of the probe can sit; the nearest trace's 1/K0 gap is recorded at each. "
+                          "and at two control positions 50 ppm either side, where no isotope of the probe at that charge can sit; the nearest trace's 1/K0 gap is recorded at each. "
                           "The tolerance is the one that admits the most isotope-position traces net of twice the control traces (true partners admitted minus chance partners admitted), "
                           "on a 0.001 grid, clamped to [0.01, 0.05]: about 0.01 on dense short-gradient runs, up to 0.05 on sparse low-load runs. A value > 0 fixes it. Logged as [isotol], stamped spx:iso_im_tolerance. CHANGES OUTPUT.", false);
     registerStringOption_("charge:iso_partner", "<first/closest>", "first", "Which candidate inside the isotope-partner box (m/z tolerance, gate:delta_rt, charge:iso_im_tolerance) the walk takes: "
@@ -3715,7 +3717,8 @@ protected:
   /// before the greedy walk. `ms1` is the content-sorted list (m/z ascending), so the sample and every search are the same
   /// at any thread count and tiling. Every ceil(N / 200000)-th trace is a probe. At each charge z <= max_charge it is
   /// probed at its +1 isotope position (m/z + 1.0033548 / z) and at two controls 50 ppm either side, where no isotope of the
-  /// probe can sit, in the walk's partner window (probe m/z x mass_ppm, gate:delta_rt), and the nearest other trace's
+  /// probe at that charge can sit (another charge's can: near m/z 1,000 a 4+ ion's M+1 lies 0.2 ppm from the 5+ control,
+  /// so a true partner there counts as a chance one), in the walk's partner window (probe m/z x mass_ppm, gate:delta_rt), and the nearest other trace's
   /// |d 1/K0| is kept. A tolerance t then admits P_iso(t) traces per isotope probe, of which about P_ctl(t) (the mean of
   /// the two controls) are chance traces: t* maximises P_iso(t) - 2 P_ctl(t), the true partners admitted minus the chance
   /// partners admitted, on a 0.001 grid over [0.002, 0.050] (ties to the wider), then clamped to [0.01, 0.05] (0.01: the
@@ -4125,7 +4128,7 @@ protected:
 
     // [outer] 2048 (was 8192): the commit is serial and mostly fixed cost per seed, but each re-evaluation in it costs a
     // whole seed (~10 us); a quarter of the batch re-evaluates a third of the seeds (a 60-min run: 17,853 vs 51,891) for 4x the
-    // fork/joins. Its greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (kim/dax, 2026-10-01). Committing
+    // fork/joins. Its greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (timed 2026-10-01). Committing
     // beside the next batch's speculation was exact but slower (more re-evaluations, a contended commit): not kept.
     size_t spec_batch = 2048;
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
@@ -4614,7 +4617,7 @@ protected:
   /// the group's first within 2 x ppm). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
   /// intensity = their sum, rescued flag = the strongest member's, key = the best-keyed member's factor @p kq (its score,
   /// and shared frames under evidence) times the summed IM-weighted apex @p ai (ln(1 + sum) when @p log_key), the formula
-  /// of an unfused fragment's key applied to the whole ion; it is never below the best member's key. It sits at its
+  /// of an unfused fragment's key applied to the whole ion; it is never below the best member's key (non-negative keys, up to rounding). It sits at its
   /// members' lowest index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and
   /// @p resc (when not empty) are parallel to @p frags and compacted with it; @p ai and @p kq are parallel to it on entry
   /// and stale on return. Deterministic: every order has a total tie-break and the sums run in m/z order. Returns the
@@ -6095,7 +6098,7 @@ protected:
       {
         const double w50 = q(0.5);
         ms1_min_len = std::max(frac * w50, 0.5 * cycle);
-        const int pts = 1 + (int)std::ceil(ms1_min_len / cycle - 1e-9);
+        const int pts = 1 + (int)std::min(std::ceil(ms1_min_len / cycle - 1e-9), 1e9);   // [review] capped before the int conversion
         writeLogInfo_("[minlen] auto: " + head + "; FWHM median " + String(w50) + " s = " + String(w50 / cycle) + " cycles (p10 " + String(q(0.1))
                       + " s = " + String(q(0.1) / cycle) + ", p90 " + String(q(0.9)) + " s = " + String(q(0.9) / cycle) + "), cycle " + String(cycle)
                       + " s -> trace:min_length_sec " + String(ms1_min_len) + " = max(" + String(frac) + " x median, half a cycle): >= "
@@ -6335,7 +6338,12 @@ protected:
     // median of a multiset does not depend on the container order, so neither does n.
     double twin_rt_tol = 0.0;
     String twin_rt_desc;
-    if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0)
+    // [review] `ext` folds across frames only through v2's extension: without v2 no spectrum carries the mark, so the
+    // relation is the same-frame one, and it is logged and stamped as such (the 1.5.0 header under the options reset)
+    const bool twin_rt_inert = twin_rt_mode == 2 && mono_check_ != 2;
+    if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && twin_rt_inert)
+      writeLogInfo_("[twins] assembly:twin_rt_frames: the same MS1 frame only (twin_rt_match ext needs charge:mono_profile_check v2)");
+    if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && !twin_rt_inert)
     {
       int n = twin_rt_frames;
       String how = String(n) + " (set)";
@@ -6346,7 +6354,8 @@ protected:
         for (const Precursor_& pc : precursors) { const double f = xicFwhm(ms1_store, ms1_traces[pc.trace_idx]); if (f > 0.0) fw.push_back(f); }
         double med = -1.0;
         if (!fw.empty()) { const size_t m = fw.size() / 2; std::nth_element(fw.begin(), fw.begin() + (long)m, fw.end()); med = fw[m]; }
-        n = med > 0.0 ? std::max(1, (int)llround(med / cycle)) : 1;
+        // [review] rounded in double and capped before the int conversion (a near-zero cycle overflowed int)
+        n = med > 0.0 ? (int)std::max(1.0, std::min(std::round(med / cycle), 1e6)) : 1;
         char b[200];
         std::snprintf(b, sizeof b, "%d (auto: median MS1 FWHM %.3f s over %zu seed traces = %.2f cycles)", n, med, fw.size(), med / cycle);
         how = String(b);
@@ -6798,7 +6807,7 @@ protected:
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
       { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes();
-        if (pipe) ledAdd_(LC_SLAB, sb); else ledSet_(LC_SLAB, sb); }   // [pipe] other tiles' slabs may still be live
+        if (pipe) ledAdd_(LC_SLAB, sb - tc.slab_charged_); else ledSet_(LC_SLAB, sb); }   // [pipe] other tiles' slabs may still be live: replace only this read's batch charges
       if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
@@ -7425,7 +7434,7 @@ protected:
       // [pipe] The driver is thread 0 of ONE parallel region over all tiles: it reads tile fin + pipe_depth - 1
       // while tile fin's windows run, admits its windows as the cap and memory allow, and once tile fin's windows
       // are done hands the tile to the WRITER, a task that finishes the tiles strictly in tile order. So the read
-      // of the next tile never waits behind a write (scal-pipe-1 ran both on the driver: on a 60-min run at 100 threads
+      // of the next tile never waits behind a write (a first build ran both on the driver: on a 60-min run at 100 threads
       // read + write per heavy tile outlasted the tile's windows, which then sat idle at three boundaries).
       // The driver does not run windows: it reaches no taskgroup end or taskwait (teamFor_, and parTasks_ keeps its
       // passes inline), so its n_threads - 1 team mates run the windows, the writer, and the reader's and writer's helper
@@ -7476,10 +7485,10 @@ protected:
         {
           for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
           {
-            // [review] Backpressure on the writer: at most `depth` tiles whose windows are done wait for their write. Without
+            // [review] Backpressure on the writer: at most `depth` + 1 tiles whose windows are done wait for their write. Without
             // it the driver kept reading and admitting while the writer lagged (slow output storage), so finished spectra and
             // writer tasks spinning on their predecessor piled up without a bound. Never binds while the writer keeps pace:
-            // by the read/write order in their logs it would not have bound in any of the 38 pipelined scalfix/integrate
+            // by the read/write order in their logs it would not have bound in any of 38 pipelined timing
             // runs. Deadlock-free: writers 0..fin-1 are spawned, and they wait only on each other, in spawn order.
             while (written.load(std::memory_order_acquire) + depth < fin && !pipe_abort.load())
               if (!teamAssist_(8)) std::this_thread::sleep_for(std::chrono::milliseconds(1));   // help the writer meanwhile

@@ -461,6 +461,13 @@ def main():
             and stamp(same) and stamp(same).group(1).startswith(b"same frame") \
             and stamp(off) and stamp(off).group(1) == b"off", \
             "the header does not record the twin setting"
+        # twin_rt_match ext folds across frames only through monocheck v2's extension: without v2 the relation is the
+        # same-frame one, and the header and the log say so (the 1.5.0 header under the CHANGELOG's options reset)
+        nov2 = os.path.join(work, "twins_no_v2.mzML")
+        r_nov2 = run(binary, inp, nov2, extra=("-charge:mono_profile_check", "false"))
+        assert stamp(nov2) and stamp(nov2).group(1).startswith(b"same frame") \
+            and "[twins] assembly:twin_rt_frames: the same MS1 frame only" in r_nov2.stdout, \
+            "without monocheck v2 the header or the log still claims a cross-frame fold"
         inp_g = os.path.join(work, "twins_groups.mzML")
         synth(inp_g, groups=(1, 9))
         g_on, g_off = os.path.join(work, "twins_g_on.mzML"), os.path.join(work, "twins_g_off.mzML")

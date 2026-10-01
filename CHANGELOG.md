@@ -22,8 +22,9 @@ set back.
 
   `-assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0
   -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3` gives the 1.5.0 spectra
-  exactly (same semantic digest, checked on two runs); the cross-frame twin fold needs v2, so these options switch it
-  off too. The options new to the defaults are now listed by `--help`, not only `--helphelp`.
+  exactly (same semantic digest, checked on two runs) and the 1.5.0 `spx:` header stamps (checked on one); the
+  cross-frame twin fold needs v2, so these options switch it off too. The options new to the defaults are now listed
+  by `--help`, not only `--helphelp`.
 - **Measured effect** (the first four defaults; the three per-run settings below were screened, not measured on the
   corpus). The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window schemes, and Evosep
   60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
@@ -70,7 +71,7 @@ set back.
   - their intensity-weighted m/z;
   - a cap key computed as for one fragment from the sum of the members' 1/K0-weighted apex intensities, with the
     score (and, for `evidence`, the shared points) of the member with the best key. A fused ion ranks under the cap
-    as one ion of its total intensity, never below its best piece.
+    as one ion of its total intensity, never below its best piece (non-negative keys, up to rounding).
 
   A spectrum that fuses below `min_fragments` is not written. `anchored` takes the fragments strongest first, and each
   one not yet fused takes every unfused fragment within the tolerance of its own m/z. `linkage` joins m/z neighbours,
@@ -99,7 +100,8 @@ set back.
   many times the spread of real isotopes, so chance traces became partners and took other precursors' monoisotopes.
   auto measures the tolerance before the walk:
   - a stride sample of the MS1 traces (at most 200,000) is probed at each charge's +1 isotope position, in the walk's
-    m/z and retention-time window, and at two control positions 50 ppm either side, where no isotope can sit;
+    m/z and retention-time window, and at two control positions 50 ppm either side, where no isotope of the probe at
+    that charge can sit;
   - at each position the nearest trace's 1/K0 gap is kept;
   - the tolerance is the one that admits the most isotope-position traces net of twice the control traces (true
     partners admitted minus chance partners admitted), on a 0.001 grid clamped to [0.01, 0.05].
@@ -117,21 +119,22 @@ set back.
   3 s minimum needed 5 MS1 points at a 0.95-s cycle but 2 at a 3.5-s cycle, so short gradients lost their short,
   faint precursors. auto first measures the run's peak width. It traces a fixed sample of the MS1 map like the run but
   with no minimum length: every peak in 1-Th m/z slices, one every 25 Th. The minimum is 0.4 × the median FWHM of the
-  brightest tenth of those traces, and at least half an MS1 cycle, so a trace always needs 2 MS1 points. Fewer than
-  100 measurable traces fall back to 3 s. The run's peak width is about 2 MS1 cycles on every scheme screened, so auto
-  asks for 2 points everywhere (0.64–0.84 s on Evosep, 1.5–1.6 s on HeLa 25pc and TNBC, 2.6–2.8 s on HeLa py3,
-  whose output is unchanged). In a screen (one extraction per run, not the corpus), the four Evosep runs gain
-  7.0–15.8 % Sage and 7.1–17.9 % MSFragger peptides with 30–45 % more spectra; HeLa 25pc at 10 ng gains 5.1 % and
-  2.9 %, TNBC 1.4 % and 0.6 %. Logged as `[minlen]` (cycle, FWHM median, p10 and p90 in seconds and cycles, the
-  minimum and the points it implies), stamped `spx:ms1_min_length`. Any value ≥ 0 fixes the minimum as before
-  (`3` = 1.5.0, `0` = no filter).
+  brightest tenth of those traces, and at least half an MS1 cycle, so a trace always needs at least 2 MS1 points.
+  Fewer than 100 traces with a measurable FWHM in that brightest tenth, or no positive MS1 cycle, fall back to 3 s.
+  The run's peak width is about 2 MS1 cycles on every scheme screened, so auto asks for 2 points everywhere
+  (0.64–0.84 s on Evosep, 1.5–1.6 s on HeLa 25pc and TNBC, 2.6–2.8 s on HeLa py3, whose output is unchanged). In a
+  screen (one extraction per run, not the corpus), the four Evosep runs gain 7.0–15.8 % Sage and 7.1–17.9 %
+  MSFragger peptides with 30–45 % more spectra; HeLa 25pc at 10 ng gains 5.1 % and 2.9 %, TNBC 1.4 % and 0.6 %.
+  Logged as `[minlen]` (cycle, FWHM median, p10 and p90 in seconds and cycles, the minimum and the points it
+  implies), stamped `spx:ms1_min_length`. Any value ≥ 0 fixes the minimum as before (`3` = 1.5.0, `0` = no filter).
 - **Twin fold across nearby frames** (`-assembly:twin_rt_frames` 0 = auto, `-assembly:twin_rt_match ext`). v2's
   extension can put a monoisotope on a trace that is another precursor's monoisotope at another MS1 frame, so one ion
   was written as two spectra that the same-frame fold could not join. The fold now also joins such a pair. Besides the
   fold's charge and 1/K0 tests, the two must meet four conditions:
   - their precursor m/z lie in one flight-time bin (within 0.05 ppm);
   - the monoisotope of at least one of them was placed by the extension;
-  - their apexes are at most n MS1 cycles apart, with n the run's median MS1 peak width in cycles (2 on the public runs);
+  - their apexes are at most n + 0.5 MS1 cycles apart, with n the run's median MS1 peak width in cycles (2 on the public
+    runs);
   - they lie in one retention-time cell, so the output does not depend on the tiling or the thread count.
 
   The survivor rule and the fusion are the fold's. Across frames, pairs of one charge and 1/K0 lie either within
@@ -180,6 +183,13 @@ set back.
   - **Duplicate monoisotope after the extension, the rest.** The fold joins the extension's pair only within its
     1/K0 tolerance (0.005) and the run's frame tolerance. A pair farther apart, or one that straddles a retention-time
     cell edge, is still written as two spectra.
+  - **Fold chains.** The fold joins clusters, not pairs: a same-frame pair and a cross-frame pair that share a
+    spectrum fold all three, so a cluster can hold two spectra that would not fold as a pair (precursor m/z more
+    than one bin apart across frames, or 1/K0 further apart than the tolerance end to end). `[twins]` counts the
+    clusters that span more than the frame tolerance.
+  - **Isotope-tolerance controls.** For a few charge pairs one charge's ±50-ppm control lies within the partner m/z
+    tolerance of another charge's +1 isotope (near m/z 1,000 a 4+ ion's M+1 is 0.2 ppm from the 5+ control), so a
+    true partner there also counts as a chance one and pulls the auto tolerance down. The effect is not measured.
   - **Fusion and elution.** Fusion sums pieces whose elution does not overlap, unlike the same-bin merge.
   - **Fusion and twins.** Fusion is not reconciled across twins, so after the fold's 10-ppm merge one ion can still
     appear as two peaks a little over 10 ppm apart.
