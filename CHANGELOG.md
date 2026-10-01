@@ -16,8 +16,17 @@ Each default can be set back.
   | `-charge:mono_profile_check` | false | v2 | checks the monoisotope against the summed MS1 intensity at the isotope positions |
 
   `-assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0
-  -charge:mono_profile_check false` gives the 1.5.0 spectra exactly (same semantic digest, checked on two runs). The
-  three options new to the defaults are now listed by `--help`, not only `--helphelp`.
+  -charge:mono_profile_check false -trace:min_length_sec 3` gives the 1.5.0 spectra exactly (same semantic digest,
+  checked on two runs). The options new to the defaults are now listed by `--help`, not only `--helphelp`.
+- **Adaptive MS1 minimum trace length** (`-trace:min_length_sec`, new default −1 = auto, with
+  `-trace:min_length_fwhm` 0.4). The fixed 3 s minimum needed 5 MS1 points at a 0.95-s cycle but 2 at a 3.5-s cycle,
+  so short gradients lost their short, faint precursors. Auto first measures the run's peak width. It traces a fixed
+  sample of the MS1 map like the run but with no minimum length: every peak in 1-Th m/z slices, one every 25 Th. The
+  minimum is 0.4 × the median FWHM of the brightest tenth of those traces, and at least half an MS1 cycle, so a
+  trace always needs 2 MS1 points. Fewer than 100 measurable traces fall back to 3 s. Logged as `[minlen]` (cycle,
+  FWHM median, p10 and p90 in seconds and cycles, the minimum and the points it implies), stamped
+  `spx:ms1_min_length`. Any value ≥ 0 fixes the minimum as before (`3` = 1.5.0, `0` = no filter). The corpus
+  measurement below predates this default.
 - **Measured effect.** The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window
   schemes, and Evosep 60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
   with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage entrapment search for the
@@ -94,8 +103,8 @@ Each default can be set back.
   - `-assembly:post_fusion_cap` re-applies `max_fragments` after the twin fold. The fold unions the members' capped
     fragment lists. Every peak carries its cap key through the merge, the fusion and the fold. Stamped
     `spx:post_fusion_cap`.
-- **Header.** A default run now carries 27 `spx:` stamps: `spx:monocheck`, `spx:foreign` and `spx:fragment_fuse` are
-  added to the 24 that are always written.
+- **Header.** A default run now carries 28 `spx:` stamps: `spx:monocheck`, `spx:foreign`, `spx:fragment_fuse` and
+  `spx:ms1_min_length` are added to the 24 that are always written.
 - `-assembly:frag_core_frames` must be odd only with `-assembly:frag_intensity core`, the only mode that uses it.
 - An exception inside the parallel twin fold or the post-fusion cap now ends the run with an error message, not an
   abort. An allocation failure is one example.

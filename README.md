@@ -187,7 +187,8 @@ and `-perf:mem_fraction`; avoid `.mzpeak` output and `-trace:detector openms` on
 whole run at once. Time: `-threads`, and `-perf:malloc_trim false` when memory is not the constraint. Sensitivity:
 `-perf:stream_load false` on a machine with the memory for it, and trying `-trace:detector openms` on your own data.
 Charge and FDR: `-charge:min_charge`. The spectra of 1.5.0: `-assembly:im_weight_sigma 0
--assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0 -charge:mono_profile_check false`.
+-assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0 -charge:mono_profile_check false
+-trace:min_length_sec 3`.
 
 **Input and output**
 
@@ -222,7 +223,8 @@ Charge and FDR: `-charge:min_charge`. The spectra of 1.5.0: `-assembly:im_weight
 | `-trace:mass_error_ppm` | 15 | m/z tolerance for trace extension |
 | `-trace:noise_threshold_int` | 100 | MS1 noise intensity threshold |
 | `-trace:ms2_noise_threshold_int` | 10 | MS2 noise intensity threshold |
-| `-trace:min_length_sec` | 3 | minimum MS1 trace length |
+| `-trace:min_length_sec` | −1 = auto | minimum MS1 trace length in seconds (last minus first point). Auto: `-trace:min_length_fwhm` × the run's median MS1 peak FWHM, measured on a fixed sample of its MS1 traces (1-Th m/z slices every 25 Th, traced with no minimum), at least half an MS1 cycle, so a trace needs 2 MS1 points; logged as `[minlen]`, stamped `spx:ms1_min_length`. 0 = no length filter; 3 = the 1.5.0 value. **Changes output** |
+| `-trace:min_length_fwhm` | 0.4 | auto minimum MS1 trace length as a fraction of the run's median MS1 peak FWHM |
 | `-trace:ms2_min_length_sec` | 0 | minimum MS2 trace length; 0 = no length filter |
 | `-trace:ms1_chrom_peak_snr`, `-trace:ms2_chrom_peak_snr` | 3, 1 | apex threshold as a multiple of the noise threshold, MS1 and MS2 |
 | `-trace:ms1_split_valleys`, `-trace:ms2_split_valleys` | 7, 7 | split traces at chromatographic valleys, value = expected peak FWHM in seconds; 0 = off |
@@ -320,7 +322,7 @@ lost precursor can be attributed to a stage.
 
 Every emitted spectrum is MS2 with a synthetic precursor: `selected ion m/z` (the apex m/z of the monoisotopic
 trace), `charge state`, the precursor's retention time and 1/K0, and the isolation window it was taken from. The run
-header carries `spx:` userParams that make any file attributable to the configuration that produced it, twenty-seven
+header carries `spx:` userParams that make any file attributable to the configuration that produced it, twenty-eight
 at the defaults. Twenty-four are always written: the detector and calibration (`spx:detector`, `spx:mz_calibration`,
 `spx:require_isotope_support`, `spx:corr_power`, `spx:pearson_G` (the correlation support, always `frames`),
 `spx:im_weight_sigma`), the twin fold (`spx:twin_merge`: its relation and tolerance, or `off`), the co-elution gate
@@ -328,10 +330,11 @@ at the defaults. Twenty-four are always written: the detector and calibration (`
 cap ranking (`spx:cap_rank`), the same-bin merges (`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`,
 `spx:dnoise_ms1_params`, `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`,
 `spx:tile_cells_per_tile`, `spx:tiles`, `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`)
-and the frozen frame table (`spx:frame_table`). The others are written when their option is on, three of them at the
+and the frozen frame table (`spx:frame_table`). The others are written when their option is on, four of them at the
 defaults: `spx:monocheck` with `-charge:mono_profile_check true` or `v2` (its settings and how many monoisotopes
 moved), `spx:foreign` when `-assembly:foreign_precursor_weight` is below 1, `spx:fragment_fuse` when
-`-assembly:fragment_fuse_ppm` is above 0; and, off by default, `spx:anchor` (`-gate:anchor_rescue true`),
+`-assembly:fragment_fuse_ppm` is above 0, `spx:ms1_min_length` when `-trace:min_length_sec` is auto (the minimum it
+chose and the peak width it came from); and, off by default, `spx:anchor` (`-gate:anchor_rescue true`),
 `spx:fragint` (`-assembly:frag_intensity` not `apex`) and `spx:post_fusion_cap` (`-assembly:post_fusion_cap true`).
 `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate

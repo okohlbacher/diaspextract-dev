@@ -560,6 +560,35 @@ namespace
       if (real(s, t, k)) { rt.push_back(rtAtSpan(s, t, k)); v.push_back((double)xv(s, t, k)); }
   }
 
+  /// [fwhm] FWHM (seconds) from the trace's own XIC: apex, then outwards to half maximum with linear interpolation;
+  /// a side that never reaches half maximum ends at the first/last point. -1 below 3 points.
+  inline double xicFwhm(const TraceStore& s, const Trace& tr)
+  {
+    if (tr.np() < 3) return -1.0;
+    vector<double> prt, pv; packReal(s, tr, prt, pv);
+    size_t ap = 0;
+    for (size_t i = 1; i < pv.size(); ++i) if (pv[i] > pv[ap]) ap = i;
+    const double half = pv[ap] * 0.5;
+    double lo = prt[0], hi = prt[pv.size() - 1];
+    for (size_t i = ap; i > 0; --i)
+      if (pv[i - 1] <= half)
+      {
+        const double d = pv[i] - pv[i - 1];
+        const double f = d > 0 ? (pv[i] - half) / d : 0.0;
+        lo = prt[i] - f * (prt[i] - prt[i - 1]);
+        break;
+      }
+    for (size_t i = ap; i + 1 < pv.size(); ++i)
+      if (pv[i + 1] <= half)
+      {
+        const double d = pv[i] - pv[i + 1];
+        const double f = d > 0 ? (pv[i] - half) / d : 0.0;
+        hi = prt[i] + f * (prt[i + 1] - prt[i]);
+        break;
+      }
+    return hi - lo;
+  }
+
   /// Trim a trace to at most `cap` seconds around its apex, AFTER detection and valley splitting, so
   /// peak ownership is unchanged (rationale: trace:max_span_sec). Only the span fields change and no
   /// bytes are copied; the arena keeps the trimmed bytes until a compaction pass.
@@ -2478,7 +2507,11 @@ protected:
     registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance for trace detection.", false);
     registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise intensity threshold.", false);
     registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise intensity threshold.", false);
-    registerDoubleOption_("trace:min_length_sec", "<sec>", 3.0, "Minimum MS1 mass-trace length (seconds).", false, true);
+    registerDoubleOption_("trace:min_length_sec", "<sec>", -1.0, "Minimum MS1 mass-trace length in seconds (last minus first point). "
+                          "Negative = auto (the default since 1.6.0): trace:min_length_fwhm x the run's median MS1 peak FWHM, at least half an MS1 cycle, so a trace needs 2 MS1 points. "
+                          "The FWHM is that of the brightest tenth of a fixed sample of MS1 traces (1-Th m/z slices every 25 Th, traced like the run but with no minimum length). "
+                          "Logged as [minlen], stamped spx:ms1_min_length. 0 = no length filter; 3 = the value before 1.6.0. CHANGES OUTPUT.", false);
+    registerDoubleOption_("trace:min_length_fwhm", "<x>", 0.4, "trace:min_length_sec auto: the minimum MS1 trace length as this fraction of the run's median MS1 peak FWHM.", false, true);
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces: the apex threshold is this x trace:ms2_noise_threshold_int (OpenMS default 3.0). Lower recovers weaker fragments.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
@@ -2698,6 +2731,7 @@ protected:
     setMinFloat_("charge:mono_profile_max_dim", 0.0);
     setMinFloat_("charge:mono_position_min_ratio", 0.0);
     setMinFloat_("charge:mono_position_im_box", 0.0);
+    setMinFloat_("trace:min_length_fwhm", 0.0);   // [minlen] 0 = the 2-point floor
     setMinFloat_("charge:mono_position_extend", 0.0);
     setMinFloat_("trace:ms1_chrom_peak_snr", 0.0);
     setMinFloat_("trace:ms2_chrom_peak_snr", 0.0);
@@ -5076,6 +5110,96 @@ protected:
     { vector<uint32_t> ri; ri.reserve(ms1_map.size());
       for (const auto& sp : ms1_map) ri.push_back(rtIndex(sp.getRT()));
       ms1_store.setFrames(ri, nullptr); }
+    // [minlen] trace:min_length_sec < 0 (auto): the run's minimum MS1 trace length from its own peak widths. A fixed
+    // sample of the MS1 map -- every peak in the 1-Th m/z slices [25k, 25k + 1), plus the band halo -- is traced like
+    // the run (tolerances, snr, valley splitter, bands) but with no minimum length, so the estimate does not depend on
+    // the threshold it sets; a whole Th per slice samples every mass-defect phase. The median FWHM W of the brightest
+    // tenth of the traces centred in a slice (ranked by apex intensity, then FWHM: deterministic) sets the minimum to
+    // trace:min_length_fwhm x W, at least half a cycle (2 MS1 points). Fewer than 100 measurable traces, or no cycle,
+    // fall back to 3 s, the value before 1.6.0. A fixed value skips all of it and leaves the header unchanged.
+    double ms1_min_len = getDoubleOption_("trace:min_length_sec");
+    String minlen_stamp;   // spx:ms1_min_length, auto only
+    if (ms1_min_len < 0.0)
+    {
+      const double _tm = phase_clock_();
+      const double frac = getDoubleOption_("trace:min_length_fwhm"), ppm = getDoubleOption_("trace:mass_error_ppm");
+      const double kPitch = 25.0, kWidth = 1.0;
+      auto slicePos = [&](double x) { return x - kPitch * std::floor(x / kPitch); };   // position within its 25-Th period
+      PeakMap smp;
+      TraceStore smp_store;
+      smp_store.setFrames(ms1_store.rt_index, nullptr);
+      vector<Trace> st;
+      size_t smp_pk = 0;
+      const size_t og0 = rtOffGrid().load(), sb0 = rtStrictlyBetween().load();   // [soa-rt] counts the run's traces, not the sample's
+      std::exception_ptr smp_err;
+      #pragma omp parallel
+      #pragma omp single
+      try
+      {
+        // the cut: chunks of spectra in parallel, each spectrum kept in place (empty ones too: the frame sequence)
+        vector<MSSpectrum> part(ms1_map.size());
+        const int nchunk = std::max(1, std::min((int)ms1_map.size(), 4 * omp_get_max_threads()));
+        std::exception_ptr cut_err;   // [task-err]
+        #pragma omp taskloop grainsize(1) default(shared)
+        for (int ci = 0; ci < nchunk; ++ci)
+        { try {
+          const size_t a = (size_t)ci * ms1_map.size() / nchunk, b = (size_t)(ci + 1) * ms1_map.size() / nchunk;
+          for (size_t i = a; i < b; ++i)
+          {
+            const MSSpectrum& s = ms1_map[i];
+            const auto* ima = s.getFloatDataArrays().empty() ? nullptr : &s.getFloatDataArrays()[0];
+            MSSpectrum& t = part[i]; t.setRT(s.getRT()); t.setMSLevel(1);
+            OpenMS::DataArrays::FloatDataArray ia;
+            ia.setName(Constants::UserParam::ION_MOBILITY);
+            for (Size k = 0; k < s.size(); ++k)
+            {
+              const double x = s[k].getMZ(), h = x * ppm * 1e-6 * kBandHaloPpmMul, r = slicePos(x);
+              if (r < kWidth + h || r >= kPitch - h) { t.push_back(s[k]); if (ima && k < ima->size()) ia.push_back((*ima)[k]); }
+            }
+            t.getFloatDataArrays().push_back(std::move(ia));
+          }
+        } catch (...) { taskErr_(cut_err); } }
+        if (cut_err) std::rethrow_exception(cut_err);
+        smp.reserveSpaceSpectra(part.size());
+        for (auto& sp : part) { smp_pk += sp.size(); smp.addSpectrum(std::move(sp)); }
+        vector<MSSpectrum>().swap(part);
+        st = detectTraces_(smp, smp_store, delta_im, getDoubleOption_("trace:noise_threshold_int"), ms1_snr, 0.0,
+                           getDoubleOption_("trace:ms1_split_valleys"), ms1_bands, split_scan_time, -1, LC_MS1BAND);
+      }
+      catch (...) { smp_err = std::current_exception(); }
+      if (smp_err) std::rethrow_exception(smp_err);
+      rtOffGrid().store(og0); rtStrictlyBetween().store(sb0);
+      vector<pair<double, double>> iw;   // (apex intensity, FWHM s) of the traces centred in a slice
+      for (const Trace& t : st)
+        if (std::isfinite(t.mz) && slicePos(t.mz) < kWidth) iw.emplace_back(intensityOf(smp_store, t), xicFwhm(smp_store, t));
+      std::sort(iw.begin(), iw.end(), [](const pair<double, double>& a, const pair<double, double>& b)
+                { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+      const size_t top = iw.size() / 10;
+      vector<double> w;
+      for (size_t i = 0; i < top; ++i) if (iw[i].second > 0.0) w.push_back(iw[i].second);
+      std::sort(w.begin(), w.end());
+      auto q = [&w](double p) { return w[(size_t)(p * (double)(w.size() - 1) + 0.5)]; };
+      const String head = "sample " + String(smp_pk) + " MS1 peaks in 1-Th slices every 25 Th -> " + String(st.size()) + " traces at min length 0, "
+                          + String(iw.size()) + " centred in a slice; brightest tenth " + String(top) + ", " + String(w.size()) + " with a FWHM (>= 3 points)";
+      if (w.size() >= 100 && cycle > 0.0)
+      {
+        const double w50 = q(0.5);
+        ms1_min_len = std::max(frac * w50, 0.5 * cycle);
+        const int pts = 1 + (int)std::ceil(ms1_min_len / cycle - 1e-9);
+        writeLogInfo_("[minlen] auto: " + head + "; FWHM median " + String(w50) + " s = " + String(w50 / cycle) + " cycles (p10 " + String(q(0.1))
+                      + " s = " + String(q(0.1) / cycle) + ", p90 " + String(q(0.9)) + " s = " + String(q(0.9) / cycle) + "), cycle " + String(cycle)
+                      + " s -> trace:min_length_sec " + String(ms1_min_len) + " = max(" + String(frac) + " x median, half a cycle): >= "
+                      + String(pts) + " MS1 points [" + String(phase_clock_() - _tm) + " s]");
+        minlen_stamp = "auto " + String(ms1_min_len) + " s = max(" + String(frac) + " x FWHM median " + String(w50) + " s, half the cycle " + String(cycle)
+                       + " s), >= " + String(pts) + " MS1 points; FWHM of " + String(w.size()) + " bright sampled traces";
+      }
+      else
+      {
+        ms1_min_len = 3.0;
+        writeLogWarn_("[minlen] auto: " + head + ", cycle " + String(cycle) + " s: too few to estimate (100 needed, and a positive cycle); trace:min_length_sec 3, the value before 1.6.0");
+        minlen_stamp = "auto fallback 3 s (" + String(w.size()) + " bright sampled traces with a FWHM, cycle " + String(cycle) + " s)";
+      }
+    }
     // [ms1-prune] every MS1 spectrum must have left its m/z sample before losing a peak, or the band edges
     // would come from a pruned map. Checked here, outside the parallel region an exception cannot leave.
     if (ms1_prune.on && (ms1_prune.frames != ms1_map.size() || ms1_prune.sample.size() != ms1_prune.sample_n))
@@ -5090,7 +5214,7 @@ protected:
     try
     {
       ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
-                                               ms1_snr, getDoubleOption_("trace:min_length_sec"), getDoubleOption_("trace:ms1_split_valleys"), ms1_bands,
+                                               ms1_snr, ms1_min_len, getDoubleOption_("trace:ms1_split_valleys"), ms1_bands,
                                                split_scan_time, LC_MS1MAP, LC_MS1BAND, &ms1_prune);   // [ledger] the partition takes the charge over
     }
     catch (...) { ms1_err = std::current_exception(); }
@@ -5259,33 +5383,7 @@ protected:
     const String ms1_dump = getStringOption_("diag:dump_ms1_tsv");
     if (!ms1_dump.empty())
     {
-      // [fwhm] FWHM from the trace's own XIC: apex, then outwards to half maximum with linear interpolation;
-      // a side that never reaches half maximum ends at the first/last point. -1 below 3 points.
-      auto fwhm_of = [&ms1_store](const Trace& tr) -> double {
-        if (tr.np() < 3) return -1.0;
-        vector<double> prt, pv; packReal(ms1_store, tr, prt, pv);
-        size_t ap = 0;
-        for (size_t i = 1; i < pv.size(); ++i) if (pv[i] > pv[ap]) ap = i;
-        const double half = pv[ap] * 0.5;
-        double lo = prt[0], hi = prt[pv.size() - 1];
-        for (size_t i = ap; i > 0; --i)
-          if (pv[i - 1] <= half)
-          {
-            const double d = pv[i] - pv[i - 1];
-            const double f = d > 0 ? (pv[i] - half) / d : 0.0;
-            lo = prt[i] - f * (prt[i] - prt[i - 1]);
-            break;
-          }
-        for (size_t i = ap; i + 1 < pv.size(); ++i)
-          if (pv[i + 1] <= half)
-          {
-            const double d = pv[i] - pv[i + 1];
-            const double f = d > 0 ? (pv[i] - half) / d : 0.0;
-            hi = prt[i] + f * (prt[i + 1] - prt[i]);
-            break;
-          }
-        return hi - lo;
-      };
+      auto fwhm_of = [&ms1_store](const Trace& tr) -> double { return xicFwhm(ms1_store, tr); };   // [fwhm]
       ofstream ft((ms1_dump + ".traces.tsv").c_str());
       // [model] 12 significant digits: the default 6 quantises m/z 765 to ~1.3 ppm.
       ft.precision(12);
@@ -5588,6 +5686,7 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
+    if (!minlen_stamp.empty()) out_exp.setMetaValue("spx:ms1_min_length", minlen_stamp);   // [minlen] auto only: a fixed value leaves the header unchanged
     if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
     if (post_fusion_cap_)   // [recap] only when on: the default header is unchanged
       out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the "
