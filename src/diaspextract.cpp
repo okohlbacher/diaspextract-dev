@@ -245,6 +245,7 @@ namespace
   double anchor_rescue_corr_ = 0.7;  ///< [anchor] gate:anchor_rescue_corr
   int anchor_max_rescued_ = 50;      ///< [anchor] gate:anchor_max_rescued
   bool post_fusion_cap_ = false;     ///< [recap] assembly:post_fusion_cap: carry the cap key per peak, re-cap after the twin fold
+  bool twin_ext_mark_ = false;       ///< [twin-rt] assembly:twin_rt_match ext: mark spectra whose mono v2's extension placed (spx_mono_ext, never written)
   double foreign_w_ = 1.0;           ///< [foreign] assembly:foreign_precursor_weight (1 = off, 0 removes)
   double foreign_ppm_ = 10.0;        ///< [foreign] assembly:foreign_precursor_ppm
   double foreign_dim_ = 0.015;       ///< [foreign] assembly:foreign_precursor_dim
@@ -693,6 +694,7 @@ namespace
     double im = 0.0;
     size_t trace_idx = 0;    ///< index into ms1 traces
     bool guessed = false;    ///< [way-4] charge was DEFAULTED, not isotope-supported
+    bool mono_ext = false;   ///< [twin-rt] the monoisotope was placed by monocheck v2's extension (B)
     int n_isotopes = 0;      ///< [Q4] isotope peaks behind the mono call (0/1 = weak, mono ±1.00335 uncertain)
   };
 
@@ -2203,18 +2205,19 @@ namespace
   /// straddles a tile under any grouping and the output stays grouping- and thread-invariant. rt_tol 0 is the
   /// same-frame relation (|dRT| <= 0 and one frame is one cell), bit for bit. `st` (optional) adds {pairs linked at one
   /// frame, pairs linked across frames, near pairs refused at a cell edge, spectra the same-frame relation alone would
-  /// have removed, clusters spanning more than rt_tol}. `near_bin`: a pair from two frames links only when its
-  /// precursor m/z lie within BIN_PPM (one flight-time bin: one MS1 trace, or one bin at two frames, is the monoisotope
-  /// of both, as when v2's extension lands on another precursor's mono); false: within TWIN_PPM, as at one frame.
+  /// have removed, clusters spanning more than rt_tol}. `near_mode`, how a pair from two frames must match: 0 precursor
+  /// m/z within TWIN_PPM, as at one frame; 1 within BIN_PPM (one flight-time bin: one MS1 trace, or one bin at two
+  /// frames, is the monoisotope of both); 2 as 1, and one of the two carries the userParam spx_mono_ext (its mono was
+  /// placed by monocheck v2's extension), which mode 2 removes from every spectrum.
   static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, bool keyed = false, double rt_tol = 0.0,
                             const vector<double>* cells = nullptr, double cell_drt = 0.0, std::array<size_t, 5>* st = nullptr,
-                            bool near_bin = false)
+                            int near_mode = 0)
   {
     const double TWIN_PPM = 20.0, FUSE_PPM = 10.0;   // ponytail: the measured values, no option until another is measured
     // [twin-rt] one flight-time bin across frames: the per-frame calibration moves one bin's m/z by < 0.01 ppm, distinct
     // monoisotope traces of one charge and 1/K0 at nearby frames sit >= 0.3 ppm apart (HeLa 10 ng: no pair in between)
     const double BIN_PPM = 0.05;
-    struct K { double rt, mz, im; int z; uint32_t i, cell; };
+    struct K { double rt, mz, im; int z; uint32_t i, cell; bool ext; };
     auto cellOf = [&](double rt) -> uint32_t {   // the first edge T with (T - rt) > cell_drt; edges ascend, so the test is monotone
       if (!cells || cells->empty()) return 0;
       return (uint32_t)(std::partition_point(cells->begin(), cells->end(), [&](double T) { return !(T - rt > cell_drt); }) - cells->begin());
@@ -2223,7 +2226,8 @@ namespace
     for (size_t i = 0; i < v.size(); ++i)
     {
       const auto& p = v[i].getPrecursors();
-      if (!p.empty() && p[0].getCharge() > 0) ks.push_back({v[i].getRT(), p[0].getMZ(), p[0].getDriftTime(), p[0].getCharge(), (uint32_t)i, cellOf(v[i].getRT())});
+      if (!p.empty() && p[0].getCharge() > 0) ks.push_back({v[i].getRT(), p[0].getMZ(), p[0].getDriftTime(), p[0].getCharge(), (uint32_t)i, cellOf(v[i].getRT()),
+                                                               near_mode == 2 && v[i].metaValueExists("spx_mono_ext")});
     }
     // one charge, then m/z: a pair is found from its lower-m/z member's 20-ppm window whatever its frames
     sort(ks.begin(), ks.end(), [](const K& a, const K& b) {
@@ -2248,7 +2252,8 @@ namespace
         auto link = [&](size_t b) {
           if (ks[b].i <= ks[a].i || !(fabs(ks[b].im - ks[a].im) <= im_tol) || !(fabs(ks[b].rt - ks[a].rt) <= rt_tol)) return;
           const bool same = ks[b].rt == ks[a].rt;
-          if (!same && near_bin && fabs(ks[b].mz - ks[a].mz) > ks[a].mz * BIN_PPM * 1e-6) return;
+          if (!same && near_mode >= 1 && fabs(ks[b].mz - ks[a].mz) > ks[a].mz * BIN_PPM * 1e-6) return;
+          if (!same && near_mode == 2 && !ks[a].ext && !ks[b].ext) return;
           if (ks[b].cell != ks[a].cell) { ++n_edge; return; }
           ++(same ? n_same : n_near);
           { const uint32_t ra = root(ks[a].i), rb = root(ks[b].i); if (ra != rb) up[ra] = rb; }
@@ -2355,6 +2360,7 @@ namespace
     }
     const size_t removed = v.size() - w;
     v.erase(v.begin() + (long)w, v.end());
+    if (near_mode == 2) for (auto& sp : v) if (sp.metaValueExists("spx_mono_ext")) sp.removeMetaValue("spx_mono_ext");   // [twin-rt] never written
     return removed;
   }
 
@@ -2544,8 +2550,8 @@ protected:
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off, as in 1.5.0. Default 0.005 since 1.6.0: together with assembly:foreign_precursor_weight 0, +5.8 % Sage and +4.2 % MSFragger peptides over 1.5.0 on 43 public runs at unchanged entrapment (CHANGELOG, v1.6.0); earlier measurements in docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. It changes the emitted intensity, not the cap key; but assembly:fragment_fuse_ppm (on by default, mode anchored) groups the fragments strongest first by emitted intensity, so it can change which pieces fuse and with them which peaks survive assembly:max_fragments. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
-    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Let the twin fold (assembly:twin_im_tolerance) also join spectra of one monoisotope from nearby MS1 frames: same charge, precursor m/z in one flight-time bin (within 0.05 ppm; assembly:twin_rt_match), 1/K0 within assembly:twin_im_tolerance, apexes at most n MS1 cycles apart (|dRT| <= (n + 0.5) x the cycle) and in one retention-time cell (tile:rt_sec; a pair across a cell edge stays two spectra). Such pairs come from charge:mono_profile_check v2's extension, which can move a monoisotope onto another precursor's monoisotope trace at another frame, and from seeds of one ion whose apexes fall in different frames. The survivor rule and the fusion are the fold's. 0 = auto: the run's median MS1 peak width (FWHM of the precursors' seed traces with at least 3 points) in MS1 cycles, rounded, at least 1. -1 = off: the same MS1 frame only (the fold before 1.6.0). Logged as [twins], stamped in spx:twin_merge. CHANGES OUTPUT.", false);
-    registerStringOption_("assembly:twin_rt_match", "<mode>", "bin", "assembly:twin_rt_frames: how the precursor m/z of a pair from two different MS1 frames must match. 'bin': within 0.05 ppm, one flight-time bin, so one MS1 trace (or one bin at two frames) is the monoisotope of both, as when charge:mono_profile_check v2's extension moves a monoisotope onto another precursor's; distinct monoisotope traces of one charge and 1/K0 at nearby frames lie 0.3 ppm or more apart. 'ppm': within 20 ppm, as at one frame; it also folds the spectra of one ion seeded from different flight-time bins and cost peptides in the screen.", false, true);
+    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Let the twin fold (assembly:twin_im_tolerance) also join two spectra of one monoisotope from nearby MS1 frames: charge:mono_profile_check v2's extension can move a monoisotope onto another precursor's monoisotope trace at another frame, which the same-frame fold cannot join. A pair folds across frames with the same charge, precursor m/z in one flight-time bin (within 0.05 ppm) and, by default, one of the two monoisotopes placed by the extension (assembly:twin_rt_match), 1/K0 within assembly:twin_im_tolerance, apexes at most n MS1 cycles apart (|dRT| <= (n + 0.5) x the cycle) and in one retention-time cell (tile:rt_sec; a pair across a cell edge stays two spectra). The survivor rule and the fusion are the fold's. 0 = auto: the run's median MS1 peak width (FWHM of the precursors' seed traces with at least 3 points) in MS1 cycles, rounded, at least 1. -1 = off: the same MS1 frame only (the fold before 1.6.0). Logged as [twins], stamped in spx:twin_merge. CHANGES OUTPUT.", false);
+    registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "assembly:twin_rt_frames: which pairs from two different MS1 frames fold. 'ext': precursor m/z in one flight-time bin (within 0.05 ppm) and the monoisotope of at least one of the two placed by charge:mono_profile_check v2's extension, i.e. the extension moved it onto another precursor's monoisotope (nothing folds across frames without v2). 'bin': any pair in one flight-time bin (one MS1 trace, or one bin at two frames, is the monoisotope of both; distinct monoisotope traces of one charge and 1/K0 at nearby frames lie 0.3 ppm or more apart). 'ppm': within 20 ppm, as at one frame; it also folds the spectra of one ion seeded from different flight-time bins. 'bin' and 'ppm' cost peptides in the screen.", false, true);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
@@ -2761,7 +2767,7 @@ protected:
     setMinInt_("assembly:default_charge", 0);
     setMinFloat_("assembly:twin_im_tolerance", -1.0);   // any negative value = off
     setMinInt_("assembly:twin_rt_frames", -1);          // -1 = off (same frame), 0 = auto
-    setValidStrings_("assembly:twin_rt_match", {"bin", "ppm"});
+    setValidStrings_("assembly:twin_rt_match", {"ext", "bin", "ppm"});
     setMinInt_("max_charge", 1);
     setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
     setMinFloat_("gate:delta_im", 0.0);
@@ -3594,7 +3600,7 @@ protected:
           f |= 8;
           long bt = -1;
           const double q = ratio(nl + 1, &bt);
-          if (q >= mono_pos_extend_ && q > 0.0 && bt >= 0) { mono = ms1[(size_t)bt].mz; f |= 16; }
+          if (q >= mono_pos_extend_ && q > 0.0 && bt >= 0) { mono = ms1[(size_t)bt].mz; f |= 16; pc.mono_ext = true; }
         }
         pc.mono_mz = mono;
         flag[(size_t)ii] = f; rej[(size_t)ii] = r;
@@ -4360,6 +4366,7 @@ protected:
     // mono call (0/1: the mono may be off by +-k*1.00335 Da, a hint for open-search correction).
     out.setMetaValue("spx_guessed", (int)(pc.guessed ? 1 : 0));
     out.setMetaValue("spx_n_isotopes", pc.n_isotopes);
+    if (twin_ext_mark_ && pc.mono_ext) out.setMetaValue("spx_mono_ext", 1);   // [twin-rt] read and removed by mergeTwins_
   }
 
   /// [arena] Assertions on the SHIPPED compactUnreferenced(): the compaction must survive traces
@@ -4482,8 +4489,14 @@ protected:
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0, 2, 1.006, 2, P), sp(11.1, 500.0, 3, 1.0, 2, P), sp(11.1, 500.0125, 2, 1.0, 2, P)};
         chk(mergeTwins_(v, 0.005, false, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and 20 ppm still apply"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0002, 2, 1.0, 2, P), sp(11.6, 500.00002, 2, 1.0, 2, P), sp(10.0, 500.0005, 2, 1.0, 2, P)};
-        chk(mergeTwins_(v, 0.005, false, 1.65, nullptr, 3.0, nullptr, true) == 2 && v.size() == 2,
+        chk(mergeTwins_(v, 0.005, false, 1.65, nullptr, 3.0, nullptr, 1) == 2 && v.size() == 2,
             "near_bin: across frames only m/z within 0.05 ppm links (10/500.0 with 11.6/500.00002 at 0.04 ppm, not 11.1/500.0002 at 0.4 ppm); one frame keeps the 20-ppm relation"); }
+      { auto ext = [&](MSSpectrum s) { s.setMetaValue("spx_mono_ext", 1); return s; };
+        vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.00002, 2, 1.0, 2, P), sp(20.0, 600.0, 2, 1.0, 2, P), ext(sp(21.1, 600.00002, 2, 1.0, 2, P))};
+        chk(mergeTwins_(v, 0.005, false, 1.65, nullptr, 3.0, nullptr, 2) == 1 && v.size() == 3 && v[0].getRT() == 10.0 && v[1].getRT() == 11.1,
+            "near_mode 2: a one-bin pair across frames folds only when one member's mono came from the v2 extension");
+        bool clean = true; for (const auto& q : v) clean = clean && !q.metaValueExists("spx_mono_ext");
+        chk(clean, "near_mode 2: the spx_mono_ext marks are removed (never written)"); }
       { vector<MSSpectrum> v{sp(12.0, 500.001, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 3, P)};
         mergeTwins_(v, 0.005, false, 2.5);
         chk(v.size() == 1 && v[0].getRT() == 10.0 && v[0].getPrecursors()[0].getMZ() == 500.0, "near frames: the survivor rule is the fold's (more isotopes), with its own RT"); } }
@@ -4660,7 +4673,8 @@ protected:
     const Size max_frags = (Size)getIntOption_("assembly:max_fragments");
     const double twin_im = getDoubleOption_("assembly:twin_im_tolerance");
     const int twin_rt_frames = getIntOption_("assembly:twin_rt_frames");   // [twin-rt] -1 off, 0 auto, n frames
-    const bool twin_rt_bin = getStringOption_("assembly:twin_rt_match") == "bin";
+    const String twin_rt_match = getStringOption_("assembly:twin_rt_match");
+    const int twin_rt_mode = twin_rt_match == "ppm" ? 0 : twin_rt_match == "bin" ? 1 : 2;
     const int max_charge = getIntOption_("max_charge");
     mzEstimator() = getStringOption_("trace:mz_estimator");   // before any toTrace() call
     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
@@ -5410,7 +5424,9 @@ protected:
       char b[96];
       std::snprintf(b, sizeof b, "|dRT| <= %.4f s", twin_rt_tol);
       twin_rt_desc = "MS1 frames up to " + how + " cycles apart (" + String(b) + ", cycle " + String(cycle) + " s"
-                     + (twin_rt_bin ? ", precursor m/z within 0.05 ppm across frames" : ", precursor m/z within 20 ppm across frames") + "), one RT cell";
+                     + (twin_rt_mode == 0 ? ", precursor m/z within 20 ppm across frames" : twin_rt_mode == 1 ? ", precursor m/z within 0.05 ppm across frames"
+                        : ", across frames precursor m/z within 0.05 ppm and one monoisotope placed by the v2 extension") + "), one RT cell";
+      twin_ext_mark_ = twin_rt_mode == 2;
       writeLogInfo_("[twins] assembly:twin_rt_frames: the fold joins " + twin_rt_desc);
     }
     // sort precursors by mono m/z so each window can binary-search its members instead of
@@ -6301,7 +6317,7 @@ protected:
       if (twin_im >= 0.0)
       {
         Phase _ph("MERGE(twins)");
-        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, post_fusion_cap_, twin_rt_tol, &cell_edges, tile_drt, &twin_st, twin_rt_bin);
+        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, post_fusion_cap_, twin_rt_tol, &cell_edges, tile_drt, &twin_st, twin_rt_mode);
         n_twins += gone;
         writeLogInfo_("[twins] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(gone) + " of " + String(before) + " spectra folded into a twin");
       }
