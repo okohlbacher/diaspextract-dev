@@ -441,6 +441,8 @@ def main():
     #      twin: the fold must not touch it. With groups=(1, 9) the same m/z window is acquired in two window groups,
     #      so each precursor is assembled twice -- twins on RT, m/z, charge and 1/K0 -- and the fold must fire; the
     #      logged count must be exactly the spectra removed, and the header must name the setting either way.
+    #      Since 1.6.0 the default fold also joins nearby MS1 frames (assembly:twin_rt_frames 0 = auto) and the header
+    #      says so; assembly:twin_rt_frames -1 restores the same-frame fold and its 1.5.0 header text.
     def c12b():
         r = run(binary, inp, os.path.join(work, "selftest_twins.mzML"), extra=("-diag:selftest_twins",))
         assert "[twins] selftest passed" in (r.stdout + r.stderr), \
@@ -449,10 +451,15 @@ def main():
         folded = lambda r: int(re.search(r"\[twins\] (\d+) spectra folded into a twin", r.stdout).group(1))
         stamp = lambda f: re.search(rb'name="spx:twin_merge"[^>]*value="([^"]*)"', open(f, "rb").read(40000))
         on, off = os.path.join(work, "twins_on.mzML"), os.path.join(work, "twins_off.mzML")
+        same = os.path.join(work, "twins_same_frame.mzML")
         r_on = run(binary, inp, on)
         run(binary, inp, off, extra=("-assembly:twin_im_tolerance", "-1"))
-        assert folded(r_on) == 0 and digest(on) == digest(off), "the fold changed a fixture that has no twin"
-        assert stamp(on) and stamp(on).group(1).startswith(b"same frame") and stamp(off) and stamp(off).group(1) == b"off", \
+        r_same = run(binary, inp, same, extra=("-assembly:twin_rt_frames", "-1"))
+        assert folded(r_on) == 0 and folded(r_same) == 0 and digest(on) == digest(off) == digest(same), \
+            "the fold changed a fixture that has no twin"
+        assert stamp(on) and stamp(on).group(1).startswith(b"MS1 frames up to ") and b"(auto: " in stamp(on).group(1) \
+            and stamp(same) and stamp(same).group(1).startswith(b"same frame") \
+            and stamp(off) and stamp(off).group(1) == b"off", \
             "the header does not record the twin setting"
         inp_g = os.path.join(work, "twins_groups.mzML")
         synth(inp_g, groups=(1, 9))
