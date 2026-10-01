@@ -129,6 +129,80 @@ namespace
     if (want && String(want) == site)
       throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
   }
+
+  /// [outer] std::sort's result, computed in parallel, for a comparator that is a strict TOTAL order on the elements
+  /// present (no two equivalent): the sorted sequence is then unique, so any correct sort returns exactly what std::sort
+  /// returns. Chunks are sorted concurrently and merged pairwise; each merge is cut into equal output pieces by merge path
+  /// (exactly std::merge's sequence). Serial std::sort when small, on one thread, or inside a parallel region. Callers
+  /// guarantee the total order by construction (a unique last key) or check the result (sortExact_).
+  template <typename T, typename Less>
+  void parallelSortTotal_(std::vector<T>& v, Less less)
+  {
+    const size_t n = v.size();
+    const int nt = omp_get_max_threads();
+    if (n < ((size_t)1 << 15) || nt < 2 || omp_in_parallel()) { std::sort(v.begin(), v.end(), less); return; }
+    size_t nc = 1;                                              // a power of two, about one chunk per thread
+    while (nc < (size_t)nt && n / (2 * nc) >= 4096) nc *= 2;
+    auto bound = [n, nc](size_t c) { return c * n / nc; };     // chunk c is [bound(c), bound(c + 1))
+    std::vector<T> buf(n);
+    T* src = v.data(); T* dst = buf.data();
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (long c = 0; c < (long)nc; ++c) std::sort(src + bound((size_t)c), src + bound((size_t)c + 1), less);
+    for (size_t w = 1; w < nc; w *= 2)                          // runs of w chunks, merged pairwise
+    {
+      const size_t nm = nc / (2 * w), np = std::max<size_t>(1, (2 * (size_t)nt + nm - 1) / nm);   // merges, pieces per merge
+      #pragma omp parallel for schedule(dynamic, 1)
+      for (long q = 0; q < (long)(nm * np); ++q)
+      {
+        const size_t m = (size_t)q / np, p = (size_t)q % np;
+        const size_t a0 = bound(2 * m * w), b0 = bound((2 * m + 1) * w), b1 = bound((2 * m + 2) * w);
+        const T* a = src + a0; const T* b = src + b0;
+        const size_t na = b0 - a0, nb = b1 - b0, k0 = p * (na + nb) / np, k1 = (p + 1) * (na + nb) / np;
+        // merge path: how many of std::merge(a, b)'s first k outputs come from a (a[i] precedes b[j] iff !less(b[j], a[i]))
+        auto corank = [&](size_t k) {
+          size_t lo = k > nb ? k - nb : 0, hi = std::min(k, na);
+          while (lo < hi) { const size_t i = lo + (hi - lo) / 2; if (!less(b[k - i - 1], a[i])) lo = i + 1; else hi = i; }
+          return lo;
+        };
+        const size_t i0 = corank(k0), i1 = corank(k1);
+        std::merge(a + i0, a + i1, b + (k0 - i0), b + (k1 - i1), dst + a0 + k0, less);
+      }
+      std::swap(src, dst);
+    }
+    if (src != v.data()) v.swap(buf);
+  }
+
+  /// [outer] Sorts @p v exactly as std::sort(v.begin(), v.end(), less) does, in parallel whenever that is provably the
+  /// same result: a permutation is sorted in parallel (index as the last key, so a total order) and, when no two
+  /// neighbours are equivalent under @p less (every element then has one place, and std::sort's sequence is that one),
+  /// gathered. With an equivalent pair, @p v -- still untouched -- goes through std::sort, so the order of equal keys is
+  /// std::sort's own. Returns the number of equal-key neighbours of the result (the same count either way).
+  template <typename T, typename Less>
+  size_t sortExact_(std::vector<T>& v, Less less)
+  {
+    const size_t n = v.size();
+    auto serial = [&]() { std::sort(v.begin(), v.end(), less); size_t t = 0;
+                          for (size_t i = 1; i < n; ++i) if (!less(v[i - 1], v[i])) ++t;
+                          return t; };
+    if (n < ((size_t)1 << 15) || n > (size_t)std::numeric_limits<uint32_t>::max() || omp_get_max_threads() < 2 || omp_in_parallel())
+      return serial();
+    std::vector<uint32_t> perm(n);
+    #pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)n; ++i) perm[(size_t)i] = (uint32_t)i;
+    parallelSortTotal_(perm, [&v, &less](uint32_t a, uint32_t b) {
+      if (less(v[a], v[b])) return true;
+      if (less(v[b], v[a])) return false;
+      return a < b; });
+    size_t ties = 0;
+    #pragma omp parallel for schedule(static) reduction(+ : ties)
+    for (long i = 1; i < (long)n; ++i) if (!less(v[perm[(size_t)i - 1]], v[perm[(size_t)i]])) ++ties;
+    if (ties) return serial();
+    std::vector<T> out(n);
+    #pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)n; ++i) out[(size_t)i] = v[perm[(size_t)i]];
+    v.swap(out);
+    return 0;
+  }
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
   /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
@@ -610,7 +684,9 @@ namespace
       if (!needed[i]) { if (tr[i].np() > 0) ++freed; tr[i].freeProfile(); continue; }
       if (tr[i].len > 0) ids.push_back((uint32_t)i);     // a zero-length span owns no bytes
     }
-    sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) { return tr[a].off < tr[b].off; });
+    // [outer] valid spans have distinct offsets (equal ones overlap and throw below either way), so with the index as a
+    // last key the order is total and the parallel sort returns std::sort's
+    parallelSortTotal_(ids, [&](uint32_t a, uint32_t b) { return tr[a].off != tr[b].off ? tr[a].off < tr[b].off : a < b; });
     uint64_t prev_end = 0;
     for (uint32_t i : ids)
     {
@@ -2730,6 +2806,10 @@ protected:
     mtd.setParameters(p);
 
     vector<MassTrace> mts;
+    // [outer] The traces as consecutive segments (the bands, then the valley-split chunks): their concatenation is the
+    // sequence the serial gather and the serial re-concatenation used to build, and every later step walks it in that
+    // order, so neither copy is needed.
+    vector<vector<MassTrace>> seg;
     // [tstage] Sub-stage seconds of this phase, logged as one line.
     double tt_edge = 0, tt_dist = 0, tt_mtd = 0, tt_gather = 0, tt_split = 0;
     auto tt_now = []() { return std::chrono::steady_clock::now(); };
@@ -2869,9 +2949,7 @@ protected:
       if (band_err) std::rethrow_exception(band_err);
       tt_mtd = tt_s(_tm0, tt_now());
       auto _tg0 = tt_now();
-      size_t tot = 0; for (const auto& v : per) tot += v.size();
-      mts.reserve(tot);
-      for (auto& v : per) { for (auto& t : v) mts.push_back(std::move(t)); vector<MassTrace>().swap(v); }
+      seg = std::move(per);   // [outer] the bands, in band order, are the segments: no serial gather
       tt_gather = tt_s(_tg0, tt_now());
     }
     else
@@ -2879,17 +2957,21 @@ protected:
       if (map.size() >= 3) mtd.run(map, mts);   // MTD aborts below 3 spectra; a tiny input is not an error
       map.clear(true); // [compact] dead from here; ~1.1 GB/window freed before the EPD peak
       if (in_cat >= 0) ledSet_(in_cat, 0);
+      seg.resize(1); seg[0].swap(mts);
     }
+    size_t n_tr = 0; for (const auto& s : seg) n_tr += s.size();
 
     // [way-2] Split mass traces at chromatographic valleys: MassTraceDetection never splits at a local
     // minimum, so co-eluting neighbours within the m/z tolerance merge. width_filtering is forced off
     // (a deletion filter). Per-trace and deterministic, so it runs as a balanced parallel loop (4 chunks
     // per band); both consumers re-sort (MS2 after detectTraces_, MS1 before inferPrecursors_).
     auto _ts0 = tt_now();
-    if (split_valleys > 0.0 && mts.size() > 1)
+    if (split_valleys > 0.0 && n_tr > 1)
     {
       const int nchunk = std::max(1, bands * 4);      // 4 chunks per band -> dynamic load balance
-      const size_t n_in = mts.size();
+      const size_t n_in = n_tr;
+      vector<size_t> at(seg.size() + 1, 0);           // [outer] segment s holds positions [at[s], at[s+1]) of the sequence
+      for (size_t s = 0; s < seg.size(); ++s) at[s + 1] = at[s] + seg[s].size();
       vector<vector<MassTrace>> parts(nchunk);
       std::exception_ptr split_err;   // [task-err]
       #pragma omp taskloop grainsize(1) default(shared)
@@ -2897,28 +2979,35 @@ protected:
       { try {
         const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
         if (lo >= hi) continue;
-        vector<MassTrace> chunk(std::make_move_iterator(mts.begin() + lo),
-                                std::make_move_iterator(mts.begin() + hi));
+        // [outer] positions [lo, hi) of the segment sequence, moved out segment by segment: the chunk the gathered
+        // vector gave (distinct chunks move distinct elements)
+        vector<MassTrace> chunk; chunk.reserve(hi - lo);
+        size_t s = (size_t)(std::upper_bound(at.begin(), at.end(), lo) - at.begin()) - 1;
+        for (size_t g = lo; g < hi; ++g) { while (g >= at[s + 1]) ++s; chunk.push_back(std::move(seg[s][g - at[s]])); }
         ElutionPeakDetection epd; setSplitter(epd, split_valleys, split_scan_time);
         parts[ci].reserve(chunk.size());
         epd.detectPeaks(chunk, parts[ci]);
       } catch (...) { taskErr_(split_err); } }
       if (split_err) std::rethrow_exception(split_err);
-      size_t tot = 0; for (auto& pth : parts) tot += pth.size();
-      vector<MassTrace> out; out.reserve(tot);
-      for (auto& pth : parts) { for (auto& t : pth) out.push_back(std::move(t)); vector<MassTrace>().swap(pth); }
-      mts.swap(out);
+      seg.swap(parts);   // [outer] the chunks' outputs, in chunk order, are the segments now: no serial re-concatenation
+      n_tr = 0; for (const auto& s : seg) n_tr += s.size();
     }
     tt_split = tt_s(_ts0, tt_now());
-    writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(mts.size()) + " traces: edges "
+    writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(n_tr) + " traces: edges "
                   + String(tt_edge) + " s | distribute " + String(tt_dist) + " s | detect "
                   + String(tt_mtd) + " s | gather " + String(tt_gather) + " s (serial) | valley-split "
                   + String(tt_split) + " s");
+    auto _tc0 = tt_now();
     vector<Trace> out;
-    out.reserve(mts.size());
+    out.reserve(n_tr);
     // Each MassTrace is released as soon as it is converted. Serial on purpose: a parallel split was
     // output-identical but 17% slower (docs/BASELINE.md, "Parallelising the MS1 trace conversion").
-    for (size_t i = 0; i < mts.size(); ++i) { out.push_back(toTrace(mts[i], store)); mts[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
+    for (auto& sv : seg)   // [outer] the segments in order: the sequence the gathered vector held
+    {
+      for (size_t i = 0; i < sv.size(); ++i) { out.push_back(toTrace(sv[i], store)); sv[i] = MassTrace(); }   // move-assign an empty one: the payload goes now, not at return
+      vector<MassTrace>().swap(sv);
+    }
+    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (serial)");
     return out;
   }
 
@@ -2960,6 +3049,24 @@ protected:
     return (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : -2.0;
   }
 
+  /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by std::sort on m/z alone.
+  /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
+  /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
+  /// With any equal (or unordered) neighbour the sort runs as before: the order of equal m/z is std::sort's own. Returns
+  /// the neighbours that are not strictly increasing (0 = the identity was taken).
+  static size_t mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
+  {
+    const size_t N = ms1.size();
+    by_mz.resize(N);
+    #pragma omp parallel for schedule(static)
+    for (long i = 0; i < (long)N; ++i) by_mz[(size_t)i] = (size_t)i;
+    size_t nonincr = 0;
+    #pragma omp parallel for schedule(static) reduction(+ : nonincr)
+    for (long i = 1; i < (long)N; ++i) if (!(ms1[(size_t)i - 1].mz < ms1[(size_t)i].mz)) ++nonincr;
+    if (nonincr) sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    return nonincr;
+  }
+
   /// [route-1] Isotope/charge inference on MS1 traces. Scores each (charge, monoisotope) hypothesis
   /// by averagine-shape agreement x isotope-XIC co-elution, instead of counting partners.
   vector<Precursor_> inferPrecursors_(const vector<Trace>& ms1, const TraceStore& ms1st, int max_charge,
@@ -2972,14 +3079,14 @@ protected:
 
     // m/z-sorted index for O(log N) isotope-partner lookup (avoids O(N^2) over all MS1 traces).
     auto _pi_t0 = std::chrono::steady_clock::now();
-    vector<size_t> by_mz(N);
-    for (size_t i = 0; i < N; ++i) by_mz[i] = i;
-    sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    vector<size_t> by_mz;
+    const size_t mz_nonincr = mzOrder_(ms1, by_mz);   // [outer]
     vector<double> sorted_mz(N);
-    for (size_t i = 0; i < N; ++i) sorted_mz[i] = ms1[by_mz[i]].mz;
     // [soa] The candidate scan's RT and IM, laid out in m/z order beside sorted_mz (sequential reads).
     vector<double> sorted_rt(N), sorted_im(N);
-    for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
+    #pragma omp parallel for schedule(static)
+    for (long ii = 0; ii < (long)N; ++ii)
+    { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
     // [mzidx] Bucket index over sorted_mz keyed on the top bits of the IEEE-754 pattern: monotone for
     // positive doubles, so the bucket width is relative (ppm-shaped) and the std search on the bucket's
     // sub-range returns the same position as on the whole array. docs/BASELINE.md, "Computed indices
@@ -2997,8 +3104,15 @@ protected:
     };
     vector<uint32_t> bstart(kspan + 2, 0);
     {
-      size_t i = 0;
-      for (size_t b = 0; b <= kspan; ++b) { while (i < N && bucketOf(sorted_mz[i]) < b) ++i; bstart[b] = (uint32_t)i; }
+      // bstart[b] = the first i with bucketOf(sorted_mz[i]) >= b, else N. [outer] bucketOf is monotone over sorted_mz, so
+      // the buckets (bucketOf(sorted_mz[i-1]), bucketOf(sorted_mz[i])] start at i: every b is written by exactly one i.
+      #pragma omp parallel for schedule(static)
+      for (long ii = 0; ii < (long)N; ++ii)
+      {
+        const size_t i = (size_t)ii, b_hi = std::min(bucketOf(sorted_mz[i]), kspan);
+        for (size_t b = (i == 0 ? 0 : bucketOf(sorted_mz[i - 1]) + 1); b <= b_hi; ++b) bstart[b] = (uint32_t)i;
+      }
+      for (size_t b = (N ? std::min(bucketOf(sorted_mz[N - 1]), kspan) + 1 : 0); b <= kspan; ++b) bstart[b] = (uint32_t)N;
       bstart[kspan + 1] = (uint32_t)N;
     }
     auto lbmz = [&](double x) -> size_t {
@@ -3017,10 +3131,12 @@ protected:
 
     // Apex intensities in one contiguous array: the sort and every isotope walk read them.
     vector<float> inten(N);
-    for (size_t i = 0; i < N; ++i) inten[i] = (float)intensityOf(ms1st, ms1[i]);
     vector<size_t> order(N);
-    for (size_t i = 0; i < N; ++i) order[i] = i;
-    sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    #pragma omp parallel for schedule(static)
+    for (long ii = 0; ii < (long)N; ++ii) { const size_t i = (size_t)ii; inten[i] = (float)intensityOf(ms1st, ms1[i]); order[i] = i; }
+    // [outer] a total order (the index breaks every tie; the coordinates are finite, non-finite traces were dropped before
+    // the content sort), so the sorted sequence is unique and the parallel sort returns std::sort's
+    parallelSortTotal_(order, [&](size_t a, size_t b) {
       if (inten[a] != inten[b]) return inten[a] > inten[b];
       if (ms1[a].mz != ms1[b].mz) return ms1[a].mz < ms1[b].mz;
       return a < b; // total order so greedy isotope assignment is deterministic
@@ -3336,6 +3452,8 @@ protected:
                     + String(spec_batch) + ": " + String(n_committed) + " committed, " + String(n_conflict)
                     + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
                     + "%), " + String(n_skipped) + " already claimed)");
+      writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort"
+                                                              : String("strictly increasing, identity")));
     }
     if (mono_check_ == 1)
     {
@@ -3387,13 +3505,14 @@ protected:
       // The m/z-sorted index of inferPrecursors_ (same comparator on the same container, so the same order; the plain
       // std searches return the positions its bucket index returns).
       const size_t N = ms1.size();
-      vector<size_t> by_mz(N);
-      for (size_t i = 0; i < N; ++i) by_mz[i] = i;
-      sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+      vector<size_t> by_mz;
+      mzOrder_(ms1, by_mz);   // [outer] the same helper, so the same order
       vector<double> sorted_mz(N), sorted_rt(N), sorted_im(N);
-      for (size_t i = 0; i < N; ++i) { const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
       vector<float> inten(N);
-      for (size_t i = 0; i < N; ++i) inten[i] = (float)intensityOf(ms1st, ms1[i]);
+      #pragma omp parallel for schedule(static)
+      for (long ii = 0; ii < (long)N; ++ii)
+      { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im;
+        inten[i] = (float)intensityOf(ms1st, ms1[i]); }
       auto lbmz = [&](double x) -> size_t { return (size_t)(std::lower_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
       auto ubmz = [&](double x) -> size_t { return (size_t)(std::upper_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
       if (v2_box <= 0.0)
@@ -4730,6 +4849,7 @@ protected:
           }
           return t; };
       }
+      writeLogInfo_("[outer] start-up before the stream reader: " + String(phase_clock_()) + " s");
       try
       {
         if (in_mzpeak)
@@ -4985,7 +5105,18 @@ protected:
     //-------------------------------------------------------------
     // MS1 traces + precursor/charge inference (shared, once) [H-8,H-10]
     //-------------------------------------------------------------
-    ms1_map.sortSpectra();
+    // [outer] sortSpectra() = the RT sort, then each spectrum's own m/z sort (a no-op check on a picked spectrum). The
+    // per-spectrum sorts are independent, so they run in parallel after the same RT sort.
+    {
+      const double _tss = phase_clock_();
+      ms1_map.sortSpectra(false);
+      std::exception_ptr ss_err;
+      #pragma omp parallel for schedule(dynamic, 16)
+      for (long i = 0; i < (long)ms1_map.size(); ++i)
+      { try { ms1_map[(Size)i].sortByPosition(); } catch (...) { taskErr_(ss_err); } }
+      if (ss_err) std::rethrow_exception(ss_err);
+      writeLogInfo_("[outer] MS1 spectra sorted in " + String(phase_clock_() - _tss) + " s");
+    }
     const double ms1_snr = getDoubleOption_("trace:ms1_chrom_peak_snr");
     const double ms2_snr = getDoubleOption_("trace:ms2_chrom_peak_snr");
     const double ms2_minlen = getDoubleOption_("trace:ms2_min_length_sec");
@@ -5054,7 +5185,15 @@ protected:
     catch (...) { ms1_err = std::current_exception(); }
     if (ms1_err) std::rethrow_exception(ms1_err);
     { const double cap = max_span;
-      if (cap > 0.0) for (auto& t : ms1_traces) trimToSpan(ms1_store, t, cap); }
+      // [outer] per trace, reading the store and writing only its own span fields: in parallel
+      std::exception_ptr trim_err;
+      if (cap > 0.0)
+      {
+        #pragma omp parallel for schedule(static)
+        for (long i = 0; i < (long)ms1_traces.size(); ++i)
+        { try { trimToSpan(ms1_store, ms1_traces[(size_t)i], cap); } catch (...) { taskErr_(trim_err); } }
+      }
+      if (trim_err) std::rethrow_exception(trim_err); }
     vector<double>().swap(ms1_prune.sample);   // [ms1-prune] consumed by the band edges, or unused at one band
     ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace)) + ms1_store.bytes());
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
@@ -5089,19 +5228,20 @@ protected:
       if (a.len != b.len) return a.len < b.len;
       return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
     };
-    sort(ms1_traces.begin(), ms1_traces.end(), traceLess);
     {
-      size_t ties = 0;
-      for (size_t i = 1; i < ms1_traces.size(); ++i)
-        if (!traceLess(ms1_traces[i - 1], ms1_traces[i])) ++ties;
+      // [outer] in parallel when that is provably std::sort's order (no equal-key neighbours), else std::sort itself
+      const double _tcs = phase_clock_();
+      const size_t ties = sortExact_(ms1_traces, traceLess);
       writeLogInfo_("[det] MS1 traces sorted by content: " + String(ms1_traces.size()) + " traces, "
                     + String(ties) + " equal-key neighbours");
+      writeLogInfo_("[outer] MS1 content sort " + String(phase_clock_() - _tcs) + " s (" + (ties ? "equal keys: std::sort" : "unique order") + ")");
     }
     std::optional<Phase> win_phase;                            // [perf-instr] the window loop (function scope)
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring, mono_check_ == 2 ? &mono_v2in : nullptr);
+    const double _t_inf_fn = phase_clock_();   // [outer] sub-step clock of PRECURSOR_INFER, log only
     if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
     {
       size_t nf = 0;
@@ -5173,11 +5313,13 @@ protected:
     }
     // [monocheck-v2] At the final charge: after the veto (which reads the walks' own monoisotopes, as without v2),
     // before the charge-less precursors are defaulted or dropped (the veto edits in place, so the order still matches).
+    const double _t_inf_v2a = phase_clock_();   // [outer]
     if (mono_check_ == 2)
     {
       monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm, env_scoring);
       vector<MonoV2In_>().swap(mono_v2in);
     }
+    const double _t_inf_v2b = phase_clock_();   // [outer]
     const int default_charge = getIntOption_("assembly:default_charge");
     Size n_default = 0;
     // [way-4] A GUESSED charge and an isotope-SUPPORTED charge must not be emitted identically.
@@ -5267,15 +5409,20 @@ protected:
     }
     // sort precursors by mono m/z so each window can binary-search its members instead of
     // rescanning all ~1M precursors per window (total order for determinism).
-    sort(precursors.begin(), precursors.end(), [](const Precursor_& a, const Precursor_& b) {
+    // [outer] trace_idx is unique (one precursor per committed seed), so the order is total and sortExact_ sorts in
+    // parallel; an equal-key pair (a non-finite key) would send it to std::sort itself.
+    const double _t_inf_srt = phase_clock_();
+    const size_t prec_ties = sortExact_(precursors, [](const Precursor_& a, const Precursor_& b) {
       if (a.mono_mz != b.mono_mz) return a.mono_mz < b.mono_mz;
       if (a.rt != b.rt) return a.rt < b.rt;
       if (a.im != b.im) return a.im < b.im;
       return a.trace_idx < b.trace_idx;
     });
+    const double _t_inf_cmp = phase_clock_();
     ledSet_(LC_PRECURSOR, (long long)(precursors.capacity() * sizeof(Precursor_) + precursors.size() * 8));
     vector<double> prec_mz(precursors.size());
     for (size_t i = 0; i < precursors.size(); ++i) prec_mz[i] = precursors[i].mono_mz;
+    double _t_inf_trim = 0.0;
     // [mem] Scoring reads only the profiles of traces a precursor points at: release the rest.
     // (ms1_map is already empty: detectTraces_ consumed it.)
     {
@@ -5286,10 +5433,15 @@ protected:
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
       ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace)) + ms1_store.bytes());
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
+      _t_inf_trim = phase_clock_();
 #ifdef __GLIBC__
     if (trim_on) trimLogged_("MS1 -> window loop");
 #endif
     }
+    writeLogInfo_("[outer] PRECURSOR_INFER steps: inferPrecursors_ " + String(_t_inf_fn - _t_inf) + " s | veto " + String(_t_inf_v2a - _t_inf_fn)
+                  + " s | monocheck v2 " + String(_t_inf_v2b - _t_inf_v2a) + " s | filters " + String(_t_inf_srt - _t_inf_v2b) + " s | precursor sort "
+                  + String(_t_inf_cmp - _t_inf_srt) + " s (" + (prec_ties ? "equal keys: std::sort" : "unique order") + ") | compaction "
+                  + String(_t_inf_trim - _t_inf_cmp) + " s | trim " + String(phase_clock_() - _t_inf_trim) + " s");
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
                   + " precursor hypotheses (" + String(n_default) + " assigned default charge)." + rss_());
     std::exception_ptr worker_err;
