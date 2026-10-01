@@ -206,6 +206,79 @@ namespace
     while (st->busy.load() != 0) std::this_thread::yield();
     if (st->err) std::rethrow_exception(st->err);
   }
+  /// [serial] Task count for one of a window's data-parallel passes over n items: at most 16 and none smaller than
+  /// min_per; 1 (run inline) outside a parallel region. A bounded COUNT, never a grainsize over data: libgomp runs a
+  /// whole taskloop inline once the team's task count passes 64 x nthreads ([gomp-cliff]).
+  inline long parTasks_(size_t n, size_t min_per)
+  {
+    const long cap = omp_in_parallel() ? std::min(16, omp_get_num_threads()) : 1;
+    return std::max(1L, std::min(cap, (long)(n / std::max<size_t>(min_per, 1))));
+  }
+  /// [serial] body(c) for c in [0, nt): nt tasks of the current team (the creating thread waits in the taskloop's
+  /// taskgroup and runs its own children, so a busy pool degrades to the serial loop), or inline for nt <= 1.
+  /// The first exception is rethrown once every task has joined.
+  template <class F> void forTasks_(long nt, F&& body)
+  {
+    if (nt <= 1) { body(0L); return; }
+    std::exception_ptr err;
+    #pragma omp taskloop num_tasks(nt) default(shared)
+    for (long c = 0; c < nt; ++c)
+    { try { body(c); } catch (...) { taskErr_(err); } }
+    if (err) std::rethrow_exception(err);
+  }
+  /// [serial] Merge-path co-rank: how many of the first r elements of the STABLE merge of a[0, m) and b[0, k) come
+  /// from a (a first on ties, as std::merge takes them).
+  template <class T, class Less> size_t coRank_(size_t r, const T* a, size_t m, const T* b, size_t k, const Less& less)
+  {
+    size_t lo = r > k ? r - k : 0, hi = std::min(r, m);
+    while (lo < hi)
+    {
+      const size_t i = lo + (hi - lo) / 2, j = r - i;   // i < m and 1 <= j <= k here
+      if (!less(b[j - 1], a[i])) lo = i + 1; else hi = i;
+    }
+    return lo;
+  }
+  /// [serial] Sort a[0, n) as nt tasks: nt chunks std::sort-ed, then pairwise std::merge levels, each pair's output
+  /// cut at merge-path co-ranks into pieces of about n / nt, ping-ponging with one scratch buffer of n elements.
+  /// The result equals std::sort's whenever `less` is a TOTAL order (no two elements equivalent: the sorted sequence
+  /// is then unique). Under a weaker order equivalent elements may come out in another order.
+  template <class T, class Less> void parallelSort_(T* a, size_t n, const Less& less, long nt)
+  {
+    static_assert(std::is_trivially_copyable<T>::value, "parallelSort_ moves elements through raw scratch memory");
+    if (nt <= 1 || n < 2 * (size_t)nt) { std::sort(a, a + n, less); return; }
+    vector<size_t> run(nt + 1);
+    for (long c = 0; c <= nt; ++c) run[c] = (size_t)c * n / (size_t)nt;
+    forTasks_(nt, [&](long c) { std::sort(a + run[c], a + run[c + 1], less); });
+    // uninitialised scratch, first touched by the merge tasks (an implicit-lifetime type: malloc creates the objects)
+    std::unique_ptr<T, void (*)(T*)> buf(static_cast<T*>(std::malloc(n * sizeof(T))), [](T* p) { std::free(p); });
+    if (!buf) throw std::bad_alloc();
+    T* src = a; T* dst = buf.get();
+    struct Piece { size_t s, mid, e, r0, r1; };   // merge src[s, mid) with src[mid, e); output ranks [r0, r1)
+    while (run.size() > 2)
+    {
+      const size_t nr = run.size() - 1;
+      vector<size_t> nxt{0};
+      vector<Piece> pcs;
+      for (size_t p = 0; p < nr; p += 2)
+      {
+        const size_t s = run[p], mid = run[p + 1], e = p + 1 < nr ? run[p + 2] : mid;   // an odd last run is copied
+        const size_t len = e - s, np = std::max<size_t>(1, (len * (size_t)nt + n - 1) / n);
+        for (size_t q = 0; q < np; ++q) pcs.push_back({s, mid, e, q * len / np, (q + 1) * len / np});
+        nxt.push_back(e);
+      }
+      forTasks_((long)pcs.size(), [&](long c) {
+        const Piece& p = pcs[(size_t)c];
+        const T* A = src + p.s; const T* B = src + p.mid;
+        const size_t m = p.mid - p.s, k = p.e - p.mid;
+        const size_t i0 = coRank_(p.r0, A, m, B, k, less), i1 = coRank_(p.r1, A, m, B, k, less);
+        std::merge(A + i0, A + i1, B + (p.r0 - i0), B + (p.r1 - i1), dst + p.s + p.r0, less);
+      });
+      std::swap(src, dst); run.swap(nxt);
+    }
+    if (src != a)
+      forTasks_(nt, [&](long c) { const size_t lo = (size_t)c * n / (size_t)nt, hi = (size_t)(c + 1) * n / (size_t)nt;
+                                  std::copy(src + lo, src + hi, a + lo); });
+  }
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
   /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
@@ -583,6 +656,64 @@ namespace
   };
   static_assert(sizeof(Trace) == 40, "Trace must stay 40 bytes: it is the largest structure in the tool "
                                     "(2.1e9 records on a 2-h file), and a silent 8-byte regrowth costs ~16 GiB");
+
+  /// [serial] `dst.absorb()` of every source in order, each source's records rebased (off += its base; frame0 and
+  /// bframe += its frame shift) and appended to `out`: the serial loop's result byte for byte (sizes and capacities
+  /// included), with the copies run as bounded tasks at prefix-summed offsets. The parallel form needs an empty
+  /// `dst` and `out` and every source's bins index-parallel to its inten (or absent) -- what every caller has; any
+  /// other input runs the serial loop. The sources are emptied either way.
+  inline void absorbAll_(TraceStore& dst, vector<Trace>& out, const vector<std::pair<TraceStore*, vector<Trace>*>>& src,
+                         const vector<uint32_t>& fshift)
+  {
+    const size_t ns = src.size();
+    vector<size_t> ib(ns + 1, 0), tb(ns + 1, 0);   // arena / record prefix sums
+    bool par = dst.inten.empty() && dst.bins.empty() && out.empty(), any_bins = false;
+    for (size_t s = 0; s < ns; ++s)
+    {
+      const TraceStore& o = *src[s].first;
+      if (!o.bins.empty()) { any_bins = true; par &= (o.bins.size() == o.inten.size()); }
+      ib[s + 1] = ib[s] + o.inten.size(); tb[s + 1] = tb[s] + src[s].second->size();
+    }
+    if (!par)
+    {
+      out.reserve(out.size() + tb[ns]);
+      for (size_t s = 0; s < ns; ++s)
+      {
+        const uint32_t base = dst.absorb(*src[s].first), fs = fshift[s];
+        for (auto& t : *src[s].second) { t.off += base; t.frame0 += fs; t.bframe += fs; out.push_back(std::move(t)); }
+        vector<Trace>().swap(*src[s].second);
+      }
+      return;
+    }
+    // absorb() throws at the first source that would reach 2^32 - 1 floats; the prefix sums are monotone
+    if (ib[ns] >= (size_t)std::numeric_limits<uint32_t>::max())
+      throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+    // absorb()'s bins: once any source carries bins they are index-parallel to inten, zero where a source has none
+    dst.inten.resize(ib[ns]); if (any_bins) dst.bins.resize(ib[ns], 0);
+    out.resize(tb[ns]);
+    // call f(s, a, e) for the part [a, e) of source s that falls in slice c of nt of the concatenation `pre`
+    auto slices = [ns](const vector<size_t>& pre, long c, long nt, auto&& f) {
+      const size_t N = pre[ns], lo = (size_t)c * N / (size_t)nt, hi = (size_t)(c + 1) * N / (size_t)nt;
+      size_t s = (size_t)(std::upper_bound(pre.begin(), pre.end(), lo) - pre.begin()) - 1;
+      for (; s < ns && pre[s] < hi; ++s)
+      { const size_t a = std::max(lo, pre[s]) - pre[s], e = std::min(hi, pre[s + 1]) - pre[s]; if (a < e) f(s, a, e); }
+    };
+    const long nt = parTasks_(ib[ns] + 8 * tb[ns], 1 << 20);   // a record is ~8 floats of copying
+    forTasks_(nt, [&](long c) {
+      slices(ib, c, nt, [&](size_t s, size_t a, size_t e) {
+        const TraceStore& o = *src[s].first;
+        std::copy(o.inten.begin() + a, o.inten.begin() + e, dst.inten.begin() + ib[s] + a);
+        if (!o.bins.empty()) std::copy(o.bins.begin() + a, o.bins.begin() + e, dst.bins.begin() + ib[s] + a);
+      });
+      slices(tb, c, nt, [&](size_t s, size_t a, size_t e) {
+        const uint32_t base = (uint32_t)ib[s], fs = fshift[s];
+        const vector<Trace>& r = *src[s].second;
+        for (size_t q = a; q < e; ++q) { Trace t = r[q]; t.off += base; t.frame0 += fs; t.bframe += fs; out[tb[s] + q] = t; }
+      });
+    });
+    for (size_t s = 0; s < ns; ++s)
+    { vector<float>().swap(src[s].first->inten); vector<int16_t>().swap(src[s].first->bins); vector<Trace>().swap(*src[s].second); }
+  }
 
   /// Span accessors take the owning store explicitly (no per-record back-pointer); bounds asserted in debug builds.
   inline float xv(const TraceStore& s, const Trace& t, size_t k)
@@ -1092,18 +1223,24 @@ namespace
     // single linkage along 1/K0 with a link of im_slice_merge_, the whole group within 2x that (one ion's 2-3 slices;
     // measured slice spacing median 0.008, q90 0.014, max 0.019 at the 0.01 picker box)
     const long tol_q = im_slice_merge_ >= 0.0 ? (long)llround(im_slice_merge_ * IM_Q) : -1, span_q = 2 * tol_q;
+    // [serial] Frames convert and merge independently, so they run as tasks over frame chunks, each frame compacted
+    // within its own range (its cursor starts at its first peak and never passes the read position, as the global
+    // cursor never did); the frames are then closed up in order -- the one-cursor loop's layout, byte for byte.
+    const long nt = parTasks_(sl.tof.size(), 1 << 17);
+    vector<uint32_t> nkept(F);                               // the frame's peaks after the merge
+    vector<long long> mc(nt, 0), fmc(nt, 0);                 // per task: peaks merged away, frames with a merge
+    forTasks_(nt, [&](long ch) {
     vector<pair<uint16_t, uint32_t>> run;                    // (imq, slab index) of one same-bin run
     vector<std::tuple<uint32_t, float, uint16_t>> cl;        // (first slab index, intensity, imq) of the run's groups
-    uint32_t w = 0;
     long long merged = 0, frames_merged = 0;
-    for (size_t i = 0; i < F; ++i)
+    for (size_t i = (size_t)ch * F / (size_t)nt; i < (size_t)(ch + 1) * F / (size_t)nt; ++i)
     {
       const double b = ax.factor(sl.frame_id[i]);
       sl.b[i] = b;
       const uint32_t lo = sl.frame_off[i], hi = sl.frame_off[i + 1];
       for (uint32_t k = lo; k < hi; ++k)
         sl.tof[k] = ax.tofOf((double)sl.tof[k] / MZ_Q, b);
-      sl.frame_off[i] = w;
+      uint32_t w = lo;
       bool any = false;
       for (uint32_t k = lo; k < hi;)
       {
@@ -1143,7 +1280,24 @@ namespace
         for (const auto& c : cl) { sl.tof[w] = t; sl.inten[w] = std::get<1>(c); sl.imq[w] = std::get<2>(c); ++w; }
         k = e;
       }
+      nkept[i] = w - lo;
       frames_merged += any;
+    }
+    mc[ch] = merged; fmc[ch] = frames_merged;
+    });
+    long long merged = 0, frames_merged = 0;
+    for (long c = 0; c < nt; ++c) { merged += mc[c]; frames_merged += fmc[c]; }
+    uint32_t w = 0;
+    for (size_t i = 0; i < F; ++i)                           // close up: every destination lies at or before its source
+    {
+      const uint32_t lo = sl.frame_off[i], n = nkept[i];
+      if (w != lo)
+      {
+        std::copy(sl.tof.begin() + lo, sl.tof.begin() + lo + n, sl.tof.begin() + w);
+        std::copy(sl.inten.begin() + lo, sl.inten.begin() + lo + n, sl.inten.begin() + w);
+        std::copy(sl.imq.begin() + lo, sl.imq.begin() + lo + n, sl.imq.begin() + w);
+      }
+      sl.frame_off[i] = w; w += n;
     }
     if (F) sl.frame_off[F] = w;
     sl.tof.resize(w); sl.inten.resize(w); sl.imq.resize(w);
@@ -1220,10 +1374,6 @@ namespace
     // Membership IS inten > noise (no per-peak map); seeds are counted first so `order` is sized exactly.
     tp.frame_live.assign(F, 0);
     const double min_apex = snr * noise;
-    size_t n_seed = 0;
-    for (size_t f = 0; f < F; ++f)
-      for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
-        if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++n_seed; }
     // OpenMS: stable_sort ascending by intensity, then iterate in reverse -> among equal
     // intensities the LATER peak seeds first.
     auto cmp = [&](uint32_t a, uint32_t b) {
@@ -1231,16 +1381,8 @@ namespace
       return a > b;
     };
     const int nb = (int)bnd.size() - 1;
-    tp.order.resize(n_seed);
-    if (nb < 2)                                          // unbanded: one globally sorted list
-    {
-      size_t w = 0;
-      for (uint32_t k = 0; k < P; ++k)
-        if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[w++] = k;
-      sort(tp.order.begin(), tp.order.end(), cmp);
-      tp.seg = {0, n_seed};
-      return tp;
-    }
+    const bool banded = nb >= 2;                         // unbanded: one globally sorted list
+    const size_t nseg = banded ? (size_t)nb : 1;
     // Band of a peak: the same half-open [bnd[b], bnd[b+1]) partition the detector applies, found
     // by upper_bound so that empty bands (bnd[b] == bnd[b+1], reachable when nb exceeds the tof
     // range) are skipped exactly as the detector's own range test skips them.
@@ -1248,21 +1390,54 @@ namespace
     // bounds. The window's edges are asserted to enclose every cell's bins before this runs (a
     // loud throw); the clamp is the memory-safety floor under that assert.
     auto bandOf = [&](TofIdx t) {
+      if (!banded) return (size_t)0;
       const auto it = std::upper_bound(bnd.begin(), bnd.end(), t);
       if (it == bnd.begin()) return (size_t)0;
       return std::min((size_t)(it - bnd.begin() - 1), (size_t)(nb - 1));
     };
-    vector<size_t> cnt(nb, 0);
-    for (uint32_t k = 0; k < P; ++k)
-      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) ++cnt[bandOf(sl.tof[k])];
-    tp.seg.assign(nb + 1, 0);
-    for (int b = 0; b < nb; ++b) tp.seg[b + 1] = tp.seg[b] + cnt[b];
-    vector<size_t> cur(tp.seg.begin(), tp.seg.end() - 1);
-    for (uint32_t k = 0; k < P; ++k)
-      if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[cur[bandOf(sl.tof[k])]++] = k;
+    // [serial] Count, then distribute, as tasks over peak-balanced FRAME chunks (frame_live stays chunk-private):
+    // chunk c counts its seeds per band, the prefix over (band, chunk) is its write cursor, so every band receives
+    // its seeds in ascending peak index -- what the one-pass loops wrote. Chunk c owns peaks [kb(c), kb(c + 1)).
+    const long nt = parTasks_(P, 1 << 17);
+    vector<size_t> fc(nt + 1, F);
+    fc[0] = 0;
+    for (long c = 1; c < nt; ++c)
+      fc[c] = (size_t)(std::lower_bound(sl.frame_off.begin(), sl.frame_off.begin() + F, (uint32_t)((size_t)c * P / (size_t)nt)) - sl.frame_off.begin());
+    auto kb = [&](long c) { return fc[c] >= F ? (uint32_t)P : sl.frame_off[fc[c]]; };
+    vector<size_t> cnt((size_t)nt * nseg, 0);
+    forTasks_(nt, [&](long c) {
+      size_t* cc = &cnt[(size_t)c * nseg];
+      for (size_t f = fc[c]; f < fc[c + 1]; ++f)
+        for (uint32_t k = sl.frame_off[f]; k < sl.frame_off[f + 1]; ++k)
+          if ((double)sl.inten[k] > noise) { tp.frame_live[f] = 1; if ((double)sl.inten[k] > min_apex) ++cc[bandOf(sl.tof[k])]; }
+    });
+    tp.seg.assign(nseg + 1, 0);
+    vector<size_t> cur((size_t)nt * nseg);
+    size_t n_seed = 0;
+    for (size_t b = 0; b < nseg; ++b)
+    {
+      tp.seg[b] = n_seed;
+      for (long c = 0; c < nt; ++c) { cur[(size_t)c * nseg + b] = n_seed; n_seed += cnt[(size_t)c * nseg + b]; }
+    }
+    tp.seg[nseg] = n_seed;
+    tp.order.resize(n_seed);
+    forTasks_(nt, [&](long c) {
+      size_t* cc = &cur[(size_t)c * nseg];
+      for (uint32_t k = kb(c), ke = kb(c + 1); k < ke; ++k)
+        if ((double)sl.inten[k] > noise && (double)sl.inten[k] > min_apex) tp.order[cc[bandOf(sl.tof[k])]++] = k;
+    });
+    // [serial] A segment holding many seeds (the dense band) is itself sorted as tasks. The comparator is a TOTAL
+    // order (the index breaks every tie), so the sorted segment is unique: parallelSort_ returns std::sort's result.
+    auto sortSeg = [&](size_t b) {
+      const size_t n = tp.seg[b + 1] - tp.seg[b];
+      parallelSort_(tp.order.data() + tp.seg[b], n, cmp, parTasks_(n, 1 << 18));
+    };
+    if (!banded) { sortSeg(0); return tp; }
+    std::exception_ptr sort_err;   // [task-err]
     #pragma omp taskloop grainsize(1) default(shared)
     for (int b = 0; b < nb; ++b)
-      sort(tp.order.begin() + tp.seg[b], tp.order.begin() + tp.seg[b + 1], cmp);
+    { try { sortSeg((size_t)b); } catch (...) { taskErr_(sort_err); } }
+    if (sort_err) std::rethrow_exception(sort_err);
     buildTofIndex(sl, tp, tlo, thi);
     return tp;
   }
@@ -1458,15 +1633,28 @@ namespace
     // No `in.size() < 2` guard: a lone parent must split as it would among others (tile invariance).
     if (split_valleys <= 0.0 || in.empty()) return std::move(in);
     const TofAxis& ax = tofAxis();
-    nchunk = std::max(1, std::min<int>(nchunk, (int)in.size()));
+    // [serial] Every parent splits on its own (below), so neither the chunk count nor the cut points can change the
+    // output. A large window (>= 8192 parents per chunk) gets up to one chunk per team thread instead of `nchunk`,
+    // and the cuts sit at equal cumulative cost (real points + 8 per trace) rather than equal counts: a window's
+    // parents come band by band, most intense (longest) first, so equal counts put the longest traces together.
+    const size_t n_in = in.size();
+    const int team = omp_in_parallel() ? omp_get_num_threads() : 1;
+    nchunk = std::max(nchunk, std::min<int>(team, (int)std::min<size_t>(n_in / 8192, 1 << 20)));
+    nchunk = std::max(1, std::min<int>(nchunk, (int)n_in));
+    vector<size_t> cut(nchunk + 1, n_in);
+    cut[0] = 0;
+    { uint64_t tot = 0, acc = 0; int c = 1;
+      for (const Trace& t : in) tot += (uint64_t)t.npts + 8;
+      for (size_t q = 0; q < n_in && c < nchunk; ++q)
+      { acc += (uint64_t)in[q].npts + 8;
+        while (c < nchunk && acc * (uint64_t)nchunk >= tot * (uint64_t)c) cut[c++] = q + 1; } }
     vector<vector<Trace>> parts(nchunk);
     vector<TraceStore> stores(nchunk);                         // chunk-private arenas, merged after
-    const size_t n_in = in.size();
     std::exception_ptr task_err;   // [task-err]
     #pragma omp taskloop grainsize(1) default(shared)
     for (int ci = 0; ci < nchunk; ++ci)
     { try {
-      const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
+      const size_t lo = cut[ci], hi = cut[ci + 1];
       TraceStore& cst = stores[ci];
       cst.setFrames(wst.rt_index, &wst.b);
       // One MassTrace in flight at a time. Per-trace detectPeaks equals the batch call: with
@@ -1520,12 +1708,9 @@ namespace
     // Reserve the merged arena once (absorb() does not); the chunk arenas stay live until absorbed.
     wst.inten.reserve(arena); if (any_bins) wst.bins.reserve(arena);
     vector<Trace> out; out.reserve(tot);
-    for (int ci = 0; ci < nchunk; ++ci)
-    {
-      const uint32_t base = wst.absorb(stores[ci]);
-      for (auto& t : parts[ci]) { t.off += base; out.push_back(std::move(t)); }
-      vector<Trace>().swap(parts[ci]);
-    }
+    vector<std::pair<TraceStore*, vector<Trace>*>> src(nchunk);   // [serial] absorbed in chunk order, copies as tasks
+    for (int ci = 0; ci < nchunk; ++ci) src[ci] = {&stores[ci], &parts[ci]};
+    absorbAll_(wst, out, src, vector<uint32_t>(nchunk, 0));
     return out;
   }
 
@@ -3691,13 +3876,29 @@ protected:
     /// inv == 0 is the DISABLED state, not an error: every bucket is then 0, every dq is 0, and
     /// the exact test alone decides. That is the fallback for every degenerate parameter below,
     /// and it costs no branch in the scan.
-    void build(const vector<Trace>& fr, const TraceStore& st, double delta_rt)
+    void build(const vector<Trace>& fr, const TraceStore& st, double delta_rt, long nt = 1)
     {
       const size_t n = fr.size();
       rt.resize(n); q.assign(n, 0);
       rt0 = 0.0; inv = 0.0;
-      double lo = 0.0, hi = 0.0;
-      for (size_t i = 0; i < n; ++i) { rt[i] = rtOf(st, fr[i]); if (!i || rt[i] < lo) lo = rt[i]; if (!i || rt[i] > hi) hi = rt[i]; }
+      // [serial] As nt tasks. The serial fold takes the first value, then any value strictly below (above) it, so
+      // chunk 0 folds serially and every later chunk contributes its smallest (largest) non-NaN value, earliest on
+      // ties, folded in chunk order: the same lo and hi for any values (a NaN first value sticks, a later NaN never
+      // replaces).
+      vector<double> clo(nt, 0.0), chi(nt, 0.0);
+      vector<char> has(nt, 0);
+      forTasks_(nt, [&](long c) {
+        double l = 0.0, h = 0.0; bool any = false;
+        for (size_t i = (size_t)c * n / (size_t)nt; i < (size_t)(c + 1) * n / (size_t)nt; ++i)
+        {
+          rt[i] = rtOf(st, fr[i]);
+          if (c == 0) { if (!i || rt[i] < l) l = rt[i]; if (!i || rt[i] > h) h = rt[i]; }
+          else if (rt[i] == rt[i]) { if (!any || rt[i] < l) l = rt[i]; if (!any || rt[i] > h) h = rt[i]; any = true; }
+        }
+        clo[c] = l; chi[c] = h; has[c] = any;
+      });
+      double lo = clo[0], hi = chi[0];
+      for (long c = 1; c < nt; ++c) if (has[c]) { if (clo[c] < lo) lo = clo[c]; if (chi[c] > hi) hi = chi[c]; }
       // A denormal delta_rt makes 1/delta_rt infinite, and an RT range spanning +/-DBL_MAX makes
       // the span infinite; both then produce inf*0 = NaN inside bucketOf. Neither survives real
       // acquisition, but both are reachable and both were UB, so every one degrades to disabled.
@@ -3711,7 +3912,8 @@ protected:
       if (span > 0.0 && span * iv > 65000.0) iv = 65000.0 / span;
       if (!std::isfinite(iv) || !(iv > 0.0)) return;
       rt0 = lo; inv = iv;
-      for (size_t i = 0; i < n; ++i) q[i] = (uint16_t)bucketOf(rt[i]);
+      forTasks_(nt, [&](long c) {
+        for (size_t i = (size_t)c * n / (size_t)nt; i < (size_t)(c + 1) * n / (size_t)nt; ++i) q[i] = (uint16_t)bucketOf(rt[i]); });
     }
   };
 
@@ -6030,7 +6232,14 @@ protected:
               // the window's band edges must enclose the cell's bins: bandOf() and the tof index
               // wrap for a bin below tlo (review M2). A run-level freeze must be a superset. In
               // every mode, one cell included (review 3a: the acquisition edges are metadata).
-              TofIdx clo = 0xFFFFFFFFu, chi = 0; for (TofIdx t : cs.tof) { clo = std::min(clo, t); chi = std::max(chi, t); }
+              // [serial] the extremes as tasks: min and max are exact in any order
+              const size_t np = cs.tof.size();
+              const long nr = parTasks_(np, 1 << 18);
+              vector<TofIdx> clos(nr, 0xFFFFFFFFu), chis(nr, 0);
+              forTasks_(nr, [&](long c) {
+                for (size_t k = (size_t)c * np / (size_t)nr; k < (size_t)(c + 1) * np / (size_t)nr; ++k)
+                { clos[c] = std::min(clos[c], cs.tof[k]); chis[c] = std::max(chis[c], cs.tof[k]); } });
+              const TofIdx clo = *std::min_element(clos.begin(), clos.end()), chi = *std::max_element(chis.begin(), chis.end());
               if (clo < tlo || chi > thi) throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                     "cell bins outside the window's band edges", String(clo) + "-" + String(chi) + " vs " + String(tlo) + "-" + String(thi));
             }
@@ -6088,16 +6297,11 @@ protected:
           if (nb > 1)
             writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + " merge: " + String(n_cells) + " cell(s) x " + String(nb) + " band arenas, "
                           + String(arena) + " floats (" + String(arena * (any_bins ? 6 : 4) / (1024ULL * 1024ULL)) + " MB) x2 while absorbed, " + String(tot) + " traces");
-          for (size_t ci = 0; ci < n_cells; ++ci)
-          {
-            const uint32_t f0 = (uint32_t)f0z[ci];             // the cell's first frame in the frozen table
-            for (int b = 0; b < nb; ++b)
-            {
-              const uint32_t base = wst.absorb(bst[ci][b]);
-              for (auto& t : per[ci][b]) { t.off += base; t.frame0 += f0; t.bframe += f0; frag_traces.push_back(std::move(t)); }
-              vector<Trace>().swap(per[ci][b]);
-            }
-          }
+          { // [serial] absorbed in (cell, band) order, rebased by the cell's first frame in the frozen table; copies as tasks
+            vector<std::pair<TraceStore*, vector<Trace>*>> src; vector<uint32_t> fsh;
+            for (size_t ci = 0; ci < n_cells; ++ci)
+              for (int b = 0; b < nb; ++b) { src.push_back({&bst[ci][b], &per[ci][b]}); fsh.push_back((uint32_t)f0z[ci]); }
+            absorbAll_(wst, frag_traces, src, fsh); }
           w_merge = secs(std::chrono::steady_clock::now() - _tm0);
           ledAdd_(LC_BAND, -band_bytes); ledAdd_(LC_PARENT, -parent_bytes); ledStore();
           }                                                  // the band stores die here
@@ -6106,7 +6310,10 @@ protected:
           auto _ts = std::chrono::steady_clock::now();
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, n_bands * 4, split_scan_time);
           w_split = secs(std::chrono::steady_clock::now() - _ts); ledStore();
-          if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
+          if (max_span > 0.0)   // [serial] per trace, independent: as tasks over trace chunks
+          { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 16);
+            forTasks_(nr, [&](long c) { for (size_t i = (size_t)c * n / (size_t)nr; i < (size_t)(c + 1) * n / (size_t)nr; ++i)
+                                          trimToSpan(wst, frag_traces[i], max_span); }); }
           vector<int16_t>().swap(wst.bins); ledStore();
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
                         + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
@@ -6180,7 +6387,9 @@ protected:
 
         // Content-only and TOTAL: traces equal in (im, mz, rt, apex intensity) fall through to the remaining
         // fields, so their order never depends on what else is resident; exact duplicates are interchangeable.
-        sort(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& a, const Trace& b) {
+        // [serial] Sorted as tasks (parallelSort_): it may order exact duplicates differently from std::sort, which
+        // the comparator already allows -- the order of what else is resident moves them too.
+        parallelSort_(frag_traces.data(), frag_traces.size(), [&wst](const Trace& a, const Trace& b) {
           if (a.im != b.im) return a.im < b.im;
           if (a.mz != b.mz) return a.mz < b.mz;
           { const double ra = rtOf(wst, a), rb = rtOf(wst, b); if (ra != rb) return ra < rb; }
@@ -6194,7 +6403,7 @@ protected:
           if (a.bframe != b.bframe) return a.bframe < b.bframe;
           if (a.rt_at != b.rt_at) return a.rt_at < b.rt_at;
           return false;
-        });
+        }, parTasks_(frag_traces.size(), 1 << 15));
         // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
         // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
         // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
@@ -6227,8 +6436,9 @@ protected:
         }
         gate.publish();
         vector<double> frag_im(frag_traces.size());
-        for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
-        FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt);   // [adaptive] buckets cover the wider window
+        { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 17);   // [serial] as tasks
+          forTasks_(nr, [&](long c) { for (size_t i = (size_t)c * n / (size_t)nr; i < (size_t)(c + 1) * n / (size_t)nr; ++i) frag_im[i] = frag_traces[i].im; }); }
+        FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt, parTasks_(frag_traces.size(), 1 << 17));   // [adaptive] buckets cover the wider window
         w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
