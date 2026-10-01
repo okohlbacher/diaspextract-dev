@@ -317,19 +317,29 @@ screen (1.177 %).
 **Status 2026-10-01:** open -- deferred at release because every fix changes the default output and would invalidate
 the 43-run harness evidence (corpus_v3_rcb_public). Each needs a counter first, then a both-engines + entrapment A/B.
 Reviewer outputs: docs/reviews/release-1.6.0/final-review-2026-10-01/ (codex.md, kimi.md, vibe.md); verdicts in the
-release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG.
+release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG, except 1 and 2, fixed before
+the release (user decision 2026-10-01 07:15; the CHANGELOG lists them as fixed).
 
-1. **v2 counts an empty heavier position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returns 0
-   when PS(-j+1) is 0 at mul == 1, and the box (auto, clamped to at most 0.03) is narrower than the walk's own partner
-   tolerance (charge:iso_im_tolerance 0.05), so a walk's own partner outside the box rejects its step; with iterate one
-   empty position inside the walk moves the mono two isotopes right. Measure: a [monocheck] counter of rejections with
-   an empty denominator or numerator that the walk itself stood on. Fixes: treat an absent denominator as no evidence
-   (skip, or compare over two positions as the veto path does), or count the walk's own partner whatever the box, or
-   derive the clamp from iso_im_tolerance.
-2. **v2 extension onto another precursor's mono** (kimi F1, codex Q12; medium). B takes `bt` from PS, which sums
-   claimed traces, so the new mono can be another precursor's mono at a different frame or 1/K0; the twin fold
-   (same MS1 frame) cannot join them. Measure: count extensions whose `bt` is another precursor's mono trace at the same
-   charge. Fix: skip or flag those, or extend the twin relation to this provenance.
+1. **FIXED 2026-10-01 (branch fix160-monocheck, user decision 07:15: fix before release). v2 counted an empty heavier
+   position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returned 0 when PS(-j+1) was 0, and the
+   box (auto, at most 0.03) is narrower than the walk's own partner tolerance (charge:iso_im_tolerance 0.05), so a walk's
+   own partner outside the box rejected its step; with iterate one empty position inside the walk moved the mono two
+   isotopes right. Now `ratio()` returns -1 (no decision) when the heavier position is empty (at a veto charge: when the
+   two-position comparison has no denominator either) and the step stands; counter "tests stopped at an empty heavier
+   position" in [monocheck]. Chosen on the K562 9905 replica (monocheck_v2/analysis walkrep4 + mc2_repeval4, release
+   dump, identified keys held fixed; ceph tune-2026-09-29/monocheck_v2/fix160/): scorecard-A-subset isotope error 7.90 %
+   (shipped) -> 7.85 % 'stop' (chosen), 7.87 % 'two positions', 7.87 % 'own partner as denominator'; with the F1 check
+   10.18 / 10.27 / 10.33 % (10.42 % with the old rejection); 'stop' also pushes the fewest keys outside -1..2. The clamp
+   was not raised: the auto box is 0.0101 on K562 and 0.018/0.022 on HeLa py3 (none clamped), and wider boxes were worse
+   in the v2 analysis.
+2. **FIXED 2026-10-01 (same branch). v2 extension onto another precursor's mono** (kimi F1, codex Q12; medium). B took
+   `bt` from PS, which sums claimed traces, so the new mono could be another precursor's mono at a different frame or
+   1/K0, which the twin fold (same MS1 frame) cannot join. Now B's candidates are applied after every A, serially by
+   (m/z, index): refused when `bt`'s m/z is a mono another precursor holds after A or an earlier (brighter) extension took
+   (counter "extensions refused onto another precursor's monoisotope"). On the K562 replica this refuses ~62 % of the
+   extensions (43,273 of 69,973) and raises the predicted isotope error 7.85 -> 10.18 % (M+1 5.38 -> 7.64 %): most
+   extensions landed on a duplicate precursor's mono (see monocheck_v2 analysis 'M+1 mechanism'). Position-level check
+   (any trace in the box is a mono): 10.66 %, not taken.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranks below an unfused peak of equal total intensity at the 500-peak cap. Fix: carry the best member's r and overlap
    and recompute the key from the summed IM-weighted apex (the frag_ai pattern).
