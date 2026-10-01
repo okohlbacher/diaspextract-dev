@@ -246,7 +246,68 @@ CPU for 2.2x the peaks; its user CPU 1.5-1.9x). The band mechanism itself is not
 (cell x band) task pool -- optimistic estimate ~1.3x faster than the reference at 100 ng once the 1.94x score-worker CPU
 regression is counted, and it must beat the residency cost that made `tile:cells_per_tile 0` +32 % slower on K562 at 64
 threads; then the thread-scaling study's levers (heaviest band first, overlap LOAD/WRITE with the loop, exact split of the
-heaviest band). Balanced band edges would help most but change the output (both-engines + entrapment gate).
+heaviest band). Balanced band edges would help most but change the output (both-engines + entrapment gate). The 25pc clean
+runs on kim (HELA25PC.md section 0b) show the excess is critical path (68-85 % of the wall delta), not work per peak.
+
+## Release decision: rc-b as 1.6.0 (added 2026-09-30, from the DDA-likeness tuning campaign)
+
+**Status 2026-09-30:** open -- harness-confirmed candidate, decision with the user (paper version freeze ~12 Oct).
+
+rc-b = branch tune/rc-b b2185db (tune/rc-a + tune/fuse + tune/monocheck d512026). Four default changes:
+`assembly:im_weight_sigma` 0 -> 0.005, `assembly:foreign_precursor_weight` -> 0, `assembly:fragment_fuse_ppm` 0 -> 25
+(anchored), `charge:mono_profile_check` false -> v2. Harness plan corpus_v3_rcb_public (43 public runs, both engines,
+entrapment): Sage +12.3 %, MSFragger +7.7 % vs 1.5.0, no run loses on either engine, entrapment FDP change median -0.03 pt
+(max +0.14), z=1 stratum unchanged; speed and RSS unchanged. Evidence and open risks: tune-2026-09-29/RELEASE_DECISION_RCB.md,
+RCB_VS_DIATRACER.md, CAMPAIGN.md. Before a release: the codex/kimi/vibe review of the merged rc-b code, the release gate
+(determinism pins, e2e, smoke, guardtest) on the final binary, the K562 PXD041421 corpus (24 runs) on rc-b, docs.
+
+## Thread scaling: levers from the 2026-09-30 study (added 2026-09-30)
+
+**Status 2026-09-30:** in progress -- user: implement the levers in parallel (tune/scal-* branches on top of tune/rc-b); study in tune-2026-09-29/scaling/SCALING.md (read section 0 first).
+
+At 64 threads the ~65 s that stops shrinking is between-tile serial work (LOAD(tile), WRITE, SORT/MERGE/trim; 58 % of the loss)
+and the phases before the loop (MS1_TRACE, PRECURSOR_INFER, LOAD(stream); 24 %). From 96 threads one heavy band-7 task per
+tile (window 909-937 on K562) sets the tail (37-40 % of the loss at 128/192). Levers, all output-identical by construction:
+(1) overlap LOAD(tile k+1) and SORT/MERGE/WRITE of tile k with the window loop, keeping the barrier; (2) heaviest band first in
+the band taskloop (cheap; 19 digest-identical runs already execute bands in varied orders); (3) pipelined tiles (dependency
+graph on the per-window carry instead of a barrier); (4) parallelise the outside-loop phases (PRECURSOR_INFER batch size,
+total-order sorts). Splitting the heaviest band exactly is the ordered-speculation item below, falsified as built at 100
+threads -- reopen only once (1)-(3) make the loop tail-bound with idle threads. The simulated gains (-17..-53 %) are upper
+bounds: the only measured counterfactual (one tile) missed by 26 %. Each lever needs a digest gate at several thread counts
+and an interleaved timing A/B (band-7 runtime varies 16-25 % between repeats). Operational: one thread per physical core on
+shared nodes.
+
+## Evosep: fewer peptides than the reference pipeline (added 2026-09-30)
+
+**Status 2026-09-30:** open -- in-depth analysis started (user request; tune-2026-09-29/evosep/).
+
+On the nine Evosep runs (60 / 200 SPD, PXD017703) DIAspeXtract + Sage finds 0.94x the peptides of the reference + MSFragger
+for rc-b (0.82x for 1.5.0); per run 0.84-1.03x. Searched with MSFragger, our spectra give 0.83x the reference's (126,316 vs
+153,071), while with Sage they give 1.18x the reference's Sage result. Our Sage entrapment FDP is also highest here (1.36 %
+median). Every other family is 1.16-1.37x. Questions: short gradients (narrow peaks, few points per trace) against the
+3-point fragment gate and the co-elution window; peaks per spectrum and the MSFragger content gap (cf. the py3 MSFragger gap
+in "From the public HeLa table"). Source: tune-2026-09-29/perf/rt_rss_table.md Table C.
+
+## The 500-peak cap is not enforced on the output (added 2026-09-30)
+
+**Status 2026-09-30:** open, low priority (user, 2026-09-30: not critical) -- a fix exists behind a flag, not adopted.
+
+`assembly:max_fragments` = 500, yet 50.8 % of 1.5.x K562 spectra carry more than 500 peaks (up to ~7k) and rc-b raises the
+share to 55.1 % (max 5,880). The twin fold and the same-bin merge take the union of capped spectra after the cap.
+`assembly:post_fusion_cap` (tune/recap, off by default) re-applies the cap after the fold: screened ID-neutral to negative
+(K562 +8.6/+4.3 % only together with imw/foreign0; the HeLa_34 cell failed and was never re-run). Decide: re-cap (with a
+both-engines + entrapment A/B on rc-b) or document the cap as applying before the fold. It also makes peaks-per-spectrum
+comparisons with the reference (hard-capped at 500) not like-for-like.
+
+## Fragment fusion and entrapment (added 2026-09-30)
+
+**Status 2026-09-30:** closed (user, 2026-09-30): a +0.14 pt single-run entrapment change is not relevant; ignore. Kept for the record.
+
+Fusion alone (fuse 25 ppm anchored + rc-a, screen) raised entrapment FDP by +0.04..+0.17 pt on 5 of 6 breadth runs. In
+rc-b, monocheck v2 takes most of it back: harness median -0.03 pt, but single runs up to +0.14 pt (a HeLa 25pc run) and TNBC
++0.10 pt in the screen; the raw z=1 entrapment share is unchanged (1.93 vs 1.96 %). Measure fusion's own contribution at
+harness grade (a fusion-only arm, stratified by charge), and compare 20 ppm linkage, which had the lowest K562 FDP in the
+screen (1.177 %).
 
 ## Routes (2026-09-08)
 
