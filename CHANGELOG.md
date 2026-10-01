@@ -2,9 +2,9 @@
 
 ## v1.6.0 — 2026-10-01
 
-Four new defaults. On 43 public runs, peptides at 1 % FDR rise by 12.3 % with Sage and by 7.7 % with MSFragger over
-1.5.0. No run loses peptides on either engine, entrapment FDR and memory are unchanged, and wall time is within 3 %.
-Each default can be set back.
+Five new defaults. With the first four, on 43 public runs, peptides at 1 % FDR rise by 12.3 % with Sage and by
+7.7 % with MSFragger over 1.5.0. No run loses peptides on either engine, entrapment FDR and memory are unchanged, and
+wall time is within 3 %. Each default can be set back.
 
 - **New defaults.**
 
@@ -14,12 +14,14 @@ Each default can be set back.
   | `-assembly:foreign_precursor_weight` | (new) | 0 | removes the residual isotope envelopes of co-isolated precursors from the spectrum |
   | `-assembly:fragment_fuse_ppm` | (new) | 25, `anchored` | fuses the pieces of one fragment ion into one peak before the cap |
   | `-charge:mono_profile_check` | false | v2 | checks the monoisotope against the summed MS1 intensity at the isotope positions |
+  | `-charge:iso_im_tolerance` | 0.05 | 0 (auto) | measures the isotope-partner 1/K0 tolerance per run |
 
   `-assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0
-  -charge:mono_profile_check false` gives the 1.5.0 spectra exactly (same semantic digest, checked on two runs). The
-  three options new to the defaults are now listed by `--help`, not only `--helphelp`.
-- **Measured effect.** The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window
-  schemes, and Evosep 60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
+  -charge:mono_profile_check false -charge:iso_im_tolerance 0.05` gives the 1.5.0 spectra exactly (same semantic
+  digest, checked on two runs). The three options new to the defaults are now listed by `--help`, not only `--helphelp`.
+- **Measured effect** (the first four defaults; the isotope tolerance below was screened, not measured on the corpus).
+  The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window schemes, and Evosep
+  60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
   with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage entrapment search for the
   FDR check.
 
@@ -83,6 +85,20 @@ Each default can be set back.
   Logged as `[monocheck]`, stamped `spx:monocheck` (with the box and the percentile). `true` selects v1, which
   correlates each leftward step's elution profile with the seed's (`-charge:mono_profile_min_corr` 0.6,
   `-charge:mono_profile_max_dim` 0.015). v1 rejects many true steps; it is kept for comparison.
+- **Isotope-partner 1/K0 tolerance per run** (`-charge:iso_im_tolerance` 0 = auto, `-charge:iso_partner first|closest`).
+  The isotope walk took any MS1 trace within 0.05 1/K0 as an isotope partner. On dense short-gradient runs that is
+  many times the spread of real isotopes, so chance traces became partners and took other precursors' monoisotopes.
+  auto measures the tolerance before the walk:
+  - a stride sample of the MS1 traces (at most 200,000) is probed at each charge's +1 isotope position, in the walk's
+    m/z and retention-time window, and at two control positions 50 ppm either side, where no isotope can sit;
+  - at each position the nearest trace's 1/K0 gap is kept;
+  - the tolerance is the one that admits the most isotope-position traces net of twice the control traces (true
+    partners admitted minus chance partners admitted), on a 0.001 grid clamped to [0.01, 0.05].
+
+  On the public HeLa runs it measures 0.010 on Evosep, 0.028 on 25pc at 10 ng and 0.045 on py3 at 10 ng. A value
+  above 0 fixes the tolerance; 0.05 is the 1.5.0 behaviour. `-charge:iso_partner closest` takes the candidate closest
+  to the seed in apex RT and 1/K0 (each scaled by its tolerance) instead of the first in m/z order. Logged as
+  `[isotol]`, stamped `spx:iso_im_tolerance` (the measured value and the partner rule).
 - **New options, off by default:**
   - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
     fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums
@@ -94,16 +110,17 @@ Each default can be set back.
   - `-assembly:post_fusion_cap` re-applies `max_fragments` after the twin fold. The fold unions the members' capped
     fragment lists. Every peak carries its cap key through the merge, the fusion and the fold. Stamped
     `spx:post_fusion_cap`.
-- **Header.** A default run now carries 27 `spx:` stamps: `spx:monocheck`, `spx:foreign` and `spx:fragment_fuse` are
-  added to the 24 that are always written.
+- **Header.** A default run now carries 28 `spx:` stamps: `spx:monocheck`, `spx:foreign`, `spx:fragment_fuse` and
+  `spx:iso_im_tolerance` are added to the 24 that are always written.
 - `-assembly:frag_core_frames` must be odd only with `-assembly:frag_intensity core`, the only mode that uses it.
 - An exception inside the parallel twin fold or the post-fusion cap now ends the run with an error message, not an
   abort. An allocation failure is one example.
 - **Known limitations.**
   - **Box narrower than the walk.** The v2 box is at most 0.03 1/K0, but the count walk accepts isotope partners up to
-    `-charge:iso_im_tolerance` (0.05) away. A walk whose own partner lies outside the box sees an empty position, which
-    counts against the step. The monoisotope can then move one or more isotopes right of the true one (two for one
-    empty position inside the walk, with `iterate`), mainly on runs with wide isotope 1/K0 scatter.
+    `-charge:iso_im_tolerance` away (auto: 0.01–0.05 per run). A walk whose own partner lies outside the box sees an
+    empty position, which counts against the step. The monoisotope can then move one or more isotopes right of the
+    true one (two for one empty position inside the walk, with `iterate`), mainly on runs with wide isotope 1/K0
+    scatter.
   - **Duplicate monoisotope after the extension.** v2's extension can put a monoisotope on a trace that is another
     precursor's monoisotope. The twin fold joins the two spectra only when they come from the same MS1 frame.
   - **Fusion and elution.** Fusion sums pieces whose elution does not overlap, unlike the same-bin merge.
