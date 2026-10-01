@@ -57,7 +57,9 @@ Each default can be set back.
   50 ppm) are fused after the same-bin merge and before `min_fragments` and the cap. A fused peak has:
   - the sum of its members' emitted intensities;
   - their intensity-weighted m/z;
-  - the best member's cap key.
+  - a cap key computed as for one fragment from the sum of the members' 1/K0-weighted apex intensities, with the
+    score (and, for `evidence`, the shared points) of the member with the best key. A fused ion ranks under the cap
+    as one ion of its total intensity, never below its best piece.
 
   A spectrum that fuses below `min_fragments` is not written. `anchored` takes the fragments strongest first, and each
   one not yet fused takes every unfused fragment within the tolerance of its own m/z. `linkage` joins m/z neighbours,
@@ -104,8 +106,7 @@ Each default can be set back.
     empty position inside the walk, with `iterate`), mainly on runs with wide isotope 1/K0 scatter.
   - **Duplicate monoisotope after the extension.** v2's extension can put a monoisotope on a trace that is another
     precursor's monoisotope. The twin fold joins the two spectra only when they come from the same MS1 frame.
-  - **Fusion and the cap.** A fused peak is ranked under the cap by its best piece's key, not by its summed
-    intensity. Fusion also sums pieces whose elution does not overlap, unlike the same-bin merge.
+  - **Fusion and elution.** Fusion sums pieces whose elution does not overlap, unlike the same-bin merge.
   - **Fusion and twins.** Fusion is not reconciled across twins, so after the fold's 10-ppm merge one ion can still
     appear as two peaks a little over 10 ppm apart.
   - **Window edges.** Foreign-envelope removal considers only precursors whose monoisotope lies in the window. A

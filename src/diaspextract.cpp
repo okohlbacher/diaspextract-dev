@@ -2576,7 +2576,7 @@ protected:
     registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
     setMinInt_("assembly:foreign_precursor_min_iso", 1);
     setMaxInt_("assembly:foreign_precursor_min_iso", 4);
-    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 with assembly:fragment_fuse_mode anchored since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) their best member's, not one recomputed from the sum; a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
+    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 with assembly:fragment_fuse_mode anchored since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) the key of one fragment applied to the whole ion: the best-keyed member's score (and, under evidence, its shared frames) with the sum of the members' IM-weighted apex intensities, never below that member's own key; a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
     setMinFloat_("assembly:fragment_fuse_ppm", 0.0);
     setMaxFloat_("assembly:fragment_fuse_ppm", 50.0);
     registerStringOption_("assembly:fragment_fuse_mode", "<mode>", "anchored", "assembly:fragment_fuse_ppm: 'anchored' takes the fragments by emitted intensity, strongest first (ties: lower m/z); each one not yet fused becomes an anchor and takes every unfused fragment within the tolerance of its own m/z. 'linkage' walks the fragments in m/z order and joins a fragment to the group of the previous one when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage, span capped).", false, true);
@@ -3621,14 +3621,15 @@ protected:
   /// grid, up to 3 steps, within max(foreign_ppm_, 30 ppm)). A candidate's positions are mono + k ISO/z, k = 0..3; a
   /// position is present when an admitted fragment lies within foreign_ppm_ of it. With at least foreign_min_iso_
   /// positions present, those fragments are multiplied by foreign_w_ (0 removes them) and their cap key is recomputed
-  /// from the attenuated IM-weighted apex (@p frag_ai). A fragment within max(foreign_ppm_, 30 ppm) of this
+  /// from the attenuated IM-weighted apex (@p frag_ai, attenuated with it). A fragment within max(foreign_ppm_, 30 ppm) of this
   /// precursor's own envelope (mono to M+3) neither counts nor is touched: stripping the own isotopes lost 2.3 % of
   /// peptides in tuning. Two matched positions are weak evidence for a 1+ (or same-charge) fragment and its own
   /// isotope, which line up with a co-isolated envelope of that charge as soon as one does (open). Returns the fragments
-  /// attenuated. @p resc: gate:anchor_rescue's rescued flags, parallel to @p frags when not empty, compacted with it.
+  /// attenuated. @p resc: gate:anchor_rescue's rescued flags, @p frag_kq: the [fuse] key factors; each parallel to @p frags
+  /// when not empty, compacted with it.
   size_t attenuateForeign_(const Precursor_& pc, double drt, const ForeignIdx_& fx, vector<pair<double, double>>& frags,
                            vector<double>& frag_scores, vector<uint32_t>& frag_bin, vector<pair<int, int>>& frag_span,
-                           const vector<double>& frag_ai, vector<char>& resc) const
+                           vector<double>& frag_ai, vector<double>& frag_kq, vector<char>& resc) const
   {
     // The two own-ion tests take a wider tolerance than the envelope match: an ion's residual peaks scatter tens of
     // ppm around the MS1 mono grid (a 10 ng HeLa run: 31 % of the own-grid peaks within 60 ppm lie 20-60 ppm off), and with
@@ -3690,13 +3691,21 @@ protected:
       frags[i].second *= foreign_w_;
       const double L = std::log1p(frag_ai[i]);                       // corr_inten keys are linear in it, the others in its log
       frag_scores[i] = cap_rank_ == 0 ? frag_scores[i] * foreign_w_ : L > 0.0 ? frag_scores[i] * std::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
+      frag_ai[i] *= foreign_w_;                                      // [fuse] a fused key sums the attenuated apex
     }
     if (n && foreign_w_ <= 0.0)                                      // remove: compact every parallel array
     {
       size_t w = 0;
       for (size_t i = 0; i < hit.size(); ++i)
-        if (!hit[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; frag_bin[w] = frag_bin[i]; frag_span[w] = frag_span[i]; if (!resc.empty()) resc[w] = resc[i]; ++w; }
-      frags.resize(w); frag_scores.resize(w); frag_bin.resize(w); frag_span.resize(w);
+        if (!hit[i])
+        {
+          frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; frag_bin[w] = frag_bin[i]; frag_span[w] = frag_span[i]; frag_ai[w] = frag_ai[i];
+          if (!frag_kq.empty()) frag_kq[w] = frag_kq[i];
+          if (!resc.empty()) resc[w] = resc[i];
+          ++w;
+        }
+      frags.resize(w); frag_scores.resize(w); frag_bin.resize(w); frag_span.resize(w); frag_ai.resize(w);
+      if (!frag_kq.empty()) frag_kq.resize(w);
       if (!resc.empty()) resc.resize(w);
     }
     cnt[1] += n_env; cnt[3] += (long long)n; cnt[6] += err; cnt[7] += n_match;
@@ -3709,11 +3718,15 @@ protected:
   /// exact bins. Groups the fragments within @p ppm (anchored: strongest first, each unfused fragment an anchor taking
   /// every unfused one within ppm of its own m/z; @p linkage: m/z order, joined to the previous member within ppm and to
   /// the group's first within 2 x ppm). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
-  /// intensity = their sum, key = their best key, rescued flag = the strongest member's. It sits at its members' lowest
-  /// index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and @p resc (when not
-  /// empty) are parallel to @p frags and compacted with it. Deterministic: every order has a total tie-break and the sums
-  /// run in m/z order. Returns the groups of >= 2 fused and adds their members to @p n_members.
+  /// intensity = their sum, rescued flag = the strongest member's, key = the best-keyed member's factor @p kq (its score,
+  /// and shared frames under evidence) times the summed IM-weighted apex @p ai (ln(1 + sum) when @p log_key), the formula
+  /// of an unfused fragment's key applied to the whole ion; it is never below the best member's key. It sits at its
+  /// members' lowest index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and
+  /// @p resc (when not empty) are parallel to @p frags and compacted with it; @p ai and @p kq are parallel to it on entry
+  /// and stale on return. Deterministic: every order has a total tie-break and the sums run in m/z order. Returns the
+  /// groups of >= 2 fused and adds their members to @p n_members.
   static long long fuseFragments_(vector<pair<double, double>>& frags, vector<double>& keys, vector<char>& resc,
+                                  const vector<double>& ai, const vector<double>& kq, bool log_key,
                                   double ppm, bool linkage, long long& n_members)
   {
     const size_t n = frags.size();
@@ -3757,13 +3770,14 @@ protected:
       }
     }
     if (ng == n) return 0;                                           // nothing within ppm: unchanged
-    struct Acc { double w = 0.0, wmz = 0.0, key = -std::numeric_limits<double>::infinity(); uint32_t head = NONE, top = NONE, n = 0; };
+    struct Acc { double w = 0.0, wmz = 0.0, ai = 0.0; uint32_t head = NONE, top = NONE, best = NONE, n = 0; };
     vector<Acc> acc(ng);
     for (uint32_t i : om)                                            // m/z order: a fixed summation order
     {
       Acc& g = acc[grp[i]];
       g.w += frags[i].second; g.wmz += frags[i].second * frags[i].first;
-      g.key = std::max(g.key, keys[i]);
+      g.ai += ai[i];
+      if (g.best == NONE || keys[i] > keys[g.best]) g.best = i;      // the best key; ties: lower m/z
       g.head = std::min(g.head, i);
       if (g.top == NONE || frags[i].second > frags[g.top].second) g.top = i;   // the strongest; ties: lower m/z
       ++g.n;
@@ -3779,7 +3793,7 @@ protected:
       {
         const double mz = g.w > 0.0 ? g.wmz / g.w : frags[g.top].first;
         const char r = resc.empty() ? 0 : resc[g.top];
-        frags[w] = {mz, g.w}; keys[w] = g.key;
+        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * (log_key ? std::log1p(g.ai) : g.ai);
         if (!resc.empty()) resc[w] = r;
         ++groups; n_members += g.n;
       }
@@ -3804,7 +3818,9 @@ protected:
   {
     vector<pair<double, double>> frags;
     vector<double> frag_scores;
-    vector<double> frag_ai;      // [foreign] each fragment's IM-weighted apex, its cap key's intensity (only with fx)
+    vector<double> frag_ai;      // [foreign]/[fuse] each fragment's IM-weighted apex, its cap key's intensity (only with fx or fusion)
+    vector<double> frag_kq;      // [fuse] each fragment's cap key factor besides that intensity term (only with fusion)
+    const bool fuse_on = fuse_ppm_ > 0.0;
     vector<uint32_t> frag_bin;   // [merge] the TOF bin of each fragment (0: OpenMS detector, no bin; a real bin 0, m/z just
                                  // below the usual 100 m/z floor, is compared by exact m/z like the OpenMS path)
     vector<pair<int, int>> frag_span;   // [merge] its detected window-frame span
@@ -3986,10 +4002,12 @@ protected:
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
         frag_span.emplace_back(f_lo, f_hi);
-        if (fx) frag_ai.push_back(inten);
+        if (fx || fuse_on) frag_ai.push_back(inten);
         frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
                             : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
                             : c * inten);                              // [cap] the max_fragments ranking key
+        if (fuse_on)                                                   // [fuse] the same key without its intensity term
+          frag_kq.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) : cap_rank_ == 2 ? std::max(c_raw, 0.0) * (1.0 + overlap) : c);
         if (g_anchor && c >= anchor_min_corr_) anchors.push_back((uint32_t)fi);   // [anchor] a well-correlated accepted fragment
       }
       // [anchor] gate:anchor_rescue. A weak fragment of a strong precursor is a 2-3 point tip that fails the plain gate's
@@ -4079,8 +4097,9 @@ protected:
             frags.emplace_back(q.mz, emit_inten);
             frag_bin.push_back(f.tof);
             frag_span.emplace_back(q.t_lo, q.t_hi);
-            if (fx) frag_ai.push_back(inten);                            // [foreign] parallel to frags, as above
+            if (fx || fuse_on) frag_ai.push_back(inten);                 // [foreign]/[fuse] parallel to frags, as above
             frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.ov) : c * inten);
+            if (fuse_on) frag_kq.push_back(cap_rank_ == 1 ? c * c : cap_rank_ == 2 ? c * (1.0 + q.ov) : c);
             resc.push_back(1);
             resc_fi.push_back(q.fi);
             ++n_why[q.why];
@@ -4133,7 +4152,7 @@ protected:
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
     // [foreign] other precursors' residual envelopes, before the merge and the cap: a removed fragment frees its slot
     const size_t n_before = frags.size();                              // [foreign] for the fell-below count
-    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai, resc) : 0;
+    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai, frag_kq, resc) : 0;
     // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
     // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
     // RT span overlaps its span are summed (parallel slices of one ion), RT-disjoint pieces are dropped (the stronger
@@ -4157,15 +4176,22 @@ protected:
           const size_t head = ord[g];                                    // lowest index: the output order is unchanged
           size_t top = head;
           for (size_t k = g; k < e; ++k) if (frags[ord[k]].second > frags[top].second) top = ord[k];
-          double sum = 0.0, cap = -std::numeric_limits<double>::infinity();
+          double sum = 0.0, cap = -std::numeric_limits<double>::infinity(), asum = 0.0;
+          size_t kb = top;                                               // [fuse] the member whose key the peak takes
           for (size_t k = g; k < e; ++k)
           {
             const size_t i = ord[k];
             if (!(frag_span[i].second < frag_span[top].first || frag_span[top].second < frag_span[i].first))
-            { sum += frags[i].second; cap = std::max(cap, frag_scores[i]); }
+            {
+              sum += frags[i].second;
+              if (frag_scores[i] > cap) kb = i;
+              cap = std::max(cap, frag_scores[i]);
+              if (fuse_on) asum += frag_ai[i];
+            }
             if (k > g) gone[i] = 1;
           }
           frags[head] = {frags[top].first, sum}; frag_scores[head] = cap;
+          if (fuse_on) { frag_ai[head] = asum; frag_kq[head] = frag_kq[kb]; }   // [fuse] the summed apex, the key's member's factor
           if (!resc.empty()) resc[head] = resc[top];                    // [anchor] rescued if its m/z is a rescued one's
           nm += (long long)(e - g - 1);
         }
@@ -4175,19 +4201,27 @@ protected:
       {
         size_t w = 0;
         for (size_t i = 0; i < frags.size(); ++i)
-          if (!gone[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; if (!resc.empty()) resc[w] = resc[i]; ++w; }
+          if (!gone[i])
+          {
+            frags[w] = frags[i]; frag_scores[w] = frag_scores[i];
+            if (fuse_on) { frag_ai[w] = frag_ai[i]; frag_kq[w] = frag_kq[i]; }
+            if (!resc.empty()) resc[w] = resc[i];
+            ++w;
+          }
         frags.resize(w); frag_scores.resize(w);
+        if (fuse_on) { frag_ai.resize(w); frag_kq.resize(w); }
         if (!resc.empty()) resc.resize(w);
         mergeCount_()[2] += nm;
       }
     }
-    // [fuse] one peak per fragment ion, after the merge (frag_bin and frag_span are stale from here on) and before
-    // min_fragments and the cap: the cap ranks fused peaks, so the slots of an ion's pieces refill
+    // [fuse] one peak per fragment ion, after the merge (frag_bin, frag_span, frag_ai and frag_kq are stale from here on)
+    // and before min_fragments and the cap: the cap ranks fused peaks by a key recomputed from the summed apex, so the
+    // slots of an ion's pieces refill
     const size_t n_merged = frags.size();                              // [foreign]/[fuse] the fell-below counts
-    if (fuse_ppm_ > 0.0 && n_merged > 0)
+    if (fuse_on && n_merged > 0)
     {
       long long n_mem = 0;
-      const long long n_grp = fuseFragments_(frags, frag_scores, resc, fuse_ppm_, fuse_linkage_, n_mem);
+      const long long n_grp = fuseFragments_(frags, frag_scores, resc, frag_ai, frag_kq, cap_rank_ != 0, fuse_ppm_, fuse_linkage_, n_mem);
       auto& fc = fuseCount_();
       ++fc[0]; fc[1] += (long long)n_merged; fc[2] += (long long)frags.size();
       if (n_grp) { fc[3] += n_grp; fc[4] += n_mem; }
@@ -5569,7 +5603,7 @@ protected:
     {
       String s = String(fuse_linkage_ ? "linkage " : "anchored ") + String(fuse_ppm_) + " ppm";
       if (fuse_linkage_) s += String(" (group span <= ") + String(2.0 * fuse_ppm_) + " ppm)";
-      s += ", summed intensity, intensity-weighted m/z, best cap key; after the same-bin merge, before min_fragments and max_fragments";
+      s += ", summed intensity, intensity-weighted m/z, cap key from the summed apex; after the same-bin merge, before min_fragments and max_fragments";
       out_exp.setMetaValue("spx:fragment_fuse", s);
     }
     std::unique_ptr<TileWriter> writer;

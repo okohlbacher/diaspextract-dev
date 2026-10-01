@@ -317,7 +317,7 @@ screen (1.177 %).
 **Status 2026-10-01:** open -- deferred at release because every fix changes the default output and would invalidate
 the 43-run harness evidence (corpus_v3_rcb_public). Each needs a counter first, then a both-engines + entrapment A/B.
 Reviewer outputs: docs/reviews/release-1.6.0/final-review-2026-10-01/ (codex.md, kimi.md, vibe.md); verdicts in the
-release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG.
+release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG (item 3 fixed before the release).
 
 1. **v2 counts an empty heavier position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returns 0
    when PS(-j+1) is 0 at mul == 1, and the box (auto, clamped to at most 0.03) is narrower than the walk's own partner
@@ -331,8 +331,12 @@ release fix commit's message. All are listed as known limitations in the 1.6.0 C
    (same MS1 frame) cannot join them. Measure: count extensions whose `bt` is another precursor's mono trace at the same
    charge. Fix: skip or flag those, or extend the twin relation to this provenance.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
-   ranks below an unfused peak of equal total intensity at the 500-peak cap. Fix: carry the best member's r and overlap
-   and recompute the key from the summed IM-weighted apex (the frag_ai pattern).
+   ranked below an unfused peak of equal total intensity at the 500-peak cap. **Fixed before the release (user,
+   2026-10-01; branch fix160-fusecap):** each fragment carries its key's intensity term (the IM-weighted apex, the
+   frag_ai pattern, attenuated with the foreign weight and summed by the same-bin merge over the members it sums) and
+   the rest of its key (r, r^2 or r (1 + overlap)); a fused peak's key is the best-keyed member's factor times the summed
+   apex (ln(1 + sum) for umpire/evidence), never below that member's key. Only the cap ranking changes: fusion off is
+   byte-identical, and with the cap out of reach (max_fragments above every spectrum) the output equals rc-b's.
 4. **Foreign candidates by mono-in-window only** (codex R4, kimi F4). A co-isolated precursor whose mono sits just outside
    the window but whose M+1..M+3 lie inside is never a candidate (under-removal only). Fix: widen the candidate m/z range
    by 3 x ISO / z_min and let the envelope match decide; note that v2 can move a mono across a window edge.
