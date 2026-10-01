@@ -353,6 +353,30 @@ a documented known limitation.
    checks show no consistent ID cost (K562 better, HeLa within +-0.4 pt either way) but raise the isotope error by 3-4 pt
    (all M+1; M-1 stays 1.5 %): the extension's value includes these same-mono pairs. A fix needs the fold to join them
    (one mono trace at nearby frames) rather than refusing the extension.
+   **Redesign screened 2026-10-01 (branch f160-f1fold; SCREENING n = 1 vs rel160_base, Sage / MSFragger; the panel's
+   ACCEPT rule: no control loses > 0.5 %, Evosep gains on both engines on average, K562 isotope error +<= 0.5 pt).**
+   New `assembly:twin_rt_frames` (0 = auto: the run's median MS1 FWHM in cycles, rounded; it came out 2 on all nine
+   panel runs, 1.95-2.41 cycles) widens the fold to apexes <= (n + 0.5) cycles apart inside one RT cell (the tile
+   loop's ownership test, so cells_per_tile and threads keep one digest). Off (-1) == rel160-base-1 on 9/9 runs, the
+   1.5.0 reset == 2b01bef4 / 5b383304, 16 / 100 threads and cells_per_tile 2 one digest (HeLa_22, HeLa_2450,
+   HeLa_2735, K562). Cross-frame pairs (same z, |d1/K0| <= 0.005, 1-3 frames) are bimodal in m/z: <= 0.01 ppm (one
+   flight-time bin; HeLa_22 1,023 / K562 37,784 at one frame apart) or >= 0.3 ppm (distinct traces; 15,900 / 230k);
+   bit-equal m/z catches only half of the one-bin pairs. Three relations (`assembly:twin_rt_match`):
+   - `ppm` (20 ppm, the original proposal; arm f160-f1fold-1): spectra -25..-44 %, K562 -7.85 / -3.60 %, HeLa_34
+     -4.31 / -3.54 %, HeLa_22 +0.13 / -1.66 %, TNBC_009 -4.83 / +0.14 %, HeLa_19 +2.80 / +3.67 % (the only gain),
+     Evosep -1.1..-2.9 % on both, isotope error 5.69 -> 8.52 %. Rejected.
+   - `bin` (any one-bin pair; arm f160-f1fold-2): spectra -6..-15 %, K562 -0.74 / +0.28 %, isotope error 6.46 %,
+     HeLa_22/34/19 MSFragger -0.44..-0.48 %, Evosep 2450/2451/2737 Sage -0.25..-0.34 %, MSFragger -2.26/+0.04/-1.29 %.
+     Rejected.
+   - `ext` (one bin and one member's mono placed by the extension, the F1 pairs only; arm f160-f1fold-3, b25d42f,
+     the branch default): spectra -0.7..-3.0 %; controls HeLa_19 +0.01 / +0.39, HeLa_22 +0.00 / -0.21, HeLa_34
+     +0.01 / +0.23, TNBC_009 -0.24 / -0.07, K562 -0.35 / +0.15 %; isotope error 5.69 -> 5.83 %; Evosep 2450 -0.08 /
+     +0.16, 2451 -0.18 / -0.09, 2735 -0.28 / +0.03, 2737 -0.15 / -1.69 % (mean -0.17 / -0.40 %); wall and RSS
+     unchanged. Passes the control and isotope-error limits, fails "Evosep gains": a de-duplication is ID-neutral at
+     best. K562 one-bin pairs one frame apart 37,784 -> 24,771 (bit-equal 23,865 -> 12,832); the rest are seeds of
+     one ion with two mono traces, which `bin` folds at a cost.
+   Decision for the user: ship `ext` as a neutral fix of the duplicate, or keep the item as a known limitation
+   (`-assembly:twin_rt_frames -1` as the default reproduces rel160 exactly).
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranked below an unfused peak of equal total intensity at the 500-peak cap. **Fixed before the release (user,
    2026-10-01; branch fix160-fusecap):** each fragment carries its key's intensity term (the IM-weighted apex, the
