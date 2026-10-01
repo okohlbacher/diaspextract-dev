@@ -205,6 +205,61 @@ namespace
     v.swap(out);
     return 0;
   }
+
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
+  /// [outer] libstdc++ 13's std::__introsort_loop with the right part of each cut handed to a task: the two parts are
+  /// disjoint and each is processed by the same calls in the same order as in the serial loop, so the array ends
+  /// exactly as std::sort leaves it, equal keys included. Small parts run inline (bounded task count).
+  template <typename It, typename Size, typename Cmp>
+  void introsortLoopPar_(It first, It last, Size depth, Cmp cmp)
+  {
+    while (last - first > 16)   // libstdc++'s _S_threshold
+    {
+      if (depth == 0) { std::__partial_sort(first, last, last, cmp); return; }
+      --depth;
+      It cut = std::__unguarded_partition_pivot(first, last, cmp);
+      if (last - cut >= 16384)
+      {
+        #pragma omp task default(shared) firstprivate(cut, last, depth, cmp)
+        introsortLoopPar_(cut, last, depth, cmp);
+      }
+      else introsortLoopPar_(cut, last, depth, cmp);
+      last = cut;
+    }
+  }
+#endif
+
+  /// [outer] std::sort(v.begin(), v.end(), less), equal keys in std::sort's own order, in parallel where the standard
+  /// library is libstdc++ 13 (the release compiler): its std::__sort is introsort loop + final insertion sort, replayed
+  /// here with tasks (introsortLoopPar_) and the same final pass. Any other library, small inputs or a caller already
+  /// inside a parallel region: std::sort itself.
+  template <typename T, typename Less>
+  void stdSortPar_(std::vector<T>& v, Less less)
+  {
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
+    if (v.size() >= ((size_t)1 << 15) && omp_get_max_threads() > 1 && !omp_in_parallel())
+    {
+      // DIASPEXTRACT_OUTER_VERIFY: also sort a copy with std::sort and report whether the two sequences are identical
+      static const bool verify = std::getenv("DIASPEXTRACT_OUTER_VERIFY") != nullptr;
+      std::vector<T> ref;
+      if (verify) { ref = v; std::sort(ref.begin(), ref.end(), less); }
+      auto cmp = __gnu_cxx::__ops::__iter_comp_iter(less);
+      const auto first = v.begin(), last = v.end();
+      const auto depth = std::__lg(last - first) * 2;   // as std::__sort
+      #pragma omp parallel
+      #pragma omp single
+      {
+        #pragma omp taskgroup
+        introsortLoopPar_(first, last, depth, cmp);
+      }
+      std::__final_insertion_sort(first, last, cmp);
+      if (verify) std::fprintf(stderr, "[outer] stdSortPar_ verify: %zu elements, %s\n", v.size(),
+                               ref == v ? "identical to std::sort" : "DIFFERENT from std::sort");
+      return;
+    }
+#endif
+    std::sort(v.begin(), v.end(), less);
+  }
   /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
   /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
   /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
@@ -2264,9 +2319,12 @@ namespace
     std::condition_variable w_cv_;
     bool w_job_ = false, w_quit_ = false;
     std::exception_ptr w_err_;
-    /// [outer] DIASPEXTRACT_MS1_ASYNC=0: the MS1 batches are picked inside the reader's hand-over, one full batch at a
-    /// time (the behaviour before 2026-10-01). Default: on the worker, beside the reader's decode of the next batch.
-    static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return !(e && *e == '0'); }(); return v; }
+    /// [outer] DIASPEXTRACT_MS1_ASYNC=1: the MS1 batches are picked on the worker, beside the reader's decode of the next
+    /// batch. OFF by default: the worker's team is a second OpenMP team on the same places as the reader's (libgomp binds
+    /// a foreign thread's team from place 0), so at 64 threads K562's LOAD(stream) got 0.3 s slower, and its extra thread
+    /// arenas raised HeLa_19's peak RSS by 6 % for 0.5-0.9 s (scalfix/outer timing, 2026-10-01). Default: the MS1 batches
+    /// are picked inside the reader's hand-over, one full batch at a time (the behaviour before 2026-10-01).
+    static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return e && *e && *e != '0'; }(); return v; }
     /// [outer] Beside the reader two batches are in memory (one being picked, one filling), so each is half the
     /// synchronous batch and the raw-frame residency stays what it was.
     static size_t ms1BatchNow_() { return ms1Async_() ? std::max<size_t>(1, kBatchMS1_() / 2) : kBatchMS1_(); }
@@ -3231,8 +3289,9 @@ protected:
   /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by std::sort on m/z alone.
   /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
   /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
-  /// With any equal (or unordered) neighbour the sort runs as before: the order of equal m/z is std::sort's own. Returns
-  /// the neighbours that are not strictly increasing (0 = the identity was taken).
+  /// With any equal (or unordered) neighbour -- K562 has 677,976, HeLa_19 19,200: quantised m/z -- the order of equal
+  /// m/z is std::sort's own, so it is std::sort's sequence, computed by stdSortPar_. Returns the neighbours that are not
+  /// strictly increasing (0 = the identity was taken).
   static size_t mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
   {
     const size_t N = ms1.size();
@@ -3242,7 +3301,7 @@ protected:
     size_t nonincr = 0;
     #pragma omp parallel for schedule(static) reduction(+ : nonincr)
     for (long i = 1; i < (long)N; ++i) if (!(ms1[(size_t)i - 1].mz < ms1[(size_t)i].mz)) ++nonincr;
-    if (nonincr) sort(by_mz.begin(), by_mz.end(), [&](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    if (nonincr) stdSortPar_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
     return nonincr;
   }
 
@@ -3322,14 +3381,16 @@ protected:
     });
 
     auto _pi_t2 = std::chrono::steady_clock::now();
-    // [outer] `used` as relaxed atomic bytes: the commit of one batch (the only writer) runs beside the speculation of the
-    // next, which then reads a mix of old and new claims (see the commit loop for why that stays exact).
+    // [outer] `used` as relaxed atomic 64-bit words, one bit per trace (as compact as the vector<bool> it replaces): the
+    // commit (the only writer, so a plain load and store per bit loses nothing) may run beside the speculation of the next
+    // batch, which then reads a mix of old and new claims (see the commit loop for why that stays exact).
     struct UsedMap
     {
-      std::unique_ptr<std::atomic<uint8_t>[]> a;
-      explicit UsedMap(size_t n) : a(new std::atomic<uint8_t>[n]()) {}
-      bool operator[](size_t i) const { return a[i].load(std::memory_order_relaxed) != 0; }
-      void set(size_t i) { a[i].store(1, std::memory_order_relaxed); }
+      std::unique_ptr<std::atomic<uint64_t>[]> a;
+      explicit UsedMap(size_t n) : a(new std::atomic<uint64_t>[(n + 63) / 64]()) {}
+      bool operator[](size_t i) const { return (a[i >> 6].load(std::memory_order_relaxed) >> (i & 63)) & 1u; }
+      void set(size_t i) { auto& w = a[i >> 6]; w.store(w.load(std::memory_order_relaxed) | ((uint64_t)1 << (i & 63)), std::memory_order_relaxed); }
+      const void* addr(size_t i) const { return &a[i >> 6]; }
     } used(N);
     vector<Precursor_> out;
     // [spec] Ordered speculation, exact: the only mutable state a seed reads is `used`, which is monotone.
@@ -3562,12 +3623,19 @@ protected:
       } while (0);
     };
 
-    // [outer] 4096 (was 8192): the speculation of a batch now runs beside the commit of the one before, so it is stale by
-    // about two batches; half the batch keeps the re-evaluated share (serial, on the committing thread) where it was.
-    size_t spec_batch = 4096;
+    // [outer] DIASPEXTRACT_SPEC_OVERLAP=1: the commit of batch k runs beside the speculation of batch k+1 (exact, see
+    // `commit`); 0: each batch is speculated against a frozen `used`, then committed (the walk before 2026-10-01).
+    static const bool spec_overlap = []{ const char* e = std::getenv("DIASPEXTRACT_SPEC_OVERLAP"); return e ? (*e && *e != '0') : false; }();
+    // [outer] DIASPEXTRACT_SPEC_PREFETCH=0 turns off the commit's prefetch of the seeds ahead (scheduling only).
+    static const bool spec_prefetch = []{ const char* e = std::getenv("DIASPEXTRACT_SPEC_PREFETCH"); return !(e && *e == '0'); }();
+    size_t spec_batch = spec_overlap ? 4096 : 8192;
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
-    vector<SeedRes> res_a(spec_batch), res_b(spec_batch);
+    // [outer] about four speculation chunks per thread (at most 16 seeds), so a small batch still feeds every thread
+    const int spec_chunk = (int)std::max<size_t>(1, std::min<size_t>(16, spec_batch / (4 * (size_t)std::max(1, omp_get_max_threads()))));
+    vector<SeedRes> res_a(spec_batch), res_b(spec_overlap ? spec_batch : 0);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
+    double t_spec = 0.0, t_commit = 0.0, t_reeval = 0.0;   // [outer] walk sub-steps, log only
+    auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     vector<MonoV2In_> v2in;           // [monocheck-v2] parallel to `out` when mono_check_ == 2
     const size_t n_order = order.size(), n_batch = (n_order + spec_batch - 1) / spec_batch;
@@ -3585,40 +3653,73 @@ protected:
     // commits. A claim it saw stays (a skipped candidate stays skipped, a used seed is skipped here too); a claim it missed
     // can only hit the partner it returned, which is a recorded dependency and makes it re-evaluate here against the exact
     // state. So every committed result equals the serial walk's, whatever mix of claims the speculation read.
+    // [outer] The loop is serial and bound by memory latency (the seed's flag, its result's vectors, the flags of its
+    // dependencies), so it prefetches those a few seeds ahead; a prefetch changes no value.
     auto commit = [&](size_t b0, size_t b1, vector<SeedRes>& res)
     {
+      const double tc0 = now_s();
       for (size_t ii = b0; ii < b1; ++ii)
       {
+        if (spec_prefetch)
+        {
+          if (ii + 16 < b1)
+          {
+            __builtin_prefetch(used.addr(order[ii + 16]));
+            const SeedRes& F = res[ii + 16 - b0];
+            if (!F.deps.empty()) __builtin_prefetch(F.deps.data());
+            if (!F.claims.empty()) __builtin_prefetch(F.claims.data());
+            if (!F.emit.empty()) __builtin_prefetch(F.emit.data());
+          }
+          if (ii + 8 < b1)
+            for (size_t d : res[ii + 8 - b0].deps) __builtin_prefetch(used.addr(d));
+        }
         const size_t seed = order[ii];
         if (used[seed]) { ++n_skipped; continue; }
         SeedRes& R = res[ii - b0];
         bool stale = false;
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
-        if (stale) { evalSeed(seed, R); ++n_conflict; }
+        if (stale) { const double tr0 = now_s(); evalSeed(seed, R); ++n_conflict; t_reeval += now_s() - tr0; }
         for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
         if (mono_check_) for (size_t q = 0; q < mc_tot.size(); ++q) mc_tot[q] += R.mc[q];
         used.set(seed);
         for (size_t j : R.claims) used.set(j);
         ++n_committed;
       }
+      t_commit += now_s() - tc0;
     };
-    #pragma omp parallel for schedule(dynamic, 16)
-    for (long ii = (long)bnd(0); ii < (long)bnd(1); ++ii) speculate(ii, bnd(0), res_a);
-    for (size_t k = 0; k < n_batch; ++k)
+    if (!spec_overlap)
     {
-      // [outer] one thread commits batch k, the others speculate batch k+1 (the committer joins them when done)
-      vector<SeedRes>& cur = (k % 2 == 0) ? res_a : res_b;
-      vector<SeedRes>& nxt = (k % 2 == 0) ? res_b : res_a;
-      const size_t c0 = bnd(k), c1 = bnd(k + 1), n0 = bnd(k + 1), n1 = bnd(k + 2);
-      std::exception_ptr commit_err;
-      #pragma omp parallel
+      for (size_t k = 0; k < n_batch; ++k)
       {
-        #pragma omp single nowait
-        { try { commit(c0, c1, cur); } catch (...) { commit_err = std::current_exception(); } }
-        #pragma omp for schedule(dynamic, 16)
-        for (long ii = (long)n0; ii < (long)n1; ++ii) speculate(ii, n0, nxt);
+        const double ts0 = now_s();
+        #pragma omp parallel for schedule(dynamic, spec_chunk)
+        for (long ii = (long)bnd(k); ii < (long)bnd(k + 1); ++ii) speculate(ii, bnd(k), res_a);
+        t_spec += now_s() - ts0;
+        commit(bnd(k), bnd(k + 1), res_a);
       }
-      if (commit_err) std::rethrow_exception(commit_err);
+    }
+    else
+    {
+      #pragma omp parallel for schedule(dynamic, spec_chunk)
+      for (long ii = (long)bnd(0); ii < (long)bnd(1); ++ii) speculate(ii, bnd(0), res_a);
+      for (size_t k = 0; k < n_batch; ++k)
+      {
+        // one thread commits batch k, the others speculate batch k+1 (the committer joins them when done)
+        vector<SeedRes>& cur = (k % 2 == 0) ? res_a : res_b;
+        vector<SeedRes>& nxt = (k % 2 == 0) ? res_b : res_a;
+        const size_t c0 = bnd(k), c1 = bnd(k + 1), n0 = bnd(k + 1), n1 = bnd(k + 2);
+        std::exception_ptr commit_err;
+        const double ts0 = now_s();
+        #pragma omp parallel
+        {
+          #pragma omp single nowait
+          { try { commit(c0, c1, cur); } catch (...) { commit_err = std::current_exception(); } }
+          #pragma omp for schedule(dynamic, spec_chunk)
+          for (long ii = (long)n0; ii < (long)n1; ++ii) speculate(ii, n0, nxt);
+        }
+        t_spec += now_s() - ts0;   // the whole region: commit and speculation side by side
+        if (commit_err) std::rethrow_exception(commit_err);
+      }
     }
     // [z1-diag] DIASPEXTRACT_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
     // (a halved 2+ ion's M+1) or +ISO/3, and was it already claimed.
@@ -3663,9 +3764,12 @@ protected:
                     + String(spec_batch) + ": " + String(n_committed) + " committed, " + String(n_conflict)
                     + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
                     + "%), " + String(n_skipped) + " already claimed)");
-      writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort"
+      writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort's order (stdSortPar_)"
                                                               : String("strictly increasing, identity"))
-                    + "; greedy walk: each batch committed beside the next batch's speculation, " + String(n_batch) + " batches");
+                    + "; greedy walk: " + (spec_overlap ? "each batch committed beside the next batch's speculation, " : "frozen batches, ")
+                    + String(n_batch) + " batches, chunk " + String(spec_chunk) + (spec_prefetch ? ", prefetch" : ", no prefetch")
+                    + (spec_overlap ? " | regions " : " | speculate ") + String(t_spec) + " s | commit " + String(t_commit)
+                    + " s (re-evaluation " + String(t_reeval) + " s)");
     }
     if (mono_check_ == 1)
     {
