@@ -337,6 +337,16 @@ release fix commit's message. All are listed as known limitations in the 1.6.0 C
    the rest of its key (r, r^2 or r (1 + overlap)); a fused peak's key is the best-keyed member's factor times the summed
    apex (ln(1 + sum) for umpire/evidence), never below that member's key. Only the cap ranking changes: fusion off is
    byte-identical, and with the cap out of reach (max_fragments above every spectrum) the output equals rc-b's.
+   Arm fix160-fusecap-1 (93cd776, binary 9687c91d). Identity: the four rc-b options reset = the 1.5.0 digests on HeLa_22
+   and K562 9905; fragment_fuse_ppm 0 with the other defaults = rc-b-1 (HeLa_22 48a08e61, K562 5e1cd2eb); max_fragments
+   100000 = rc-b-1 (HeLa_22 adbadf73). Defaults differ from rc-b-1 by design (HeLa_22 d166a4f5, K562 c4548556) with the
+   same spectrum count; on HeLa_22 4,534 of 52,484 spectra (8.6 %) change peaks, all with >= 500 peaks; two pairs of
+   equal (RT, m/z, z) spectra swap canonical places (the tie-break is peak count/content) and one twin fold keeps the
+   other twin's 1/K0 (0.8088 -> 0.8049; survivor tie on isotopes and capped peak count). Determinism: 16 / 100 threads
+   and cells_per_tile 2 give one digest on HeLa_22 and on K562. Screen (n = 1, vs rcb1): K562 9905 Sage +0.44 %,
+   MSFragger +0.83 %, entrapment 1.150 -> 1.151 %; HeLa_22 -0.03 % / +0.27 %, 0.997 -> 0.995 %; HeLa_34 +0.44 % /
+   -0.04 %, 1.063 -> 1.096 %; spectra unchanged; K562 scorecard A_sa 0.8144 -> 0.8146, A_iso_err 5.54 -> 5.69 %,
+   B_tilt 0.0575 -> 0.0571, B_rec_lt5 0.374 -> 0.373. To be confirmed by the 43-run harness re-run.
 4. **Foreign candidates by mono-in-window only** (codex R4, kimi F4). A co-isolated precursor whose mono sits just outside
    the window but whose M+1..M+3 lie inside is never a candidate (under-removal only). Fix: widen the candidate m/z range
    by 3 x ISO / z_min and let the envelope match decide; note that v2 can move a mono across a window edge.
