@@ -3381,20 +3381,10 @@ protected:
     });
 
     auto _pi_t2 = std::chrono::steady_clock::now();
-    // [outer] `used` as relaxed atomic 64-bit words, one bit per trace (as compact as the vector<bool> it replaces): the
-    // commit (the only writer, so a plain load and store per bit loses nothing) may run beside the speculation of the next
-    // batch, which then reads a mix of old and new claims (see the commit loop for why that stays exact).
-    struct UsedMap
-    {
-      std::unique_ptr<std::atomic<uint64_t>[]> a;
-      explicit UsedMap(size_t n) : a(new std::atomic<uint64_t>[(n + 63) / 64]()) {}
-      bool operator[](size_t i) const { return (a[i >> 6].load(std::memory_order_relaxed) >> (i & 63)) & 1u; }
-      void set(size_t i) { auto& w = a[i >> 6]; w.store(w.load(std::memory_order_relaxed) | ((uint64_t)1 << (i & 63)), std::memory_order_relaxed); }
-      const void* addr(size_t i) const { return &a[i >> 6]; }
-    } used(N);
+    vector<bool> used(N, false);
     vector<Precursor_> out;
     // [spec] Ordered speculation, exact: the only mutable state a seed reads is `used`, which is monotone.
-    // A batch of seeds is evaluated concurrently against `used` (growing under the previous batch's commit, [outer]), recording the partners each
+    // A batch of seeds is evaluated concurrently against a frozen `used`, recording the partners each
     // search returned; the commit walks the batch in the original order, skips a seed that is now used,
     // and re-evaluates one whose recorded partner has since been claimed. A search that returned -1 saw
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
@@ -3623,56 +3613,38 @@ protected:
       } while (0);
     };
 
-    // [outer] DIASPEXTRACT_SPEC_OVERLAP=1: the commit of batch k runs beside the speculation of batch k+1 (exact, see
-    // `commit`); 0: each batch is speculated against a frozen `used`, then committed (the walk before 2026-10-01).
-    static const bool spec_overlap = []{ const char* e = std::getenv("DIASPEXTRACT_SPEC_OVERLAP"); return e ? (*e && *e != '0') : false; }();
-    // [outer] DIASPEXTRACT_SPEC_PREFETCH=0 turns off the commit's prefetch of the seeds ahead (scheduling only).
-    static const bool spec_prefetch = []{ const char* e = std::getenv("DIASPEXTRACT_SPEC_PREFETCH"); return !(e && *e == '0'); }();
-    size_t spec_batch = spec_overlap ? 4096 : 8192;
+    // [outer] 2048 (was 8192): the commit is serial and mostly fixed cost per seed, but each re-evaluation in it costs a
+    // whole seed (~10 us); a quarter of the batch re-evaluates a third of the seeds (K562: 17,853 vs 51,891) for 4x the
+    // fork/joins. K562 greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (kim/dax, 2026-10-01). Committing
+    // beside the next batch's speculation was exact but slower (more re-evaluations, a contended commit): not kept.
+    size_t spec_batch = 2048;
     if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
-    // [outer] about four speculation chunks per thread (at most 16 seeds), so a small batch still feeds every thread
+    // [outer] about four speculation chunks per thread (at most 16 seeds, as before), so a small batch feeds every thread
     const int spec_chunk = (int)std::max<size_t>(1, std::min<size_t>(16, spec_batch / (4 * (size_t)std::max(1, omp_get_max_threads()))));
-    vector<SeedRes> res_a(spec_batch), res_b(spec_overlap ? spec_batch : 0);
+    vector<SeedRes> res(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
-    double t_spec = 0.0, t_commit = 0.0, t_reeval = 0.0;   // [outer] walk sub-steps, log only
-    auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     vector<MonoV2In_> v2in;           // [monocheck-v2] parallel to `out` when mono_check_ == 2
-    const size_t n_order = order.size(), n_batch = (n_order + spec_batch - 1) / spec_batch;
-    auto bnd = [&](size_t k) { return std::min(k * spec_batch, n_order); };   // batch k is [bnd(k), bnd(k + 1))
-    // Phase 1: speculate. Nothing here writes `used`.
-    auto speculate = [&](long ii, size_t b0, vector<SeedRes>& res)
+    double t_spec = 0.0, t_commit = 0.0, t_reeval = 0.0;   // [outer] the walk's sub-steps, log only
+    auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
     {
-      SeedRes& R = res[(size_t)ii - b0];
-      const size_t seed = order[(size_t)ii];
-      if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); return; }
-      evalSeed(seed, R);
-    };
-    // Phase 2: commit in the original seed order. [outer] It may run while the next batch is speculated: `used` only ever
-    // goes 0 -> 1 and only this loop writes it, so a speculating seed sees a subset of the claims made by the time it
-    // commits. A claim it saw stays (a skipped candidate stays skipped, a used seed is skipped here too); a claim it missed
-    // can only hit the partner it returned, which is a recorded dependency and makes it re-evaluate here against the exact
-    // state. So every committed result equals the serial walk's, whatever mix of claims the speculation read.
-    // [outer] The loop is serial and bound by memory latency (the seed's flag, its result's vectors, the flags of its
-    // dependencies), so it prefetches those a few seeds ahead; a prefetch changes no value.
-    auto commit = [&](size_t b0, size_t b1, vector<SeedRes>& res)
-    {
+      const size_t b1 = std::min(b0 + spec_batch, order.size());
+      const double ts0 = now_s();
+      // Phase 1: speculate. Nothing here writes `used`, so the concurrent reads are safe.
+      #pragma omp parallel for schedule(dynamic, spec_chunk)
+      for (long ii = (long)b0; ii < (long)b1; ++ii)
+      {
+        SeedRes& R = res[(size_t)ii - b0];
+        const size_t seed = order[(size_t)ii];
+        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); continue; }
+        evalSeed(seed, R);
+      }
       const double tc0 = now_s();
+      t_spec += tc0 - ts0;
+      // Phase 2: commit in the original seed order.
       for (size_t ii = b0; ii < b1; ++ii)
       {
-        if (spec_prefetch)
-        {
-          if (ii + 16 < b1)
-          {
-            __builtin_prefetch(used.addr(order[ii + 16]));
-            const SeedRes& F = res[ii + 16 - b0];
-            if (!F.deps.empty()) __builtin_prefetch(F.deps.data());
-            if (!F.claims.empty()) __builtin_prefetch(F.claims.data());
-            if (!F.emit.empty()) __builtin_prefetch(F.emit.data());
-          }
-          if (ii + 8 < b1)
-            for (size_t d : res[ii + 8 - b0].deps) __builtin_prefetch(used.addr(d));
-        }
         const size_t seed = order[ii];
         if (used[seed]) { ++n_skipped; continue; }
         SeedRes& R = res[ii - b0];
@@ -3681,45 +3653,11 @@ protected:
         if (stale) { const double tr0 = now_s(); evalSeed(seed, R); ++n_conflict; t_reeval += now_s() - tr0; }
         for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
         if (mono_check_) for (size_t q = 0; q < mc_tot.size(); ++q) mc_tot[q] += R.mc[q];
-        used.set(seed);
-        for (size_t j : R.claims) used.set(j);
+        used[seed] = true;
+        for (size_t j : R.claims) used[j] = true;
         ++n_committed;
       }
       t_commit += now_s() - tc0;
-    };
-    if (!spec_overlap)
-    {
-      for (size_t k = 0; k < n_batch; ++k)
-      {
-        const double ts0 = now_s();
-        #pragma omp parallel for schedule(dynamic, spec_chunk)
-        for (long ii = (long)bnd(k); ii < (long)bnd(k + 1); ++ii) speculate(ii, bnd(k), res_a);
-        t_spec += now_s() - ts0;
-        commit(bnd(k), bnd(k + 1), res_a);
-      }
-    }
-    else
-    {
-      #pragma omp parallel for schedule(dynamic, spec_chunk)
-      for (long ii = (long)bnd(0); ii < (long)bnd(1); ++ii) speculate(ii, bnd(0), res_a);
-      for (size_t k = 0; k < n_batch; ++k)
-      {
-        // one thread commits batch k, the others speculate batch k+1 (the committer joins them when done)
-        vector<SeedRes>& cur = (k % 2 == 0) ? res_a : res_b;
-        vector<SeedRes>& nxt = (k % 2 == 0) ? res_b : res_a;
-        const size_t c0 = bnd(k), c1 = bnd(k + 1), n0 = bnd(k + 1), n1 = bnd(k + 2);
-        std::exception_ptr commit_err;
-        const double ts0 = now_s();
-        #pragma omp parallel
-        {
-          #pragma omp single nowait
-          { try { commit(c0, c1, cur); } catch (...) { commit_err = std::current_exception(); } }
-          #pragma omp for schedule(dynamic, spec_chunk)
-          for (long ii = (long)n0; ii < (long)n1; ++ii) speculate(ii, n0, nxt);
-        }
-        t_spec += now_s() - ts0;   // the whole region: commit and speculation side by side
-        if (commit_err) std::rethrow_exception(commit_err);
-      }
     }
     // [z1-diag] DIASPEXTRACT_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
     // (a halved 2+ ion's M+1) or +ISO/3, and was it already claimed.
@@ -3766,10 +3704,8 @@ protected:
                     + "%), " + String(n_skipped) + " already claimed)");
       writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort's order (stdSortPar_)"
                                                               : String("strictly increasing, identity"))
-                    + "; greedy walk: " + (spec_overlap ? "each batch committed beside the next batch's speculation, " : "frozen batches, ")
-                    + String(n_batch) + " batches, chunk " + String(spec_chunk) + (spec_prefetch ? ", prefetch" : ", no prefetch")
-                    + (spec_overlap ? " | regions " : " | speculate ") + String(t_spec) + " s | commit " + String(t_commit)
-                    + " s (re-evaluation " + String(t_reeval) + " s)");
+                    + "; greedy walk: " + String((order.size() + spec_batch - 1) / spec_batch) + " batches, chunk " + String(spec_chunk)
+                    + " | speculate " + String(t_spec) + " s | commit " + String(t_commit) + " s (re-evaluation " + String(t_reeval) + " s)");
     }
     if (mono_check_ == 1)
     {
