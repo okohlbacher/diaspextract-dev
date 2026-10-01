@@ -560,6 +560,35 @@ namespace
       if (real(s, t, k)) { rt.push_back(rtAtSpan(s, t, k)); v.push_back((double)xv(s, t, k)); }
   }
 
+  /// [fwhm] FWHM (s) from the trace's own XIC: apex, then outwards to half maximum with linear interpolation;
+  /// a side that never reaches half maximum ends at the first/last point. -1 below 3 points.
+  inline double traceFwhm(const TraceStore& s, const Trace& tr)
+  {
+    if (tr.np() < 3) return -1.0;
+    vector<double> prt, pv; packReal(s, tr, prt, pv);
+    size_t ap = 0;
+    for (size_t i = 1; i < pv.size(); ++i) if (pv[i] > pv[ap]) ap = i;
+    const double half = pv[ap] * 0.5;
+    double lo = prt[0], hi = prt[pv.size() - 1];
+    for (size_t i = ap; i > 0; --i)
+      if (pv[i - 1] <= half)
+      {
+        const double d = pv[i] - pv[i - 1];
+        const double f = d > 0 ? (pv[i] - half) / d : 0.0;
+        lo = prt[i] - f * (prt[i] - prt[i - 1]);
+        break;
+      }
+    for (size_t i = ap; i + 1 < pv.size(); ++i)
+      if (pv[i + 1] <= half)
+      {
+        const double d = pv[i] - pv[i + 1];
+        const double f = d > 0 ? (pv[i] - half) / d : 0.0;
+        hi = prt[i] + f * (prt[i + 1] - prt[i]);
+        break;
+      }
+    return hi - lo;
+  }
+
   /// Trim a trace to at most `cap` seconds around its apex, AFTER detection and valley splitting, so
   /// peak ownership is unchanged (rationale: trace:max_span_sec). Only the span fields change and no
   /// bytes are copied; the arena keeps the trimmed bytes until a compaction pass.
@@ -2167,38 +2196,70 @@ namespace
   /// thread-invariant. This is bench/twin_merge.py, which priced it: docs/SAME-POSITION-DUPLICATION-2026-09-20.md.
   /// `v` in canonical order; survivors keep their places. Returns the number of spectra removed.
   /// [recap] `keyed`: every spectrum carries its peaks' cap keys as float data array 0; a fused peak keeps the max key.
-  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, bool keyed = false)
+  /// [twin-rt] `rt_tol` > 0 widens "same MS1 frame" to |dRT| <= rt_tol (assembly:twin_rt_frames): two calls of one
+  /// monoisotope at nearby frames (seeds of one ion whose apexes differ, or v2's extension onto another precursor's
+  /// monoisotope) fold like same-frame twins. Such a pair must also lie in one RT cell: the cell that owns a precursor
+  /// (`cells`: the cell edges, `cell_drt`: tile_drt; the tile loop's own test, (T - rt) > cell_drt), so a pair never
+  /// straddles a tile under any grouping and the output stays grouping- and thread-invariant. rt_tol 0 is the
+  /// same-frame relation (|dRT| <= 0 and one frame is one cell), bit for bit. `st` (optional) adds {pairs linked at one
+  /// frame, pairs linked across frames, near pairs refused at a cell edge, spectra the same-frame relation alone would
+  /// have removed, clusters spanning more than rt_tol}. `near_exact`: a pair from two frames links only when its
+  /// precursor m/z are bit-equal (one MS1 trace as the monoisotope of both: v2's extension onto another precursor's mono).
+  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, bool keyed = false, double rt_tol = 0.0,
+                            const vector<double>* cells = nullptr, double cell_drt = 0.0, std::array<size_t, 5>* st = nullptr,
+                            bool near_exact = false)
   {
     const double TWIN_PPM = 20.0, FUSE_PPM = 10.0;   // ponytail: the measured values, no option until another is measured
-    struct K { double rt, mz, im; int z; uint32_t i; };
+    struct K { double rt, mz, im; int z; uint32_t i, cell; };
+    auto cellOf = [&](double rt) -> uint32_t {   // the first edge T with (T - rt) > cell_drt; edges ascend, so the test is monotone
+      if (!cells || cells->empty()) return 0;
+      return (uint32_t)(std::partition_point(cells->begin(), cells->end(), [&](double T) { return !(T - rt > cell_drt); }) - cells->begin());
+    };
     vector<K> ks; ks.reserve(v.size());
     for (size_t i = 0; i < v.size(); ++i)
     {
       const auto& p = v[i].getPrecursors();
-      if (!p.empty() && p[0].getCharge() > 0) ks.push_back({v[i].getRT(), p[0].getMZ(), p[0].getDriftTime(), p[0].getCharge(), (uint32_t)i});
+      if (!p.empty() && p[0].getCharge() > 0) ks.push_back({v[i].getRT(), p[0].getMZ(), p[0].getDriftTime(), p[0].getCharge(), (uint32_t)i, cellOf(v[i].getRT())});
     }
+    // one charge, then m/z: a pair is found from its lower-m/z member's 20-ppm window whatever its frames
     sort(ks.begin(), ks.end(), [](const K& a, const K& b) {
-      if (a.rt != b.rt) return a.rt < b.rt;
       if (a.z != b.z) return a.z < b.z;
       if (a.mz != b.mz) return a.mz < b.mz;
+      if (a.rt != b.rt) return a.rt < b.rt;
       return a.i < b.i;
     });
-    vector<uint32_t> up(v.size());
+    vector<uint32_t> up(v.size()), up1;   // up1: the same-frame relation alone, for the counter only
     for (size_t i = 0; i < up.size(); ++i) up[i] = (uint32_t)i;
-    auto root = [&up](uint32_t a) { while (up[a] != a) { up[a] = up[up[a]]; a = up[a]; } return a; };
+    if (st) up1 = up;
+    auto rootIn = [](vector<uint32_t>& u, uint32_t a) { while (u[a] != a) { u[a] = u[u[a]]; a = u[a]; } return a; };
+    auto root = [&](uint32_t a) { return rootIn(up, a); };
+    size_t n_same = 0, n_near = 0, n_edge = 0;
     for (size_t g0 = 0, g1; g0 < ks.size(); g0 = g1)
     {
-      for (g1 = g0 + 1; g1 < ks.size() && ks[g1].rt == ks[g0].rt && ks[g1].z == ks[g0].z; ++g1) {}   // one frame, one charge
+      for (g1 = g0 + 1; g1 < ks.size() && ks[g1].z == ks[g0].z; ++g1) {}   // one charge
       for (size_t a = g0; a < g1; ++a)
       {
         // the probe is the EARLIER member of a pair, with its own tolerance, as in bench/twin_merge.py
         const double tol = ks[a].mz * TWIN_PPM * 1e-6, lo = ks[a].mz - tol, hi = ks[a].mz + tol;
         auto link = [&](size_t b) {
-          if (ks[b].i > ks[a].i && fabs(ks[b].im - ks[a].im) <= im_tol) { const uint32_t ra = root(ks[a].i), rb = root(ks[b].i); if (ra != rb) up[ra] = rb; }
+          if (ks[b].i <= ks[a].i || !(fabs(ks[b].im - ks[a].im) <= im_tol) || !(fabs(ks[b].rt - ks[a].rt) <= rt_tol)) return;
+          const bool same = ks[b].rt == ks[a].rt;
+          if (!same && near_exact && ks[b].mz != ks[a].mz) return;
+          if (ks[b].cell != ks[a].cell) { ++n_edge; return; }
+          ++(same ? n_same : n_near);
+          { const uint32_t ra = root(ks[a].i), rb = root(ks[b].i); if (ra != rb) up[ra] = rb; }
+          if (st && same) { const uint32_t ra = rootIn(up1, ks[a].i), rb = rootIn(up1, ks[b].i); if (ra != rb) up1[ra] = rb; }
         };
         for (size_t b = a + 1; b < g1 && ks[b].mz <= hi; ++b) link(b);
         for (size_t b = a; b-- > g0 && ks[b].mz >= lo; ) link(b);
       }
+    }
+    if (st)
+    {
+      vector<uint8_t> seen(v.size(), 0);
+      size_t n_roots = 0;
+      for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = rootIn(up1, i); if (!seen[r]) { seen[r] = 1; ++n_roots; } }
+      (*st)[0] += n_same; (*st)[1] += n_near; (*st)[2] += n_edge; (*st)[3] += v.size() - n_roots;
     }
     // survivor per cluster: (isotopes, peaks) strictly greater replaces, so a tie keeps the earliest
     const uint32_t NONE = UINT32_MAX;
@@ -2221,6 +2282,13 @@ namespace
     }
     vector<vector<uint32_t>> members(surv.size());
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
+    if (st && rt_tol > 0.0)   // [twin-rt] clusters whose members span more than rt_tol: chained through intermediate frames
+      for (const auto& m : members)
+      {
+        double r0 = v[m[0]].getRT(), r1 = r0;
+        for (uint32_t i : m) { r0 = std::min(r0, v[i].getRT()); r1 = std::max(r1, v[i].getRT()); }
+        if (r1 - r0 > rt_tol) ++(*st)[4];
+      }
     // fuse: each thread reads and writes one cluster's spectra only
     std::exception_ptr fold_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
 #pragma omp parallel for schedule(dynamic, 64)
@@ -2472,6 +2540,8 @@ protected:
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off, as in 1.5.0. Default 0.005 since 1.6.0: together with assembly:foreign_precursor_weight 0, +5.8 % Sage and +4.2 % MSFragger peptides over 1.5.0 on 43 public runs at unchanged entrapment (CHANGELOG, v1.6.0); earlier measurements in docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. It changes the emitted intensity, not the cap key; but assembly:fragment_fuse_ppm (on by default, mode anchored) groups the fragments strongest first by emitted intensity, so it can change which pieces fuse and with them which peaks survive assembly:max_fragments. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
+    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Let the twin fold (assembly:twin_im_tolerance) also join spectra from nearby MS1 frames: same charge, precursor m/z within 20 ppm, 1/K0 within assembly:twin_im_tolerance, apexes at most n MS1 cycles apart (|dRT| <= (n + 0.5) x the cycle) and in one retention-time cell (tile:rt_sec; a pair across a cell edge stays two spectra). Such pairs are one monoisotope called twice: seeds of one ion whose apexes fall in different frames, or a monoisotope that charge:mono_profile_check v2 moved onto another precursor's. The survivor rule and the fusion are the fold's. 0 = auto: the run's median MS1 peak width (FWHM of the precursors' seed traces with at least 3 points) in MS1 cycles, rounded, at least 1. -1 = off: the same MS1 frame only (the fold before 1.6.0). Logged as [twins], stamped in spx:twin_merge. CHANGES OUTPUT.", false);
+    registerStringOption_("assembly:twin_rt_match", "<mode>", "ppm", "assembly:twin_rt_frames: how a pair from two different MS1 frames must match. 'ppm': precursor m/z within 20 ppm, as at one frame. 'exact': bit-equal precursor m/z, i.e. one MS1 trace is the monoisotope of both (charge:mono_profile_check v2's extension onto another precursor's monoisotope); seeds of one ion with two mono traces stay apart. Experimental.", false, true);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
@@ -2501,7 +2571,7 @@ protected:
     registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. Fragment traces of the integer detector always report the calibrated m/z of their apex bin, whatever this says; with trace:detector openms the estimator applies to them too. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
     setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic valleys (ElutionPeakDetection, width filtering off). Value = chrom_fwhm (seconds); 0 = off.", false);
-    registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation, the cluster closure, the survivor order, the 10-ppm fusion and the keyed fold with the post-fusion cap (assembly:post_fusion_cap)", true);
+    registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation (also across nearby frames), the cluster closure, the survivor order, the 10-ppm fusion and the keyed fold with the post-fusion cap (assembly:post_fusion_cap)", true);
     registerFlag_("diag:selftest_arena", "Run assertions on the MS1 arena compaction (compactUnreferenced) and exit: kept spans must survive a container order that differs from their offset order", true);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys (ElutionPeakDetection), so two peptides eluting apart within the m/z tolerance do not merge into one precursor with the wrong monoisotope and charge. Value = chrom_fwhm (seconds); 0 = off.", false);
     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each mass trace (precursor and fragment) to at most this many seconds "
@@ -2686,6 +2756,8 @@ protected:
     setMinInt_("assembly:max_fragments", 1);
     setMinInt_("assembly:default_charge", 0);
     setMinFloat_("assembly:twin_im_tolerance", -1.0);   // any negative value = off
+    setMinInt_("assembly:twin_rt_frames", -1);          // -1 = off (same frame), 0 = auto
+    setValidStrings_("assembly:twin_rt_match", {"ppm", "exact"});
     setMinInt_("max_charge", 1);
     setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
     setMinFloat_("gate:delta_im", 0.0);
@@ -4385,6 +4457,32 @@ protected:
     chk(!pair_folds(sp(10.0, 500.001, 2, 1.006, 2, P)), "1/K0 beyond the tolerance: untouched");
     chk(pair_folds(sp(10.0, 500.001, 2, 1.004, 2, P)), "1/K0 inside the tolerance: folded");
     chk(!pair_folds(sp(11.1, 500.0, 2, 1.0, 2, P)), "the next MS1 frame: untouched");
+    // [twin-rt] the near-frame relation (assembly:twin_rt_frames): |dRT| <= rt_tol, inside one RT cell
+    { auto nearFold = [&](double rt_b, double tol, const vector<double>* cells, std::array<size_t, 5>* st = nullptr) {
+        vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(rt_b, 500.001, 2, 1.0, 3, P)};
+        return mergeTwins_(v, 0.005, false, tol, cells, 3.0, st) == 1 && v.size() == 1; };
+      const vector<double> edges{20.0};   // cell 0 owns rt < 17, cell 1 rt >= 17 (the first edge T with (T - rt) > 3)
+      std::array<size_t, 5> st{};
+      chk(nearFold(11.1, 1.5, nullptr, &st) && st[0] == 0 && st[1] == 1 && st[3] == 0, "the next MS1 frame inside rt_tol: folded, counted as a near-frame link");
+      chk(nearFold(11.5, 1.5, nullptr), "|dRT| exactly rt_tol: folded (the bound is inclusive)");
+      chk(!nearFold(11.75, 1.5, nullptr), "|dRT| beyond rt_tol: untouched");
+      chk(!nearFold(11.1, 0.0, nullptr), "rt_tol 0: the same-frame relation, the next frame untouched");
+      chk(nearFold(16.9, 7.0, &edges), "both inside one cell: dRT 6.9 within a 7-s tolerance folds");
+      { std::array<size_t, 5> se{};
+        vector<MSSpectrum> v{sp(16.5, 500.0, 2, 1.0, 2, P), sp(17.5, 500.001, 2, 1.0, 3, P)};
+        chk(mergeTwins_(v, 0.005, false, 1.65, &edges, 3.0, &se) == 0 && v.size() == 2 && se[2] == 1, "a pair across a cell edge stays two spectra (counted)"); }
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.002, 2, 1.0, 2, P), sp(11.1, 500.001, 2, 1.004, 2, P), sp(12.2, 500.0, 2, 1.0, 2, P)};
+        std::array<size_t, 5> sc{};
+        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1 && sc[3] == 1 && sc[4] == 1,
+            "frames 10, 11.1, 12.2 chain into one cluster (span 2.2 > rt_tol: counted as chained); the same frame alone folds one"); }
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0, 2, 1.006, 2, P), sp(11.1, 500.0, 3, 1.0, 2, P), sp(11.1, 500.0125, 2, 1.0, 2, P)};
+        chk(mergeTwins_(v, 0.005, false, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and 20 ppm still apply"); }
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.001, 2, 1.0, 2, P), sp(11.6, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0005, 2, 1.0, 2, P)};
+        chk(mergeTwins_(v, 0.005, false, 1.65, nullptr, 3.0, nullptr, true) == 2 && v.size() == 2,
+            "near_exact: across frames only bit-equal m/z links (10/500.0 with 11.6/500.0, not 11.1/500.001); one frame keeps the 20-ppm relation"); }
+      { vector<MSSpectrum> v{sp(12.0, 500.001, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 3, P)};
+        mergeTwins_(v, 0.005, false, 2.5);
+        chk(v.size() == 1 && v[0].getRT() == 10.0 && v[0].getPrecursors()[0].getMZ() == 500.0, "near frames: the survivor rule is the fold's (more isotopes), with its own RT"); } }
     chk(!pair_folds(sp(10.0, 500.0, 3, 1.0, 2, P)), "another charge: untouched");
     chk(!pair_folds(sp(10.0, 500.0125, 2, 1.0, 2, P)), "25 ppm apart: untouched");
     { vector<MSSpectrum> v{sp(10.0, 500.0, 0, 1.0, 2, P), sp(10.0, 500.0, 0, 1.0, 2, P)};
@@ -4557,6 +4655,8 @@ protected:
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
     const Size max_frags = (Size)getIntOption_("assembly:max_fragments");
     const double twin_im = getDoubleOption_("assembly:twin_im_tolerance");
+    const int twin_rt_frames = getIntOption_("assembly:twin_rt_frames");   // [twin-rt] -1 off, 0 auto, n frames
+    const bool twin_rt_exact = getStringOption_("assembly:twin_rt_match") == "exact";
     const int max_charge = getIntOption_("max_charge");
     mzEstimator() = getStringOption_("trace:mz_estimator");   // before any toTrace() call
     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
@@ -5259,33 +5359,7 @@ protected:
     const String ms1_dump = getStringOption_("diag:dump_ms1_tsv");
     if (!ms1_dump.empty())
     {
-      // [fwhm] FWHM from the trace's own XIC: apex, then outwards to half maximum with linear interpolation;
-      // a side that never reaches half maximum ends at the first/last point. -1 below 3 points.
-      auto fwhm_of = [&ms1_store](const Trace& tr) -> double {
-        if (tr.np() < 3) return -1.0;
-        vector<double> prt, pv; packReal(ms1_store, tr, prt, pv);
-        size_t ap = 0;
-        for (size_t i = 1; i < pv.size(); ++i) if (pv[i] > pv[ap]) ap = i;
-        const double half = pv[ap] * 0.5;
-        double lo = prt[0], hi = prt[pv.size() - 1];
-        for (size_t i = ap; i > 0; --i)
-          if (pv[i - 1] <= half)
-          {
-            const double d = pv[i] - pv[i - 1];
-            const double f = d > 0 ? (pv[i] - half) / d : 0.0;
-            lo = prt[i] - f * (prt[i] - prt[i - 1]);
-            break;
-          }
-        for (size_t i = ap; i + 1 < pv.size(); ++i)
-          if (pv[i + 1] <= half)
-          {
-            const double d = pv[i] - pv[i + 1];
-            const double f = d > 0 ? (pv[i] - half) / d : 0.0;
-            hi = prt[i] + f * (prt[i + 1] - prt[i]);
-            break;
-          }
-        return hi - lo;
-      };
+      auto fwhm_of = [&ms1_store](const Trace& tr) -> double { return traceFwhm(ms1_store, tr); };   // [fwhm]
       ofstream ft((ms1_dump + ".traces.tsv").c_str());
       // [model] 12 significant digits: the default 6 quantises m/z 765 to ~1.3 ppm.
       ft.precision(12);
@@ -5306,6 +5380,34 @@ protected:
       fp.close();
       writeLogInfo_("MS1 funnel dump: " + String(ms1_traces.size()) + " traces, "
                     + String(precursors.size()) + " precursors -> " + ms1_dump + ".{traces,precursors}.tsv");
+    }
+    // [twin-rt] assembly:twin_rt_frames: the twin fold's frame tolerance, |dRT| <= (n + 0.5) cycles (0 s = one frame).
+    // Auto (0): n = the median FWHM of the final precursors' seed traces (>= 3 points), in cycles, rounded, >= 1. The
+    // median of a multiset does not depend on the container order, so neither does n.
+    double twin_rt_tol = 0.0;
+    String twin_rt_desc;
+    if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0)
+    {
+      int n = twin_rt_frames;
+      String how = String(n) + " (set)";
+      if (n == 0)
+      {
+        vector<double> fw;
+        fw.reserve(precursors.size());
+        for (const Precursor_& pc : precursors) { const double f = traceFwhm(ms1_store, ms1_traces[pc.trace_idx]); if (f > 0.0) fw.push_back(f); }
+        double med = -1.0;
+        if (!fw.empty()) { const size_t m = fw.size() / 2; std::nth_element(fw.begin(), fw.begin() + (long)m, fw.end()); med = fw[m]; }
+        n = med > 0.0 ? std::max(1, (int)llround(med / cycle)) : 1;
+        char b[200];
+        std::snprintf(b, sizeof b, "%d (auto: median MS1 FWHM %.3f s over %zu seed traces = %.2f cycles)", n, med, fw.size(), med / cycle);
+        how = String(b);
+      }
+      twin_rt_tol = (n + 0.5) * cycle;
+      char b[96];
+      std::snprintf(b, sizeof b, "|dRT| <= %.4f s", twin_rt_tol);
+      twin_rt_desc = "MS1 frames up to " + how + " cycles apart (" + String(b) + ", cycle " + String(cycle) + " s"
+                     + (twin_rt_exact ? ", bit-equal precursor m/z across frames" : "") + "), one RT cell";
+      writeLogInfo_("[twins] assembly:twin_rt_frames: the fold joins " + twin_rt_desc);
     }
     // sort precursors by mono m/z so each window can binary-search its members instead of
     // rescanning all ~1M precursors per window (total order for determinism).
@@ -5592,7 +5694,8 @@ protected:
     if (post_fusion_cap_)   // [recap] only when on: the default header is unchanged
       out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the "
                            + (cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten") + " cap key");
-    out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
+    out_exp.setMetaValue("spx:twin_merge", twin_im < 0.0 ? String("off") : twin_rt_desc.empty() ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm")
+                         : String(twin_rt_desc + ", same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm"));   // [twin-rt] the 1.5.0 text when off
     if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
       out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
     if (foreign_w_ < 1.0)   // [foreign] stamped only when on (on by default since 1.6.0; 1 leaves the 1.5.0 header)
@@ -5614,6 +5717,7 @@ protected:
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
     Size n_twins = 0;   // [twins] spectra folded into a twin, over every tile
+    std::array<size_t, 5> twin_st{};   // [twin-rt] mergeTwins_'s counters, over every tile
     std::array<size_t, 4> recap{};   // [recap] spectra re-capped, peaks removed, largest spectrum before, spectra seen
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
@@ -6193,7 +6297,7 @@ protected:
       if (twin_im >= 0.0)
       {
         Phase _ph("MERGE(twins)");
-        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, post_fusion_cap_);
+        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, post_fusion_cap_, twin_rt_tol, &cell_edges, tile_drt, &twin_st, twin_rt_exact);
         n_twins += gone;
         writeLogInfo_("[twins] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(gone) + " of " + String(before) + " spectra folded into a twin");
       }
@@ -6268,6 +6372,11 @@ protected:
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
+    if (twin_im >= 0.0 && twin_rt_tol > 0.0)   // [twin-rt] the before/after of the near-frame relation
+      writeLogInfo_("[twins] assembly:twin_rt_frames: " + String(twin_st[0]) + " twin pairs at one MS1 frame, " + String(twin_st[1])
+                    + " same-monoisotope pairs at nearby frames joined, " + String(twin_st[2]) + " left apart at an RT cell edge; "
+                    + String(n_twins - std::min<size_t>(n_twins, twin_st[3])) + " of the " + String(n_twins) + " folded spectra need a near-frame link (the same frame alone folds "
+                    + String(twin_st[3]) + "); " + String(twin_st[4]) + " clusters span more than the tolerance (chained)");
     if (post_fusion_cap_)
       writeLogInfo_("[recap] assembly:post_fusion_cap: " + String(recap[0]) + " of " + String(recap[3]) + " spectra re-capped to " + String(max_frags)
                     + " peaks after the twin fold, " + String(recap[1]) + " peaks removed (largest spectrum before: " + String(recap[2]) + " peaks)");
