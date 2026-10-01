@@ -49,20 +49,22 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    judged by their centre. With `-gate:anchor_rescue true` (off by default) a well-sampled precursor whose own fragments
    correlate strongly (the anchors) also takes back weak fragments the gate rejected for too few points or a low
    correlation, when their apex and their points follow the anchors' consensus elution profile.
-4. **Assembly and output.** The accepted fragments are ranked by evidence — max(r, 0) × ln(1 + intensity) × (1 + shared
-   points) — and the top 500 kept;
-   fragments that still share a flight-time bin are merged into one peak first (`-assembly:merge_same_bin`), so no
-   spectrum carries two peaks at one m/z. Before that merge, `-assembly:foreign_precursor_weight` (0 by default,
-   which removes them; 1 = off) attenuates the residual isotope envelope of another precursor isolated with this one:
-   one of the run's own precursors in the same window, co-eluting within the gate's window and 0.015 1/K0, with at
-   least 2 of its mono…M+3 positions among the fragments; the precursor's own envelope is never touched. After the
-   merge, `-assembly:fragment_fuse_ppm` (25 by default, `anchored`; 0 = off) fuses the pieces of one fragment ion that
-   the mobility picker split over neighbouring flight-time bins, peaks within that many ppm, into one peak with their
-   summed intensity, so the cap ranks whole ions and the freed slots refill. A spectrum with at least 3 fragments is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
-   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`).
-   That intensity is the fragment trace's apex by default; `-assembly:frag_intensity core` sums the trace over the
-   frames around the precursor's apex instead, and `sum` over the precursor's whole span. Spectra are sorted per tile,
-   a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
+4. **Assembly and output.** Each accepted fragment is written with its trace's apex intensity, weighted by a Gaussian
+   of its 1/K0 distance to the precursor (`-assembly:im_weight_sigma`, 0.005 by default) and by its correlation raised
+   to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`);
+   `-assembly:frag_intensity core` sums the trace over the frames around the precursor's apex instead of taking its
+   apex, and `sum` over the precursor's whole span. Then, per spectrum: `-assembly:foreign_precursor_weight` (0 by
+   default, which removes them; 1 = off) attenuates the residual isotope envelope of another precursor isolated with
+   this one — one of the run's own precursors whose monoisotope lies in the same window, co-eluting within the gate's
+   window and 0.015 1/K0, with at least 2 of its mono…M+3 positions among the fragments; the precursor's own envelope
+   is never touched. Fragments that still share a flight-time bin are merged into one peak
+   (`-assembly:merge_same_bin`), so no spectrum carries two peaks at one m/z, and `-assembly:fragment_fuse_ppm` (25 by
+   default, `anchored`; 0 = off) fuses the pieces of one fragment ion that the mobility picker split over neighbouring
+   flight-time bins, peaks within that many ppm, into one peak with their summed intensity, so the ion takes one slot
+   under the cap. A spectrum with at least 3 fragments left is written: its fragments ranked by evidence —
+   max(r, 0) × ln(1 + intensity) × (1 + shared points), a fused peak by its best piece's key — and the top 500 kept,
+   with a synthetic precursor (apex m/z, charge, retention time, 1/K0). Spectra are sorted per tile, a precursor
+   claimed twice is folded into one spectrum that carries the union of the members' fragment lists
    (`-assembly:twin_im_tolerance`; with `-assembly:post_fusion_cap` a folded spectrum is cut back to `max_fragments` by
    the same `cap_rank` key, which each peak carries through the merge and the fold), and the tile is serialised in parallel. The header records every setting that shaped the output.
 
@@ -182,8 +184,9 @@ only the options marked **changes output** move the spectrum list, the others co
 **Which option for what.** Memory: `-tile:cells_per_tile` (1 is the smallest footprint), `-perf:max_concurrent_windows`
 and `-perf:mem_fraction`; avoid `.mzpeak` output and `-trace:detector openms` on a small machine, both process the
 whole run at once. Time: `-threads`, and `-perf:malloc_trim false` when memory is not the constraint. Sensitivity:
-`-perf:stream_load false` on a machine with the memory for it, `-assembly:im_weight_sigma 0.005` for a Sage search,
-and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:min_charge`.
+`-perf:stream_load false` on a machine with the memory for it, and trying `-trace:detector openms` on your own data.
+Charge and FDR: `-charge:min_charge`. The spectra of 1.5.0: `-assembly:im_weight_sigma 0
+-assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0 -charge:mono_profile_check false`.
 
 **Input and output**
 
@@ -240,8 +243,8 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-charge:im_veto_band` | 2.5 | half-width of that band in MAD-sigma of the fit residuals |
 | `-charge:iso_im_tolerance` | 0.05 | 1/K0 tolerance for isotope partners |
 | `-charge:mono_averagine_guard`, `-charge:mono_averagine_select` | 0, off | averagine-based corrections of the monoisotope; off by default, neither improves identifications |
-| `-charge:mono_profile_check`, `-charge:mono_profile_min_corr`, `-charge:mono_profile_max_dim` | v2 (false = off), 0.6, 0.015 | `true` checks each leftward step of the count walk for the winning charge: the lighter trace becomes the monoisotope only if its MS1 profile correlates with the seed's (Pearson ≥ min_corr; fewer than 3 shared frames pass unchecked) and its 1/K0 is within max_dim of the seed's; the walk stops at the first failure and the rejected trace stays unclaimed. Charge and envelope size are unchanged. **Changes output**; under evaluation |
-| `-charge:mono_profile_check v2`, `-charge:mono_position_min_ratio`, `-charge:mono_position_im_box`, `-charge:mono_position_extend`, `-charge:mono_position_iterate` | –, 0.2, 0 (auto), 0.6, true | `v2` tests isotope positions, not the claimed partner: PS(k) sums the apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (partner m/z tolerance, `gate:delta_rt`, im_box 1/K0 of the seed). im_box 0 (auto) sizes the box from the run's own isotope scatter: 3.5 × the 90th percentile of the 1/K0 gap between the brightest tenth of the seeds and their nearest trace one isotope heavier, clamped to [0.01, 0.03] (0.0101 on K562 9905, 0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs); a value > 0 fixes it. The walk's leftmost step j is rejected when PS(−j)/PS(−j+1) × λ < min_ratio (λ = max(0.1, 0.000594 × neutral mass); 0 = no test), and the monoisotope moves one isotope right; `iterate` (`true`) repeats the test on the new leftmost step while it fails, `false` tests one step only. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope (its most intense trace, not claimed) when its ratio is ≥ extend (0 = off). Each walk is judged at its precursor's final charge, after `charge:im_charge_veto` (a z=1 walk re-called 2+ is read at 2+ spacing). Claims, charge and envelope size are unchanged. The default since the 2026-09-29 tuning (rc-b); **changes output** |
+| `-charge:mono_profile_check`, `-charge:mono_profile_min_corr`, `-charge:mono_profile_max_dim` | v2 (false = off), 0.6, 0.015 | `true` checks each leftward step of the count walk for the winning charge: the lighter trace becomes the monoisotope only if its MS1 profile correlates with the seed's (Pearson ≥ min_corr; fewer than 3 shared frames pass unchecked) and its 1/K0 is within max_dim of the seed's; the walk stops at the first failure and the rejected trace stays unclaimed. Charge and envelope size are unchanged. `v2` (the default since 1.6.0) is described in the next row. **Changes output** |
+| `-charge:mono_profile_check v2`, `-charge:mono_position_min_ratio`, `-charge:mono_position_im_box`, `-charge:mono_position_extend`, `-charge:mono_position_iterate` | –, 0.2, 0 (auto), 0.6, true | `v2` tests isotope positions, not the claimed partner: PS(k) sums the apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (partner m/z tolerance, `gate:delta_rt`, im_box 1/K0 of the seed). im_box 0 (auto) sizes the box from the run's own isotope scatter: 3.5 × the 90th percentile of the 1/K0 gap between the brightest tenth of the seeds and their nearest trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703); a value > 0 fixes it. The walk itself accepts partners up to `iso_im_tolerance` (0.05) away, so a partner outside the box counts as an empty position. The walk's leftmost step j is rejected when PS(−j)/PS(−j+1) × λ < min_ratio (λ = max(0.1, 0.000594 × neutral mass); 0 = no test), and the monoisotope moves one isotope right; `iterate` (`true`) repeats the test on the new leftmost step while it fails, `false` tests one step only. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope (its most intense trace, not claimed) when its ratio is ≥ extend (0 = off). Each walk is judged at its precursor's final charge, after `charge:im_charge_veto` (a z=1 walk re-called 2+ is read at 2+ spacing). Claims, charge and envelope size are unchanged. The default since 1.6.0; **changes output** |
 
 **Co-elution gate (`gate:`)**
 
@@ -278,19 +281,19 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 
 | option | default | meaning |
 |---|---|---|
-| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments remain after the gate and the same-bin merge (checked before the cap below) |
-| `-assembly:foreign_precursor_weight` | 0 (remove; 1 = off) | multiply the fragments on the residual isotope envelope of ANOTHER precursor isolated with this one by this weight (0 removes them) before the same-bin merge and `max_fragments`; the cap key follows the attenuated intensity. A foreign precursor is one of the run's precursors in the same window, apex within the gate's retention-time window of this one's, 1/K0 within `-assembly:foreign_precursor_dim` (0.015), neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid within 30 ppm); its envelope counts when at least `-assembly:foreign_precursor_min_iso` (2) of mono + k × 1.00335/z, k = 0…3, carry a fragment within `-assembly:foreign_precursor_ppm` (10). Fragments within 30 ppm of the precursor's own mono…M+3 are never touched. Logged as `[foreign]`, stamped `spx:foreign`. Experimental |
-| `-assembly:foreign_precursor_ppm` | 10 | the m/z tolerance between a foreign envelope position and a fragment; the own-ion tests take the larger of this and 30 ppm. Residual precursor peaks scatter widely around the MS1 mono grid: on HeLa_22 (10 ng) about half of them lie beyond 10 ppm and three quarters within 20 ppm |
+| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments remain after the gate, the foreign-envelope removal, the same-bin merge and the fragment fusion (checked before the cap below) |
+| `-assembly:foreign_precursor_weight` | 0 (remove; 1 = off) | multiply the fragments on the residual isotope envelope of ANOTHER precursor isolated with this one by this weight (0 removes them) before the same-bin merge and `max_fragments`; the cap key follows the attenuated intensity. A foreign precursor is one of the run's isotope-supported precursors whose monoisotope lies in the same window (a precursor whose monoisotope sits just outside it is not considered, even when its heavier isotopes fall inside), apex within the gate's retention-time window of this one's, 1/K0 within `-assembly:foreign_precursor_dim` (0.015), neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid within the larger of `foreign_precursor_ppm` and 30 ppm); its envelope counts when at least `-assembly:foreign_precursor_min_iso` (2) of mono + k × 1.00335/z, k = 0…3, carry a fragment within `-assembly:foreign_precursor_ppm` (10). Fragments within that larger tolerance of the precursor's own mono…M+3 are never touched. Logged as `[foreign]`, stamped `spx:foreign`. The default since 1.6.0; **changes output** |
+| `-assembly:foreign_precursor_ppm` | 10 | the m/z tolerance between a foreign envelope position and a fragment; the own-ion tests take the larger of this and 30 ppm. Residual precursor peaks scatter widely around the MS1 mono grid: on a 10 ng HeLa run about half of them lie beyond 10 ppm and three quarters within 20 ppm |
 | `-assembly:foreign_precursor_dim` | 0.015 | the largest 1/K0 distance between this precursor and a foreign one |
 | `-assembly:foreign_precursor_min_iso` | 2 | how many of a foreign envelope's four positions (mono…M+3) must carry a fragment before its fragments are attenuated (1–4) |
 | `-assembly:merge_same_bin` | true | merge a spectrum's fragments of one flight-time bin (one exact m/z with the OpenMS detector) into one peak before `max_fragments`: members overlapping the strongest in retention time are summed, retention-time-disjoint pieces dropped. Two peaks at one m/z stall the fragment matching of OpenMS-based search engines. **Changes output** |
-| `-assembly:fragment_fuse_ppm` | 25 (0 = off) | fuse a spectrum's fragments within this many ppm (at most 50) into one peak, after the same-bin merge and before `min_fragments` and `max_fragments`. The mobility picker keeps 1–2 flight-time bins of a fragment ion that spans 4–7, so one ion becomes several peaks 5–20 ppm apart (half of the b/y ions on K562, against 0.6 % in DDA), each with its own apex intensity. A fused peak takes the sum of its members' emitted intensities, their intensity-weighted m/z and their best `cap_rank` key, so the cap ranks whole ions and the freed slots refill; a spectrum can fall below `min_fragments`. A `[fuse]` log line counts the fragments in, the peaks out, the groups fused and their mean size; stamped `spx:fragment_fuse`. 25 ppm `anchored` is the default since the 2026-09-29 tuning (rc-b); **changes output** |
+| `-assembly:fragment_fuse_ppm` | 25 (0 = off) | fuse a spectrum's fragments within this many ppm (at most 50) into one peak, after the same-bin merge and before `min_fragments` and `max_fragments`. The mobility picker keeps 1–2 flight-time bins of a fragment ion that spans 4–7, so one ion becomes several peaks 5–20 ppm apart, each with its own apex intensity. A fused peak takes the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), their intensity-weighted m/z and their best `cap_rank` key (the best piece's, not one computed from the sum), so the ion takes one cap slot and the freed slots refill; a spectrum that fuses below `min_fragments` is not written. A `[fuse]` log line counts the fragments in, the peaks out, the groups fused and their mean size; stamped `spx:fragment_fuse`. 25 ppm `anchored` is the default since 1.6.0; **changes output** |
 | `-assembly:fragment_fuse_mode` | anchored | how `fragment_fuse_ppm` groups: `anchored` takes the fragments strongest first (ties: lower m/z), and each one not yet fused takes every unfused fragment within the tolerance of its own m/z; `linkage` walks them in m/z order and joins a fragment to the previous one's group when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage with a capped span) |
 | `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more (unless `post_fusion_cap`) |
 | `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
-| `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
-| `-assembly:im_weight_sigma` | 0.005 (0 = off) | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
-| `-assembly:frag_intensity` | apex | the base amplitude of an emitted fragment, before the 1/K0 weight and `corr_power`: `apex` the trace's maximum in one frame; `core` the trace summed over the `frag_core_frames` window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor); `sum` the trace summed over the precursor's span, from its first to its last frame with signal (gaps included). A fragment with no point there takes its point nearest the precursor's apex. Fragments rescued by `gate:anchor_rescue` take the same amplitude. The gate and the `cap_rank` key (still the apex) are unchanged; only the steps that weigh by intensity move a few peaks (the same-bin merge keeps the strongest member's m/z, the twin fold fuses at the intensity-weighted m/z): on HeLa 10 ng 99.9 % of the peaks lie within 10 ppm of the `apex` run's. Experimental; **changes output** when not `apex` |
+| `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. The cap key does not use it, but `fragment_fuse_ppm` (anchored) groups the strongest fragments first, so it can change which pieces fuse and with them which peaks survive the cap. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
+| `-assembly:im_weight_sigma` | 0.005 (0 = off) | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. The default since 1.6.0: together with `foreign_precursor_weight 0`, +5.8 % Sage and +4.2 % MSFragger peptides over 1.5.0 on 43 public runs at unchanged entrapment FDR. **Changes output** |
+| `-assembly:frag_intensity` | apex | the base amplitude of an emitted fragment, before the 1/K0 weight and `corr_power`: `apex` the trace's maximum in one frame; `core` the trace summed over the `frag_core_frames` window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor); `sum` the trace summed over the precursor's span, from its first to its last frame with signal (gaps included). A fragment with no point there takes its point nearest the precursor's apex. Fragments rescued by `gate:anchor_rescue` take the same amplitude. The gate and the `cap_rank` key (still the apex) are unchanged; the steps that weigh by intensity follow the new values (the same-bin merge keeps the strongest member's m/z, `fragment_fuse_ppm` groups the strongest first and sums the members, the twin fold fuses at the intensity-weighted m/z), so peaks can move, fuse differently and change which survive the cap. Measured before fragment fusion became the default: on HeLa 10 ng 99.9 % of the peaks lay within 10 ppm of the `apex` run's. Experimental; **changes output** when not `apex` |
 | `-assembly:frag_core_frames` | 3 | `frag_intensity core`: the number of window frames (odd, 1–15) |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
@@ -316,18 +319,22 @@ lost precursor can be attributed to a stage.
 
 Every emitted spectrum is MS2 with a synthetic precursor: `selected ion m/z` (the apex m/z of the monoisotopic
 trace), `charge state`, the precursor's retention time and 1/K0, and the isolation window it was taken from. The run
-header carries twenty-four `spx:` userParams that make any file attributable to the configuration that produced it: the
-detector and calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
-`spx:pearson_G` (the correlation support, always `frames`), `spx:im_weight_sigma`), the twin fold (`spx:twin_merge`: its relation and
-tolerance, or `off`; `spx:post_fusion_cap` is added when `-assembly:post_fusion_cap` is on), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`,
-`spx:gate_colocation`, `spx:gate_short_traces`), the cap ranking (`spx:cap_rank`), the same-bin merges
-(`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
-`spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
-`spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
-(`spx:frame_table`); `-gate:anchor_rescue true` adds `spx:anchor`. `spx:foreign` is added when `-assembly:foreign_precursor_weight` is below 1, `spx:fragint` when `-assembly:frag_intensity` is not `apex`, `spx:fragment_fuse` when `-assembly:fragment_fuse_ppm` is above 0. `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
+header carries `spx:` userParams that make any file attributable to the configuration that produced it, twenty-seven
+at the defaults. Twenty-four are always written: the detector and calibration (`spx:detector`, `spx:mz_calibration`,
+`spx:require_isotope_support`, `spx:corr_power`, `spx:pearson_G` (the correlation support, always `frames`),
+`spx:im_weight_sigma`), the twin fold (`spx:twin_merge`: its relation and tolerance, or `off`), the co-elution gate
+(`spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`, `spx:gate_colocation`, `spx:gate_short_traces`), the
+cap ranking (`spx:cap_rank`), the same-bin merges (`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`,
+`spx:dnoise_ms1_params`, `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`,
+`spx:tile_cells_per_tile`, `spx:tiles`, `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`)
+and the frozen frame table (`spx:frame_table`). The others are written when their option is on, three of them at the
+defaults: `spx:monocheck` with `-charge:mono_profile_check true` or `v2` (its settings and how many monoisotopes
+moved), `spx:foreign` when `-assembly:foreign_precursor_weight` is below 1, `spx:fragment_fuse` when
+`-assembly:fragment_fuse_ppm` is above 0; and, off by default, `spx:anchor` (`-gate:anchor_rescue true`),
+`spx:fragint` (`-assembly:frag_intensity` not `apex`) and `spx:post_fusion_cap` (`-assembly:post_fusion_cap true`).
+`spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
 `bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
-transform, on request) or `unset` (an mzML input, which carries its m/z as is). With
-`-charge:mono_profile_check true` or `v2` the header also carries `spx:monocheck` (its settings and how many monoisotopes moved).
+transform, on request) or `unset` (an mzML input, which carries its m/z as is).
 
 ## Layout
 

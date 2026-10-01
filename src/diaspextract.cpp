@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.5.0"
+#define DIASPEXTRACT_VERSION "1.6.0"
 #endif
 
 using namespace OpenMS;
@@ -2222,9 +2222,10 @@ namespace
     vector<vector<uint32_t>> members(surv.size());
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
     // fuse: each thread reads and writes one cluster's spectra only
+    std::exception_ptr fold_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
 #pragma omp parallel for schedule(dynamic, 64)
     for (long c = 0; c < (long)surv.size(); ++c)
-    {
+    { try {
       if (keyed)
       {
         // [recap] the same fusion over (m/z, intensity, key) triples. Peaks equal in m/z and intensity add equal terms
@@ -2270,7 +2271,8 @@ namespace
       s.clear(false);   // peaks only: RT, precursor and userParams are the survivor's
       s.reserve(fused.size());
       for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
-    }
+    } catch (...) { taskErr_(fold_err); } }
+    if (fold_err) std::rethrow_exception(fold_err);
     size_t w = 0;
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
     {
@@ -2291,9 +2293,10 @@ namespace
   static std::array<size_t, 3> capAfterFusion_(vector<MSSpectrum>& v, Size max_frags)
   {
     size_t n_sp = 0, n_pk = 0, n_max = 0;
+    std::exception_ptr cap_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
 #pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
     for (long i = 0; i < (long)v.size(); ++i)
-    {
+    { try {
       MSSpectrum& s = v[(size_t)i];
       n_max = std::max(n_max, (size_t)s.size());
       if (s.size() > max_frags && !s.getFloatDataArrays().empty())
@@ -2314,7 +2317,8 @@ namespace
         s.select(idx);
       }
       s.getFloatDataArrays().clear();
-    }
+    } catch (...) { taskErr_(cap_err); } }
+    if (cap_err) std::rethrow_exception(cap_err);
     return {n_sp, n_pk, n_max};
   }
 
@@ -2465,8 +2469,8 @@ protected:
     registerTOPPSubsection_("assembly", "Pseudo-spectrum assembly");
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
     registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance; assembly:post_fusion_cap re-applies it after the fold).", false);
-    registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off. Default 0.005 since the 2026-09-29 tuning campaign (screen: Sage +3-7 %, MSFragger +3-5 % on K562, HeLa 10/100 ng and TNBC at flat entrapment); earlier measurements in docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
+    registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off, as in 1.5.0. Default 0.005 since 1.6.0: together with assembly:foreign_precursor_weight 0, +5.8 % Sage and +4.2 % MSFragger peptides over 1.5.0 on 43 public runs at unchanged entrapment (CHANGELOG, v1.6.0); earlier measurements in docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
+    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. It changes the emitted intensity, not the cap key; but assembly:fragment_fuse_ppm (on by default, mode anchored) groups the fragments strongest first by emitted intensity, so it can change which pieces fuse and with them which peaks survive assembly:max_fragments. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
@@ -2541,7 +2545,7 @@ protected:
     setValidStrings_("gate:anchor_rescue", {"true", "false"});
     registerIntOption_("gate:anchor_min_count", "<n>", 3, "gate:anchor_rescue: fewest anchors (accepted fragments at gate:anchor_min_corr or more) a precursor needs for the rescue.", false, true);
     setMinInt_("gate:anchor_min_count", 1);
-    registerDoubleOption_("gate:anchor_min_corr", "<r>", 0.8, "gate:anchor_rescue: least gate correlation of an anchor; also caps the score of a rescued fragment, so it never outweighs an anchor.", false, true);
+    registerDoubleOption_("gate:anchor_min_corr", "<r>", 0.8, "gate:anchor_rescue: least gate correlation of an anchor; also caps the correlation score of a rescued fragment (its cap key can still exceed an anchor's through intensity and shared frames).", false, true);
     setMinFloat_("gate:anchor_min_corr", 0.0);
     setMaxFloat_("gate:anchor_min_corr", 1.0);
     registerDoubleOption_("gate:anchor_rescue_corr", "<r>", 0.7, "gate:anchor_rescue: least Pearson correlation of a rejected fragment's points with the anchor consensus.", false, true);
@@ -2557,12 +2561,12 @@ protected:
     setValidStrings_("assembly:post_fusion_cap", {"true", "false"});
     registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
     setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
-    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the assembly:cap_rank key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the twin fold's intensity-weighted m/z), so a few peaks move or change. Experimental.", false, true);
+    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the assembly:cap_rank key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the anchored grouping and the sums of assembly:fragment_fuse_ppm, the twin fold's intensity-weighted m/z), so peaks can move, fuse differently and change which survive the cap. Experimental.", false, true);
     setValidStrings_("assembly:frag_intensity", {"apex", "core", "sum"});
     registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: the number of window frames (odd) centred on the precursor's apex frame.", false, true);
     setMinInt_("assembly:frag_core_frames", 1);
     setMaxInt_("assembly:frag_core_frames", 15);
-    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 0.0, "Multiply the fragments that lie on the residual isotope envelope of ANOTHER precursor isolated with this one by w, before assembly:max_fragments (0 removes them, 1 = off); the cap key follows the attenuated intensity. A foreign precursor is one of the run's precursors in the same isolation window with its apex within the gate's RT window of this precursor's, 1/K0 within assembly:foreign_precursor_dim, and neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid, up to 3 steps, within 30 ppm). Its envelope counts when at least assembly:foreign_precursor_min_iso of its positions mono + k x 1.00335/z, k = 0..3, carry a fragment within assembly:foreign_precursor_ppm. Fragments within 30 ppm of this precursor's own envelope (mono to M+3) are never touched. Logged as [foreign], stamped spx:foreign. Experimental.", false, true);
+    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 0.0, "Multiply the fragments that lie on the residual isotope envelope of ANOTHER precursor isolated with this one by w, before assembly:max_fragments (0 removes them; 1 = off, as in 1.5.0); the cap key follows the attenuated intensity. Default 0 since 1.6.0. A foreign precursor is one of the run's isotope-supported precursors whose mono lies in the same isolation window, with its apex within the gate's RT window of this precursor's, 1/K0 within assembly:foreign_precursor_dim, and neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid, up to 3 steps, within the larger of assembly:foreign_precursor_ppm and 30 ppm). Its envelope counts when at least assembly:foreign_precursor_min_iso of its positions mono + k x 1.00335/z, k = 0..3, carry a fragment within assembly:foreign_precursor_ppm. Fragments within that larger tolerance of this precursor's own envelope (mono to M+3) are never touched. Logged as [foreign], stamped spx:foreign. CHANGES OUTPUT.", false, false);
     setMinFloat_("assembly:foreign_precursor_weight", 0.0);
     setMaxFloat_("assembly:foreign_precursor_weight", 1.0);
     registerDoubleOption_("assembly:foreign_precursor_ppm", "<ppm>", 10.0, "assembly:foreign_precursor_weight: m/z tolerance between a foreign envelope position and a fragment (ppm).", false, true);
@@ -2572,7 +2576,7 @@ protected:
     registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
     setMinInt_("assembly:foreign_precursor_min_iso", 1);
     setMaxInt_("assembly:foreign_precursor_min_iso", 4);
-    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off; default 25 with assembly:fragment_fuse_mode anchored since the 2026-09-29 tuning campaign, rc-b): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities, its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) their best, so the cap ranks fused peaks and the slots they free refill. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT. Experimental.", false, true);
+    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 with assembly:fragment_fuse_mode anchored since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) their best member's, not one recomputed from the sum; a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
     setMinFloat_("assembly:fragment_fuse_ppm", 0.0);
     setMaxFloat_("assembly:fragment_fuse_ppm", 50.0);
     registerStringOption_("assembly:fragment_fuse_mode", "<mode>", "anchored", "assembly:fragment_fuse_ppm: 'anchored' takes the fragments by emitted intensity, strongest first (ties: lower m/z); each one not yet fused becomes an anchor and takes every unfused fragment within the tolerance of its own m/z. 'linkage' walks the fragments in m/z order and joins a fragment to the group of the previous one when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage, span capped).", false, true);
@@ -2633,19 +2637,19 @@ protected:
     setValidStrings_("assembly:require_isotope_support", {"true", "false"});
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "Reject a leftward isotope step of the charge:scoring=count walk when the lighter peak is below slack x heavier peak / lambda, averagine's loosest ratio (lambda = 0.000594 x neutral mass; 1.0 = exactly that bound, smaller values add slack). 0 = off. Falsified: it trades the -1.003 Da open-search artefact for a +1.003 Da one, docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.", false);
     registerFlag_("charge:mono_averagine_select", "Choose the monoisotope by averagine cosine over the whole isotope run of the charge:scoring=count walk instead of its furthest-left peak; only the reported precursor mass moves. Missed its pre-registered criterion: docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.");
-    registerStringOption_("charge:mono_profile_check", "<false/true/v2>", "v2", "Check the monoisotope of the charge:scoring=count walk, for the winning charge only (default v2 since the 2026-09-29 tuning campaign, rc-b; false = off). "
+    registerStringOption_("charge:mono_profile_check", "<false/true/v2>", "v2", "Check the monoisotope of the charge:scoring=count walk, for the winning charge only (default v2 since 1.6.0; false = off, as in 1.5.0). "
                           "'true' (v1): a lighter trace becomes the monoisotope only if its MS1 elution profile correlates with the seed trace's (Pearson >= charge:mono_profile_min_corr over the frames both have; below 3 shared frames the correlation test passes unchecked) and its 1/K0 is within charge:mono_profile_max_dim of the seed's. "
                           "The walk stops at the first failed step: the monoisotope is the last accepted peak, and the rejected trace and the ones beyond it stay unclaimed for other precursors. "
                           "'v2': isotope-position intensity sums (charge:mono_position_*). PS(k) = summed apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (the partner tolerance in m/z, gate:delta_rt, charge:mono_position_im_box 1/K0 of the seed, by default from the run's own isotope scatter). "
                           "The walk's leftmost step j is rejected when PS(-j) / PS(-j+1) x lambda < charge:mono_position_min_ratio (lambda = max(0.1, 0.000594 x neutral mass), averagine's M-1/M0 bound; an empty heavier position counts as 0); "
                           "the monoisotope moves one isotope right, the rejected trace stays claimed, and (charge:mono_position_iterate true) the new leftmost step is tested in turn. If nothing was rejected and the walk ended on a miss (not a charge:mono_averagine_guard stop), the next lighter position is accepted without claiming when its ratio is >= charge:mono_position_extend (0 = off). "
                           "v2 judges each walk at its precursor's final charge, after charge:im_charge_veto: a z=1 walk re-called 2+ stepped 1.003 m/z, two isotopes at 2+, and is read at 2+ spacing. "
-                          "Both 'true' and 'v2' keep the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, true);
+                          "Both 'true' and 'v2' keep the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, false);
     setValidStrings_("charge:mono_profile_check", {"false", "true", "v2"});
     registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check true: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
     registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check true: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
     registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: the walk's leftmost step is rejected when its averagine-scaled position ratio PS(-j) / PS(-j+1) x lambda is below this.", false, true);
-    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (K562 9905: 0.01; 2019 HeLa py3, whose isotope traces scatter wider in 1/K0: 0.019). A value > 0 fixes the box.", false, true);
+    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance (0.05) away, so a walk's own partner can lie outside the box and then counts as an empty position.", false, true);
     registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when no step was rejected and the walk ended on a miss, move the monoisotope one isotope lighter (the most intense trace there, not claimed) if that position's ratio is >= this. 0 = off.", false, true);
     registerStringOption_("charge:mono_position_iterate", "<true/false>", "true", "charge:mono_profile_check v2: after a rejected leftmost step, test the new leftmost step too, and repeat while steps fail. false tests the leftmost step only.", false, true);
     setValidStrings_("charge:mono_position_iterate", {"true", "false"});
@@ -3274,7 +3278,7 @@ protected:
       {
         SeedRes& R = res[(size_t)ii - b0];
         const size_t seed = order[(size_t)ii];
-        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); continue; }
+        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); R.mc.fill(0); R.v2 = MonoV2In_(); continue; }
         evalSeed(seed, R);
       }
       // Phase 2: commit in the original seed order.
@@ -3354,8 +3358,8 @@ protected:
 
   /// [monocheck-v2] charge:mono_profile_check v2, after the IM charge veto: each count walk is judged at its
   /// precursor's FINAL charge. A z=1 walk the veto re-calls 2+ stepped 1.003 m/z, two isotopes at 2+; judged at z=1
-  /// spacing its steps and extension land two isotopes off (K562 9905, identified release keys from such walks:
-  /// 54.5 % not monoisotopic in the release, 55.7 % after a z=1-spaced v2), so its walk is read at the final charge:
+  /// spacing its steps and extension land two isotopes off (on a tuning run, identified 1.5.0 keys from such walks:
+  /// 54.5 % not monoisotopic in 1.5.0, 55.7 % after a z=1-spaced v2), so its walk is read at the final charge:
   /// its leftmost partner is position -2 nl there, and the positions between are filled by whatever traces sit on
   /// them. PS(k) sums the apex intensity of EVERY MS1 trace (claimed or not, the seed included) at the seed's isotope
   /// position k within im_box 1/K0, in m/z order (deterministic): findPartner takes the first box candidate in m/z
@@ -3589,8 +3593,10 @@ protected:
   };
 
   /// [foreign] One window's precursors, the candidate foreign envelopes of its spectra: every precursor whose mono
-  /// m/z lies in the window, with a finite apex RT and 1/K0 and a charge, sorted by apex RT (ties by index). Built
-  /// from the run's precursor list, not from the tile's owned subset, so it is the same in any tiling.
+  /// m/z lies in the window, with a finite apex RT and 1/K0 and an isotope-supported charge (a guessed precursor's
+  /// charge is a default, so its envelope would be fictional; assembly:require_isotope_support drops them anyway),
+  /// sorted by apex RT (ties by index). Built from the run's precursor list, not from the tile's owned subset, so it
+  /// is the same in any tiling.
   struct ForeignIdx_
   {
     const vector<Precursor_>* p = nullptr;
@@ -3602,7 +3608,7 @@ protected:
       vector<pair<double, uint32_t>> o;
       o.reserve(hi > lo ? hi - lo : 0);
       for (size_t i = lo; i < hi; ++i)
-        if (std::isfinite(v[i].rt) && std::isfinite(v[i].im) && v[i].charge > 0) o.emplace_back(v[i].rt, (uint32_t)i);
+        if (std::isfinite(v[i].rt) && std::isfinite(v[i].im) && v[i].charge > 0 && !v[i].guessed) o.emplace_back(v[i].rt, (uint32_t)i);
       std::sort(o.begin(), o.end());
       rt.resize(o.size()); idx.resize(o.size());
       for (size_t i = 0; i < o.size(); ++i) { rt[i] = o[i].first; idx[i] = o[i].second; }
@@ -3612,18 +3618,20 @@ protected:
   /// [foreign] assembly:foreign_precursor_weight: attenuate, among one precursor's admitted fragments, the residual
   /// (unfragmented) envelopes of the OTHER precursors isolated with it -- apex within drt of this one's, 1/K0 within
   /// foreign_dim_, neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope
-  /// grid, up to 3 steps, within 30 ppm). A candidate's positions are mono + k ISO/z, k = 0..3; a position is present
-  /// when an admitted fragment lies within foreign_ppm_ of it. With at least foreign_min_iso_ positions present, those
-  /// fragments are multiplied by foreign_w_ (0 removes them) and their cap key is recomputed from the attenuated
-  /// IM-weighted apex (@p frag_ai). A fragment within 30 ppm of this precursor's own envelope (mono to M+3) neither
-  /// counts nor is touched: stripping the own isotopes lost 2.3 % of peptides (CHANGELOG). Returns the fragments
+  /// grid, up to 3 steps, within max(foreign_ppm_, 30 ppm)). A candidate's positions are mono + k ISO/z, k = 0..3; a
+  /// position is present when an admitted fragment lies within foreign_ppm_ of it. With at least foreign_min_iso_
+  /// positions present, those fragments are multiplied by foreign_w_ (0 removes them) and their cap key is recomputed
+  /// from the attenuated IM-weighted apex (@p frag_ai). A fragment within max(foreign_ppm_, 30 ppm) of this
+  /// precursor's own envelope (mono to M+3) neither counts nor is touched: stripping the own isotopes lost 2.3 % of
+  /// peptides in tuning. Two matched positions are weak evidence for a 1+ (or same-charge) fragment and its own
+  /// isotope, which line up with a co-isolated envelope of that charge as soon as one does (open). Returns the fragments
   /// attenuated. @p resc: gate:anchor_rescue's rescued flags, parallel to @p frags when not empty, compacted with it.
   size_t attenuateForeign_(const Precursor_& pc, double drt, const ForeignIdx_& fx, vector<pair<double, double>>& frags,
                            vector<double>& frag_scores, vector<uint32_t>& frag_bin, vector<pair<int, int>>& frag_span,
                            const vector<double>& frag_ai, vector<char>& resc) const
   {
     // The two own-ion tests take a wider tolerance than the envelope match: an ion's residual peaks scatter tens of
-    // ppm around the MS1 mono grid (HeLa_22: 31 % of the own-grid peaks within 60 ppm lie 20-60 ppm off), and with
+    // ppm around the MS1 mono grid (a 10 ng HeLa run: 31 % of the own-grid peaks within 60 ppm lie 20-60 ppm off), and with
     // both tests at foreign_ppm_ (10) 15 % of the removed fragments sat 10-60 ppm off the precursor's own M..M+3
     // (chance 0.06 %): the same ion called again with a mono just outside the sibling test took them.
     const double ISO = 1.0033548, ppm = foreign_ppm_ * 1e-6, same = std::max(ppm, 30e-6);
@@ -3700,7 +3708,7 @@ protected:
   /// that spans 4-7, so one ion becomes several traces and several peaks 5-20 ppm apart; the same-bin merge reaches only
   /// exact bins. Groups the fragments within @p ppm (anchored: strongest first, each unfused fragment an anchor taking
   /// every unfused one within ppm of its own m/z; @p linkage: m/z order, joined to the previous member within ppm and to
-  /// the group's first within 2 ppm). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
+  /// the group's first within 2 x ppm). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
   /// intensity = their sum, key = their best key, rescued flag = the strongest member's. It sits at its members' lowest
   /// index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and @p resc (when not
   /// empty) are parallel to @p frags and compacted with it. Deterministic: every order has a total tie-break and the sums
@@ -4489,7 +4497,7 @@ protected:
     im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
     merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
     frag_int_ = getStringOption_("assembly:frag_intensity") == "core" ? 1 : getStringOption_("assembly:frag_intensity") == "sum" ? 2 : 0;
-    if (getIntOption_("assembly:frag_core_frames") % 2 == 0)
+    if (frag_int_ == 1 && getIntOption_("assembly:frag_core_frames") % 2 == 0)   // used by 'core' only
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:frag_core_frames must be odd: the core is centred on the precursor's apex frame");
     frag_core_half_ = getIntOption_("assembly:frag_core_frames") / 2;
     post_fusion_cap_ = getStringOption_("assembly:post_fusion_cap") == "true";
@@ -5553,10 +5561,11 @@ protected:
     out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
     if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
       out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
-    if (foreign_w_ < 1.0)   // [foreign] stamped only when on: the default header is unchanged
+    if (foreign_w_ < 1.0)   // [foreign] stamped only when on (on by default since 1.6.0; 1 leaves the 1.5.0 header)
       out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
-                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept (30 ppm)"));
-    if (fuse_ppm_ > 0.0)   // [fuse] stamped only when on (on by default since rc-b; 0 leaves the 1.5.0 header)
+                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept ("
+                                                 + (foreign_ppm_ > 30.0 ? String(foreign_ppm_) : String("30")) + " ppm)"));   // the own-ion tests' max(ppm, 30)
+    if (fuse_ppm_ > 0.0)   // [fuse] stamped only when on (on by default since 1.6.0; 0 leaves the 1.5.0 header)
     {
       String s = String(fuse_linkage_ ? "linkage " : "anchored ") + String(fuse_ppm_) + " ppm";
       if (fuse_linkage_) s += String(" (group span <= ") + String(2.0 * fuse_ppm_) + " ppm)";

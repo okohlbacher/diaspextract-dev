@@ -176,6 +176,11 @@ scan "local paths /Users/kohlbach" "" '/Users/kohlbach'
 scan "cohort project AGXT/PH1/liver (word-bounded)" "-i" '(^|[^A-Za-z0-9_])(AGXT|PH1|liver)([^A-Za-z0-9_]|$)'
 scan "private directories docs/reviews, docs/benchmarks" "" 'docs/reviews|docs/benchmarks'
 scan "K562 study (user decision 2026-09-23: no K562 result in any public file)" "-i" 'k[-_ ]?562|charkow'
+# 1.6.0 review (2026-10-01): the K562 data sets also travel under their accession and study name, and the tuning
+# campaign's candidate/branch names and harness sample keys are private jargon no scan above catches
+scan "K562 accession/study name (PXD041421, MultiPro)" "-i" 'PXD041421|multi[-_ ]?pro([^a-z]|$)'
+scan "internal candidate and branch names (rc-a/rc-b, tune/, tuning campaign)" "-i" '(^|[^A-Za-z0-9_])rc-[ab]([^A-Za-z0-9_]|$)|tune/|tuning campaign'
+scan "harness sample keys (HeLa_NN, TNBC_NNN, CAD_NNNN)" "" '(HeLa|TNBC|CAD)_[0-9]'
 echo "== internal-development mentions (informational, not a gate)"
 ( cd "$DST_ABS" && tr '\n' '\0' < "$WORK/textfiles.txt" | xargs -0 -r grep -a -n -H -i -E -- 'codex|(^|[^A-Za-z0-9_])(kimi|vibe)([^A-Za-z0-9_]|$)|adversarial|ibminode|/ceph/|/scratch/kohlbach|\[adv-fix\]' ) 2>/dev/null | sed 's/^/     /' | head -40
 echo "   (end of informational scan)"

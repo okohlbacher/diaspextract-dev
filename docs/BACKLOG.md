@@ -252,6 +252,9 @@ runs on kim (HELA25PC.md section 0b) show the excess is critical path (68-85 % o
 ## Release decision: rc-b as 1.6.0 (added 2026-09-30, from the DDA-likeness tuning campaign)
 
 **Status 2026-09-30:** open -- harness-confirmed candidate, decision with the user (paper version freeze ~12 Oct).
+**Status 2026-10-01:** in release -- branch release-1.6.0 (rc-b + dev main), codex/kimi/vibe review done
+(docs/reviews/release-1.6.0/final-review-2026-10-01/; verdicts in the release fix commit's message), output-neutral
+fixes and docs committed; the release gate on the final binary, the export and public CI are still to run. Deferred review findings: "Open findings from the 1.6.0 release review" below.
 
 rc-b = branch tune/rc-b b2185db (tune/rc-a + tune/fuse + tune/monocheck d512026). Four default changes:
 `assembly:im_weight_sigma` 0 -> 0.005, `assembly:foreign_precursor_weight` -> 0, `assembly:fragment_fuse_ppm` 0 -> 25
@@ -308,6 +311,47 @@ rc-b, monocheck v2 takes most of it back: harness median -0.03 pt, but single ru
 +0.10 pt in the screen; the raw z=1 entrapment share is unchanged (1.93 vs 1.96 %). Measure fusion's own contribution at
 harness grade (a fusion-only arm, stratified by charge), and compare 20 ppm linkage, which had the lowest K562 FDP in the
 screen (1.177 %).
+
+## Open findings from the 1.6.0 release review (added 2026-10-01)
+
+**Status 2026-10-01:** open -- deferred at release because every fix changes the default output and would invalidate
+the 43-run harness evidence (corpus_v3_rcb_public). Each needs a counter first, then a both-engines + entrapment A/B.
+Reviewer outputs: docs/reviews/release-1.6.0/final-review-2026-10-01/ (codex.md, kimi.md, vibe.md); verdicts in the
+release fix commit's message. All are listed as known limitations in the 1.6.0 CHANGELOG.
+
+1. **v2 counts an empty heavier position against the step** (codex R1, kimi F2, vibe 9-1; high). `ratio()` returns 0
+   when PS(-j+1) is 0 at mul == 1, and the box (auto, clamped to at most 0.03) is narrower than the walk's own partner
+   tolerance (charge:iso_im_tolerance 0.05), so a walk's own partner outside the box rejects its step; with iterate one
+   empty position inside the walk moves the mono two isotopes right. Measure: a [monocheck] counter of rejections with
+   an empty denominator or numerator that the walk itself stood on. Fixes: treat an absent denominator as no evidence
+   (skip, or compare over two positions as the veto path does), or count the walk's own partner whatever the box, or
+   derive the clamp from iso_im_tolerance.
+2. **v2 extension onto another precursor's mono** (kimi F1, codex Q12; medium). B takes `bt` from PS, which sums
+   claimed traces, so the new mono can be another precursor's mono at a different frame or 1/K0; the twin fold
+   (same MS1 frame) cannot join them. Measure: count extensions whose `bt` is another precursor's mono trace at the same
+   charge. Fix: skip or flag those, or extend the twin relation to this provenance.
+3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
+   ranks below an unfused peak of equal total intensity at the 500-peak cap. Fix: carry the best member's r and overlap
+   and recompute the key from the summed IM-weighted apex (the frag_ai pattern).
+4. **Foreign candidates by mono-in-window only** (codex R4, kimi F4). A co-isolated precursor whose mono sits just outside
+   the window but whose M+1..M+3 lie inside is never a candidate (under-removal only). Fix: widen the candidate m/z range
+   by 3 x ISO / z_min and let the envelope match decide; note that v2 can move a mono across a window edge.
+5. **Two matched positions are weak evidence** (codex R7, kimi F10; vibe low). A 1+ fragment and its own isotope match
+   mono and M+1 of a co-isolated 1+ envelope as soon as one does, and at weight 0 both genuine peaks are deleted; the same
+   ion called at two charges is not recognised by on_grid. Measure: removals whose matched positions are an isotope pair
+   of one fragment ion (same trace shape and 1/K0). Fix: require evidence linking the traces to the foreign precursor
+   (MS1 profile, 1/K0), or attenuate instead of deleting.
+6. **Fusion and the twin fold are not reconciled** (codex R5). Twins weight the same pieces differently (IM weight), so
+   their fused centroids can land just over the fold's 10 ppm apart and both survive. Not a regression (fusion off leaves
+   two fold peaks too). Fix: group fragments across twins before fusing.
+7. **Fusion sums RT-disjoint members** (codex R6, kimi F6). The same-bin merge sums only RT-overlapping members, fusion
+   all, the fold takes the max: three amplitude conventions for one ion. Fix: an RT-overlap policy before summing.
+8. **Total order across standard libraries** (codex R3, kimi F20; low). v2's `by_mz` sort has no tie-break, the MS1
+   comparator omits profile samples, keyed and unkeyed folds sort differently. Deterministic for one binary (digest gate
+   passes); a cross-libc++/libstdc++ risk only. Fix: tie-break on the canonical index (changes ties, so digest-gate it).
+9. **Hot-path counters** (codex R9, kimi F11; low). seq_cst atomics on adjacent static counter arrays (false sharing),
+   two full sorts per assembly in fusion, the foreign index rebuilt per tile. rc-b wall and RSS are unchanged on the
+   corpus; profile before acting (per-thread accumulation).
 
 ## Routes (2026-09-08)
 

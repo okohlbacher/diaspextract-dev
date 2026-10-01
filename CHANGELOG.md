@@ -1,221 +1,124 @@
 # Changelog
 
-## Unreleased (tuning 2026-09-29)
+## v1.6.0 — 2026-10-01
 
-- **Unreleased: rc-b (branch tune/rc-b = rc-a + tune/fuse + tune/monocheck): new defaults**
-  `-assembly:fragment_fuse_ppm 25` with `-assembly:fragment_fuse_mode anchored` (was 0 = off) and
-  `-charge:mono_profile_check v2` (was `false`), with v2's reviewed sub-defaults (`mono_position_min_ratio` 0.2,
-  `mono_position_im_box` 0 = auto, `mono_position_extend` 0.6, `mono_position_iterate` true); rc-a's
-  `-assembly:im_weight_sigma 0.005` and `-assembly:foreign_precursor_weight 0` stay. `-assembly:fragment_fuse_ppm 0
-  -charge:mono_profile_check false -assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1` restores the
-  1.5.0 output. Screening grade (n = 1 per sample; Sage / MSFragger peptides at 1 % FDR, Sage entrapment FDP;
-  release 1.5.0 = K562 9905 36,742 / 36,057 / 1.183 %, HeLa_22 8,837 / 7,211 / 0.969 %, HeLa_34 30,957 / 26,721 /
-  1.174 %). The two halves were screened apart, not together:
-  fusion with the rc-a defaults (fuse 25 ppm anchored + im_weight_sigma 0.005 + foreign 0): K562 42,236 (+15.0 %) /
-  38,602 (+7.1 %) / 1.227 %; HeLa_22 9,227 (+4.4 %) / 7,630 (+5.8 %) / 0.979 %; HeLa_34 34,144 (+10.3 %) / 30,253
-  (+13.2 %) / 1.050 %; on six further public runs (TNBC_009, K562 CAD_3197, HeLa 2450 / 2737 / 19 / 28) more peptides
-  with both engines on all six (Sage +8.2..+13.9 %, MSFragger +2.6..+14.5 %), entrapment +0.04..+0.17 pt on five and
-  −0.03 pt on HeLa 28. Monocheck v2 with im_weight_sigma 0.005 (review arm, no foreign weight, no fusion): K562 39,915
-  (+8.6 %) / 37,822 (+4.9 %) / 1.198 %; HeLa_22 9,111 (+3.1 %) / 7,477 (+3.7 %) / 1.016 %; HeLa_34 32,689 (+5.6 %) /
-  27,870 (+4.3 %) / 1.189 %; identified K562 isotope error 5.2 % (1.5.0: 18.5 %). The fused runs' entrapment rise and
-  the combination itself still need a harness-grade measurement. The default output changes: the release digest pins
-  do not apply to this branch.
+Four new defaults. On 43 public runs, peptides at 1 % FDR rise by 12.3 % with Sage and by 7.7 % with MSFragger over
+1.5.0. No run loses peptides on either engine, entrapment FDR and memory are unchanged, and wall time is within 3 %.
+Each default can be set back.
 
-- **Release candidate A (branch tune/rc-a): new defaults** `-assembly:im_weight_sigma 0.005` (was 0 = off) and
-  `-assembly:foreign_precursor_weight 0` (was 1 = off). Screen, both engines at 1 % FDR with Sage entrapment, versus 1.5.0: K562
-  (two instruments) +8.2 % Sage / +4.2-5.1 % MSFragger, HeLa py3 10/50/100 ng +2.7-5.1 % / +3.6-4.6 %, HeLa 25pc 10 ng +6.4 / +3.9 %,
-  Evosep 60/200 SPD +5.5-7.5 % / +2.3-3.4 %, TNBC +5.2 / +4.5 %; entrapment within -0.14..+0.09 points. The spectra are more
-  DDA-like on the K562 scorecard (b/y ions in the top 150 +0.76, unexplained top-20 peaks -1.4, weak-ion recovery 25.6 -> 29.4 %).
-  The default output changes: the release digest pins do not apply to this branch.
+- **New defaults.**
 
-- **Fragment intensity definition (`-assembly:frag_intensity`, off by default).** The written fragment intensity is
-  the trace's apex in one frame, while a DDA spectrum sums the precursor's selection. `core` sums the fragment trace
-  over the `-assembly:frag_core_frames` (default 3, odd) window frames centred on the precursor's apex frame, the same
-  frames for every fragment of the precursor; `sum` over the precursor's span, from its first to its last frame with
-  signal, gaps included (summed only where the precursor has a point, 29 % of HeLa 10 ng's fragments had none: a faint
-  MS1 trace has missing points and the concentric gate keeps fragments that sit in them). The 1/K0 weight and
-  corr^`corr_power` apply on top as before. A fragment with no point in those frames takes its point nearest the
-  precursor's apex rather than being dropped or written at 0. The gate and the `max_fragments` cap key (still the
-  apex) are unchanged, so the spectra and the fragments passing the gate are the same; the steps after it that weigh
-  by intensity follow the new values (the same-bin merge keeps its strongest member's m/z and sums the members that
-  overlap it, the twin fold fuses peaks at their intensity-weighted m/z), so on HeLa 10 ng 99.9 % of the peaks lie
-  within 10 ppm of the `apex` run's. Stamped `spx:fragint`; a `[fragint]` log line counts the fragments and the
-  fallbacks. `apex` is the 1.5.0 output (same semantic digest).
-- **`-charge:mono_profile_check` (off by default): profile-supported monoisotope.** 9.9 % of the identified precursors
-  were reported one isotope below the monoisotope (5.5 % in DDA on the same keys): the count walk latches leftward onto
-  the first unused MS1 trace at mono − 1.00335/z within 15 ppm, 3 s and 0.05 1/K0 without asking whether it belongs to
-  the envelope. With the option on, each leftward step of the winning charge must correlate with the seed trace's MS1
-  profile (Pearson ≥ `-charge:mono_profile_min_corr`, default 0.6, over the frames both have; fewer than 3 shared frames
-  pass unchecked) and lie within `-charge:mono_profile_max_dim` (default 0.015) 1/K0 of the seed. The walk stops at the
-  first failed step, the monoisotope is the last accepted peak, and the rejected trace (and any beyond it) stays
-  unclaimed. The charge, the seed and `spx_n_isotopes` are unchanged. A `[monocheck]` log line counts the walks checked,
-  the monoisotopes moved and the rejections; the header is stamped `spx:monocheck`. Default output unchanged. At the
-  defaults the unclaimed traces seed precursors of their own: spectra +8.5 % on HeLa_22 (10 ng), +28 % on K562 9905.
-- **Anchor-conditioned rescue of weak fragments (`-gate:anchor_rescue`, off by default).** Of the DDA fragment ions
-  below 5 % relative intensity the pseudo-spectra recover 33 % (diaTracer 44 %): the faint-precursor gate helps only
-  when the precursor is faint, and a weak fragment of a strong precursor still needs 3 shared points and a full-grid
-  Pearson of 0.3. With the option on, a well-sampled precursor (signal in more than `-gate:faint_max_frames` window
-  frames, in every `-gate:adaptive` mode) with at least `-gate:anchor_min_count` (3) fragments at
-  r >= `-gate:anchor_min_corr` (0.8) builds a consensus profile from them (each at unit maximum, summed); fragment
-  traces in the RT and 1/K0 windows that the gate rejected only for support or by the correlation cut, with at least
-  2 points, join when their apex is within one cycle of the consensus apex and their own points correlate with the
-  consensus by `-gate:anchor_rescue_corr` (0.7) or more (2 points: both in the consensus core, in its direction,
-  scored at the threshold). Rescued fragments are weighted and cap-ranked like the others with that score, capped at
-  `anchor_min_corr`, and their cap key counts the frames shared with the precursor like every other fragment's; at
-  most `-gate:anchor_max_rescued` (50) per spectrum. An `[anchor]` log line counts anchored precursors, candidates,
-  rescues (by the gate step that had rejected them) and rescued peaks in the written spectra; the header stamps
-  `spx:anchor`, and `DIASPEXTRACT_GATE_DUMP` labels a rescued fragment's fate `rescued`. The default output is
-  unchanged (same semantic digest).
-- **`-assembly:post_fusion_cap` (off by default): `max_fragments` holds after the twin fold.** The cap was applied per
-  precursor before the fold, whose union of the members' fragment lists lets a spectrum exceed 500 peaks: at the 1.5.0
-  defaults 50.5 % of the K562 9905 spectra (up to 5,551 peaks) and 35.4 % of HeLa 10 ng (up to 1,611). With the option
-  on, each peak carries its `cap_rank` key (as a 32-bit float) through the same-bin merge and the fold (a fused peak
-  keeps its members' best key), and every spectrum over the cap after the fold keeps its top-ranked peaks (ties: higher
-  intensity, then lower m/z), in m/z order: on K562 9905 it removes 44 % of those spectra's peaks (203 M), the spectrum
-  count is unchanged, the cap takes 0.6 s and the keyed fold 0.9 s more, peak RSS +0.6 GB (+2.9 %). A `[recap]` log
-  line gives the spectra re-capped and the peaks removed; the header stamps `spx:post_fusion_cap`. Off, the output is
-  unchanged (same semantic digest on HeLa 10 ng and K562 9905). `-diag:selftest_twins` covers the keyed fold and the cap.
-- **Foreign precursor envelopes (`-assembly:foreign_precursor_weight`, off by default).** A diaPASEF window passes
-  every precursor inside it, and the unfragmented envelope of a co-isolated precursor lands in the spectrum as intense
-  fragments (about half of the 20 most intense peaks are not the peptide's, against 30 % in DDA). Below 1, fragments on
-  the envelope of another of the run's precursors in the same window (apex within the gate's retention-time window,
-  1/K0 within `-assembly:foreign_precursor_dim` 0.015, neither a twin nor this ion called again, i.e. a mono on the
-  other's isotope grid within 30 ppm) are multiplied by the weight before the same-bin merge and `max_fragments` (0
-  removes them, freeing their cap slots; the cap key follows the attenuated intensity), when at least
-  `-assembly:foreign_precursor_min_iso` (2) of its mono…M+3 positions carry a fragment within
-  `-assembly:foreign_precursor_ppm` (10). Fragments within 30 ppm of the precursor's own mono…M+3 are never touched
-  (stripping them lost 2.3 % of peptides, below). The two own-ion tests take 30 ppm, not the match tolerance: an ion's
-  residual peaks scatter tens of ppm around its MS1 mono grid, and with both tests at 10 ppm 15 % of the fragments
-  removed on HeLa_22 were the precursor's own isotopes, taken by the same ion called again with a mono just outside
-  the test. A `[foreign]` log line counts what it did; the header stamps `spx:foreign`. The default output is
-  unchanged (same semantic digest).
-- **Fragment fusion (`-assembly:fragment_fuse_ppm`, `-assembly:fragment_fuse_mode`, off by default): one peak per
-  fragment ion.** The mobility picker keeps 1.4–2.3 flight-time bins of a fragment ion that spans 3.8–6.9, so one ion
-  becomes several traces and several output peaks 5–20 ppm apart, each written with its own apex intensity: on K562
-  9905 49.8 % of the b/y ions have at least 2 peaks within 20 ppm (chance 12.9 %, DDA 0.6 %), and the 1.5.0 same-bin
-  merge, which reaches only an exact bin, does not change that. Above 0, a spectrum's fragments within that many ppm
-  (at most 50) are fused after the same-bin merge and before `min_fragments` and `max_fragments`: the fused peak takes
-  the sum of its members' emitted intensities, their intensity-weighted m/z and their best cap key, so the cap ranks
-  whole ions and the slots of an ion's pieces refill. `anchored` (the default mode) takes the fragments strongest first
-  (ties: lower m/z), each unfused one taking every unfused fragment within the tolerance of its own m/z; `linkage` joins
-  m/z neighbours within the tolerance of the previous member, the group's span capped at twice the tolerance (a
-  post-hoc single-linkage fusion chained past 20 ppm). Post hoc on the 1.5.0 K562 9905 output, 20 ppm gave MSFragger
-  +1.6 % (anchored) / +2.1 % (single linkage) and Sage +3.7 % / +5.6 %, Sage entrapment FDP 1.18 % to 1.21 % / 1.25 %;
-  a 25-ppm bound keeps 98 % of an ion, 15 ppm 72 %. A spectrum whose fragments fuse below `min_fragments` is not
-  written. Smoke on HeLa_22 (10 ng, 64 threads), anchored 20 ppm: 7.8 % of the fragments reaching the cap fuse away
-  (1.71 M groups, mean size 2.4; linkage 8.5 %, 25 ppm 9.3 % / 9.9 %), 7 fewer spectra of 53,715 (12 fell below
-  `min_fragments`), the written peaks with another peak within 20 ppm drop from 10.3 % to 3.9 % (among each spectrum's
-  150 most intense from 19.9 % to 6.5 %; with the twin fold off from 12.3 % to 0.42 %, linkage 0.04 %: the rest are
-  the fold's union of its members' peaks, which it fuses only within 10 ppm), peaks per spectrum 404 to 402 (the
-  freed slots refill), wall time unchanged. K562 9905: 18.6 % fused away, the spectrum count unchanged, wall +3 %
-  (3:37 to 3:43, the second run on a busier node), peak RSS -3.7 %. With the other tuning options: the fused
-  intensities are the `frag_intensity` amplitudes after the `foreign_precursor_weight` attenuation; a fused peak is
-  `anchor_rescue`-rescued when its strongest member was; with `post_fusion_cap` it carries its fused key into the
-  twin fold. Fused together with `foreign_precursor_weight 0`, `anchor_rescue` and `post_fusion_cap` (anchored and
-  linkage, 20 ppm), and with all five tuning options (anchored 20 ppm; linkage 25 ppm with `frag_intensity sum` and
-  foreign weight 0.1), the output is the same at 16 and 100 threads (anchored 20 ppm also at 64 threads with 4 cells
-  per tile). A `[fuse]` log line counts the fragments in, the peaks out, the groups fused, their mean size and the
-  spectra that fell below `min_fragments`; the header stamps `spx:fragment_fuse`. The default output is unchanged
-  (same semantic digest).
-- **The five tuning options together (integration branch `tune/r1`).** Each option alone behaves as on its own
-  branch; all five off is the 1.5.0 output. Where two act on the same fragments: `-gate:anchor_rescue` fragments take
-  the `-assembly:frag_intensity` amplitude like gate-passing ones (their cap key stays the IM-weighted apex, as for every
-  fragment), and the `[fragint]` counts include them. `-assembly:foreign_precursor_weight` sees the rescued fragments
-  like any other (their apex is carried for its cap-key rescale, and removal at weight 0 keeps the rescued flags in
-  step, so the `[anchor]` written-peak counts stay exact); both happen before the same-bin merge and the cap.
-  `-assembly:post_fusion_cap` carries the cap key as it stands after the foreign rescale and the rescue, and its
-  ties fall to the written intensity, which is the `frag_intensity` amplitude when that is on; the `[anchor]`
-  written-peak counts are taken before the fold and the post-fusion cap. `-charge:mono_profile_check` changes the
-  precursor list that `-assembly:foreign_precursor_weight` draws its candidates from: the own-envelope protection
-  follows the moved monoisotope (mono…M+3 of the new one), so the released lighter trace at its M−1 is outside it, but
-  a precursor that trace seeds lies on this precursor's isotope grid and is skipped as the same ion, so it never turns
-  that position into a foreign envelope; the extra precursors seeded by released traces add candidates and spectra,
-  so the `[foreign]` counts are not comparable across `mono_profile_check` settings.
+  | option | 1.5.0 | 1.6.0 | what it does |
+  |---|---|---|---|
+  | `-assembly:im_weight_sigma` | 0 | 0.005 | weights each fragment by a Gaussian of its 1/K0 distance to the precursor, before the 500-peak cap |
+  | `-assembly:foreign_precursor_weight` | (new) | 0 | removes the residual isotope envelopes of co-isolated precursors from the spectrum |
+  | `-assembly:fragment_fuse_ppm` | (new) | 25, `anchored` | fuses the pieces of one fragment ion into one peak before the cap |
+  | `-charge:mono_profile_check` | false | v2 | checks the monoisotope against the summed MS1 intensity at the isotope positions |
 
-- **`-charge:mono_profile_check v2` (off by default): isotope-position monoisotope check.** `true` (v1) cut the M-1
-  calls on K562 9905 from 9.9 % to 3.7 % but raised the total isotope error from 18.5 % to 39.7 % (true monoisotopes
-  rejected) and the spectra by 28 %: `findPartner` takes the first candidate in m/z order, which for a third of true
-  steps sits more than 0.01 1/K0 from the seed, and ion-mobility slicing splits one isotope over several traces, so a
-  single trace's profile and intensity are noisy. `v2` sums the apex intensity of every MS1 trace, claimed or not, at
-  each isotope position of the seed (the partner m/z tolerance, `gate:delta_rt`, `-charge:mono_position_im_box` 0.02
-  1/K0). Only the walk's leftmost step is tested (an identified walk has at most one spurious step, and it is the
-  leftmost): it is rejected when PS(−j)/PS(−j+1) × λ, with averagine's λ = max(0.1, 0.000594 × neutral mass), is below
-  `-charge:mono_position_min_ratio` (0.15), and the monoisotope moves one isotope right;
-  `-charge:mono_position_iterate` (`true`; `false` = one step only) repeats the test on the new leftmost step while it
-  fails. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope,
-  without claiming its trace, when its ratio is ≥ `-charge:mono_position_extend` (0.5; 0 = off). Claims, charge and
-  `spx_n_isotopes` never change, so the same precursors are inferred (the spectrum count can still shift where a moved
-  mass crosses a window edge or the twin fold). The test reads only the fixed trace arrays (no speculation
-  dependencies) and sums in m/z order (deterministic). Logged as `[monocheck]`, stamped `spx:monocheck`. `false`
-  output unchanged; `true` unchanged. Screened 2026-09-29 (iteration 1: im_box 0.01, min_ratio 0.2, extend 0.6; n = 1,
-  K562 9905, HeLa 10 ng and 100 ng): with iterate the isotope error of identified K562 precursors falls from 18.5 % to
-  8.1 % (M-1 9.9 % to 1.4 %), peptides rise with both engines on all three runs (Sage / MSFragger +1.0 / +0.7 %, +0.4
-  / +0.2 %, +1.5 / +4.8 %), entrapment is lower on all three, and spectra fall by 1.6-5.6 % (seeds of one ion that sat
-  one isotope apart now fold into twins). Without iterate: 10.3 %. On the 2019 HeLa py3 runs the isotope traces of one
-  ion scatter about 3x wider in 1/K0 than on K562, and the leftmost-step test rejects 12 % of true steps (K562 3 %):
-  the identified 10 ng isotope error rises from 8.6 % to 9.8 %.
-  **Defaults re-tuned (iteration 2):** iterate is on (`-charge:mono_position_iterate` is now a `true`/`false` option,
-  default `true`), `im_box` 0.01 → 0.02, `min_ratio` 0.2 → 0.15, `extend` 0.6 → 0.5. Search-free sweep on the fixed
-  identified release keys (K562 MSFragger/DDA truth; HeLa Sage isotope_error), total isotope error K562 / HeLa 10 ng /
-  HeLa 100 ng: release 18.5 / 9.0 / 18.2 %; iteration-1 settings 7.7 / 10.3 / 14.8 %; new defaults 8.1 / 8.5 / 12.7 %
-  (extend 0.6: im_box 0.015 7.7 / 9.5 / 13.5; 0.02 8.0 / 9.3 / 13.1; 0.03 8.6 / 9.1 / 13.1; 0.02 with min_ratio 0.10
-  8.9 / 8.3 / 13.1). Of the ten settings tried the new defaults have the lowest error summed over the three runs; at the
-  iteration-1 settings (im_box 0.01) the HeLa 10 ng error stays above the release.
-  Screened (iteration 2, n = 1; Sage / MSFragger peptides vs release): K562 +0.6 / +0.3 %, HeLa 10 ng +0.4 / −0.8 %,
-  HeLa 100 ng +1.3 / +4.6 %; entrapment −0.09, +0.02, −0.06 pt; spectra −5.0, −1.9, −4.5 %. Identified K562 isotope
-  error 8.4 % (M-1 2.4 %; iteration 1 with iterate 8.1 %, M-1 1.4 %). Sage isotope error on the peptides both runs
-  identify: HeLa 10 ng 8.5 → 8.2 %, 100 ng 17.6 → 12.3 % (same measure, iteration 1: 8.5 → 9.7 %, 17.5 → 14.3 %).
-  Peptide counts are 0.2-0.5 % below iteration 1's, except at 10 ng (Sage equal, MSFragger −1.0 %); that MSFragger
-  loss sits at the 1 % cut (71 vs 72 decoys; target peptides above hyperscore 20, 22 and 25 equal iteration 1's within
-  4). With `-assembly:im_weight_sigma 0.005`: K562 +8.4 / +4.3 %, 10 ng +3.1 / +3.4 %, 100 ng +6.0 / +5.6 % (above
-  `im_weight_sigma 0.005` alone at 100 ng, which iteration 1 was not), entrapment −0.01, +0.05, +0.05 pt, K562 isotope
-  error 8.0 %.
-  **Iteration 3: the 1/K0 box follows the run.** `-charge:mono_position_im_box` 0 (the new default) = auto: 3.5 × the
-  90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds (commit order) and their nearest
-  MS1 trace one isotope heavier (partner m/z tolerance, `gate:delta_rt`, `charge:iso_im_tolerance`), clamped to
-  [0.01, 0.03]; a value > 0 fixes the box as before. The runs' own p90 is 0.0029 on K562 9905 (box 0.0101, i.e.
-  iteration 1's 0.01), 0.0053 on HeLa 10 ng (0.018) and 0.0063 on HeLa 100 ng (0.022). `min_ratio` and `extend` return
-  to iteration 1's 0.2 and 0.6, whose peptide counts were the higher ones (iterate stays on). To use the run-level box,
-  the v2 decision moved from the greedy loop to a pass after it; it reads the same immutable arrays and changes only
-  `mono_mz`. With a fixed box the output is unchanged: HeLa 10 ng digests equal iteration 2's defaults and iteration 1's
-  settings; 16 and 100 threads give the same digest. The log and `spx:monocheck` report the box and the percentile.
-  Search-free, fixed identified release keys, total isotope error K562 / HeLa 10 ng / HeLa 100 ng: 7.7 / 9.3 / 13.1 %
-  (release 18.5 / 9.0 / 18.2; iteration 1 7.7 / 10.3 / 14.8; iteration 2 8.1 / 8.5 / 12.7).
-  Screened (iteration 3, n = 1; Sage / MSFragger peptides vs release): K562 +1.0 / +0.6 %, HeLa 10 ng +0.5 / −0.6 %,
-  HeLa 100 ng +1.1 / +4.8 %; entrapment −0.09, −0.00, −0.07 pt; spectra −5.6, −1.8, −4.5 %. Identified K562 isotope
-  error 8.2 % (M-1 1.4 %). Sage isotope error on the peptides both runs identify: HeLa 10 ng 8.5 → 8.9 %, 100 ng 17.5 →
-  12.6 %. The 10 ng MSFragger loss (7,165 vs 7,211) is where the 1 % cut falls (71 decoys vs 72): above hyperscore 20,
-  22 and 25 the run keeps 3,171 / 2,353 / 1,436 target peptides, the release 3,143 / 2,318 / 1,418. With
-  `-assembly:im_weight_sigma 0.005`: K562 +8.8 / +5.0 %, 10 ng +3.1 / +3.4 %, 100 ng +5.8 / +5.6 %, entrapment +0.04,
-  +0.05, +0.05 pt, K562 isotope error 7.6 % (M-1 1.4 %); peptides above `im_weight_sigma 0.005` alone on K562 (+1.5 /
-  +1.1 %) and 100 ng (+1.1 / +0.7 %), level at 10 ng (+0.3 / −0.4 %).
-  **Review fix: v2 decides at the final charge.** `charge:im_charge_veto` (on by default) runs after the count walk and
-  re-calls 2+ the z=1 calls that sit on the run's 2+ mobility line (K562 9905: 156,781 of 219,342 z=1 calls), keeping
-  their monoisotope. v2 used to judge those walks at z=1 spacing, where a step of 1.003 m/z is two isotopes of the 2+
-  ion: on the 2,375 identified release keys from such walks the release monoisotope is wrong for 54.5 %, v2 left it
-  wrong for 55.7 % and moved 267 of them two or four isotopes (none onto the right one). v2 now runs after the veto
-  (`monoPositionPass_`), which therefore reads the walks' own monoisotopes as without v2, and judges each walk at its
-  precursor's final charge: a re-called walk's leftmost partner is position −2·nl at 2+, and the positions between are
-  read like any other (the tested sums do not need a claimed partner); where such an in-between position is empty
-  in the box, which is no evidence against a step the walk never took there, the step is compared over two positions
-  against the Poisson M+2/M0 = λ²/2. The extension (B) also no longer fires after a
-  `charge:mono_averagine_guard` stop, which is not a miss, and the "back onto the seed" count no longer counts
-  monoisotopes that `charge:mono_averagine_select` had already put there. Offline replica on the fixed K562 keys
-  (agrees with the tool on 99.75 % of same-charge walks): re-called walks 55.7 % → 22.0 % not monoisotopic, all keys
-  10.6 % → 8.7 %. With `-charge:mono_position_iterate false`, a rejected step of a re-called walk could leave the
-  monoisotope on an empty in-between position (a bare computed m/z, no trace); it now moves on to the walk's next own
-  position (HeLa 10 ng: 580 of 72,537 monoisotopes sat on no MS1 trace, now 0). The default (`true`) and every
-  same-charge walk are unaffected (HeLa 10 ng digests unchanged).
-  Search-free, fixed identified release keys, total isotope error K562 (DDA-matched) / HeLa 10 ng / HeLa 100 ng:
-  5.3 / 9.0 / 11.5 % (release 18.5 / 9.0 / 18.2; iteration 3 7.7 / 9.3 / 13.1); at 10 ng M-1 falls 2.4 → 1.2 % and
-  M+1 rises 6.2 → 7.0 %. Screened (review arm, n = 1; Sage / MSFragger peptides vs release): K562 +0.9 / +0.4 %,
-  HeLa 10 ng +0.5 / +0.1 %, HeLa 100 ng +0.9 / +4.4 %; entrapment −0.11, +0.16, −0.08 pt; spectra −6.5, −2.3, −5.6 %;
-  identified K562 isotope error 5.5 % (M-1 1.4 %; DDA 5.5 % on the same keys). The 10 ng entrapment rise (63 vs 55
-  entrapment peptides, CI 0.88-1.42 %) is the 1 % cut moving: the entrapment search is exactly reproducible on the same
-  mzML, and against the previous review build (0.95 %, 66 spectra different) 15 of the 16 extra entrapment peptides
-  come from spectra present unchanged in both, where they sat at q 0.010-0.021. With
-  `-assembly:im_weight_sigma 0.005`: K562 +8.6 / +4.9 %, 10 ng +3.1 / +3.7 %, 100 ng +5.6 / +4.3 %, entrapment +0.02,
-  +0.05, +0.02 pt, K562 isotope error 5.2 % (M-1 1.4 %).
+  `-assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0
+  -charge:mono_profile_check false` gives the 1.5.0 spectra exactly (same semantic digest, checked on two runs). The
+  three options new to the defaults are now listed by `--help`, not only `--helphelp`.
+- **Measured effect.** The corpus is 43 public runs: PXD017703 (HeLa: 10/50/100 ng in the py3 and 25pc window
+  schemes, and Evosep 60/100/200 samples per day) and PXD047793 (TNBC tissue). Each run is extracted once
+  with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage entrapment search for the
+  FDR check.
+
+  | runs | n | Sage | MSFragger | entrapment FDR change, median (largest rise) |
+  |---|---:|---:|---:|---|
+  | HeLa py3 | 9 | +10.0 % | +9.4 % | −0.02 pt (+0.05) |
+  | HeLa 25pc | 9 | +14.2 % | +12.6 % | −0.05 pt (+0.14) |
+  | HeLa Evosep | 9 | +14.6 % | +7.9 % | −0.08 pt (+0.08) |
+  | TNBC | 16 | +12.2 % | +5.8 % | −0.03 pt (+0.10) |
+  | **all** | **43** | **+12.3 %** | **+7.7 %** | **−0.03 pt (+0.14)** |
+
+  - Per run, Sage gains +4.8 to +19.2 % and MSFragger +0.5 to +16.0 %.
+  - Pooled over the runs, the raw entrapment share is 1.93 % at z = 1 (1.5.0: 1.96 %) and 0.57 % at z ≥ 2 (0.58 %).
+  - The 1/K0 weight and the foreign-envelope removal together give +5.8 % Sage and +4.2 % MSFragger. Fragment fusion
+    and the monoisotope check add another +6.2 % and +3.4 % on top.
+  - There are 3.7 % fewer spectra (46.8 M against 48.6 M), mostly from the monoisotope check: seeds of one ion that
+    sat one isotope apart now resolve to one monoisotope and fold into twins.
+  - Median peak RSS is 8.7 GB (1.5.0: 8.6 GB). Walls are compared through the reference implementation, which ran on
+    the same node: the extraction takes 0.36 of its wall time (1.5.0: 0.35).
+- **Foreign precursor envelopes** (`-assembly:foreign_precursor_weight`, `-assembly:foreign_precursor_ppm` 10,
+  `-assembly:foreign_precursor_dim` 0.015, `-assembly:foreign_precursor_min_iso` 2). A diaPASEF window passes every
+  precursor inside it, and the unfragmented envelope of a co-isolated precursor lands in the spectrum as intense
+  "fragments". A precursor counts as foreign when it meets three conditions:
+  - it is another of the run's isotope-supported precursors whose monoisotope lies in the same window;
+  - its apex is within the gate's retention-time window, and its 1/K0 is within 0.015;
+  - it is neither a twin nor the same ion called again.
+
+  When at least 2 of that precursor's mono…M+3 positions carry a fragment within 10 ppm, those fragments are
+  multiplied by the weight. 0 removes them; 1 is off. This happens before the same-bin merge and the cap, and the cap
+  key follows the attenuated intensity. Fragments on the precursor's own mono…M+3, within the larger of the
+  tolerance and 30 ppm, are never touched. Logged as `[foreign]`, stamped `spx:foreign`.
+- **Fragment fusion** (`-assembly:fragment_fuse_ppm`, `-assembly:fragment_fuse_mode anchored|linkage`). The mobility
+  picker keeps 1–2 flight-time bins of a fragment ion that spans 4–7. One ion therefore becomes several peaks 5–20 ppm
+  apart, each with its own apex intensity and its own slot under the cap. Fragments within the tolerance (at most
+  50 ppm) are fused after the same-bin merge and before `min_fragments` and the cap. A fused peak has:
+  - the sum of its members' emitted intensities;
+  - their intensity-weighted m/z;
+  - the best member's cap key.
+
+  A spectrum that fuses below `min_fragments` is not written. `anchored` takes the fragments strongest first, and each
+  one not yet fused takes every unfused fragment within the tolerance of its own m/z. `linkage` joins m/z neighbours,
+  with the group's span capped at twice the tolerance. Logged as `[fuse]`, stamped `spx:fragment_fuse`.
+- **Monoisotope check v2** (`-charge:mono_profile_check v2`, `-charge:mono_position_min_ratio` 0.2,
+  `-charge:mono_position_im_box` 0 = auto, `-charge:mono_position_extend` 0.6, `-charge:mono_position_iterate` true).
+  The count walk steps leftward onto any unused MS1 trace one isotope lighter, so some precursors were reported one
+  isotope below their monoisotope. v2 sums the apex intensity of every MS1 trace, claimed or not, at each isotope
+  position of the seed. It counts traces within the partner m/z tolerance, the gate's retention-time window and a
+  1/K0 box. The box is sized per run: 3.5 × the 90th percentile of the isotope 1/K0 scatter of the brightest tenth of
+  the seeds, clamped to [0.01, 0.03].
+  - The walk's leftmost step j is rejected when PS(−j) / PS(−j+1) × λ is below `min_ratio`, with PS the position sum
+    and λ = max(0.1, 0.000594 × neutral mass), averagine's M−1/M0 bound. The monoisotope then moves one isotope right,
+    and with `iterate` the test repeats on the new leftmost step.
+  - When nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope if its
+    ratio is at least `extend`. Its trace is not claimed.
+  - Each walk is judged at its precursor's final charge, after `-charge:im_charge_veto`. A z = 1 walk that the veto
+    re-calls 2+ is read at 2+ spacing.
+  - Only the reported monoisotope moves. Claims, charge and `spx_n_isotopes` are unchanged.
+
+  Logged as `[monocheck]`, stamped `spx:monocheck` (with the box and the percentile). `true` selects v1, which
+  correlates each leftward step's elution profile with the seed's (`-charge:mono_profile_min_corr` 0.6,
+  `-charge:mono_profile_max_dim` 0.015). v1 rejects many true steps; it is kept for comparison.
+- **New options, off by default:**
+  - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
+    fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums
+    the precursor's whole span. The gate and the cap key keep the apex. Stamped `spx:fragint`.
+  - `-gate:anchor_rescue` (with `-gate:anchor_min_count` 3, `-gate:anchor_min_corr` 0.8, `-gate:anchor_rescue_corr`
+    0.7 and `-gate:anchor_max_rescued` 50) applies to a well-sampled precursor with at least 3 strongly correlated
+    fragments. For such a precursor it takes back weak fragments that the gate rejected for too few points or a low
+    correlation, when they follow the consensus elution profile of those anchors. Stamped `spx:anchor`.
+  - `-assembly:post_fusion_cap` re-applies `max_fragments` after the twin fold. The fold unions the members' capped
+    fragment lists. Every peak carries its cap key through the merge, the fusion and the fold. Stamped
+    `spx:post_fusion_cap`.
+- **Header.** A default run now carries 27 `spx:` stamps: `spx:monocheck`, `spx:foreign` and `spx:fragment_fuse` are
+  added to the 24 that are always written.
+- `-assembly:frag_core_frames` must be odd only with `-assembly:frag_intensity core`, the only mode that uses it.
+- An exception inside the parallel twin fold or the post-fusion cap now ends the run with an error message, not an
+  abort. An allocation failure is one example.
+- **Known limitations.**
+  - **Box narrower than the walk.** The v2 box is at most 0.03 1/K0, but the count walk accepts isotope partners up to
+    `-charge:iso_im_tolerance` (0.05) away. A walk whose own partner lies outside the box sees an empty position, which
+    counts against the step. The monoisotope can then move one or more isotopes right of the true one (two for one
+    empty position inside the walk, with `iterate`), mainly on runs with wide isotope 1/K0 scatter.
+  - **Duplicate monoisotope after the extension.** v2's extension can put a monoisotope on a trace that is another
+    precursor's monoisotope. The twin fold joins the two spectra only when they come from the same MS1 frame.
+  - **Fusion and the cap.** A fused peak is ranked under the cap by its best piece's key, not by its summed
+    intensity. Fusion also sums pieces whose elution does not overlap, unlike the same-bin merge.
+  - **Fusion and twins.** Fusion is not reconciled across twins, so after the fold's 10-ppm merge one ion can still
+    appear as two peaks a little over 10 ppm apart.
+  - **Window edges.** Foreign-envelope removal considers only precursors whose monoisotope lies in the window. A
+    co-isolated precursor whose monoisotope sits just outside the window keeps its heavier isotopes in the spectrum.
+  - **False matches.** Two matched positions are weak evidence when a genuine fragment and its own isotope line up
+    with a co-isolated envelope of the same charge. Both genuine peaks are then removed. How often this happens has
+    not been measured.
+  - **Spectra over the cap.** A folded spectrum can still exceed `max_fragments`. `-assembly:post_fusion_cap true`
+    prevents that but has not been measured at release grade.
+  - **Evosep.** On the short-gradient Evosep runs, the output searched with Sage identifies fewer peptides (0.94x)
+    than the reference implementation's output searched with MSFragger.
+  - **HeLa 25pc speed.** On the HeLa 25pc window scheme, the extraction takes 1.06–1.52x the reference
+    implementation's wall time, as in 1.5.0.
 
 ## v1.5.0 — 2026-09-29
 
