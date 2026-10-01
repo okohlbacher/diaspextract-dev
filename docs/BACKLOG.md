@@ -261,8 +261,8 @@ the per-run isotope-partner 1/K0 tolerance (f160-isotol 2409b0b: `charge:iso_im_
 redesign (f160-f1fold 71bd6f5: `assembly:twin_rt_frames` 0 = auto, `twin_rt_match ext`; item 2 of the release-review
 findings below) and the scaling levers (tune/rc-b-scal 7e6acdc, see "Thread scaling"). Combined arms:
 rel160-comb-1 (55d72d6: minlen + isotol only), rel160-comb-noscal (the features without the scaling levers) and
-rel160-comb-2 (features + scaling, the release candidate's code); the combined screen is recorded under "Evosep"
-below. Next: rc2, the CLI review of the full release diff, the 43-run harness on the combined defaults (the
+rel160-comb-2 (features + scaling, 9ad11f2; rel160-comb-3 = 35ac0af, a comment scrub only, whose binary differs from
+comb-2 in the build id and the build path alone); the combined screen is recorded under "Evosep" below. Next: rc2, the CLI review of the full release diff, the 43-run harness on the combined defaults (the
 CHANGELOG's corpus table predates the three per-run defaults), the gate, the export.
 
 rc-b = branch tune/rc-b b2185db (tune/rc-a + tune/fuse + tune/monocheck d512026). Four default changes:
@@ -282,8 +282,12 @@ stages as bounded tasks; outer = MS1 conversion / sorts and PRECURSOR_INFER batc
 and is not included. Digest-identical to rc-b-1 on 12/12 runs, e2e 30/30. Interleaved timing rc-b-1 -> rc-b-scal-1:
 HeLa_19 -44..-48 % at 32-192 threads, TNBC_009 -36 % (100 threads), K562 -5.7 / -13.1 / -24.5 / -29.1 % at 32 / 64 /
 128 / 192 threads; peak RSS +34..+67 % on K562, TNBC 20 -> 28 GB. On the 1.6.0 combined defaults: digest gate
-rel160-comb-2 == rel160-comb-noscal (tune-2026-09-29/rel160comb/B). Open: the RSS rise (pipe depth 2 keeps a second
-tile's slabs); the ordered-speculation item below stays closed.
+rel160-comb-2 == rel160-comb-noscal (tune-2026-09-29/rel160comb/B): 25/25 PASS (HeLa_22, HeLa_19, HeLa_2737, K562,
+TNBC_009 at 100 and 16 threads and cells_per_tile 2; the 1.5.0 reset, the F1 fold off == rel160-comb-1 and all three
+per-run settings off == rel160-base-1 on the scaling arm). Paired walls at 100 threads (noscal -> scal, one node, n =
+1): HeLa_19 132 -> 73 s, TNBC 583 -> 416 s, K562 193 -> 147 s, HeLa_22 24 -> 18 s; peak RSS TNBC 21.9 -> 28.9 GB, K562
+20.5 -> 28.9 GB, and with cells_per_tile 2 44 / 46 GB. Open: the RSS rise (pipe depth 2 keeps a second tile's slabs);
+the ordered-speculation item below stays closed.
 
 At 64 threads the ~65 s that stops shrinking is between-tile serial work (LOAD(tile), WRITE, SORT/MERGE/trim; 58 % of the loss)
 and the phases before the loop (MS1_TRACE, PRECURSOR_INFER, LOAD(stream); 24 %). From 96 threads one heavy band-7 task per
@@ -308,8 +312,20 @@ SCREENING (n = 1, vs rel160_base, Sage / MSFragger): minlen auto Evosep 2450/245
 +15.8/+17.9, +13.8/+15.9 %, controls >= -0.01 % (py3 output identical), K562 iso err 5.69 -> 5.47 %; isotol auto
 +5.3/+4.2, +5.0/+5.6, +6.6/+4.0, +6.7/+6.4 %, controls >= -0.36 % (HeLa_19), K562 iso err 5.69 -> 6.15 %.
 `charge:iso_partner closest` was screened and is not recommended (-1.6 / -5.0 % MSFragger on the 10 ng HeLa runs).
-Combined screen: below. Remaining open: the rest of the emission gap (EVOSEP.md section 6, open questions), and a
-corpus (harness) measurement of the per-run defaults.
+**Combined screen 2026-10-01** (SCREENING n = 1, label rel160_comb2 = arm rel160-comb-2, release-1.6.0 9ad11f2 = F3 +
+minlen + isotol + F1 fold ext + scaling, vs rel160_base, Sage / MSFragger; records screen/rel160_comb2, summary
+rel160comb/B): all nine Evosep runs -- 60 SPD 2450 / 2451 / 2452 +13.6/+13.7, +12.7/+14.3, +13.1/+13.6 %; 100 SPD
+2731 / 2732 / 2735 +24.8/+24.0, +25.6/+27.4, +24.2/+24.5 %; 200 SPD 2737 / 2738 / 2740 +23.3/+22.4, +25.2/+25.0,
++27.6/+29.6 % (pooled +18.8 / +19.4 %; spectra +37..+54 %). Controls: HeLa_19 +5.48/+1.63, HeLa_22 +0.00/-0.21,
+HeLa_34 +0.33/+0.39, TNBC_009 +2.81/+1.79, K562 +2.51/+2.96 % -- no control loses > 0.5 %; K562 A_iso_err 5.69 ->
+5.85 % (+0.16 pt). Entrapment FDP -0.27..+0.13 pt. Wall (100 threads, contended shared nodes): Evosep -5..+31 %
+(2740 12.1 -> 15.8 s), HeLa_19 -45 %, HeLa py3 -21..-25 %, TNBC -32 %, K562 -14 %; peak RSS Evosep +1..+14 %, HeLa py3
++18..+33 %, TNBC 21.6 -> 29.6 GB, K562 19.9 -> 29.7 GB (scaling's pipelined tiles). The features add up: minlen +
+isotol alone (rel160_comb, arm rel160-comb-1) gave Evosep pooled +19.0 / +19.3 %, controls +0.0..+5.3 %, iso err
+5.68 %; the F1 fold on top (rel160_comb2 vs rel160_comb) moves Evosep -0.45..+0.04 % Sage / -0.22..+0.38 % MSFragger
+(the f1fold-alone HeLa_2737 MSFragger -1.69 % is -0.13 % here) and the controls -0.35..+0.37 %, at -0.7..-3.5 %
+spectra. Remaining open: the rest of the emission gap (EVOSEP.md section 6, open questions), and a corpus (harness)
+measurement of the per-run defaults.
 
 On the nine Evosep runs (60 / 200 SPD, PXD017703) DIAspeXtract + Sage finds 0.94x the peptides of the reference + MSFragger
 for rc-b (0.82x for 1.5.0); per run 0.84-1.03x. Searched with MSFragger, our spectra give 0.83x the reference's (126,316 vs
@@ -406,7 +422,11 @@ its `ext` default.
    **Merged 2026-10-01 with `ext` as the default** (workflow decision following the user's 09:05 request to redesign
    item 2 for 1.6.0): it fails only "Evosep gains", which a de-duplication cannot be expected to meet; the HeLa_2737
    MSFragger -1.69 % is unreplicated and the 43-run harness on the combined defaults decides. The way back is one
-   default: `-assembly:twin_rt_frames -1` reproduces the same-frame fold bit for bit (OFF == rel160-base-1, 9/9 runs).
+   default: `-assembly:twin_rt_frames -1` reproduces the same-frame fold bit for bit (OFF == rel160-base-1, 9/9 runs;
+   on the merged code, -1 == rel160-comb-1 on HeLa_22 / HeLa_19 / HeLa_2737 / TNBC_009 / K562). On top of minlen +
+   isotol (rel160_comb2 vs rel160_comb, 14 runs) the fold is neutral: Evosep Sage -0.45..+0.04 %, MSFragger
+   -0.22..+0.38 %, controls -0.35..+0.37 %, HeLa_2737 MSFragger -0.13 % (not the -1.69 % of the fold alone); K562
+   isotope error 5.68 -> 5.85 %.
    What remains of the item (pairs beyond 0.005 1/K0 or across a cell edge) stays a CHANGELOG known limitation.
 3. **Fused cap key = best member's key** (kimi F3, vibe 2-1; codex: documented policy). ln is concave, so a fused ion
    ranked below an unfused peak of equal total intensity at the 500-peak cap. **Fixed before the release (user,

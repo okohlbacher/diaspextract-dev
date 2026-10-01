@@ -46,6 +46,10 @@ set back.
     sat one isotope apart now resolve to one monoisotope and fold into twins.
   - Median peak RSS is 8.7 GB (1.5.0: 8.6 GB). Walls are compared through the reference implementation, which ran on
     the same node: the extraction takes 0.36 of its wall time (1.5.0: 0.35).
+  - The three per-run settings were screened together, with one extraction per run against the first four defaults
+    alone. The nine Evosep runs gain 12.7–27.6 % Sage and 13.6–29.6 % MSFragger peptides (60 SPD about 13 %, 100 and
+    200 SPD 22–30 %) with 37–54 % more spectra. HeLa 25pc at 10 ng gains 5.5 % and 1.6 %, TNBC 2.8 % and 1.8 %, and
+    HeLa py3 moves by 0.4 % or less. The Sage entrapment FDR changes by −0.27 to +0.13 pt.
 - **Foreign precursor envelopes** (`-assembly:foreign_precursor_weight`, `-assembly:foreign_precursor_ppm` 10,
   `-assembly:foreign_precursor_dim` 0.015, `-assembly:foreign_precursor_min_iso` 2). A diaPASEF window passes every
   precursor inside it, and the unfragmented envelope of a co-isolated precursor lands in the spectrum as intense
@@ -131,9 +135,10 @@ set back.
   - they lie in one retention-time cell, so the output does not depend on the tiling or the thread count.
 
   The survivor rule and the fusion are the fold's. Across frames, pairs of one charge and 1/K0 lie either within
-  0.01 ppm (one bin) or 0.3 ppm and more apart (distinct traces). In a screen of HeLa and TNBC runs the fold removes
-  0.7–1.8 % of the spectra; peptides stay within ±0.4 % on both engines, except one Evosep 200 SPD run
-  (−1.7 % with MSFragger). The corpus numbers above predate it. `bin` (any one-bin pair across frames) and `ppm` (the
+  0.01 ppm (one bin) or 0.3 ppm and more apart (distinct traces). Screened on top of the other two per-run settings
+  (one extraction per run), the fold removes 0.7–2.4 % of the spectra and moves peptides by −0.5 to +0.4 % on either
+  engine. Screened without them, one Evosep 200 SPD run lost 1.7 % with MSFragger; with them, that run lost 0.1 %.
+  The corpus numbers above predate it. `bin` (any one-bin pair across frames) and `ppm` (the
   fold's 20 ppm) are options; both lost peptides in the screen. Without v2 nothing folds across frames, so the 1.5.0
   options above still give the 1.5.0 spectra. `-1` restores the same-frame fold. Logged as `[twins]` (pairs joined at
   one frame and across frames, pairs left apart at a cell edge), stamped in `spx:twin_merge`.
@@ -146,8 +151,10 @@ set back.
   - The MS1 conversion and sorts and the precursor-inference batches run in parallel.
 
   Measured before the per-run defaults, with two or three runs per build on one node: HeLa 25pc at 10 ng takes 44–48 %
-  less wall time at 32 to 192 threads, TNBC 36 % less at 100 threads. Peak memory rises with the second tile in
-  flight: TNBC from 20 to 28 GB, HeLa 25pc by 1–17 %.
+  less wall time at 32 to 192 threads, TNBC 36 % less at 100 threads. On the 1.6.0 defaults (one run per build, back
+  to back on one node, 100 threads): HeLa 25pc 132 → 73 s, TNBC 583 → 416 s, HeLa py3 at 10 ng 24 → 18 s, Evosep
+  200 SPD 14 → 12 s. Peak memory rises with the second tile in flight: TNBC from 22 to 29 GB, HeLa 25pc from 6.3 to
+  7.2 GB, and with `-tile:cells_per_tile 2` TNBC needs 44 GB.
 - **New options, off by default:**
   - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
     fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums
