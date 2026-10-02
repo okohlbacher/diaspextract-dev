@@ -17,7 +17,7 @@ namespace diaspextract
 {
 // ---------------------------------------------------------------------------------------------
 // sqlite3 directly, not SQLiteCpp: SQLiteCpp is an OpenMS in-tree extern absent from an installed OpenMS,
-// and a missing SQLite must be a compile error, never a silent detector switch (docs/BASELINE.md).
+// and a missing SQLite must be a compile error, never a silent detector switch.
 // Every read is whole or refused with sqlite3_errmsg: each prepare is checked and each row loop must end in
 // SQLITE_DONE (an error merely ends a loop, so a partial read would look complete). Optional tables and
 // columns are read from the schema, never inferred from a failed query.

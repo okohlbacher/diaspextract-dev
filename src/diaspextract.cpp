@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.6.1"
+#define DIASPEXTRACT_VERSION "1.7.0"
 #endif
 
 using namespace OpenMS;
@@ -836,7 +836,7 @@ namespace
     double rt = 0.0;
     double im = 0.0;
     size_t trace_idx = 0;    ///< index into ms1 traces
-    bool guessed = false;    ///< charge was DEFAULTED, not isotope-supported
+    bool guessed = false;    ///< no isotope-supported charge (charge 0); always dropped
     bool mono_ext = false;   ///< [twin-rt] the monoisotope was placed by monocheck v2's extension (B)
     int n_isotopes = 0;      ///< isotope peaks behind the mono call (0/1 = weak, mono ±1.00335 uncertain)
   };
@@ -5299,7 +5299,7 @@ protected:
       else writeLogInfo_("[im-veto] too few confident 2+ calls to fit a mobility line; no z=1 re-calls");
     }
     // [monocheck-v2] At the final charge: after the veto (which reads the walks' own monoisotopes, as without v2),
-    // before the charge-less precursors are defaulted or dropped (the veto edits in place, so the order still matches).
+    // before the charge-less precursors are dropped (the veto edits in place, so the order still matches).
     if (mono_check_ == 2)
     {
       monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm);

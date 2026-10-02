@@ -7,6 +7,5 @@ Small standard-library tools for checking DIAspeXtract output. Each script's doc
 - `mzml_specdiff.py`: per-spectrum diff of two outputs, to locate a digest difference.
 - `entrapment.py`: entrapment FDR estimator (foreign-proteome false positives, bootstrap CI).
 - `fix_mzml_cvparams.py`: adds `value=""` to valueless cvParams so MSFragger can read OpenMS mzML.
-- `ledger_report.py`: summarises a `DIASPEXTRACT_LEDGER` memory trace.
 - `tile_concat.py`: concatenates RT-tiled outputs, keeping each tile's core precursors.
 - `sage_closed.json`: a closed-search Sage configuration (set `fasta` before use).

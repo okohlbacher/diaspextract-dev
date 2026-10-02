@@ -102,7 +102,7 @@ sha256sum -c --quiet SHA256SUMS || { echo "REFUSED: staged files differ from the
 grep -q TdfMzCalibration "$OMS/src/openms/source/FORMAT/BrukerTimsFile.cpp" || {
   echo "REFUSED: the cluster OpenMS tree has no calibration patch applied - nothing changed"
   echo "  run: scripts/apply_openms_patches.sh $OMS   (on the node)"; exit 1; }
-# Both unit tests with the tool's own compiler and flags (test_dnoise_ms1 pins D's FMA-sensitive gate boxes),
+# Both unit tests with the tool's own compiler and flags (test_dnoise_ms1 pins FMA-sensitive gate boxes),
 # BEFORE anything is promoted. They compile in a copy of the repo layout made from the hash-checked staged files
 # ($U/src, $U/tests, and $U/inc/OpenMS/FORMAT for the calibration header under the name the OpenMS patch installs):
 # the very bytes renamed into the tree below and re-verified after the build. No tree header can stand in for
