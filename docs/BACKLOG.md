@@ -249,6 +249,17 @@ threads; then the thread-scaling study's levers (heaviest band first, overlap LO
 heaviest band). Balanced band edges would help most but change the output (both-engines + entrapment gate). The 25pc clean
 runs on kim (HELA25PC.md section 0b) show the excess is critical path (68-85 % of the wall delta), not work per peak.
 
+## Public data only: move the release gate and every baseline off the in-house data (added 2026-10-02, user decision)
+
+**Status 2026-10-02:** open -- policy in force; copies of the in-house cohort data are being removed from all nodes and working dirs.
+
+From 2026-10-02 benchmarking and development use only PXD-stored public data sets (PXD017703 HeLa, PXD047793 TNBC, PXD041421
+K562, PXD029836). Consequences: (1) the release gate's dataset D rows (`gate_D_*.sh`, pins 50b38ed9 / 3b2ea767 / 23ad7444) must be
+replaced by an equivalent public-run gate (one HeLa py3 and one TNBC run: defaults, 1.5.0 reset, threads/tiles/cells invariance,
+refusal rows) before the next release; (2) harness plans with in-house samples (`*_inhouse`, the cohort samples in
+harness/samples.yaml) are retired -- remove or comment them out; (3) docs that quote dataset A-F numbers (BASELINE.md, CONTRIBUTING
+memory figures, this backlog) are history, and new claims are measured on public runs only. Kill criterion: none (policy).
+
 ## Release decision: rc-b as 1.6.0 (added 2026-09-30, from the DDA-likeness tuning campaign)
 
 **Status 2026-09-30:** open -- harness-confirmed candidate, decision with the user (paper version freeze ~12 Oct).

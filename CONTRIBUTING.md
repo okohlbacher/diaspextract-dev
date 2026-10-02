@@ -30,6 +30,9 @@ If a change is *supposed* to be output-neutral, prove it with a spectrum-list di
 (`bench/semantic_digest.py`) rather than with peptide counts — counts move by ~2% from a last-ulp
 arithmetic difference, so equal counts are not equality.
 
+**Data.** Benchmarks, regression gates and development use only public data sets deposited in ProteomeXchange (PXD
+accessions), so that every number can be reproduced by anyone. Do not add, stage or cite unpublished data.
+
 ## Running the tests
 
 ```bash
