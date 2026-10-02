@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Every `-<group>:<option>` token in README.md and CONTRIBUTING.md is an option the tool registers.
+"""Every `-<group>:<option>` token in README.md, CONTRIBUTING.md and docs/options.md is an option the tool
+registers, and docs/options.md documents every registered `group:option`.
 
 The tool refuses an unknown option and aborts before it does any work ("Unknown option(s) '[-a:b]'
 given. Aborting!"), so a documented command that passes a removed option is dead on arrival.
-CHANGELOG.md and docs/ are the historical record and name removed options on purpose; they are not
-checked.
+CHANGELOG.md is the historical record and names removed options on purpose; it is not checked.
 
     scripts/check_option_tokens.py [--ini ini.xml] [file ...]
 
 With --ini (a `-write_ini` dump from the built binary) the option inventory is the binary's own;
 without it, the inventory is parsed from the register*_ calls in src/diaspextract.cpp, so the check
-runs in a tree with no build. Exit 1 if any token is not a registered option.
+runs in a tree with no build. Exit 1 if any token is not a registered option or the reference misses one.
 """
 import argparse
 import pathlib
@@ -19,7 +19,8 @@ import sys
 import xml.etree.ElementTree as ET
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_FILES = [str(ROOT / "README.md"), str(ROOT / "CONTRIBUTING.md")]
+REFERENCE = ROOT / "docs" / "options.md"
+DEFAULT_FILES = [str(ROOT / "README.md"), str(ROOT / "CONTRIBUTING.md"), str(REFERENCE)]
 TOKEN = re.compile(r"-([a-z][a-z_0-9]*):([a-z][a-z_0-9]*)")
 
 
@@ -74,6 +75,10 @@ def main():
                 if tok not in known:
                     print(f"{f}:{n}: -{tok} is not a registered option ({where})")
                     bad += 1
+    ref = REFERENCE.read_text(encoding="utf-8")
+    for opt in sorted(o for o in known if ":" in o and f"`-{o}`" not in ref):
+        print(f"{REFERENCE}: -{opt} is registered but not documented")
+        bad += 1
     print(f"checked {len(files)} file(s) against {len(known)} registered options: "
           f"{bad or 'no'} unknown token(s)")
     return 1 if bad else 0
