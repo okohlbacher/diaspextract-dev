@@ -66,7 +66,7 @@ The tool follows each ion over time (a trace), for precursors in the MS1 frames 
 | `-trace:mass_error_ppm` | 15 | m/z tolerance (ppm) of trace detection. |
 | `-trace:noise_threshold_int` | 100 | MS1 (precursor) noise level: peaks at or below it are not traced. At least 0. |
 | `-trace:ms2_noise_threshold_int` | 10 | MS2 (fragment) noise level: peaks at or below it are not traced. At least 0. |
-| `-trace:min_length_sec` | -1 | Shortest MS1 trace kept, in seconds from first to last point. Negative: set per run from the run's peak width (see `-trace:min_length_fwhm`). 0: no filter. 3 was the fixed value before 1.6.0. |
+| `-trace:min_length_sec` | -1 | Shortest MS1 trace kept, in seconds from first to last point. Negative: set per run, `-trace:min_length_fwhm` × the run's median MS1 peak width, at least half an MS1 cycle; 3 s when the run has too few bright traces to measure the width. 0: no filter. 3 was the fixed value before 1.6.0. |
 | `-trace:min_length_fwhm` | 0.4 | For the automatic `-trace:min_length_sec`: the shortest MS1 trace as this fraction of the run's median MS1 peak width. At least 0. |
 | `-trace:ms1_chrom_peak_snr` | 3 | An MS1 trace's apex must exceed this multiple of `-trace:noise_threshold_int`. At least 0. |
 | `-trace:ms2_chrom_peak_snr` | 1 | A fragment trace's apex must exceed this multiple of `-trace:ms2_noise_threshold_int`. Lower it to keep weaker fragments. At least 0. |
@@ -162,15 +162,15 @@ the fragments of both.
 | option | default | what it does |
 |---|---|---|
 | `-assembly:twin_im_tolerance` | 0.005 | Fold two spectra with the same charge, precursor m/z within 20 ppm and 1/K0 within this tolerance. Negative: off. 0 folds only twins with identical 1/K0. At least -1. |
-| `-assembly:twin_rt_frames` | 0 | Also fold twins whose apexes lie up to n MS1 cycles apart, as `-assembly:twin_rt_match` allows. 0: set per run from the MS1 peak width. -1: the same MS1 frame only (as before 1.6.0). At least -1. |
-| `-assembly:twin_rt_match` | `ext` | Which twins from different MS1 frames fold. `ext`: the same flight-time bin, and the monoisotope check (`-charge:mono_profile_check v2`) moved one of the two monoisotopic peaks one isotope lighter (see `-charge:mono_position_extend`). `bin`: any pair in the same flight-time bin. `ppm`: any pair within 20 ppm. `bin` and `ppm` fold more and are not recommended. Values: `ext`, `bin`, `ppm`. |
+| `-assembly:twin_rt_frames` | 0 | Also fold twins whose apexes lie up to n + 0.5 MS1 cycles apart and in the same retention-time cell (a pair across a cell edge stays apart), as `-assembly:twin_rt_match` allows. 0: set per run from the MS1 peak width. -1: the same MS1 frame only (as before 1.6.0). At least -1. |
+| `-assembly:twin_rt_match` | `ext` | Which twins from different MS1 frames fold. `ext`: precursor m/z within 0.05 ppm (one flight-time bin), and the monoisotope check (`-charge:mono_profile_check v2`) moved one of the two monoisotopic peaks one isotope lighter (see `-charge:mono_position_extend`). `bin`: any pair within 0.05 ppm. `ppm`: any pair within 20 ppm. `bin` and `ppm` fold more and are not recommended. Values: `ext`, `bin`, `ppm`. |
 
 **Experimental, off by default.**
 
 | option | default | what it does |
 |---|---|---|
 | `-assembly:post_fusion_cap` | `false` | Apply `-assembly:max_fragments` again after the twin fold. Values: `true`, `false`. |
-| `-assembly:frag_intensity` | `apex` | Fragment intensity in the spectrum. `apex`: the trace's maximum. `core`: its sum over `-assembly:frag_core_frames` frames centred on the precursor's apex. `sum`: its sum over the precursor's retention-time span. Values: `apex`, `core`, `sum`. |
+| `-assembly:frag_intensity` | `apex` | Fragment intensity in the spectrum. `apex`: the trace's maximum. `core`: its sum over `-assembly:frag_core_frames` frames centred on the precursor's apex. `sum`: its sum over the precursor's retention-time span. A fragment with no signal in those frames takes its point nearest the precursor's apex. Values: `apex`, `core`, `sum`. |
 | `-assembly:frag_core_frames` | 3 | For `-assembly:frag_intensity core`: number of frames, an odd number from 1 to 15. |
 
 ## MS1 denoising
@@ -220,7 +220,7 @@ A normal run needs none of these.
 | `DIASPEXTRACT_SDK_PARALLEL` | unset | Any value: decode frames in parallel even when Bruker's library does the m/z conversion. Without it, that conversion runs on one thread, because the library is not known to be thread-safe. |
 | `DIASPEXTRACT_ALLOW_CHORD_FALLBACK` | unset | `1`: when the exact m/z calibration in `analysis.tdf` cannot be used, accept a less accurate approximation instead of stopping. Needs `-dnoise:ms1 false`. |
 | `DIASPEXTRACT_MZPEAK_TDF` | unset | mzPeak builds: path to `analysis.tdf.gz` for an mzPeak archive converted without the vendor files. The tool takes the exact m/z calibration from it. |
-| `DIASPEXTRACT_MZPEAK_EXACT` | unset | mzPeak builds: `0` accepts the archive's approximate m/z conversion when the exact calibration cannot be recovered. Without it, the tool stops and names both ways out. |
+| `DIASPEXTRACT_MZPEAK_EXACT` | unset | mzPeak builds: `0` always uses the archive's approximate m/z conversion instead of the exact calibration. The integer detector cannot run on it, so add `-trace:detector openms`. Unset, an archive whose exact calibration cannot be recovered stops the run, and the message names both ways out. |
 
 `DIASPEXTRACT_LOAD_BATCH`, `OPENMS_BRUKER_SDK_PATH`, `DIASPEXTRACT_SDK_PARALLEL` and
 `DIASPEXTRACT_ALLOW_CHORD_FALLBACK` are read by the patched OpenMS library, so they act only on `.d` input. The tool

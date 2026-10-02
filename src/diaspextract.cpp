@@ -2716,10 +2716,11 @@ protected:
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Weight each fragment's intensity by corr^k, corr its elution correlation with the precursor. 0 = off.", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim the same precursor twice (same charge, m/z within "
                               "20 ppm, 1/K0 within this tolerance) into one spectrum with the fragments of both. Negative = off; 0 folds only twins of identical 1/K0.", false);
-    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Also fold twins whose apexes are up to n MS1 cycles apart, as assembly:twin_rt_match "
-                           "allows. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only (as before 1.6.0).", false);
-    registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "Which twins from different MS1 frames fold. 'ext' (default): same flight-time "
-                              "bin, and charge:mono_profile_check v2 moved one of the two monoisotopes; 'bin': any pair in the same flight-time bin; "
+    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Also fold twins whose apexes are up to n + 0.5 MS1 cycles apart and in the same "
+                           "retention-time cell, as assembly:twin_rt_match allows. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only (as before 1.6.0).", false);
+    registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "Which twins from different MS1 frames fold. 'ext' (default): precursor m/z within "
+                              "0.05 ppm (one flight-time bin), and charge:mono_profile_check v2 moved one of the two monoisotopes; 'bin': any pair "
+                              "within 0.05 ppm; "
                               "'ppm': within 20 ppm. 'bin' and 'ppm' fold more and are not recommended.", false, true);
 
     registerTOPPSubsection_("trace", "Mass-trace detection");
@@ -2727,7 +2728,8 @@ protected:
     registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise level: peaks at or below it are not traced.", false);
     registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise level: peaks at or below it are not traced.", false);
     registerDoubleOption_("trace:min_length_sec", "<sec>", -1.0, "Shortest MS1 trace kept (seconds, first to last point). Negative (default) = auto: "
-                              "trace:min_length_fwhm times the run's median MS1 peak width. 0 = no filter; 3 = the fixed value before 1.6.0.", false);
+                              "trace:min_length_fwhm times the run's median MS1 peak width, at least half an MS1 cycle; 3 s when the run has too few "
+                              "bright traces to measure the width. 0 = no filter; 3 = the fixed value before 1.6.0.", false);
     registerDoubleOption_("trace:min_length_fwhm", "<x>", 0.4, "Auto trace:min_length_sec: the shortest MS1 trace as this fraction of the run's median MS1 peak width.", false, true);
     registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "An MS1 trace's apex must exceed this times trace:noise_threshold_int.", false, true);
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "A fragment trace's apex must exceed this times trace:ms2_noise_threshold_int. "
@@ -2795,7 +2797,8 @@ protected:
     regBool("assembly:post_fusion_cap", "false", "Apply assembly:max_fragments again after the twin fold. Experimental.", true);
     registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "Fragment intensity written to the spectrum: 'apex' (default) the trace's "
                               "maximum; 'core' its sum over assembly:frag_core_frames frames centred on the precursor's apex; 'sum' its sum over the "
-                              "precursor's retention-time span. Experimental.", false, true);
+                              "precursor's retention-time span. A fragment with no signal in those frames takes its point nearest the precursor's apex. "
+                              "Experimental.", false, true);
     setValidStrings_("assembly:frag_intensity", {"apex", "core", "sum"});
     registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: number of frames (odd) centred on the precursor's apex.", false, true);
     setMinInt_("assembly:frag_core_frames", 1);
@@ -5457,8 +5460,13 @@ protected:
                   + String(n_threads) + " worker threads over one task pool; up to "
                   + String(n_conc) + " windows in flight (memory-bounded)");
     bool integer_detector = integer_req;
+    // A candidate tdf that could not be read at the preflight (e.g. still being copied) is tried once more.
+    if (integer_detector && !tofAxis().ok)
+      for (const std::string& c : tdf_cand)
+        if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
+              + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
 #ifdef DIASPEXTRACT_WITH_MZPEAK
-    // No tdf candidate calibrated the run (preflight): an mzPeak archive carries its own vendor/analysis.tdf.gz, and the
+    // No tdf candidate calibrated the run: an mzPeak archive carries its own vendor/analysis.tdf.gz, and the
     // exact-m/z path has already read MzCalibration + Frames.T1 from it: the same calibration the .d path loads.
     if (integer_detector && !tofAxis().ok)
       if (const auto mzp = spx::lastMzPeakMeta(); mzp && mzp->exact)

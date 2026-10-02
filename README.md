@@ -23,7 +23,7 @@ flowchart TD
     subgraph TILE["Per 10-minute tile"]
         READ["Read the tile's MS2 frames"]
         subgraph WIN["Per isolation window"]
-            FRAG["Trace fragment peaks over time"] --> GATE["Keep fragments that co-elute with the precursor<br/>apex within 3 s and 0.01 1/K0<br/>elution profiles correlate"]
+            FRAG["Trace fragment peaks over time"] --> GATE["Keep fragments that co-elute with the precursor<br/>apex within 3 s, 6 s if faint, and 0.01 1/K0<br/>elution profiles correlate"]
             GATE --> SPEC["Build one spectrum per precursor<br/>weight and clean the fragments<br/>keep the best 500"]
         end
         FOLD["Sort the spectra<br/>fold spectra of one precursor, within 20 ppm<br/>write the tile"]

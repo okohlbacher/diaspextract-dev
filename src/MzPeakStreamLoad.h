@@ -277,7 +277,7 @@ namespace spx
       catch (const std::exception& e)
       {
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or DIASPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
+          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is less exact and identifies fewer peptides; set DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or DIASPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
       }
       lastMzPeakCalibration() = "tdf_table_modeltype1 (recovered from the archive's two-point transform + embedded vendor/analysis.tdf.gz) archive=" + path.substr(path.find_last_of('/') + 1);
     }

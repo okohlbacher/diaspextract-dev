@@ -30,8 +30,8 @@ Each option or value below is gone, and the default behaviour is now the only on
   gone.
 - `-trace:mz_estimator`: a trace's m/z is always that of its most intense peak (`apex`); `mean` and `median` are gone.
 - `-trace:band_edges`: the integer detector always takes its flight-time band edges from the acquisition
-  (`acquisition`); `slab` is gone.
-- The gate dump (`DIASPEXTRACT_GATE_DUMP`, `DIASPEXTRACT_GATE_TARGETS`) and fourteen undocumented debug
+  (`acquisition`); `slab` is gone, and with it `DIASPEXTRACT_TILE_RESIDENT`, which served it.
+- The gate dump (`DIASPEXTRACT_GATE_DUMP`, `DIASPEXTRACT_GATE_TARGETS`) and thirteen undocumented debug
   environment variables used during development. Unset, none of them changed the output; set, they now have no
   effect.
 - Benchmark scripts, run plans and search configurations that are no longer used, from `bench/` and `scripts/`.
@@ -47,6 +47,8 @@ Each option or value below is gone, and the default behaviour is now the only on
   remaining options are unchanged, except that `-charge:mono_profile_check` no longer accepts `true`.
 - **README** rewritten in plain language, with one flow chart of the algorithm in place of the three diagrams.
 - **`docs/options.md`**: the complete option reference, with every option, its default and its valid values.
+- **Study records and design notes** under `docs/` are no longer part of the repository. Earlier entries below link to
+  some of them; they remain available at the `v1.6.1` tag.
 - With `-DMZPEAK_ROOT`, CMake no longer searches the checkout's `build-release/` and `buildfix/` directories for the
   mzPeak library; build it into `build/`, as `scripts/build_mzpeak_lib.sh` does.
 
