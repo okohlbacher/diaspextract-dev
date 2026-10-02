@@ -91,7 +91,7 @@ install_script() {  # path-substituted copy; refuses if any real cluster path su
   sed -e "s#/scratch/kohlbach#$R#g" -e "s#/ceph/ibmi/abi/oliver/spextract#$N/ceph#g" "$1" > "$2"
   if grep -n '/scratch/kohlbach\|/ceph/ibmi' "$2"; then echo "ABORT: real path survived in $2"; exit 98; fi
 }
-SHIPPED="test/test_diaspextract.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
+SHIPPED="test/test_diaspextract.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/launch.sh"
 mk_repo() {
   mkdir -p $1/src $1/tests $1/test $1/bench $1/scripts
   git -C $1 init -q && git -C $1 config user.email t@t && git -C $1 config user.name t && git -C $1 config commit.gpgsign false
@@ -121,7 +121,7 @@ pv()   { sed -n "s/^$1=//p" "$2"; }
 tree_is() { local W=$V/ver/$1
   same $W/src/diaspextract.cpp $O/src/topp/diaspextract.cpp && same $W/src/TdfMzCalibration.h $O/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h &&
   same $W/src/TdfLoad.h $O/src/topp/TdfLoad.h && same $W/src/MzPeakStreamLoad.h $O/src/topp/MzPeakStreamLoad.h && same $W/src/DnoiseMs1.h $O/src/topp/DnoiseMs1.h; }
-ship_is() { local W=$V/ver/$1 f; for f in test/test_diaspextract.py bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh; do same $W/$f "$TOOLS/$(basename $f)" || return 1; done
+ship_is() { local W=$V/ver/$1 f; for f in test/test_diaspextract.py bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/launch.sh; do same $W/$f "$TOOLS/$(basename $f)" || return 1; done
   same $W/tests/calibration_golden.json $TESTS/calibration_golden.json && same $W/tests/test_dnoise_ms1.cpp $R/diaspextract_unit/test_dnoise_ms1.cpp &&
   same $W/tests/test_tdf_load.cpp $R/diaspextract_unit/test_tdf_load.cpp && [ -e $R/diaspextract_unit/test_dnoise_ms1.log ] && [ -e $R/diaspextract_unit/test_tdf_load.log ]; }
 prov_is() { local W=$V/ver/$1 P=${2:-$PROV}

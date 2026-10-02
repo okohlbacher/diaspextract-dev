@@ -23,7 +23,7 @@ TESTS=/ceph/ibmi/abi/oliver/spextract/tests
 INPUTS="src/diaspextract.cpp src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
 # The e2e suite, its golden file (check 9 reads ../tests/calibration_golden.json), the gate chains'
 # digest/diff tools and the remote launcher: each drifted once when it did not travel with the source.
-SHIP="test/test_diaspextract.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/ledger_report.py bench/launch.sh"
+SHIP="test/test_diaspextract.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/launch.sh"
 for f in $INPUTS $SHIP; do [ -f "$f" ] || { echo "REFUSED: $f does not exist - nothing changed" >&2; exit 1; }; done
 DIRT=$(git status --porcelain -- $INPUTS); DIRTY=""
 if [ -n "$DIRT" ]; then
@@ -171,7 +171,7 @@ cat "$PROV" >> "$R/deploys.log"; cat "$PROV"
 if [ -e "$S/bak/diaspextract.cpp" ]; then mv -f "$S/bak/diaspextract.cpp" "$TOPP/diaspextract.cpp.bak"; fi
 mkdir -p "$UT" "$TESTS"
 cp "$U/tests/test_dnoise_ms1.cpp" "$U/test_dnoise_ms1.log" "$U/tests/test_tdf_load.cpp" "$U/test_tdf_load.log" "$UT/"
-cp "$S/test_diaspextract.py" "$S/semantic_digest.py" "$S/mzml_specdiff.py" "$S/tile_concat.py" "$S/ledger_report.py" "$S/launch.sh" "$TOOLS/"
+cp "$S/test_diaspextract.py" "$S/semantic_digest.py" "$S/mzml_specdiff.py" "$S/tile_concat.py" "$S/launch.sh" "$TOOLS/"
 cp "$S/calibration_golden.json" "$TESTS/"
 # 771 explicitly, not chmod +x: the tools dir carries a default ACL (default:group::rwx, other:---), so a file
 # created by a redirect or a python write lands 0660 with NO exec bit regardless of umask -- which is how

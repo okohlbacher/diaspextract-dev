@@ -872,7 +872,7 @@ def main():
         env = {k: v for k, v in os.environ.items() if not k.startswith(("SPEXTRACTOR_", "DIASPEXTRACTOR_"))}
         for tag, old_vars in (("spextractor", {"SPEXTRACTOR_DET": "1"}),
                               ("diaspextractor", {"DIASPEXTRACTOR_DET": "1"}),
-                              ("both", {"SPEXTRACTOR_LEDGER": "x", "DIASPEXTRACTOR_TILE_NO_CARRY": "1"})):
+                              ("both", {"SPEXTRACTOR_PIPE_TILES": "1", "DIASPEXTRACTOR_TILE_NO_CARRY": "1"})):
             old = os.path.join(work, f"old_env_{tag}.mzML")
             r = run(binary, inp, old, expect_fail=True, env=dict(env, **old_vars))
             log = r.stdout + r.stderr

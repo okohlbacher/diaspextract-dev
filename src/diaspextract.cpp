@@ -37,7 +37,6 @@
 #include <fstream>
 #include <atomic>
 #include <mutex>
-#include <condition_variable>   // [outer] the MS1 pick worker
 #include <thread>
 #include <map>
 #include <string>
@@ -394,10 +393,6 @@ namespace
 #if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
     if (v.size() >= ((size_t)1 << 15) && omp_get_max_threads() > 1 && !omp_in_parallel())
     {
-      // DIASPEXTRACT_OUTER_VERIFY: also sort a copy with std::sort and report whether the two sequences are identical
-      static const bool verify = std::getenv("DIASPEXTRACT_OUTER_VERIFY") != nullptr;
-      std::vector<T> ref;
-      if (verify) { ref = v; std::sort(ref.begin(), ref.end(), less); }
       auto cmp = __gnu_cxx::__ops::__iter_comp_iter(less);
       const auto first = v.begin(), last = v.end();
       const auto depth = std::__lg(last - first) * 2;   // as std::__sort
@@ -408,40 +403,11 @@ namespace
         introsortLoopPar_(first, last, depth, cmp);
       }
       std::__final_insertion_sort(first, last, cmp);
-      if (verify) std::fprintf(stderr, "[outer] stdSortPar_ verify: %zu elements, %s\n", v.size(),
-                               ref == v ? "identical to std::sort" : "DIFFERENT from std::sort");
       return;
     }
 #endif
     std::sort(v.begin(), v.end(), less);
   }
-  /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
-  /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
-  /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
-  /// 15 s, with the first gate it fails (plain Pearson gate rules only, RT window as applied: gate:short_traces,
-  /// gate:colocation and gate:shrinkage are not reflected in the fate). The spectra are unchanged; off unless both variables are set.
-  struct GateDump_
-  {
-    struct T { std::string id; double mz, rt, im; int z; };
-    std::vector<T> t;   ///< sorted by mz
-    std::ofstream out;
-    std::mutex mu;
-    bool on = false;
-    GateDump_()
-    {
-      const char* f = std::getenv("DIASPEXTRACT_GATE_DUMP");
-      const char* g = std::getenv("DIASPEXTRACT_GATE_TARGETS");
-      if (!f || !g) return;
-      std::ifstream in(g);
-      T x;
-      while (in >> x.id >> x.mz >> x.rt >> x.im >> x.z) t.push_back(x);
-      std::sort(t.begin(), t.end(), [](const T& a, const T& b) { return a.mz < b.mz; });
-      out.open(f);
-      out << "target\tiso_k\tpc_mz\tpc_z\tpc_rt\tpc_im\tpc_iso\tpc_guessed\tfrag_mz\tdim\tdrt\tnp\toverlap\tcorr\tinten\tfate\n";
-      on = !t.empty() && out.good();
-    }
-    static GateDump_& get() { static GateDump_ d; return d; }
-  };
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
@@ -547,58 +513,6 @@ namespace
 #endif
   }
 
-  // [ledger] DIASPEXTRACT_LEDGER=<file>: a sampler thread appends one TSV row every 250 ms -- wall
-  // clock, VmRSS, glibc arena/free, live bytes per category, the unattributed remainder (RSS minus
-  // the sum: mostly allocator retention) and the phase marker. Charges are atomic adds at allocation
-  // boundaries, never per peak; with the variable unset every call is one branch.
-  enum LedCat { LC_SLAB, LC_MS1MAP, LC_MS1TRACE, LC_PRECURSOR, LC_FROZEN, LC_PREP, LC_BAND,
-                LC_MS1BAND, LC_PARENT, LC_WSTORE, LC_FRAG, LC_SPECTRA, LC_CARRY, LC_WRITER,
-                LC_SCRATCH, LC_N };
-  inline const char* ledName_(int c)
-  {
-    // band_arena: the MS2 integer path's per-window arenas; ms1_band: detectTraces_'s copy of the MS1 map.
-    static const char* const n[LC_N] = {"slab", "ms1_map", "ms1_trace", "precursor", "frozen", "prep",
-                                        "band_arena", "ms1_band", "parent", "wstore", "frag_aux",
-                                        "spectra", "carry", "writer", "scratch"};
-    return n[c];
-  }
-  inline std::array<std::atomic<long long>, LC_N>& ledger_() { static std::array<std::atomic<long long>, LC_N> a{}; return a; }
-  inline const char* ledFile_() { static const char* f = std::getenv("DIASPEXTRACT_LEDGER"); return f; }
-  inline std::atomic<const char*>& ledPhaseName_() { static std::atomic<const char*> p{"start"}; return p; }   // stored pointers need static lifetime: the sampler reads them from another thread
-  inline void ledAdd_(int c, long long b) { if (ledFile_()) ledger_()[(size_t)c].fetch_add(b, std::memory_order_relaxed); }
-  inline void ledSet_(int c, long long b) { if (ledFile_()) ledger_()[(size_t)c].store(b, std::memory_order_relaxed); }
-  inline void ledPhaseTile_(const char* what, size_t k)
-  {
-    if (!ledFile_()) return;
-    static std::mutex m; static std::string buf;
-    std::lock_guard<std::mutex> g(m);
-    buf = std::string(what) + std::to_string(k);
-    ledPhaseName_().store(buf.c_str(), std::memory_order_relaxed);
-  }
-  /// A scoped charge: the subtract cannot be skipped by an early return or an exception.
-  struct LedCharge
-  {
-    int c; long long b;
-    LedCharge(int cat, long long bytes) : c(cat), b(bytes) { ledAdd_(c, b); }
-    void change(long long nb) { ledAdd_(c, nb - b); b = nb; }
-    ~LedCharge() { ledAdd_(c, -b); }
-    LedCharge(const LedCharge&) = delete;
-    LedCharge& operator=(const LedCharge&) = delete;
-  };
-  /// [ledger] live bytes of a PeakMap: peaks at the padded 20 B (Peak1D 16 + the IM float) plus
-  /// the per-spectrum header and its settings tail. O(spectra), never O(peaks).
-  inline long long ledMapBytes_(const MSExperiment& m)
-  {
-    long long b = (long long)m.size() * 700;
-    for (const auto& sp : m) b += (long long)sp.size() * 20;
-    return b;
-  }
-  /// [ms1-hist] DIASPEXTRACT_MS1_HIST=1: picked MS1 peaks counted by intensity band (<100, 100-300, 300-1000,
-  /// 1000-10000, >=10000; 100 and 300 are MS1 tracing's default noise and seed thresholds). Counting only.
-  inline bool ms1HistOn_() { static const bool on = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_HIST"); return e && *e && *e != '0'; }(); return on; }
-  inline std::array<std::atomic<long long>, 5>& ms1Hist_() { static std::array<std::atomic<long long>, 5> h{}; return h; }
-  /// [pspan] precursors reaching assembly by MS1 span in window frames: 1, 2, 3, 4, 5-6, 7-10, 11-20, >20; [8] = faint (adaptive)
-  inline std::array<std::atomic<long long>, 9>& pspanHist_() { static std::array<std::atomic<long long>, 9> h{}; return h; }
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
@@ -620,48 +534,6 @@ namespace
   /// assemblies, [1] fragments in, [2] peaks out, [3] groups of >= 2 fused, [4] fragments in those groups, [5] assemblies
   /// with at least assembly:min_fragments before the fusion and fewer after it
   inline std::array<std::atomic<long long>, 6>& fuseCount_() { static std::array<std::atomic<long long>, 6> c{}; return c; }
-  /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
-  struct LedRun
-  {
-    std::atomic<bool> stop{false};
-    std::thread t;
-    LedRun()
-    {
-      if (!ledFile_()) return;
-      t = std::thread([this]() {
-        std::ofstream f(ledFile_());
-        // MiB: every value below is a byte count >> 20.
-        f << "t_s\trss_mib\tarena_mib\tfree_mib\tsum_mib\tunattributed_mib";
-        for (int c = 0; c < LC_N; ++c) f << '\t' << ledName_(c) << "_mib";
-        f << "\tphase\n";
-        while (true)
-        {
-          const bool last = stop.load(std::memory_order_relaxed);
-          long long arena = 0, freeb = 0;
-#ifdef __GLIBC__
-          { const struct mallinfo2 mi = mallinfo2(); arena = (long long)(mi.arena >> 20); freeb = (long long)(mi.fordblks >> 20); }
-#endif
-          const long rss = rss_mb_();
-          long long sum = 0, v[LC_N];
-          for (int c = 0; c < LC_N; ++c) { v[c] = ledger_()[(size_t)c].load(std::memory_order_relaxed); sum += v[c]; }
-          const long long sum_mb = sum >> 20;
-          char buf[64];
-          std::snprintf(buf, sizeof buf, "%.2f", phase_clock_());
-          f << buf << '\t' << rss << '\t' << arena << '\t' << freeb << '\t' << sum_mb << '\t' << (rss - sum_mb);
-          for (int c = 0; c < LC_N; ++c) f << '\t' << (v[c] >> 20);
-          f << '\t' << ledPhaseName_().load(std::memory_order_relaxed) << '\n';
-          f.flush();
-          if (last) break;
-          std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        }
-      });
-    }
-    ~LedRun()
-    {
-      if (!t.joinable()) return;
-      ledPhaseName_().store("end", std::memory_order_relaxed); stop.store(true, std::memory_order_relaxed); t.join();
-    }
-  };
   /// " [RSS cur, peak hwm]" from /proc/self/status; "" where unsupported. [mem]
   static std::string rss_()
   {
@@ -759,7 +631,6 @@ namespace
     /// (tof 0, zero-filled slots) reconstructs to 0.
     vector<int16_t> bins;        ///< arena of per-frame bin OFFSETS (integer path, until EPD)
     size_t frames() const { return rt_index.size(); }
-    long long bytes() const { return (long long)(inten.capacity() * 4 + bins.capacity() * 2 + rt_index.capacity() * 4 + b.capacity() * 8 + frame_rt.capacity() * 8); }
     void setFrames(const vector<uint32_t>& ri, const vector<double>* bb)
     {
       rt_index = ri; if (bb) b = *bb; else b.clear();
@@ -863,21 +734,12 @@ namespace
   /// ElutionPeakDetection is skipped (trace:ms{1,2}_split_valleys = 0, or a single trace), where
   /// MassTraceDetection reports an intensity-weighted mean instead. Counted, not silent.
   inline std::atomic<size_t>& rtOffGrid() { static std::atomic<size_t> n{0}; return n; }
-  /// [soa-rt diag] is the stray RT strictly BETWEEN two frame times (a weighted
-  /// mean, which no frame index can represent) or merely a hair off one (a representable value)?
-  inline std::atomic<size_t>& rtStrictlyBetween() { static std::atomic<size_t> n{0}; return n; }
   /// Record `rt` as a frame offset. Snaps to the nearest frame if the value is off-grid (counted).
   inline void setRtFrame(const TraceStore& s, Trace& t, double rt)
   {
     if (s.frame_rt.empty()) { t.rt_at = 0; return; }
     const uint32_t f = s.frameOf(rt);
-    if (s.frame_rt[f] != rt)
-    {
-      rtOffGrid().fetch_add(1, std::memory_order_relaxed);
-      // strictly interior to the frame grid => an interpolated value, unrepresentable as an index
-      if (f > 0 && f + 1 < s.frame_rt.size() && rt > s.frame_rt[f - 1] && rt < s.frame_rt[f + 1])
-        rtStrictlyBetween().fetch_add(1, std::memory_order_relaxed);
-    }
+    if (s.frame_rt[f] != rt) rtOffGrid().fetch_add(1, std::memory_order_relaxed);
     const int64_t d = (int64_t)f - (int64_t)t.frame0;
     if (d < -32768 || d > 32767) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
     t.rt_at = (int16_t)d;
@@ -1412,7 +1274,6 @@ namespace
   void toTof(PeakSlab& sl)
   {
     if (!sl.mzq) return;
-    const long long led_b0 = (long long)sl.bytes();         // [ledger] the load charged the pre-merge bytes
     const TofAxis& ax = tofAxis();
     const size_t F = sl.frames();
     sl.b.resize(F);
@@ -1497,7 +1358,6 @@ namespace
     }
     if (F) sl.frame_off[F] = w;
     sl.tof.resize(w); sl.inten.resize(w); sl.imq.resize(w);
-    ledAdd_(LC_SLAB, (long long)sl.bytes() - led_b0);         // [ledger] give back what the merge freed
     mergeCount_()[0] += merged; mergeCount_()[1] += frames_merged;
     vector<uint32_t>().swap(sl.frame_id);
     sl.mzq = false;
@@ -2261,12 +2121,8 @@ namespace
     PickCompactConsumer(PeakPickerIM& picker, map<WinKey, PeakSlab>& windows,
                         PeakMap& ms1, CompactStats& stats)
       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats) {}
-    /// [outer] the MS1 worker ends with the consumer, also when an exception leaves the load early
-    ~PickCompactConsumer() { stopMs1Worker_(); }
 
     size_t frames_seen = 0;
-    long long slab_charged_ = 0;   ///< [ledger] LC_SLAB bytes this consumer's MS2 batches charged (the pipelined tile read replaces them)
-    String ms1_pick_mode_;   ///< [outer] how the MS1 batches were picked, for the log (set by finish())
 
     /// [frames] A window's FROZEN frame table (rt, vendor id) with the lockstep cursor: every table
     /// frame the reader skipped (no raw peaks, an empty mobility slice) is appended EMPTY with the
@@ -2307,19 +2163,11 @@ namespace
       if (!tables_init_) { tables_init_ = true; if (tablefn) tables_ = tablefn(); }
       const int n = (int)buf_.size();
       if (n == 0) return;
-      waitMs1Worker_();   // [review] DIASPEXTRACT_MS1_ASYNC: the worker appends to ms1_ (read below) and adds to flush_wall_()
       const double _tf0 = phase_clock_();
-      // [ledger] the batch's RAW frames, 20 B per raw peak (Peak1D 16 + IM float 4), freed one by one in the pick loop
-      long long raw_b = 0;
-      for (const auto& sp : buf_) raw_b += (long long)sp.size() * 20;
-      LedCharge _raw(LC_SCRATCH, raw_b);
       // per-frame regions of one reusable scratch, sized by the RAW peak counts
       scratch_off_.resize((size_t)n + 1);
       { size_t total = 0; for (int i = 0; i < n; ++i) { scratch_off_[(size_t)i] = total; total += buf_[(size_t)i].size(); } scratch_off_[(size_t)n] = total;
         if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); } }
-      static std::atomic<long long> scratch_charged{0};   // [ledger] the reusable compaction scratch, once
-      { const long long want = (long long)(scratch_mzq_.capacity() * 4 + scratch_inten_.capacity() * 4 + scratch_imq_.capacity() * 2);
-        ledAdd_(LC_SCRATCH, want - scratch_charged.exchange(want)); }
       std::vector<size_t> kept((size_t)n);
       std::vector<double> frt((size_t)n);
       std::vector<uint32_t> fid((size_t)n);
@@ -2385,7 +2233,6 @@ namespace
           per_win[it->second].idx.push_back(i);
         } }
       const size_t n_ms1 = ms1_.size();
-      std::atomic<long long> slab_b{0};   // [ledger] what this batch actually touched
       std::exception_ptr pad_err;
       auto appendWin = [&](const long w)
       {
@@ -2403,7 +2250,6 @@ namespace
           }
           const size_t o = scratch_off_[(size_t)i];
           bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
-          slab_b += (long long)kept[(size_t)i] * 10 + 24;   // [ledger] touched bytes: 10 B/peak + the frame's table row
         }
       };
       if (!omp_in_parallel())
@@ -2412,11 +2258,9 @@ namespace
         for (long w = 0; w < (long)per_win.size(); ++w) appendWin(w);
       }
       else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
-      ledAdd_(LC_SLAB, slab_b); slab_charged_ += slab_b;
       if (pad_err) std::rethrow_exception(pad_err);
       flush_wall_() += phase_clock_() - _tf0;
       buf_.clear(); key_.clear();
-      loadTrim_();
     }
 
   protected:
@@ -2428,77 +2272,17 @@ namespace
       if (dnoise && dnoise->on && !dn_loader_checked_) { dnoise->checkLoader(); dn_loader_checked_ = true; }
       ms1_buf_.push_back(std::move(s));
       ++frames_seen;
-      if (ms1_buf_.size() >= ms1BatchNow_()) flushMS1Async_();
+      if (ms1_buf_.size() >= kBatch) flushMS1_();
     }
 
-    /// Picks the buffered MS1 frames now, after the worker's batch (if any): the order of the MS1 map is the arrival order.
-    void flushMS1_()
-    {
-      waitMs1Worker_();
-      pickMS1Batch_(ms1_buf_);
-    }
-
-    /// [outer] Hands the buffered MS1 frames to the worker thread and returns to the reader, which decodes the next batch
-    /// meanwhile. The previous batch is picked and appended first, so batches still reach the MS1 map in arrival order,
-    /// and every frame is processed exactly as by flushMS1_: batch composition does not change the output (kBatch_).
-    void flushMS1Async_()
-    {
-      if (!ms1Async_()) { flushMS1_(); return; }
-      waitMs1Worker_();
-      ms1_inflight_.swap(ms1_buf_);   // ms1_buf_ takes the picked (empty) buffer back
-      ms1_buf_.clear();
-      if (!w_th_.joinable())
-      {
-        const int nthr = std::max(1, omp_get_max_threads());   // a new thread starts from the global default team size
-        w_th_ = std::thread([this, nthr] {
-          omp_set_num_threads(nthr);
-          std::unique_lock<std::mutex> lk(w_mu_);
-          for (;;)
-          {
-            w_cv_.wait(lk, [this] { return w_job_ || w_quit_; });
-            if (!w_job_) return;   // quit, nothing pending
-            lk.unlock();
-            std::exception_ptr err;
-            try { pickMS1Batch_(ms1_inflight_); } catch (...) { err = std::current_exception(); }
-            lk.lock();
-            w_err_ = err; w_job_ = false;
-            w_cv_.notify_all();
-          }
-        });
-      }
-      { std::lock_guard<std::mutex> g(w_mu_); w_job_ = true; }
-      w_cv_.notify_all();
-    }
-
-    /// [outer] Waits for the worker's batch and rethrows its error, if any.
-    void waitMs1Worker_()
-    {
-      if (!w_th_.joinable()) return;
-      std::unique_lock<std::mutex> lk(w_mu_);
-      w_cv_.wait(lk, [this] { return !w_job_; });
-      if (w_err_) { std::exception_ptr e = w_err_; w_err_ = nullptr; lk.unlock(); std::rethrow_exception(e); }
-    }
-
-    /// [outer] Lets the worker finish its batch and ends it (finish() and the destructor; an unreported error is dropped
-    /// here only when an exception is already unwinding the load).
-    void stopMs1Worker_()
-    {
-      if (!w_th_.joinable()) return;
-      { std::lock_guard<std::mutex> g(w_mu_); w_quit_ = true; }
-      w_cv_.notify_all();
-      w_th_.join();
-      w_quit_ = false;
-    }
+    /// Picks the buffered MS1 frames now: the order of the MS1 map is the arrival order.
+    void flushMS1_() { pickMS1Batch_(ms1_buf_); }
 
     void pickMS1Batch_(std::vector<MapType::SpectrumType>& buf)   // one MS1 batch, picked and appended to the MS1 map, then emptied
     {
       const int n = (int)buf.size();
       if (n == 0) return;
       const double _tf0 = phase_clock_();
-      // [ledger] the buffered RAW MS1 frames, 20 B per raw peak, held until picked: pass 1's largest transient.
-      long long raw_b = 0;
-      for (const auto& sp : buf) raw_b += (long long)sp.size() * 20;
-      LedCharge _raw(LC_SCRATCH, raw_b);
       PeakPickerIM picker = picker_;
       std::exception_ptr pick_err;
       // [dnoise] per thread for this batch only (freed with it), per frame counts merged below
@@ -2526,21 +2310,10 @@ namespace
       }
       if (pick_err) std::rethrow_exception(pick_err);
       if (dn) dnoise->add(dn_cnt);
-      if (ms1HistOn_())
-        for (const auto& sp : buf)
-        {
-          long long c[5] = {0, 0, 0, 0, 0};
-          for (const auto& pk : sp) { const float v = pk.getIntensity(); ++c[v < 100 ? 0 : v < 300 ? 1 : v < 1000 ? 2 : v < 10000 ? 3 : 4]; }
-          for (int k = 0; k < 5; ++k) ms1Hist_()[(size_t)k].fetch_add(c[k], std::memory_order_relaxed);
-        }
-      // [ms1-prune] after [ms1-hist] (which counts what was PICKED), before the charge below (which is then
-      // the kept bytes)
-      if (ms1_prune && ms1_prune->on) ms1_prune->batch(buf, [](const MSSpectrum&) { return true; });
-      { long long mb = 0; for (const auto& s : buf) mb += (long long)s.size() * 20; ledAdd_(LC_MS1MAP, mb); }
+      if (ms1_prune && ms1_prune->on) ms1_prune->batch(buf, [](const MSSpectrum&) { return true; });   // [ms1-prune]
       for (auto& s : buf) ms1_.addSpectrum(std::move(s));
       buf.clear();
       flush_wall_() += phase_clock_() - _tf0;
-      loadTrim_();
     }
 
     void consumeSwathSpectrum_(MapType::SpectrumType& s, size_t /*swath_nr*/) override
@@ -2554,7 +2327,7 @@ namespace
       key_.push_back(winKey(lo, hi, windowGroupOf(s.getNativeID())));
       buf_.push_back(std::move(s));                  // pick+compact deferred to flush_()
       ++frames_seen;
-      if (buf_.size() >= kBatch_()) flush_();
+      if (buf_.size() >= kBatch) flush_();
     }
 
     void ensureMapsAreFilled_() override { finish(); }
@@ -2566,9 +2339,6 @@ namespace
     void finish()
     {
       flushMS1_(); flush_();
-      stopMs1Worker_();
-      ms1_pick_mode_ = ms1Async_() ? "beside the reader on a worker thread, batches of " + String(ms1BatchNow_())
-                                   : "inside the reader's hand-over, batches of " + String(kBatchMS1_());
       // [frames] the tail of every delivered window's table; a table window that delivered nothing
       // gets no slab (it is counted as absent by the caller)
       for (auto& kv : tables_)
@@ -2576,32 +2346,8 @@ namespace
     }
 
   private:
-    /// [ledger] DIASPEXTRACT_LOAD_TRIM=N: malloc_trim(0) every Nth flush (0 = never). The load's retention
-    /// sits in per-thread arenas, which only an explicit malloc_trim reaches (MALLOC_TRIM_THRESHOLD_ does
-    /// not). Priced in docs/BASELINE.md, "The composition on D".
-    static int loadTrimEvery_() { static const int v = []{ const char* e = std::getenv("DIASPEXTRACT_LOAD_TRIM");
-                                                           return e ? std::atoi(e) : 0; }(); return v; }
-    static void loadTrim_()
-    {
-      const int n = loadTrimEvery_();
-      if (n <= 0) return;
-      static std::atomic<long long> k{0};
-      const bool due = (k.fetch_add(1, std::memory_order_relaxed) % n == n - 1);
-#ifdef __GLIBC__
-      if (due) malloc_trim(0);
-#else
-      (void)due;   // every other trim site in this file is glibc-only for the same reason
-#endif
-    }
-    /// Frames per pick batch, 256 by default (~1 GB raw buffer); DIASPEXTRACT_PICK_BATCH overrides.
-    /// Batch composition does not change the output.
-    static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACT_PICK_BATCH");
-      const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
-    /// [batch] DIASPEXTRACT_PICK_BATCH_MS1: the MS1-only flush batch (unset = kBatch_), so shrinking it for memory does not
-    /// re-batch the MS2 tile reads (a smaller MS2 batch only costs CPU). Output-invariant; priced in docs/BASELINE.md "The composition on D".
-    static size_t kBatchMS1_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACT_PICK_BATCH_MS1");
-      const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)0; }();
-      return v ? v : kBatch_(); }
+    /// Frames per pick batch (~1 GB raw buffer), MS1 and MS2. Batch composition does not change the output.
+    static constexpr size_t kBatch = 256;
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
     FrameTables tables_; bool tables_init_ = false;   ///< [frames] the reader's frozen tables + cursors
@@ -2610,24 +2356,6 @@ namespace
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
     bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
-    /// [outer] The MS1 worker: picks ms1_inflight_ while the reader fills ms1_buf_. w_job_ is set by the reader's thread
-    /// and cleared by the worker, both under w_mu_; the worker touches only its batch, the MS1 map, the prune, the dnoise
-    /// counts and the ledger (atomic), none of which the reader's thread uses before waitMs1Worker_ has returned.
-    std::vector<MapType::SpectrumType> ms1_inflight_;
-    std::thread w_th_;
-    std::mutex w_mu_;
-    std::condition_variable w_cv_;
-    bool w_job_ = false, w_quit_ = false;
-    std::exception_ptr w_err_;
-    /// [outer] DIASPEXTRACT_MS1_ASYNC=1: the MS1 batches are picked on the worker, beside the reader's decode of the next
-    /// batch. OFF by default: the worker's team is a second OpenMP team on the same places as the reader's (libgomp binds
-    /// a foreign thread's team from place 0), so at 64 threads a 60-min run's LOAD(stream) got 0.3 s slower, and its extra thread
-    /// arenas raised a 2-h HeLa run's peak RSS by 6 % for 0.5-0.9 s (timed 2026-10-01). Default: the MS1 batches
-    /// are picked inside the reader's hand-over, one full batch at a time (the behaviour before 2026-10-01).
-    static bool ms1Async_() { static const bool v = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_ASYNC"); return e && *e && *e != '0'; }(); return v; }
-    /// [outer] Beside the reader two batches are in memory (one being picked, one filling), so each is half the
-    /// synchronous batch and the raw-frame residency stays what it was.
-    static size_t ms1BatchNow_() { return ms1Async_() ? std::max<size_t>(1, kBatchMS1_() / 2) : kBatchMS1_(); }
     map<WinKey, PeakSlab>& windows_;
     PeakMap& ms1_;
     CompactStats& stats_;
@@ -2742,13 +2470,12 @@ namespace
   /// (`cells`: the cell edges, `cell_drt`: tile_drt; the tile loop's own test, (T - rt) > cell_drt), so a pair never
   /// straddles a tile under any grouping and the output stays grouping- and thread-invariant. rt_tol 0 is the
   /// same-frame relation (|dRT| <= 0 and one frame is one cell), bit for bit. `st` (optional) adds {pairs linked at one
-  /// frame, pairs linked across frames, near pairs refused at a cell edge, spectra the same-frame relation alone would
-  /// have removed, clusters spanning more than rt_tol}. `near_mode`, how a pair from two frames must match: 0 precursor
+  /// frame, pairs linked across frames, near pairs refused at a cell edge}. `near_mode`, how a pair from two frames must match: 0 precursor
   /// m/z within TWIN_PPM, as at one frame; 1 within BIN_PPM (one flight-time bin: one MS1 trace, or one bin at two
   /// frames, is the monoisotope of both); 2 as 1, and one of the two carries the userParam spx_mono_ext (its mono was
   /// placed by monocheck v2's extension), which mode 2 removes from every spectrum.
   static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, bool keyed = false, double rt_tol = 0.0,
-                            const vector<double>* cells = nullptr, double cell_drt = 0.0, std::array<size_t, 5>* st = nullptr,
+                            const vector<double>* cells = nullptr, double cell_drt = 0.0, std::array<size_t, 3>* st = nullptr,
                             int near_mode = 0)
   {
     const double TWIN_PPM = 20.0, FUSE_PPM = 10.0;   // ponytail: the measured values, no option until another is measured
@@ -2774,11 +2501,9 @@ namespace
       if (a.rt != b.rt) return a.rt < b.rt;
       return a.i < b.i;
     });
-    vector<uint32_t> up(v.size()), up1;   // up1: the same-frame relation alone, for the counter only
+    vector<uint32_t> up(v.size());
     for (size_t i = 0; i < up.size(); ++i) up[i] = (uint32_t)i;
-    if (st) up1 = up;
-    auto rootIn = [](vector<uint32_t>& u, uint32_t a) { while (u[a] != a) { u[a] = u[u[a]]; a = u[a]; } return a; };
-    auto root = [&](uint32_t a) { return rootIn(up, a); };
+    auto root = [&](uint32_t a) { while (up[a] != a) { up[a] = up[up[a]]; a = up[a]; } return a; };
     size_t n_same = 0, n_near = 0, n_edge = 0;
     for (size_t g0 = 0, g1; g0 < ks.size(); g0 = g1)
     {
@@ -2795,19 +2520,12 @@ namespace
           if (ks[b].cell != ks[a].cell) { ++n_edge; return; }
           ++(same ? n_same : n_near);
           { const uint32_t ra = root(ks[a].i), rb = root(ks[b].i); if (ra != rb) up[ra] = rb; }
-          if (st && same) { const uint32_t ra = rootIn(up1, ks[a].i), rb = rootIn(up1, ks[b].i); if (ra != rb) up1[ra] = rb; }
         };
         for (size_t b = a + 1; b < g1 && ks[b].mz <= hi; ++b) link(b);
         for (size_t b = a; b-- > g0 && ks[b].mz >= lo; ) link(b);
       }
     }
-    if (st)
-    {
-      vector<uint8_t> seen(v.size(), 0);
-      size_t n_roots = 0;
-      for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = rootIn(up1, i); if (!seen[r]) { seen[r] = 1; ++n_roots; } }
-      (*st)[0] += n_same; (*st)[1] += n_near; (*st)[2] += n_edge; (*st)[3] += v.size() - n_roots;
-    }
+    if (st) { (*st)[0] += n_same; (*st)[1] += n_near; (*st)[2] += n_edge; }
     // survivor per cluster: (isotopes, peaks) strictly greater replaces, so a tie keeps the earliest
     const uint32_t NONE = UINT32_MAX;
     vector<uint32_t> n_in(v.size(), 0), best(v.size(), NONE);
@@ -2829,13 +2547,6 @@ namespace
     }
     vector<vector<uint32_t>> members(surv.size());
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
-    if (st && rt_tol > 0.0)   // [twin-rt] clusters whose members span more than rt_tol: chained through intermediate frames
-      for (const auto& m : members)
-      {
-        double r0 = v[m[0]].getRT(), r1 = r0;
-        for (uint32_t i : m) { r0 = std::min(r0, v[i].getRT()); r1 = std::max(r1, v[i].getRT()); }
-        if (r1 - r0 > rt_tol) ++(*st)[4];
-      }
     // fuse: each thread reads and writes one cluster's spectra only
     auto fuse = [&](const long c)
     {
@@ -3342,8 +3053,6 @@ protected:
   vector<Trace> detectTraces_(PeakMap& map, TraceStore& store, double delta_im, double noise,
                               double snr, double min_len, double split_valleys, int bands,
                               double splitter_scan_time,   // the run's cycle time for the splitter, 0 = per trace
-                              int in_cat = -1,          // [ledger] the caller's category for `map`, -1 = uncharged
-                              int part_cat = LC_BAND,   // [ledger] where this call's band partition belongs
                               Ms1Prune* ms1_prune = nullptr)   // [ms1-prune] the MS1 call only: the pre-prune edge sample
   {
     MassTraceDetection mtd;
@@ -3361,10 +3070,6 @@ protected:
     // sequence the serial gather and the serial re-concatenation used to build, and every later step walks it in that
     // order, so neither copy is needed.
     vector<vector<MassTrace>> seg;
-    // [tstage] Sub-stage seconds of this phase, logged as one line.
-    double tt_edge = 0, tt_dist = 0, tt_mtd = 0, tt_gather = 0, tt_split = 0;
-    auto tt_now = []() { return std::chrono::steady_clock::now(); };
-    auto tt_s = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
     if (bands > 1)
     {
       // [bands] Partition the peaks by m/z and trace the bands concurrently. A trace cannot span more
@@ -3373,7 +3078,6 @@ protected:
       const double ppm = getDoubleOption_("trace:mass_error_ppm");
       // Band edges from m/z QUANTILES, not uniform m/z: peak density varies by orders of
       // magnitude across a window, and uniform edges would leave one band holding most of the work.
-      auto _te0 = tt_now();
       vector<double> sample;
       if (ms1_prune && ms1_prune->on) sample.swap(ms1_prune->sample);   // [ms1-prune] taken before the prune; the pruned map's own would move the edges
       else
@@ -3393,8 +3097,6 @@ protected:
 
       // Partition ONCE (peaks are copied into exactly one core band plus any halo it falls in),
       // then release the source map so the halo duplicates are the only overhead.
-      tt_edge = tt_s(_te0, tt_now());
-      auto _td0 = tt_now();
       // [dist-par] Distribute chunks of spectra in parallel; chunks concatenate in chunk order, so every
       // band gets the same spectra in the same order (byte-identical), and each source spectrum is
       // released as it is copied (transient ~1x the map). docs/BASELINE.md, "`perf:ms1_trace_bands`:
@@ -3454,28 +3156,7 @@ protected:
       if (ms1_prune && detOn_())   // [det] which (frame, band) spectra exist: condition (ii) of the MS1 prune
       { String cnt; for (int b = 0; b < bands; ++b) cnt += (b ? "," : "") + String(sub[b].size());
         writeLogInfo_("[det] MS1 band spectra " + cnt); }
-      // [ledger] the partition is a COPY of the whole map (plus a 1-5% halo) and lives from here
-      // until each band is detected -- charged as ms1_map until now, which named the wrong
-      // structure for the largest allocation of the MS1 phase. Hand the charge over at the swap.
-      vector<long long> band_b((size_t)bands, 0);
-      { long long tb = 0;
-        for (int b = 0; b < bands; ++b) { band_b[(size_t)b] = ledMapBytes_(sub[b]); tb += band_b[(size_t)b]; }
-        ledAdd_(part_cat, tb); if (in_cat >= 0) ledSet_(in_cat, 0); }
       vector<vector<PeakMap>>().swap(csub);
-      tt_dist = tt_s(_td0, tt_now());
-      // [ms1-trim] DIASPEXTRACT_MS1_TRIM=1 (MS1 call only): return the released MS1 map's free pages before
-      // detection. Measured: docs/BASELINE.md, "TNBC 009: the pass-1 levers take 6.3 GB off".
-      static const bool ms1_trim = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_TRIM"); return e && *e && *e != '0'; }();
-      if (ms1_trim && in_cat >= 0)
-      {
-#ifdef __GLIBC__
-        const double _tt = phase_clock_(); const long _r0 = rss_mb_();
-        malloc_trim(0);
-        writeLogInfo_("[trim] MS1 band distribution -> detection: " + String(_r0) + " -> " + String(rss_mb_()) + " MB RSS in "
-                      + String(phase_clock_() - _tt) + " s");
-#endif
-      }
-      auto _tm0 = tt_now();
       vector<vector<MassTrace>> per(bands);
       std::exception_ptr band_err;   // [task-err]
       #pragma omp taskloop grainsize(1) default(shared)
@@ -3485,11 +3166,9 @@ protected:
         MassTraceDetection m2; m2.setLogType(ProgressLogger::NONE); m2.setParameters(p);
         vector<MassTrace> t;
         sub[b].sortSpectra();
-        // NOTE: MassTraceDetection builds its OWN copy of this band internally; that copy is the
-        // one structure of the MS1 phase the tool cannot charge without patching OpenMS.
-        if (sub[b].size() < 3) { sub[b].clear(true); ledAdd_(part_cat, -band_b[(size_t)b]); continue; }
+        if (sub[b].size() < 3) { sub[b].clear(true); continue; }
         m2.run(sub[b], t);
-        sub[b].clear(true); ledAdd_(part_cat, -band_b[(size_t)b]);
+        sub[b].clear(true);
         // keep only traces whose centroid lies in this band's CORE -> no duplicates from the halo
         for (auto& mt : t)
         {
@@ -3498,16 +3177,12 @@ protected:
         }
       } catch (...) { taskErr_(band_err); } }
       if (band_err) std::rethrow_exception(band_err);
-      tt_mtd = tt_s(_tm0, tt_now());
-      auto _tg0 = tt_now();
       seg = std::move(per);   // [outer] the bands, in band order, are the segments: no serial gather
-      tt_gather = tt_s(_tg0, tt_now());
     }
     else
     {
       if (map.size() >= 3) mtd.run(map, mts);   // MTD aborts below 3 spectra; a tiny input is not an error
       map.clear(true); // [compact] dead from here; ~1.1 GB/window freed before the EPD peak
-      if (in_cat >= 0) ledSet_(in_cat, 0);
       seg.resize(1); seg[0].swap(mts);
     }
     size_t n_tr = 0; for (const auto& s : seg) n_tr += s.size();
@@ -3516,7 +3191,6 @@ protected:
     // minimum, so co-eluting neighbours within the m/z tolerance merge. width_filtering is forced off
     // (a deletion filter). Per-trace and deterministic, so it runs as a balanced parallel loop (4 chunks
     // per band); both consumers re-sort (MS2 after detectTraces_, MS1 before inferPrecursors_).
-    auto _ts0 = tt_now();
     if (split_valleys > 0.0 && n_tr > 1)
     {
       const int nchunk = std::max(1, bands * 4);      // 4 chunks per band -> dynamic load balance
@@ -3543,22 +3217,14 @@ protected:
       seg.swap(parts);   // [outer] the chunks' outputs, in chunk order, are the segments now: no serial re-concatenation
       n_tr = 0; for (const auto& s : seg) n_tr += s.size();
     }
-    tt_split = tt_s(_ts0, tt_now());
-    writeLogInfo_("[tstage] " + String(bands) + " bands -> " + String(n_tr) + " traces: edges "
-                  + String(tt_edge) + " s | distribute " + String(tt_dist) + " s | detect "
-                  + String(tt_mtd) + " s | gather " + String(tt_gather) + " s (serial) | valley-split "
-                  + String(tt_split) + " s");
-    auto _tc0 = tt_now();
     vector<Trace> out;
     // [outer] The MS1 call converts in parallel: pass 1 sizes every span (makeSpan's frame range), the offsets are the
     // running sum from the arena's end -- exactly where the serial appends put them -- and pass 2 fills each span at
     // its offset with toTrace's own statements. Every trace writes only its own span and its own slot, so the arena and
     // the trace list are byte-identical to the serial loop's. Contiguous ranges per task keep the walk sequential. The
     // two earlier parallel versions kept the arena append serial (docs/BASELINE.md, "Parallelising the MS1 trace
-    // conversion"); DIASPEXTRACT_MS1_CONVERT_SERIAL=1 runs the serial loop below.
-    static const bool conv_serial = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_CONVERT_SERIAL"); return e && *e && *e != '0'; }();
-    bool conv_par = ms1_prune && !conv_serial && n_tr >= 4096 && omp_in_parallel() && omp_get_num_threads() > 1;
-    const char* conv_why = "";
+    // conversion").
+    bool conv_par = ms1_prune && n_tr >= 4096 && omp_in_parallel() && omp_get_num_threads() > 1;
     vector<size_t> at, off;   // segment s holds positions [at[s], at[s+1]) of the sequence; off: span length, then offset
     auto segOf = [&at](size_t g) { return (size_t)(std::upper_bound(at.begin(), at.end(), g) - at.begin()) - 1; };
     const int ntask = conv_par ? std::max(1, std::min(4 * omp_get_num_threads(), (int)(n_tr / 1024))) : 1;   // bounded: no task-count cliff
@@ -3582,7 +3248,7 @@ protected:
       // [review] Trace::off is 32-bit and makeSpan narrows the arena size without a check. Past 2^32 - 1 floats two
       // traces' narrowed offsets would alias and their tasks would race on the same span; the serial loop below keeps
       // the old (deterministic) result there instead.
-      if (off[n_tr] > (size_t)std::numeric_limits<uint32_t>::max()) { conv_par = false; conv_why = ", the arena passes 2^32 floats"; }
+      if (off[n_tr] > (size_t)std::numeric_limits<uint32_t>::max()) conv_par = false;
     }
     if (conv_par)
     {
@@ -3616,7 +3282,6 @@ protected:
         vector<MassTrace>().swap(sv);
       }
     }
-    if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (" + (conv_par ? "parallel" : "serial") + conv_why + ")");
     return out;
   }
 
@@ -3701,9 +3366,8 @@ protected:
   /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
   /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
   /// With any equal (or unordered) neighbour -- a 60-min run has 677,976, a 2-h HeLa run 19,200: quantised m/z -- the order of equal
-  /// m/z is std::sort's own, so it is std::sort's sequence, computed by stdSortPar_. Returns the neighbours that are not
-  /// strictly increasing (0 = the identity was taken).
-  static size_t mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
+  /// m/z is std::sort's own, so it is std::sort's sequence, computed by stdSortPar_.
+  static void mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
   {
     const size_t N = ms1.size();
     by_mz.resize(N);
@@ -3713,7 +3377,6 @@ protected:
     #pragma omp parallel for schedule(static) reduction(+ : nonincr)
     for (long i = 1; i < (long)N; ++i) if (!(ms1[(size_t)i - 1].mz < ms1[(size_t)i].mz)) ++nonincr;
     if (nonincr) stdSortPar_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
-    return nonincr;
   }
 
   /// Isotope/charge inference on MS1 traces: a greedy partner-count walk, brightest seed first, with exact ordered
@@ -3726,9 +3389,8 @@ protected:
     const size_t N = ms1.size();
 
     // m/z-sorted index for O(log N) isotope-partner lookup (avoids O(N^2) over all MS1 traces).
-    auto _pi_t0 = std::chrono::steady_clock::now();
     vector<size_t> by_mz;
-    const size_t mz_nonincr = mzOrder_(ms1, by_mz);   // [outer]
+    mzOrder_(ms1, by_mz);   // [outer]
     vector<double> sorted_mz(N);
     // [soa] The candidate scan's RT and IM, laid out in m/z order beside sorted_mz (sequential reads).
     vector<double> sorted_rt(N), sorted_im(N);
@@ -3775,7 +3437,6 @@ protected:
       const size_t b = bucketOf(x);
       return (size_t)(std::upper_bound(sorted_mz.begin() + bstart[b], sorted_mz.begin() + bstart[b + 1], x) - sorted_mz.begin());
     };
-    auto _pi_t1 = std::chrono::steady_clock::now();
 
     // Apex intensities in one contiguous array: the sort and every isotope walk read them.
     vector<float> inten(N);
@@ -3790,7 +3451,6 @@ protected:
       return a < b; // total order so greedy isotope assignment is deterministic
     });
 
-    auto _pi_t2 = std::chrono::steady_clock::now();
     vector<bool> used(N, false);
     vector<Precursor_> out;
     // [spec] Ordered speculation, exact: the only mutable state a seed reads is `used`, which is monotone.
@@ -3867,23 +3527,15 @@ protected:
       for (size_t j : best_partners) R.claims.push_back(j);   // de-isotope
     };
 
-    // [outer] 2048 (was 8192): the commit is serial and mostly fixed cost per seed, but each re-evaluation in it costs a
-    // whole seed (~10 us); a quarter of the batch re-evaluates a third of the seeds (a 60-min run: 17,853 vs 51,891) for 4x the
-    // fork/joins. Its greedy walk 1.45 -> 1.19 s at 64 threads, 1.55 -> 1.48 s at 192 (timed 2026-10-01). Committing
-    // beside the next batch's speculation was exact but slower (more re-evaluations, a contended commit): not kept.
-    size_t spec_batch = 2048;
-    if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
+    // [outer] batch size: re-evaluations in the serial commit vs fork/join count
+    constexpr size_t spec_batch = 2048;
     // [outer] about four speculation chunks per thread (at most 16 seeds, as before), so a small batch feeds every thread
     const int spec_chunk = (int)std::max<size_t>(1, std::min<size_t>(16, spec_batch / (4 * (size_t)std::max(1, omp_get_max_threads()))));
     vector<SeedRes> res(spec_batch);
-    size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
     vector<MonoV2In_> v2in;           // [monocheck-v2] parallel to `out` when mono_check_ == 2
-    double t_spec = 0.0, t_commit = 0.0, t_reeval = 0.0;   // [outer] the walk's sub-steps, log only
-    auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
     {
       const size_t b1 = std::min(b0 + spec_batch, order.size());
-      const double ts0 = now_s();
       // Phase 1: speculate. Nothing here writes `used`, so the concurrent reads are safe.
       #pragma omp parallel for schedule(dynamic, spec_chunk)
       for (long ii = (long)b0; ii < (long)b1; ++ii)
@@ -3893,71 +3545,19 @@ protected:
         if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); R.v2 = MonoV2In_(); continue; }
         evalSeed(seed, R);
       }
-      const double tc0 = now_s();
-      t_spec += tc0 - ts0;
       // Phase 2: commit in the original seed order.
       for (size_t ii = b0; ii < b1; ++ii)
       {
         const size_t seed = order[ii];
-        if (used[seed]) { ++n_skipped; continue; }
+        if (used[seed]) continue;
         SeedRes& R = res[ii - b0];
         bool stale = false;
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
-        if (stale) { const double tr0 = now_s(); evalSeed(seed, R); ++n_conflict; t_reeval += now_s() - tr0; }
+        if (stale) evalSeed(seed, R);
         for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
         used[seed] = true;
         for (size_t j : R.claims) used[j] = true;
-        ++n_committed;
       }
-      t_commit += now_s() - tc0;
-    }
-    // [z1-diag] DIASPEXTRACT_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
-    // (a halved 2+ ion's M+1) or +ISO/3, and was it already claimed.
-    if (const char* dz = std::getenv("DIASPEXTRACT_Z1_DIAG"))
-    {
-      size_t n1 = 0, has2 = 0, has3 = 0, has2_free = 0;
-      FILE* fo = (*dz && std::strcmp(dz, "1") != 0) ? std::fopen(dz, "w") : nullptr;
-      if (fo) std::fprintf(fo, "mono_mz\trt\tim\tn_iso\tp2\tp2_free\tp3\n");
-      for (const auto& pc : out)
-      {
-        if (pc.charge != 1) continue;
-        ++n1;
-        const Trace& sd = ms1[pc.trace_idx];
-        const double sd_rt = rtOf(ms1st, sd);   // [soa-rt]
-        const double tol = sd.mz * mass_ppm * 1e-6;
-        auto has = [&](double target, bool& free_) -> bool {
-          const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
-          for (size_t k = klo; k < khi; ++k)
-          {
-            if (fabs(sorted_rt[k] - sd_rt) > delta_rt || fabs(sorted_im[k] - sd.im) > iso_im_tol) continue;
-            const size_t j = by_mz[k]; if (j == pc.trace_idx) continue;
-            free_ = !used[j]; return true;
-          }
-          return false;
-        };
-        bool f2 = false, f3 = false;
-        const bool p2 = has(pc.mono_mz + ISO / 2.0, f2), p3 = has(pc.mono_mz + ISO / 3.0, f3);
-        has2 += p2; has3 += p3; has2_free += (p2 && f2);
-        if (fo) std::fprintf(fo, "%.5f\t%.3f\t%.5f\t%d\t%d\t%d\t%d\n", pc.mono_mz, pc.rt, pc.im, pc.n_isotopes, (int)p2, (int)f2, (int)p3);
-      }
-      if (fo) std::fclose(fo);
-      writeLogInfo_("[z1-diag] " + String(n1) + " z=1 precursors: " + String(has2) + " (" + String((int)(1000.0 * has2 / std::max<size_t>(n1, 1)) / 10.0)
-                    + "%) have a co-eluting MS1 trace at +ISO/2, i.e. where a 2+ ion's M+1 would be (" + String(has2_free)
-                    + " of those unclaimed); " + String(has3) + " at +ISO/3");
-    }
-    {
-      auto _pi_t3 = std::chrono::steady_clock::now();
-      auto secs_ = [](auto d) { return std::chrono::duration<double>(d).count(); };
-      writeLogInfo_("[infer] " + String(N) + " MS1 traces -> " + String(out.size()) + " precursors: mz-index "
-                    + String(secs_(_pi_t1 - _pi_t0)) + " s | intensity-sort " + String(secs_(_pi_t2 - _pi_t1))
-                    + " s | greedy walk " + String(secs_(_pi_t3 - _pi_t2)) + " s (speculative, batch "
-                    + String(spec_batch) + ": " + String(n_committed) + " committed, " + String(n_conflict)
-                    + " re-evaluated (" + String((int)(1000.0 * n_conflict / std::max<size_t>(n_committed, 1)) / 10.0)
-                    + "%), " + String(n_skipped) + " already claimed)");
-      writeLogInfo_("[outer] infer m/z order: " + (mz_nonincr ? String(mz_nonincr) + " neighbours not strictly increasing, std::sort's order (stdSortPar_)"
-                                                              : String("strictly increasing, identity"))
-                    + "; greedy walk: " + String((order.size() + spec_batch - 1) / spec_batch) + " batches, chunk " + String(spec_chunk)
-                    + " | speculate " + String(t_spec) + " s | commit " + String(t_commit) + " s (re-evaluation " + String(t_reeval) + " s)");
     }
     if (v2_out) v2_out->swap(v2in);   // [monocheck-v2] parallel to `out`, for monoPositionPass_
     return out;
@@ -4476,7 +4076,6 @@ protected:
     };
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
-    { const size_t n = touched.size(); pspanHist_()[n <= 4 ? (n ? n - 1 : 0) : n <= 6 ? 4 : n <= 10 ? 5 : n <= 20 ? 6 : 7]++; if (faint) pspanHist_()[8]++; }
     const bool g_shrink = shrink_ && all_p, g_coloc = coloc_ && all_p, g_conc = short_conc_ && all_p;
     const double g_drt = faint ? faint_drt_ : delta_rt, g_cp = faint ? faint_cp_ : corr_power_;
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
@@ -4486,7 +4085,7 @@ protected:
     // faint test of gate:adaptive, whatever that mode is set to): the accepted fragments that can anchor a consensus, and
     // the ones the gate rejected only for support (point or overlap floor) or by the correlation cut, with at least 2 points
     const bool g_anchor = anchor_rescue_ && (int)touched.size() > faint_frames_;
-    vector<uint32_t> anchors, resc_fi;                                  // resc_fi: the rescued indices, sorted, for the gate dump
+    vector<uint32_t> anchors;
     vector<size_t> cands;                                               // cands: index << 2 | rejection (0 points, 1 overlap, 2 corr)
     vector<char> resc;                                                  // [anchor] 1 = rescued, parallel to frags (empty: none)
     if (pinv > 0.0)
@@ -4662,54 +4261,13 @@ protected:
             frag_scores.push_back(c * std::log1p(inten) * (1.0 + q.ov));
             if (fuse_on) frag_kq.push_back(c * (1.0 + q.ov));
             resc.push_back(1);
-            resc_fi.push_back(q.fi);
             ++n_why[q.why];
           }
           for (int w = 0; w < 3; ++w) if (n_why[w]) ac[8 + w] += n_why[w];
-          std::sort(resc_fi.begin(), resc_fi.end());
         }
       }
     }
     if (n_fint) { fragIntCount_()[0] += n_fint; fragIntCount_()[1] += n_fint_fb; }   // [fragint] once per precursor x window
-    if (GateDump_& gd = GateDump_::get(); gd.on)                       // [gate-dump] read-only; before the reset
-    {
-      std::ostringstream rows;
-      rows.imbue(std::locale::classic());
-      auto it = std::lower_bound(gd.t.begin(), gd.t.end(), pc.mono_mz - 1.2, [](const GateDump_::T& a, double v) { return a.mz < v; });
-      for (; it != gd.t.end() && it->mz <= pc.mono_mz + 1.2; ++it)
-      {
-        if (std::fabs(it->rt - pc.rt) > 20.0 || std::fabs(it->im - pc.im) > 0.05 || it->z <= 0) continue;
-        int kk = 9;
-        for (int k = -1; k <= 1; ++k)
-          if (std::fabs(pc.mono_mz - (it->mz + k * 1.003355 / it->z)) <= it->mz * 20e-6) { kk = k; break; }
-        if (kk == 9) continue;
-        auto head = [&]() { rows << it->id << '\t' << kk << '\t' << pc.mono_mz << '\t' << pc.charge << '\t' << pc.rt << '\t' << pc.im
-                                 << '\t' << pc.n_isotopes << '\t' << (int)pc.guessed << '\t'; };
-        head(); rows << "-\t-\t-\t-\t-\t-\t" << frags.size() << (pinv > 0.0 ? "\tPRECURSOR\n" : "\tPRECURSOR_FLAT\n");
-        if (!(pinv > 0.0)) continue;
-        const size_t lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - 0.05) - frag_im.begin();
-        const size_t hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + 0.05) - frag_im.begin();
-        for (size_t fi = lo; fi < hi; ++fi)
-        {
-          const double drt = frag_rt[fi] - pc.rt, dim = frag_im[fi] - pc.im;
-          if (std::fabs(drt) > 15.0) continue;
-          const Trace& f = frag_traces[fi];
-          double dot = 0; int overlap = 0;
-          for (size_t k = 0; k < f.span(); ++k)
-          { const float fv = xv(wst, f, k); if (fv == 0.0f) continue;
-            const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
-          const double c = fg.invnorm[fi] == 0.0 ? 0.0 : (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi];
-          const char* fate = std::fabs(dim) > delta_im ? "im" : std::fabs(drt) > g_drt ? "rt" : fg.invnorm[fi] == 0.0 ? "degenerate"
-                           : std::fabs(f.mz - pc.mono_mz) < 0.01 ? "precursor_peak"
-                           : !resc_fi.empty() && std::binary_search(resc_fi.begin(), resc_fi.end(), (uint32_t)fi) ? "rescued"   // [anchor]
-                           : f.np() < (size_t)std::max(min_corr_pts, 0) ? "np"
-                           : overlap < min_corr_pts ? "overlap" : c < min_corr ? "corr" : "kept";
-          head(); rows << exportMz_(f.tof, bOf(wst, f), f.mz) << '\t' << dim << '\t' << drt << '\t' << f.np() << '\t' << overlap << '\t'
-                       << c << '\t' << intensityOf(wst, f) << '\t' << fate << '\n';
-        }
-      }
-      if (rows.tellp() > 0) { std::lock_guard<std::mutex> lk(gd.mu); gd.out << rows.str(); gd.out.flush(); }
-    }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
     // [foreign] other precursors' residual envelopes, before the merge and the cap: a removed fragment frees its slot
     const size_t n_before = frags.size();                              // [foreign] for the fell-below count
@@ -4948,23 +4506,23 @@ protected:
     chk(pair_folds(sp(10.0, 500.001, 2, 1.004, 2, P)), "1/K0 inside the tolerance: folded");
     chk(!pair_folds(sp(11.1, 500.0, 2, 1.0, 2, P)), "the next MS1 frame: untouched");
     // [twin-rt] the near-frame relation (assembly:twin_rt_frames): |dRT| <= rt_tol, inside one RT cell
-    { auto nearFold = [&](double rt_b, double tol, const vector<double>* cells, std::array<size_t, 5>* st = nullptr) {
+    { auto nearFold = [&](double rt_b, double tol, const vector<double>* cells, std::array<size_t, 3>* st = nullptr) {
         vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(rt_b, 500.001, 2, 1.0, 3, P)};
         return mergeTwins_(v, 0.005, false, tol, cells, 3.0, st) == 1 && v.size() == 1; };
       const vector<double> edges{20.0};   // cell 0 owns rt < 17, cell 1 rt >= 17 (the first edge T with (T - rt) > 3)
-      std::array<size_t, 5> st{};
-      chk(nearFold(11.1, 1.5, nullptr, &st) && st[0] == 0 && st[1] == 1 && st[3] == 0, "the next MS1 frame inside rt_tol: folded, counted as a near-frame link");
+      std::array<size_t, 3> st{};
+      chk(nearFold(11.1, 1.5, nullptr, &st) && st[0] == 0 && st[1] == 1, "the next MS1 frame inside rt_tol: folded, counted as a near-frame link");
       chk(nearFold(11.5, 1.5, nullptr), "|dRT| exactly rt_tol: folded (the bound is inclusive)");
       chk(!nearFold(11.75, 1.5, nullptr), "|dRT| beyond rt_tol: untouched");
       chk(!nearFold(11.1, 0.0, nullptr), "rt_tol 0: the same-frame relation, the next frame untouched");
       chk(nearFold(16.9, 7.0, &edges), "both inside one cell: dRT 6.9 within a 7-s tolerance folds");
-      { std::array<size_t, 5> se{};
+      { std::array<size_t, 3> se{};
         vector<MSSpectrum> v{sp(16.5, 500.0, 2, 1.0, 2, P), sp(17.5, 500.001, 2, 1.0, 3, P)};
         chk(mergeTwins_(v, 0.005, false, 1.65, &edges, 3.0, &se) == 0 && v.size() == 2 && se[2] == 1, "a pair across a cell edge stays two spectra (counted)"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.002, 2, 1.0, 2, P), sp(11.1, 500.001, 2, 1.004, 2, P), sp(12.2, 500.0, 2, 1.0, 2, P)};
-        std::array<size_t, 5> sc{};
-        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1 && sc[3] == 1 && sc[4] == 1,
-            "frames 10, 11.1, 12.2 chain into one cluster (span 2.2 > rt_tol: counted as chained); the same frame alone folds one"); }
+        std::array<size_t, 3> sc{};
+        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1,
+            "frames 10, 11.1, 12.2 chain into one cluster (span 2.2 > rt_tol); one pair is linked at one frame"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0, 2, 1.006, 2, P), sp(11.1, 500.0, 3, 1.0, 2, P), sp(11.1, 500.0125, 2, 1.0, 2, P)};
         chk(mergeTwins_(v, 0.005, false, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and 20 ppm still apply"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0002, 2, 1.0, 2, P), sp(11.6, 500.00002, 2, 1.0, 2, P), sp(10.0, 500.0005, 2, 1.0, 2, P)};
@@ -5071,7 +4629,6 @@ protected:
   ExitCodes main_(int argc, const char** argv) override
   {
     phase_clock_();   // [perf-instr] fix the epoch (a first-call static) before loading
-    LedRun _ledger;   // [ledger] DIASPEXTRACT_LEDGER=<file>: the per-structure memory profile
 
     // -threads not given: use every core. The command line is scanned, so an explicit -threads 1 stays serial.
     int n_threads_req = getIntOption_("threads");
@@ -5361,18 +4918,8 @@ protected:
         else BrukerTimsFile().loadDIAStreaming(in, consumer, cfg);
         consumer.finish();                                          // the last partial batch
         streamed = true;
-        if (ms1HistOn_())
-        { const auto& h = ms1Hist_(); long long tot = 0; for (const auto& v : h) tot += v.load();
-          auto pc = [&](long long v) { return String(tot > 0 ? 100.0 * (double)v / (double)tot : 0.0); };
-          writeLogInfo_("[ms1-hist] picked MS1 peaks " + String(tot) + " by intensity: <100 " + String(h[0].load()) + " (" + pc(h[0].load()) + "%), 100-300 "
-                        + String(h[1].load()) + " (" + pc(h[1].load()) + "%), 300-1000 " + String(h[2].load()) + " (" + pc(h[2].load()) + "%), 1000-10000 "
-                        + String(h[3].load()) + " (" + pc(h[3].load()) + "%), >=10000 " + String(h[4].load()) + " (" + pc(h[4].load()) + "%)"); }
         phaseAdd_("LOAD(stream)", 0.0, 0.0, false);                // [perf-instr] start-to-here
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-        writeLogInfo_("[outer] MS1 pick " + consumer.ms1_pick_mode_);
-        if (std::getenv("DIASPEXTRACT_LOAD_ONLY"))
-        { if (tile_source) writeLogInfo_("[perf-load] DIASPEXTRACT_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
-          report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + clk_() + rss_() + mem_());
@@ -5419,16 +4966,14 @@ protected:
     if (!streamed)
     {
       // A failed stream attempt may already have delivered part of the run -- MS1 spectra (sampled, pruned and
-      // denoised), window slabs, compaction counts and their ledger charges. The resident load below reads the WHOLE
+      // denoised), window slabs and compaction counts. The resident load below reads the WHOLE
       // run again and only appends, so discard all of it first: kept, the delivered frames were loaded twice (silently
       // wrong with the prune off, a refusal with it on, "not in retention-time order" once partial slabs existed).
       ms1_map = PeakMap();
       ms2_by_window.clear();
       cstat = CompactStats();
       ms1_prune.reset();
-      for (auto& v : ms1Hist_()) v.store(0, std::memory_order_relaxed);   // [ms1-hist] the failed attempt's picked peaks
       dnoise.reset();   // [dnoise] counts and frame marks: the resident pick below filters every frame again
-      ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);
       Phase _ph("LOAD(full)");
       FileHandler().loadExperiment(in, exp,
 #ifdef DIASPEXTRACT_WITH_MZPEAK
@@ -5536,8 +5081,6 @@ protected:
                       + " nonzero the compact store is NOT lossless and results differ from the old path.");
       }
       size_t ms1_pk = 0; for (const auto& sp : ms1_map) ms1_pk += sp.size();
-      { long long sb = 0; for (const auto& kv : ms2_by_window) sb += (long long)kv.second.bytes();
-        ledSet_(LC_SLAB, sb); ledSet_(LC_MS1MAP, (long long)ms1_pk * 20); }   // touched bytes; the 2.5x reserve is untouched pages
       writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
                     + String(cb / (1024ULL * 1024ULL)) + " MB for " + String(cp) + " peaks (~"
                     + String(cp ? (double)cb / cp : 0.0) + " B/peak); MS1 " + String(ms1_map.size()) + " frames / "
@@ -5680,7 +5223,7 @@ protected:
       smp_store.setFrames(ms1_store.rt_index, nullptr);
       vector<Trace> st;
       size_t smp_pk = 0;
-      const size_t og0 = rtOffGrid().load(), sb0 = rtStrictlyBetween().load();   // [soa-rt] counts the run's traces, not the sample's
+      const size_t og0 = rtOffGrid().load();   // [soa-rt] counts the run's traces, not the sample's
       std::exception_ptr smp_err;
       #pragma omp parallel
       #pragma omp single
@@ -5714,11 +5257,11 @@ protected:
         for (auto& sp : part) { smp_pk += sp.size(); smp.addSpectrum(std::move(sp)); }
         vector<MSSpectrum>().swap(part);
         st = detectTraces_(smp, smp_store, delta_im, getDoubleOption_("trace:noise_threshold_int"), ms1_snr, 0.0,
-                           getDoubleOption_("trace:ms1_split_valleys"), ms1_bands, splitter_scan_time, -1, LC_MS1BAND);
+                           getDoubleOption_("trace:ms1_split_valleys"), ms1_bands, splitter_scan_time);
       }
       catch (...) { smp_err = std::current_exception(); }
       if (smp_err) std::rethrow_exception(smp_err);
-      rtOffGrid().store(og0); rtStrictlyBetween().store(sb0);
+      rtOffGrid().store(og0);
       vector<pair<double, double>> iw;   // (apex intensity, FWHM s) of the traces centred in a slice
       for (const Trace& t : st)
         if (std::isfinite(t.mz) && slicePos(t.mz) < kWidth) iw.emplace_back(intensityOf(smp_store, t), xicFwhm(smp_store, t));
@@ -5765,7 +5308,7 @@ protected:
     {
       ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                                ms1_snr, ms1_min_len, getDoubleOption_("trace:ms1_split_valleys"), ms1_bands,
-                                               splitter_scan_time, LC_MS1MAP, LC_MS1BAND, &ms1_prune);   // [ledger] the partition takes the charge over
+                                               splitter_scan_time, &ms1_prune);
     }
     catch (...) { ms1_err = std::current_exception(); }
     if (ms1_err) std::rethrow_exception(ms1_err);
@@ -5780,7 +5323,6 @@ protected:
       }
       if (trim_err) std::rethrow_exception(trim_err); }
     vector<double>().swap(ms1_prune.sample);   // [ms1-prune] consumed by the band edges, or unused at one band
-    ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace)) + ms1_store.bytes());
     if (detOn_()) writeLogInfo_("[det] MS1 traces n=" + String(ms1_traces.size()) + " digest=" + String(traceDigest_(ms1_store, ms1_traces)));
     phaseAdd_("MS1_TRACE", _t_ms1, _c_ms1, false);
 
@@ -5828,7 +5370,6 @@ protected:
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, mono_check_ == 2 ? &mono_v2in : nullptr);
-    const double _t_inf_fn = phase_clock_();   // [outer] sub-step clock of PRECURSOR_INFER, log only
     if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
     {
       size_t nf = 0;
@@ -5900,13 +5441,11 @@ protected:
     }
     // [monocheck-v2] At the final charge: after the veto (which reads the walks' own monoisotopes, as without v2),
     // before the charge-less precursors are defaulted or dropped (the veto edits in place, so the order still matches).
-    const double _t_inf_v2a = phase_clock_();   // [outer]
     if (mono_check_ == 2)
     {
       monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm);
       vector<MonoV2In_>().swap(mono_v2in);
     }
-    const double _t_inf_v2b = phase_clock_();   // [outer]
     Size n_default = 0;
     for (auto& pc : precursors)
       if (pc.charge == 0) { pc.guessed = true; ++n_default; }
@@ -5925,17 +5464,6 @@ protected:
       if (before != precursors.size())
         writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
                       + " precursors below that charge, " + String(precursors.size()) + " remain");
-    }
-    // [step-02 emission-controlled arm, 2026-09-02] DIASPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
-    // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
-    // emission without touching fragment sharing. Pre-registered falsifier in BASELINE.md.
-    if (const char* mi = std::getenv("DIASPEXTRACT_MIN_ISOTOPES"))
-    {
-      const int k = std::atoi(mi); const size_t before = precursors.size();
-      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
-                       [k](const Precursor_& pc){ return pc.n_isotopes < k; }), precursors.end());
-      writeLogInfo_("DIASPEXTRACT_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
-                    + " precursors with fewer isotope peaks, " + String(precursors.size()) + " remain");
     }
     // [ms1-funnel] diag:dump_ms1_tsv: MS1 traces and precursors, to attribute where a precursor is lost.
     const String ms1_dump = getStringOption_("diag:dump_ms1_tsv");
@@ -6003,18 +5531,14 @@ protected:
     // rescanning all ~1M precursors per window (total order for determinism).
     // [outer] trace_idx is unique (one precursor per committed seed), so the order is total and sortExact_ sorts in
     // parallel; an equal-key pair (a non-finite key) would send it to std::sort itself.
-    const double _t_inf_srt = phase_clock_();
-    const size_t prec_ties = sortExact_(precursors, [](const Precursor_& a, const Precursor_& b) {
+    sortExact_(precursors, [](const Precursor_& a, const Precursor_& b) {
       if (a.mono_mz != b.mono_mz) return a.mono_mz < b.mono_mz;
       if (a.rt != b.rt) return a.rt < b.rt;
       if (a.im != b.im) return a.im < b.im;
       return a.trace_idx < b.trace_idx;
     });
-    const double _t_inf_cmp = phase_clock_();
-    ledSet_(LC_PRECURSOR, (long long)(precursors.capacity() * sizeof(Precursor_) + precursors.size() * 8));
     vector<double> prec_mz(precursors.size());
     for (size_t i = 0; i < precursors.size(); ++i) prec_mz[i] = precursors[i].mono_mz;
-    double _t_inf_trim = 0.0;
     // [mem] Scoring reads only the profiles of traces a precursor points at: release the rest.
     // (ms1_map is already empty: detectTraces_ consumed it.)
     {
@@ -6023,17 +5547,11 @@ protected:
         if (pc.trace_idx < ms1_traces.size()) needed[pc.trace_idx] = true;
       // Compacted in place, in offset order (see compactUnreferenced()).
       const Size freed = compactUnreferenced(ms1_traces, ms1_store, needed);
-      ledSet_(LC_MS1TRACE, (long long)(ms1_traces.capacity() * sizeof(Trace)) + ms1_store.bytes());
       writeLogInfo_("Released XICs of " + String(freed) + " unreferenced MS1 traces." + rss_() + mem_());
-      _t_inf_trim = phase_clock_();
 #ifdef __GLIBC__
     if (trim_on) trimLogged_("MS1 -> window loop");
 #endif
     }
-    writeLogInfo_("[outer] PRECURSOR_INFER steps: inferPrecursors_ " + String(_t_inf_fn - _t_inf) + " s | veto " + String(_t_inf_v2a - _t_inf_fn)
-                  + " s | monocheck v2 " + String(_t_inf_v2b - _t_inf_v2a) + " s | filters " + String(_t_inf_srt - _t_inf_v2b) + " s | precursor sort "
-                  + String(_t_inf_cmp - _t_inf_srt) + " s (" + (prec_ties ? "equal keys: std::sort" : "unique order") + ") | compaction "
-                  + String(_t_inf_trim - _t_inf_cmp) + " s | trim " + String(phase_clock_() - _t_inf_trim) + " s");
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
                   + " precursor hypotheses (" + String(n_default) + " without a charge call dropped)." + rss_());
     std::exception_ptr worker_err;
@@ -6140,11 +5658,6 @@ protected:
       for (size_t f = 0; f < fw.frames(); ++f) fw.b[f] = tofAxis().factor(fw.frame_id[f]);   // the value toTof() gives the slab
       fw.nearest_local = nearestLocal(fw.frame_rt, ms1_store.frame_rt, delta_rt);
     }
-    { long long fb = 0;
-      for (const auto& kv : frozen)
-        fb += (long long)(kv.second.frame_rt.capacity() * 8 + kv.second.frame_id.capacity() * 4
-                          + kv.second.rt_index.capacity() * 4 + kv.second.b.capacity() * 8 + kv.second.nearest_local.capacity() * 4);
-      ledSet_(LC_FROZEN, fb); }
     if (cell_pitch > 0.0 && !integer_detector)
     {
       writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells) -- the header records no grid.");
@@ -6224,8 +5737,7 @@ protected:
     }
     // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
     // the once-only ownership check per precursor (a window's m/z range is tile-independent)
-    struct Carry { vector<Trace> rec; vector<float> inten;
-                   long long bytes() const { return (long long)(rec.capacity() * sizeof(Trace) + inten.capacity() * 4); } };
+    struct Carry { vector<Trace> rec; vector<float> inten; };
     // [pipe] One slot per window: `c` is carry_out(w, k - 1), and `ready` counts the window's tiles that have
     // published theirs, so tile k may take `c` once ready == k. Under the per-tile barrier that always holds;
     // with pipelined tiles it is the one dependency between a window's tiles -- tile k + 1 may slab, prepare,
@@ -6240,8 +5752,8 @@ protected:
       CarrySlot& s; const size_t tk; bool took = false, done = false;
       void wait() const   // [pipe] idle until the carry arrives: help the tile reader or writer meanwhile
       { while (s.ready.load(std::memory_order_acquire) < tk) if (!teamAssist_(4)) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
-      Carry take() { wait(); took = true; Carry c = std::move(s.c); s.c = Carry(); ledAdd_(LC_CARRY, -c.bytes()); return c; }
-      void put(Carry&& c) { ledAdd_(LC_CARRY, c.bytes()); s.c = std::move(c); }
+      Carry take() { wait(); took = true; Carry c = std::move(s.c); s.c = Carry(); return c; }
+      void put(Carry&& c) { s.c = std::move(c); }
       void publish()
       {
         if (done) return;
@@ -6330,7 +5842,7 @@ protected:
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
     Size n_twins = 0;   // [twins] spectra folded into a twin, over every tile
-    std::array<size_t, 5> twin_st{};   // [twin-rt] mergeTwins_'s counters, over every tile
+    std::array<size_t, 3> twin_st{};   // [twin-rt] mergeTwins_'s counters, over every tile
     std::array<size_t, 4> recap{};   // [recap] spectra re-capped, peaks removed, largest spectrum before, spectra seen
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
@@ -6374,7 +5886,6 @@ protected:
     {
     const size_t tk = R.tk;
     const Tile& tile = tiles[tk];
-    ledPhaseTile_("tile", tk + 1);
     // [tile] the tile's slabs: one tile = the resident slabs themselves (moved out by the body, as
     // today); several = a slice of each window's frames in [lo, hi) (the resident source keeps the
     // whole run: this arm is the exactness gate, not the memory configuration)
@@ -6420,8 +5931,6 @@ protected:
         n_peaks += sl.peaks();
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
-      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes();
-        if (pipe) ledAdd_(LC_SLAB, sb - tc.slab_charged_); else ledSet_(LC_SLAB, sb); }   // [pipe] other tiles' slabs may still be live: replace only this read's batch charges
       if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
@@ -6437,7 +5946,6 @@ protected:
           h = slabDigest_(kv.second, h);
           writeLogInfo_("[det] window " + String(kv.first[0] / 100.0) + "-" + String(kv.first[1] / 100.0) + " tile " + String(tk + 1)
                         + " slab n=" + String(kv.second.peaks()) + " digest=" + String(slabDigest_(kv.second)) + " chain=" + String(h)); }
-      ledPhaseTile_("loop", tk + 1);
       writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + ") read: "
                     + String(tile_slabs.size()) + " windows, frames delivered " + String(n_del) + " padded " + String(n_pad) + " absent-windows " + String(n_absent)
                     + ", " + String(n_peaks) + " peaks, " + String(phase_clock_() - _tr0, 1) + " s" + rss_() + mem_());
@@ -6456,7 +5964,6 @@ protected:
         ts = sliceFrames(sl, f0, f1);
         tile_peaks += ts.peaks();
       }
-      { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledAdd_(LC_SLAB, sb); }
       writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + "): "
                     + String(tile_slabs.size()) + " windows, " + String(tile_peaks) + " peaks resident" + rss_() + mem_());
     }
@@ -6527,18 +6034,12 @@ protected:
         // Per-window stage seconds and the completion line, printed on EVERY exit of the body
         // (empty window, any assembly arm, exception): what the profile could only infer. [mem]
         double w_prep = 0, w_trace = 0, w_split = 0, w_score = 0, w_emit = 0;
-        // [tsub] w_trace bundles more than the band taskloop -- the slab build, the serial arena
-        // merge, and a full sort of every trace record in the window. Time them apart, so the next
-        // decision about this stage is measured rather than attributed to the parallel part.
-        double w_slab = 0, w_detect = 0, w_merge = 0, w_sort = 0;
         auto secs = [](auto d) { return std::chrono::duration<double>(d).count(); };
         struct WinDone { std::function<void()> f; ~WinDone() { f(); } } win_done_guard{[&]() {
           #pragma omp critical(winlog)
           writeLogInfo_("  window " + String(++win_done) + "/" + String(wl.size()) + " " + String(win_lo) + "-" + String(win_hi)
                         + ": prep " + String(w_prep) + " s | trace " + String(w_trace) + " s | split " + String(w_split)
-                        + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_()
-                        + "\n    [tsub] " + String(win_lo) + "-" + String(win_hi) + " trace = slab " + String(w_slab)
-                        + " + detect " + String(w_detect) + " + merge " + String(w_merge) + " + sort " + String(w_sort) + " s");
+                        + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_());
         }};
         // [tile-2d] take ONLY this window's slab (a move: the store is the slab) and convert its
         // m/z quanta to flight-time bins in place. Only the OpenMS path needs the peaks converted
@@ -6547,10 +6048,8 @@ protected:
         PeakSlab wslab;
         if (integer_detector)
         {
-          { auto _tsl = std::chrono::steady_clock::now();
-            wslab = std::move(*wl[wi].second);
-            toTof(wslab);
-            w_slab = secs(std::chrono::steady_clock::now() - _tsl); }
+          wslab = std::move(*wl[wi].second);
+          toTof(wslab);
           if (detOn_())
           {
             #pragma omp critical
@@ -6574,11 +6073,6 @@ protected:
         auto _t2 = std::chrono::steady_clock::now();
         vector<Trace> frag_traces;
         TraceStore wst;                                   // this window's frame table + arenas; outlives scoring
-        // [ledger] the two structures that dominate a window: the store's arena and the trace
-        // records. Scoped, so every exit path returns them to the counter.
-        LedCharge _wst(LC_WSTORE, 0), _recs(LC_PARENT, 0);
-        auto ledStore = [&]() { _wst.change(wst.bytes());
-                                _recs.change((long long)(frag_traces.capacity() * sizeof(Trace))); };
         const FrozenWin& fwin = frozen.at(wl[wi].first);
         if (integer_detector && wslab.frames() == 0)
         {
@@ -6634,7 +6128,6 @@ protected:
           // window store absorbs them in (cell, band) order and every offset is rebased (R4 sequencing).
           vector<vector<TraceStore>> bst(n_cells, vector<TraceStore>(nb));
           vector<vector<vector<Trace>>> per(n_cells, vector<vector<Trace>>(nb));
-          long long band_bytes = 0, parent_bytes = 0;   // [ledger] returned to the counter at the merge
           for (size_t ci = 0; ci < n_cells; ++ci)
           {
             const size_t f0 = cut[ci], f1 = cut[ci + 1];
@@ -6659,11 +6152,8 @@ protected:
             }
             auto _tp = std::chrono::steady_clock::now();
             TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi);   // once per cell
-            LedCharge _prep(LC_PREP, (long long)(tprep.order.capacity() * 4 + tprep.frame_live.capacity()
-                                                 + tprep.seg.capacity() * sizeof(size_t) + tprep.fidx.capacity() * 4));
             w_prep += secs(std::chrono::steady_clock::now() - _tp);
             n_seeds += tprep.order.size();
-            auto _td0 = std::chrono::steady_clock::now();
             if (nb == 1)
               per[ci][0] = detectTracesInteger_(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_minlen);
             else
@@ -6679,10 +6169,6 @@ protected:
               } catch (...) { taskErr_(band_err); } }
               if (band_err) std::rethrow_exception(band_err);
             }
-            w_detect += secs(std::chrono::steady_clock::now() - _td0);
-            { long long ab = 0, pb = 0;
-              for (int b = 0; b < nb; ++b) { ab += (long long)(bst[ci][b].inten.capacity() * 4 + bst[ci][b].bins.capacity() * 2); pb += (long long)(per[ci][b].capacity() * sizeof(Trace)); }
-              ledAdd_(LC_BAND, ab); ledAdd_(LC_PARENT, pb); band_bytes += ab; parent_bytes += pb; }
           }
           // Each cell's first frame in the FROZEN table, by value (the slab-local cut is an index
           // into the resident slab, which may hold only some of the table's frames later); the
@@ -6698,11 +6184,9 @@ protected:
                       "resident frames are not the frozen table's at cell " + String(ci) + " frame", String(j));
           }
           // The slab is dead after the frame check above: release it BEFORE the merge, the window's peak allocation.
-          ledAdd_(LC_SLAB, -(long long)wslab.bytes());
           vector<TofIdx>().swap(wslab.tof); vector<float>().swap(wslab.inten);
           vector<uint16_t>().swap(wslab.imq); vector<uint32_t>().swap(wslab.frame_off);
           vector<double>().swap(wslab.b); vector<uint32_t>().swap(wslab.rt_index);
-          auto _tm0 = std::chrono::steady_clock::now();
           size_t tot = 0, arena = 0; bool any_bins = false;
           for (size_t ci = 0; ci < n_cells; ++ci) for (int b = 0; b < nb; ++b)
           { tot += per[ci][b].size(); arena += bst[ci][b].inten.size(); any_bins |= !bst[ci][b].bins.empty(); }
@@ -6716,19 +6200,17 @@ protected:
             for (size_t ci = 0; ci < n_cells; ++ci)
               for (int b = 0; b < nb; ++b) { src.push_back({&bst[ci][b], &per[ci][b]}); fsh.push_back((uint32_t)f0z[ci]); }
             absorbAll_(wst, frag_traces, src, fsh); }
-          w_merge = secs(std::chrono::steady_clock::now() - _tm0);
-          ledAdd_(LC_BAND, -band_bytes); ledAdd_(LC_PARENT, -parent_bytes); ledStore();
           }                                                  // the band stores die here
           // Valley splitting, as on the OpenMS path (skipping it lost 92% of peptides); it rebuilds the arena, and the per-frame bins are dead after it.
           n_parents = frag_traces.size();
           auto _ts = std::chrono::steady_clock::now();
           frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, n_bands * 4, splitter_scan_time);
-          w_split = secs(std::chrono::steady_clock::now() - _ts); ledStore();
+          w_split = secs(std::chrono::steady_clock::now() - _ts);
           if (max_span > 0.0)   // [serial] per trace, independent: as tasks over trace chunks
           { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 16);
             forTasks_(nr, [&](long c) { for (size_t i = (size_t)c * n / (size_t)nr; i < (size_t)(c + 1) * n / (size_t)nr; ++i)
                                           trimToSpan(wst, frag_traces[i], max_span); }); }
-          vector<int16_t>().swap(wst.bins); ledStore();
+          vector<int16_t>().swap(wst.bins);
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
                         + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
                         + " -> " + String(frag_traces.size()) + " (cap " + String(frag_traces.capacity()) + ", "
@@ -6793,7 +6275,6 @@ protected:
             if (vis[pi - plo]++ != 0)
               throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tile] a precursor is owned by two tiles",
                                             String(precursors[pi].rt, 6) + " s in window " + String(win_lo) + "-" + String(win_hi)); }
-        auto _tso = std::chrono::steady_clock::now();
         frag_traces.erase(remove_if(frag_traces.begin(), frag_traces.end(), [&wst](const Trace& t) {
           return !std::isfinite(t.im) || !std::isfinite(t.mz) || !std::isfinite(rtOf(wst, t));
         }), frag_traces.end());
@@ -6853,16 +6334,12 @@ protected:
         { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 17);   // [serial] as tasks
           forTasks_(nr, [&](long c) { for (size_t i = (size_t)c * n / (size_t)nr; i < (size_t)(c + 1) * n / (size_t)nr; ++i) frag_im[i] = frag_traces[i].im; }); }
         FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt, parTasks_(frag_traces.size(), 1 << 17));   // [adaptive] buckets cover the wider window
-        w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
         // window's precursors (this window runs on one thread). [perf]
         auto _t3 = std::chrono::steady_clock::now();
         w_trace = secs(_t3 - _t2) - w_prep - w_split;
         FragStats fg = buildFragStats(frag_traces, wst, fwin);
-        ledStore();   // the finiteness filter and the content sort have run
-        LedCharge _frag(LC_FRAG, (long long)(frag_im.capacity() * 8 + frag_rt.rt.capacity() * 8 + frag_rt.q.capacity() * 2
-                                             + fg.mean.capacity() * 8 + fg.invnorm.capacity() * 8));
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
         // [foreign] the window's precursors by apex RT, owned by this tile or not: the same candidates in any tiling
         ForeignIdx_ fx;
@@ -6877,10 +6354,6 @@ protected:
           // drop or reorder an emission; pdense is per-task scratch and must stay firstprivate.
           auto _t5 = std::chrono::steady_clock::now();
           vector<MSSpectrum> pslot(pidx.size());   // [tile] the owned precursors, in index order as before
-          // [ledger] ~700 B of empty header per OWNED precursor, most of which never emit, plus the
-          // payloads as they are produced -- charged HERE and not at the end of the stage, so the
-          // scoring stage's real footprint is visible instead of appearing all at once after it.
-          LedCharge _pslot(LC_SPECTRA, (long long)pidx.size() * (long long)sizeof(MSSpectrum));
           // [gomp-cliff] Bound the TASK COUNT: libgomp's GOMP_taskloop runs the whole loop inline in the
           // creating thread once team task_count + num_tasks > 64 x nthreads, silently serialising it
           // (grainsize does not bound the count). So <= n_threads worker tasks pull 32-precursor chunks from
@@ -6907,8 +6380,7 @@ protected:
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
                              gate_dim, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2,
                              foreign_w_ < 1.0 ? &fx : nullptr);
-                if (!ms2.empty())
-                { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * (post_fusion_cap_ ? 16 : 12))); pslot[(size_t)j] = std::move(ms2); }   // [recap] +4 B/peak key
+                if (!ms2.empty()) pslot[(size_t)j] = std::move(ms2);
               }
             }
           } catch (...) { taskErr_(asm_err); } }
@@ -6916,7 +6388,6 @@ protected:
           auto _t6 = std::chrono::steady_clock::now();
           w_score = secs(_t6 - _t5);
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));
-          // (the payloads were charged at emission; moving them into the bucket changes no bytes)
           const auto _t7 = std::chrono::steady_clock::now();
           w_emit = secs(_t7 - _t6);
         }
@@ -6976,7 +6447,6 @@ protected:
       ms1_store = TraceStore();
       vector<Precursor_>().swap(precursors);
       vector<double>().swap(prec_mz);
-      ledSet_(LC_MS1TRACE, 0); ledSet_(LC_PRECURSOR, 0);
       writeLogInfo_("[mem] MS1 traces, spans, precursors released after the window loop." + rss_() + mem_());
     }
     {
@@ -6986,8 +6456,6 @@ protected:
       vector<MSSpectrum> tile_out;
       { size_t n_tot = 0; for (const auto& bucket : win_out) n_tot += bucket.size(); tile_out.reserve(n_tot); }
       for (auto& bucket : win_out) { for (auto& s : bucket) tile_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
-      long long tile_spec_bytes = 0;
-      for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * (post_fusion_cap_ ? 16 : 12));   // as charged at emission
       { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
       if (twin_im >= 0.0)
       {
@@ -7006,22 +6474,20 @@ protected:
       {
         for (auto& sp : tile_out) sp.getDataProcessing().push_back(out_dp);   // ONE entry, by pointer, for every spectrum
         if (tiles.size() == 1) writer->setExpectedSize(tile_out.size(), 0);   // exact count: the bulk writer's bytes
-        ledPhaseTile_("write", tk + 1);
         { Phase _ph("WRITE(mzML)"); writer->writeBlock(tile_out); }
         n_out += tile_out.size();
-        ledAdd_(LC_SPECTRA, -tile_spec_bytes); ledSet_(LC_WRITER, (long long)n_out * 40);
         writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(tile_out.size()) + " spectra written" + clk_() + rss_() + mem_());
       }
       else
       {
         all_out.reserve(all_out.size() + tile_out.size());
-        for (auto& sp : tile_out) all_out.push_back(std::move(sp));   // [ledger] the same bytes, still charged
+        for (auto& sp : tile_out) all_out.push_back(std::move(sp));
       }
     }
 #ifdef __GLIBC__
     // [trim] Between tiles, under perf:malloc_trim: nothing else returns the allocator's free pages here -- the in-loop
     // trim above runs only when there is one tile -- so a tiled loop's RSS would ratchet toward the arena pass 1 sized.
-    // After tile k is written, before tile k+1 is read; about 4 GB off TNBC 009 and 0.5 GB off dataset D. Output-identical.
+    // After tile k is written, before tile k+1 is read; about 4 GB off TNBC 009. Output-identical.
     // [pipe] Pipelined, the later tiles in flight keep their pages: the trim returns what tile k left behind.
     if (trim_on && tk + 1 < tiles.size())
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();
@@ -7134,8 +6600,7 @@ protected:
     }
 
     win_phase.reset();   // [perf-instr] WINDOW_LOOP ends here: the tile loop's own phases were enclosed in it, the final write is not
-    writeLogInfo_("[soa-rt] off-grid " + String(rtOffGrid().load())
-                  + " (of which strictly between two frames " + String(rtStrictlyBetween().load()) + ")");
+    writeLogInfo_("[soa-rt] off-grid " + String(rtOffGrid().load()));
     if (rtOffGrid().load() != 0)
       writeLogWarn_("[soa-rt] " + String(rtOffGrid().load()) + " traces had an RT that is not one of "
                     "the store's frame times (ElutionPeakDetection skipped, or a span trimmed away from "
@@ -7167,9 +6632,7 @@ protected:
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
     if (twin_im >= 0.0 && twin_rt_tol > 0.0)   // [twin-rt] the before/after of the near-frame relation
       writeLogInfo_("[twins] assembly:twin_rt_frames: " + String(twin_st[0]) + " twin pairs at one MS1 frame, " + String(twin_st[1])
-                    + " same-monoisotope pairs at nearby frames joined, " + String(twin_st[2]) + " left apart at an RT cell edge; "
-                    + String(n_twins - std::min<size_t>(n_twins, twin_st[3])) + " of the " + String(n_twins) + " folded spectra need a near-frame link (the same frame alone folds "
-                    + String(twin_st[3]) + "); " + String(twin_st[4]) + " clusters span more than the tolerance (chained)");
+                    + " same-monoisotope pairs at nearby frames joined, " + String(twin_st[2]) + " left apart at an RT cell edge");
     if (post_fusion_cap_)
       writeLogInfo_("[recap] assembly:post_fusion_cap: " + String(recap[0]) + " of " + String(recap[3]) + " spectra re-capped to " + String(max_frags)
                     + " peaks after the twin fold, " + String(recap[1]) + " peaks removed (largest spectrum before: " + String(recap[2]) + " peaks)");
@@ -7204,12 +6667,6 @@ protected:
                     + " precursor-window assemblies; " + String(g) + " groups of >= 2 fused, mean size "
                     + String(g ? (double)c[4].load() / (double)g : 0.0, false) + "; " + String(c[5].load())
                     + " assemblies fell below assembly:min_fragments");
-    }
-    {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
-      auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();
-      writeLogInfo_("[pspan] precursors by MS1 span (window frames): 1:" + String(h[0].load()) + " 2:" + String(h[1].load()) + " 3:" + String(h[2].load())
-                    + " 4:" + String(h[3].load()) + " 5-6:" + String(h[4].load()) + " 7-10:" + String(h[5].load()) + " 11-20:" + String(h[6].load())
-                    + " >20:" + String(h[7].load()) + " total " + String(tot) + (adaptive_ ? " faint(<=" + String(faint_frames_) + "): " + String(h[8].load()) : String("")));
     }
     if (anchor_rescue_)
     {   // [anchor] what the rescue did (counted at assembly: before the twin fold)
