@@ -498,17 +498,11 @@ namespace
     OPENMS_LOG_INFO << b;
   }
 
-  bool log_overlap_ = false;   ///< [B0] gate:coelution == "logoverlap"
   double im_weight_sigma_ = 0.0;     ///< [recall] Gaussian IM-proximity weight on emitted fragment intensity (0=off)
-  double mono_guard_ = 0.0;          ///< [mono-guard] averagine slack on leftward isotope steps (0=off)
-  bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
-  int mono_check_ = 0;               ///< [monocheck] charge:mono_profile_check: 0 false, 1 true (v1 profile + 1/K0 steps), 2 v2
-  double mono_check_min_corr_ = 0.6, mono_check_max_dim_ = 0.015;   ///< [monocheck] charge:mono_profile_min_corr, _max_dim
+  int mono_check_ = 0;               ///< [monocheck] charge:mono_profile_check: 0 false, 2 v2
   double mono_pos_min_ratio_ = 0.2, mono_pos_im_box_ = 0.0, mono_pos_extend_ = 0.6;   ///< [monocheck-v2] charge:mono_position_* (im_box 0 = auto)
   bool mono_pos_iterate_ = true;     ///< [monocheck-v2] charge:mono_position_iterate
   String mono_check_stamp_;          ///< [monocheck] the spx:monocheck run stamp, filled by inferPrecursors_
-  bool iso_closest_ = false;         ///< [isotol] charge:iso_partner == "closest": the nearest candidate in RT and 1/K0, not the first in m/z
-  bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
   bool short_conc_ = false;          ///< [short] gate:short_traces == "concentric": span test for traces too short for Pearson
   double short_center_tol_ = 0.5;    ///< [short] gate:short_center_tol, fraction of the precursor half-span
   int short_min_pts_ = 1;            ///< [short] gate:short_min_points
@@ -523,7 +517,6 @@ namespace
   int faint_frames_ = 4;             ///< [adaptive] gate:faint_max_frames
   double faint_drt_ = 6.0, faint_cp_ = 1.0;   ///< [adaptive] gate:faint_delta_rt, gate:faint_corr_power
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
-  int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
   double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
   bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
   int frag_int_ = 0;                 ///< [fragint] assembly:frag_intensity: 0 apex (legacy), 1 core, 2 sum
@@ -540,7 +533,6 @@ namespace
   double foreign_dim_ = 0.015;       ///< [foreign] assembly:foreign_precursor_dim
   int foreign_min_iso_ = 2;          ///< [foreign] assembly:foreign_precursor_min_iso
   double fuse_ppm_ = 0.0;            ///< [fuse] assembly:fragment_fuse_ppm (0 = off)
-  bool fuse_linkage_ = false;        ///< [fuse] assembly:fragment_fuse_mode: false anchored, true linkage
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -1048,9 +1040,9 @@ namespace
   };
 
   /// [monocheck-v2] What charge:mono_profile_check v2 needs of a count walk, one per precursor of inferPrecursors_
-  /// (z = 0: nothing to test): the winning charge, its leftward partners' m/z (nearest first), the monoisotope before
-  /// v2, and whether the leftward walk stopped at charge:mono_averagine_guard instead of on a miss.
-  struct MonoV2In_ { int z = 0, nl = 0; bool guard_stop = false; double mono = 0.0; std::array<double, 5> left_mz{}; };
+  /// (z = 0: nothing to test): the winning charge, its leftward partners' m/z (nearest first) and the monoisotope
+  /// before v2.
+  struct MonoV2In_ { int z = 0, nl = 0; double mono = 0.0; std::array<double, 5> left_mz{}; };
 
   /// MassTraceDetection locates the per-peak IM array by the exact name
   /// Constants::UserParam::ION_MOBILITY ("Ion Mobility"). Converters name it via CV term and
@@ -1073,20 +1065,10 @@ namespace
     }
   }
 
-  /// Reported-m/z estimator, set once from `trace:mz_estimator` before any trace is converted.
-  /// A file-scope value because toTrace() is a free helper with no access to the tool's parameters.
-  inline std::string& mzEstimator() { static std::string v = "apex"; return v; }
-
   Trace toTrace(const MassTrace& mt, TraceStore& store)
   {
-    // Reported m/z of a mass trace. "apex" (the default) takes the m/z of the most intense peak;
-    // "mean" is the OpenMS intensity-weighted centroid; "median" the median m/z. Set by
-    // `trace:mz_estimator` -- see docs/BASELINE.md for the comparison that chose apex.
-    const std::string& mz_est = mzEstimator();
-    double mz;
-    if (mz_est == "apex" && mt.getSize() > 0) mz = mt[mt.findMaxByIntPeak(false)].getMZ();
-    else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); mz = m2.getCentroidMZ(); }
-    else mz = mt.getCentroidMZ();
+    // Reported m/z of a mass trace: the m/z of its most intense peak (the centroid when it has none).
+    const double mz = mt.getSize() > 0 ? mt[mt.findMaxByIntPeak(false)].getMZ() : mt.getCentroidMZ();
     // One peak per frame (MassTraceDetection takes at most one candidate per spectrum), so the
     // profile is a span over the store's frame table with zeros where frames were missed.
     const Size np = mt.getSize();
@@ -1116,11 +1098,7 @@ namespace
   /// have put it. @p pts is the caller's scratch.
   inline Trace toTraceAt(const MassTrace& mt, TraceStore& store, size_t off, vector<pair<uint32_t, float>>& pts)
   {
-    const std::string& mz_est = mzEstimator();
-    double mz;
-    if (mz_est == "apex" && mt.getSize() > 0) mz = mt[mt.findMaxByIntPeak(false)].getMZ();
-    else if (mz_est == "median" && mt.getSize() > 0) { MassTrace m2 = mt; m2.updateMedianMZ(); mz = m2.getCentroidMZ(); }
-    else mz = mt.getCentroidMZ();
+    const double mz = mt.getSize() > 0 ? mt[mt.findMaxByIntPeak(false)].getMZ() : mt.getCentroidMZ();
     const Size np = mt.getSize();
     pts.clear();
     for (Size i = 0; i < np; ++i) pts.emplace_back(store.frameOf(mt[i].getRT()), (float)mt[i].getIntensity());
@@ -1821,7 +1799,7 @@ namespace
 
   /// The acquisition's cycle time: the smallest POSITIVE gap between consecutive frame times. Every gap
   /// is a multiple of the cycle, so skipped frames cannot inflate it (a median can). It is the valley
-  /// splitter's scan time (trace:split_scan_time=frame) and the tile:rt_sec cell unit; 0 when no two
+  /// splitter's scan time and the tile:rt_sec cell unit; 0 when no two
   /// frames differ, and the splitter then uses each trace's own average.
   inline double frameSpacing(const vector<double>& frame_rt)
   {
@@ -3136,7 +3114,6 @@ protected:
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame (or nearby frames, see assembly:twin_rt_frames), same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
     registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Let the twin fold (assembly:twin_im_tolerance) also join two spectra of one monoisotope from nearby MS1 frames: charge:mono_profile_check v2's extension can move a monoisotope onto another precursor's monoisotope trace at another frame, which the same-frame fold cannot join. A pair folds across frames with the same charge, precursor m/z in one flight-time bin (within 0.05 ppm) and, by default, one of the two monoisotopes placed by the extension (assembly:twin_rt_match), 1/K0 within assembly:twin_im_tolerance, apexes at most n MS1 cycles apart (|dRT| <= (n + 0.5) x the cycle) and in one retention-time cell (tile:rt_sec; a pair across a cell edge stays two spectra). The survivor rule and the fusion are the fold's. 0 = auto: the run's median MS1 peak width (FWHM of the precursors' seed traces with at least 3 points) in MS1 cycles, rounded, at least 1. -1 = off: the same MS1 frame only (the fold before 1.6.0). Logged as [twins], stamped in spx:twin_merge. CHANGES OUTPUT.", false);
     registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "assembly:twin_rt_frames: which pairs from two different MS1 frames fold. 'ext': precursor m/z in one flight-time bin (within 0.05 ppm) and the monoisotope of at least one of the two placed by charge:mono_profile_check v2's extension, i.e. the extension moved it onto another precursor's monoisotope (nothing folds across frames without v2). 'bin': any pair in one flight-time bin (one MS1 trace, or one bin at two frames, is the monoisotope of both; distinct monoisotope traces of one charge and 1/K0 at nearby frames lie 0.3 ppm or more apart). 'ppm': within 20 ppm, as at one frame; it also folds the spectra of one ion seeded from different flight-time bins. 'bin' and 'ppm' cost peptides in the screen.", false, true);
-    registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
     registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance for trace detection.", false);
@@ -3152,22 +3129,16 @@ protected:
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
     registerTOPPSubsection_("tile", "Retention-time cells and tiles (integer detector)");   // without it --helphelp threw ElementNotFound
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch (seconds) of the fixed retention-time cells the integer detector traces in, cut at the run's MS1 frame times and stamped in the header (spx:tile_boundaries). The spectra are digest-identical for any grouping into tiles and any thread count at a fixed perf:trace_bands (the header stamps the grouping); a trace eluting across a cut is cut there. -1 = one cell (the whole run). CHANGES OUTPUT; the price of 600: docs/BASELINE.md '2026-09-09: the cell-atomic grid, step 2'.", false, true);
-    registerStringOption_("trace:band_edges", "<mode>", "acquisition", "Where the integer detector's per-window flight-time band edges come from. 'acquisition': tlo = 0 and thi = the larger of the digitizer's last bin (GlobalMetadata DigitizerNumSamples) and MzAcqRangeUpper through the window's frame calibrations, run-level metadata a reader holding one tile can compute. A calibration tdf without those bounds is refused; an input with no tdf falls back to -trace:detector openms, which has no bands. 'slab': the window's resident peaks' extremes (the default before 2026-09-10); on a .d it needs -perf:stream_load false. Measured neutral: docs/BASELINE.md 'Cell grid, step 3a'.", false);
-    setValidStrings_("trace:band_edges", {"slab", "acquisition"});
     registerIntOption_("tile:cells_per_tile", "<n>", 1, "Group the retention-time cells into TILES of n cells each and run the window loop tile by tile: "
                        "detection on the tile's frames only, scoring of the precursors the tile owns (an MS1 frame time in [T_k - gate:delta_rt, T_{k+1} - gate:delta_rt)) "
                        "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
                        "Output is digest-identical for any tile count (the cell grid); memory is one tile's. At the defaults TNBC 009 peaks at 99.70 GB in one "
                        "tile and 21.07 GB in 13 tiles with a trim between tiles (wall 9:42 -> 9:57, same node), dataset D at 37.44 -> 21.99 GB in 3 tiles "
                        "(3:15 -> 3:47). 0 = all cells in one tile; mzPeak output always runs as one tile (it is written in one piece).", false, true);
-    registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time behind the valley splitter's window (chrom_fwhm / scan time). 'frame': the run's MS1 cycle time, one value for every trace. 'trace': each trace's own average cycle time (OpenMS's behaviour; the default before 2026-09-09, Sage -5.7% on dataset D): docs/BASELINE.md '2026-09-09: the valley splitter's scan time'.", false, true);
-    setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' works on the instrument's flight-time bins "
                           "and needs the vendor calibration (without it: 'openms', logged). 'openms' runs OpenMS MassTraceDetection. Different "
                           "algorithms: they share ~85% of identified peptides, neither wins on every file and engine, integer uses ~40% less memory. docs/MZ-AXIS-DESIGN.md.", false);
     setValidStrings_("trace:detector", {"openms", "integer"});
-    registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. Fragment traces of the integer detector always report the calibrated m/z of their apex bin, whatever this says; with trace:detector openms the estimator applies to them too. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
-    setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic valleys (ElutionPeakDetection, width filtering off). Value = chrom_fwhm (seconds); 0 = off.", false);
     registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation (also across nearby frames), the cluster closure, the survivor order, the 10-ppm fusion and the keyed fold with the post-fusion cap (assembly:post_fusion_cap)", true);
     registerFlag_("diag:selftest_arena", "Run assertions on the MS1 arena compaction (compactUnreferenced) and exit: kept spans must survive a container order that differs from their offset order", true);
@@ -3200,8 +3171,6 @@ protected:
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Sum n neighbouring MS1 frames on each side in the .d reader, before peak picking: 0 = off, 1 = 3-frame sum, 2 = 5-frame sum. Needs perf:stream_load true and -dnoise:ms1 false. CHANGES OUTPUT: at 1 (2026-07-27, older defaults) Sage +7.8% for 2.7x the spectra.", false);
 
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
-    registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching. 'logoverlap' needs gate:shrinkage off (the default fisher refuses it).", false);
-    setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
     registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
     registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: centre tolerance as a fraction of the precursor half-span (at least one cycle).", false, true);
@@ -3225,11 +3194,9 @@ protected:
     setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
     registerStringOption_("assembly:merge_same_bin", "<true/false>", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", false, true);
     setValidStrings_("assembly:merge_same_bin", {"true", "false"});
-    registerStringOption_("assembly:post_fusion_cap", "<true/false>", "false", "Re-apply assembly:max_fragments after the twin fold (assembly:twin_im_tolerance), whose union of the members' capped fragments can exceed it. Every peak carries its assembly:cap_rank key (as a 32-bit float) through the same-bin merge and the fold (a fused peak keeps its members' best key); a spectrum over the cap keeps its top-ranked peaks (ties: higher intensity, then lower m/z). Logged as [recap], stamped spx:post_fusion_cap. CHANGES OUTPUT. Experimental.", false, true);
+    registerStringOption_("assembly:post_fusion_cap", "<true/false>", "false", "Re-apply assembly:max_fragments after the twin fold (assembly:twin_im_tolerance), whose union of the members' capped fragments can exceed it. Every peak carries its cap key (as a 32-bit float) through the same-bin merge and the fold (a fused peak keeps its members' best key); a spectrum over the cap keeps its top-ranked peaks (ties: higher intensity, then lower m/z). Logged as [recap], stamped spx:post_fusion_cap. CHANGES OUTPUT. Experimental.", false, true);
     setValidStrings_("assembly:post_fusion_cap", {"true", "false"});
-    registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
-    setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
-    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the assembly:cap_rank key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the anchored grouping and the sums of assembly:fragment_fuse_ppm, the twin fold's intensity-weighted m/z), so peaks can move, fuse differently and change which survive the cap. Experimental.", false, true);
+    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the cap key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the anchored grouping and the sums of assembly:fragment_fuse_ppm, the twin fold's intensity-weighted m/z), so peaks can move, fuse differently and change which survive the cap. Experimental.", false, true);
     setValidStrings_("assembly:frag_intensity", {"apex", "core", "sum"});
     registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: the number of window frames (odd) centred on the precursor's apex frame.", false, true);
     setMinInt_("assembly:frag_core_frames", 1);
@@ -3244,11 +3211,9 @@ protected:
     registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
     setMinInt_("assembly:foreign_precursor_min_iso", 1);
     setMaxInt_("assembly:foreign_precursor_min_iso", 4);
-    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 with assembly:fragment_fuse_mode anchored since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key (assembly:cap_rank) the key of one fragment applied to the whole ion: the best-keyed member's score (and, under evidence, its shared frames) with the sum of the members' IM-weighted apex intensities, never below that member's own key (non-negative keys, up to rounding); a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping by assembly:fragment_fuse_mode. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
+    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key the key of one fragment applied to the whole ion: the best-keyed member's score and shared frames with the sum of the members' IM-weighted apex intensities, never below that member's own key (non-negative keys, up to rounding); a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping is anchored: the fragments by emitted intensity, strongest first (ties: lower m/z), each one not yet fused takes every unfused fragment within the tolerance of its own m/z. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
     setMinFloat_("assembly:fragment_fuse_ppm", 0.0);
     setMaxFloat_("assembly:fragment_fuse_ppm", 50.0);
-    registerStringOption_("assembly:fragment_fuse_mode", "<mode>", "anchored", "assembly:fragment_fuse_ppm: 'anchored' takes the fragments by emitted intensity, strongest first (ties: lower m/z); each one not yet fused becomes an anchor and takes every unfused fragment within the tolerance of its own m/z. 'linkage' walks the fragments in m/z order and joins a fragment to the group of the previous one when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage, span capped).", false, true);
-    setValidStrings_("assembly:fragment_fuse_mode", {"anchored", "linkage"});
     registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
     registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
@@ -3264,14 +3229,13 @@ protected:
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
     setMinFloat_("gate:colocation_overlap", 0.0);
-    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental. Replaces gate:min_correlation_points with gate:shrink_min_points.", false, true);
+    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the Pearson co-elution statistic over the full RT grid, with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Experimental. Replaces gate:min_correlation_points with gate:shrink_min_points.", false, true);
     setValidStrings_("gate:shrinkage", {"off", "fisher"});
     registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.6, "gate:shrinkage fisher: prior mean correlation; 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments).", false, true);
     registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.3, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
     setMinFloat_("gate:shrink_prior_sd", 0.01);
     registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation; at 1 a one-frame overlap is scored almost at the prior (the data get weight 1/(1 + 1/gate:shrink_prior_sd^2)), so pair it with gate:adaptive faint.", false, true);
     setMinInt_("gate:shrink_min_points", 1);
-    registerFlag_("gate:variance_support", "Compute the Pearson co-elution score over the union support of the two profiles instead of the full RT grid (gate:coelution pearson only; the scale changes, retune gate:min_correlation). Falsified 2026-07-27, kept for reproducibility: docs/BASELINE.md 'What is already falsified'.");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
     registerStringOption_("perf:ms1_prune", "<true/false>", "true",
                           "Drop picked MS1 centroids at or below trace:noise_threshold_int as they load, keeping the witnesses that leave every MS1 "
@@ -3292,30 +3256,18 @@ protected:
     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
     registerIntOption_("charge:min_charge", "<n>", 1, "Minimum precursor charge to emit. Default 1 since 2026-09-08: identified z=1 peptides on tryptic data are genuine 1+ ions (mobility on the 1+ trend line; 14-20% of Sage peptides on a 2-hour acquisition), but their stratum carries a higher entrapment FDR than a pooled 1% cut implies, so control FDR per charge downstream. "
                        "-charge:min_charge 2 -charge:im_charge_veto false restores the old charge handling (the veto runs first). docs/BASELINE.md 'charge:min_charge 1 + the ion-mobility charge veto'.", false);
-    registerStringOption_("charge:scoring", "<mode>", "count", "Charge/monoisotope inference: 'count', the partner-count walk (ties favour the lower charge); 'envelope', averagine cosine x isotope co-elution (the default until 2026-07-21; 49.7% vs 71.8% charge agreement with a DIA-NN reference on dataset B). docs/charge-inference.md.", false);
-    setValidStrings_("charge:scoring", {"envelope", "count"});
     registerStringOption_("charge:im_charge_veto", "<true/false>", "true", "Correct charge halving by ion mobility: fit the run's 2+ and 3+ 1/K0 trend lines from its confident calls (>= 3 isotopes); a z=1 call within charge:im_veto_band sigma of the 2+ line (and nearer it than the 3+ line) is re-called 2+, "
-                          "one on the 3+ line loses its charge and becomes a guessed precursor (dropped by assembly:require_isotope_support). Genuine 1+ ions sit on their own line and stay. docs/BASELINE.md 'The veto's 3+ arm dropped'.", false);
+                          "one on the 3+ line loses its charge and becomes a guessed precursor, which is dropped. Genuine 1+ ions sit on their own line and stay. docs/BASELINE.md 'The veto's 3+ arm dropped'.", false);
     setValidStrings_("charge:im_charge_veto", {"true", "false"});
     registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "Half-width of the 2+/3+ mobility band, in MAD-sigma of "
                           "the confident calls' residuals (measured residual sd ~0.037 1/K0 against a 1+/2+ separation of ~0.29).", false);
-    registerStringOption_("assembly:require_isotope_support", "<true/false>", "true",
-                          "Drop precursor hypotheses with no isotope partner (the guessed singletons). false keeps them: on dataset D (2026-09-04) "
-                          "that doubled the spectra, ran 6.9x slower and identified fewer peptides on both engines. docs/BASELINE.md (defaults audit, top of file).", false);
-    setValidStrings_("assembly:require_isotope_support", {"true", "false"});
-    registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "Reject a leftward isotope step of the charge:scoring=count walk when the lighter peak is below slack x heavier peak / lambda, averagine's loosest ratio (lambda = 0.000594 x neutral mass; 1.0 = exactly that bound, smaller values add slack). 0 = off. Falsified: it trades the -1.003 Da open-search artefact for a +1.003 Da one, docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.", false);
-    registerFlag_("charge:mono_averagine_select", "Choose the monoisotope by averagine cosine over the whole isotope run of the charge:scoring=count walk instead of its furthest-left peak; only the reported precursor mass moves. Missed its pre-registered criterion: docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.");
-    registerStringOption_("charge:mono_profile_check", "<false/true/v2>", "v2", "Check the monoisotope of the charge:scoring=count walk, for the winning charge only (default v2 since 1.6.0; false = off, as in 1.5.0). "
-                          "'true' (v1): a lighter trace becomes the monoisotope only if its MS1 elution profile correlates with the seed trace's (Pearson >= charge:mono_profile_min_corr over the frames both have; below 3 shared frames the correlation test passes unchecked) and its 1/K0 is within charge:mono_profile_max_dim of the seed's. "
-                          "The walk stops at the first failed step: the monoisotope is the last accepted peak, and the rejected trace and the ones beyond it stay unclaimed for other precursors. "
+    registerStringOption_("charge:mono_profile_check", "<false/v2>", "v2", "Check the monoisotope of the partner-count walk, for the winning charge only (default v2 since 1.6.0; false = off, as in 1.5.0). "
                           "'v2': isotope-position intensity sums (charge:mono_position_*). PS(k) = summed apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (the partner tolerance in m/z, gate:delta_rt, charge:mono_position_im_box 1/K0 of the seed, by default from the run's own isotope scatter). "
                           "The walk's leftmost step j is rejected when PS(-j) / PS(-j+1) x lambda < charge:mono_position_min_ratio (lambda = max(0.1, 0.000594 x neutral mass), averagine's M-1/M0 bound; an empty heavier position counts as 0); "
-                          "the monoisotope moves one isotope right, the rejected trace stays claimed, and (charge:mono_position_iterate true) the new leftmost step is tested in turn. If nothing was rejected and the walk ended on a miss (not a charge:mono_averagine_guard stop), the next lighter position is accepted without claiming when its ratio is >= charge:mono_position_extend (0 = off). "
+                          "the monoisotope moves one isotope right, the rejected trace stays claimed, and (charge:mono_position_iterate true) the new leftmost step is tested in turn. If nothing was rejected and the walk ended on a miss, the next lighter position is accepted without claiming when its ratio is >= charge:mono_position_extend (0 = off). "
                           "v2 judges each walk at its precursor's final charge, after charge:im_charge_veto: a z=1 walk re-called 2+ stepped 1.003 m/z, two isotopes at 2+, and is read at 2+ spacing. "
-                          "Both 'true' and 'v2' keep the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, false);
-    setValidStrings_("charge:mono_profile_check", {"false", "true", "v2"});
-    registerDoubleOption_("charge:mono_profile_min_corr", "<r>", 0.6, "charge:mono_profile_check true: minimum Pearson correlation of a leftward partner's MS1 profile with the seed's.", false, true);
-    registerDoubleOption_("charge:mono_profile_max_dim", "<1/K0>", 0.015, "charge:mono_profile_check true: maximum 1/K0 difference of a leftward partner from the seed.", false, true);
+                          "'v2' keeps the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, false);
+    setValidStrings_("charge:mono_profile_check", {"false", "v2"});
     registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: the walk's leftmost step is rejected when its averagine-scaled position ratio PS(-j) / PS(-j+1) x lambda is below this.", false, true);
     registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance away (auto: 0.01-0.05 per run), so a walk's own partner can lie outside the box and then counts as an empty position.", false, true);
     registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when no step was rejected and the walk ended on a miss, move the monoisotope one isotope lighter (the most intense trace there, not claimed) if that position's ratio is >= this. 0 = off.", false, true);
@@ -3326,9 +3278,6 @@ protected:
                           "and at two control positions 50 ppm either side, where no isotope of the probe at that charge can sit; the nearest trace's 1/K0 gap is recorded at each. "
                           "The tolerance is the one that admits the most isotope-position traces net of twice the control traces (true partners admitted minus chance partners admitted), "
                           "on a 0.001 grid, clamped to [0.01, 0.05]: about 0.01 on dense short-gradient runs, up to 0.05 on sparse low-load runs. A value > 0 fixes it. Logged as [isotol], stamped spx:iso_im_tolerance. CHANGES OUTPUT.", false);
-    registerStringOption_("charge:iso_partner", "<first/closest>", "first", "Which candidate inside the isotope-partner box (m/z tolerance, gate:delta_rt, charge:iso_im_tolerance) the walk takes: "
-                          "'first' in m/z order (as in 1.5.0), or 'closest' to the seed in apex RT and 1/K0, each scaled by its tolerance (ties to the first in m/z). Screened 2026-10-01: closest lost 1.6-5.0% MSFragger peptides on two 10 ng HeLa runs and wrote 14-15% more spectra on Evosep for about the same peptides; not recommended. CHANGES OUTPUT.", false, true);
-    setValidStrings_("charge:iso_partner", {"first", "closest"});
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
     registerStringOption_("dnoise:ms1", "<true/false>", "true",
@@ -3359,7 +3308,6 @@ protected:
     // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
     setMinInt_("assembly:min_fragments", 1);
     setMinInt_("assembly:max_fragments", 1);
-    setMinInt_("assembly:default_charge", 0);
     setMinFloat_("assembly:twin_im_tolerance", -1.0);   // any negative value = off
     setMinInt_("assembly:twin_rt_frames", -1);          // -1 = off (same frame), 0 = auto
     setValidStrings_("assembly:twin_rt_match", {"ext", "bin", "ppm"});
@@ -3370,9 +3318,6 @@ protected:
     setMinFloat_("gate:min_correlation", -1.0);
     setMaxFloat_("gate:min_correlation", 1.0);
     setMinFloat_("charge:iso_im_tolerance", 0.0);
-    setMinFloat_("charge:mono_profile_min_corr", -1.0);
-    setMaxFloat_("charge:mono_profile_min_corr", 1.0);
-    setMinFloat_("charge:mono_profile_max_dim", 0.0);
     setMinFloat_("charge:mono_position_min_ratio", 0.0);
     setMinFloat_("charge:mono_position_im_box", 0.0);
     setMinFloat_("trace:min_length_fwhm", 0.0);   // [minlen] 0 = the 2-point floor
@@ -3396,7 +3341,7 @@ protected:
   /// @p map is CLEARED as it is consumed, so it is not resident through the valley-splitting peak.
   vector<Trace> detectTraces_(PeakMap& map, TraceStore& store, double delta_im, double noise,
                               double snr, double min_len, double split_valleys, int bands,
-                              double split_scan_time,   // the run's cycle time for the splitter, 0 = per trace
+                              double splitter_scan_time,   // the run's cycle time for the splitter, 0 = per trace
                               int in_cat = -1,          // [ledger] the caller's category for `map`, -1 = uncharged
                               int part_cat = LC_BAND,   // [ledger] where this call's band partition belongs
                               Ms1Prune* ms1_prune = nullptr)   // [ms1-prune] the MS1 call only: the pre-prune edge sample
@@ -3590,7 +3535,7 @@ protected:
         vector<MassTrace> chunk; chunk.reserve(hi - lo);
         size_t s = (size_t)(std::upper_bound(at.begin(), at.end(), lo) - at.begin()) - 1;
         for (size_t g = lo; g < hi; ++g) { while (g >= at[s + 1]) ++s; chunk.push_back(std::move(seg[s][g - at[s]])); }
-        ElutionPeakDetection epd; setSplitter(epd, split_valleys, split_scan_time);
+        ElutionPeakDetection epd; setSplitter(epd, split_valleys, splitter_scan_time);
         parts[ci].reserve(chunk.size());
         epd.detectPeaks(chunk, parts[ci]);
       } catch (...) { taskErr_(split_err); } }
@@ -3673,44 +3618,6 @@ protected:
     }
     if (ms1_prune) writeLogInfo_("[outer] MS1 trace conversion " + String(tt_s(_tc0, tt_now())) + " s (" + (conv_par ? "parallel" : "serial") + conv_why + ")");
     return out;
-  }
-
-  /// [route-1] Averagine isotope envelope, Poisson approximation: for neutral mass M the expected
-  /// number of 13C is lambda ~ 0.000594*M, giving relative intensities [1, l, l^2/2, l^3/6, ...].
-  /// This is what lets us pick the MONOISOTOPE: the mono is NOT always the most intense peak
-  /// (above ~1800 Da M+1 exceeds M), so intensity-ranking alone mis-assigns it.
-  static void averagineRatios(double neutral_mass, int n, vector<double>& out)
-  {
-    const double lam = std::max(0.10, 0.000594 * neutral_mass);
-    out.assign(n, 0.0);
-    double term = 1.0;
-    for (int k = 0; k < n; ++k) { out[k] = term; term *= lam / (double)(k + 1); }
-    double mx = 0.0; for (double v : out) mx = std::max(mx, v);
-    if (mx > 0) for (double& v : out) v /= mx;
-  }
-
-  static double cosineSim(const vector<double>& a, const vector<double>& b)
-  {
-    double dot = 0, na = 0, nb = 0;
-    for (size_t i = 0; i < a.size() && i < b.size(); ++i) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
-    return (na > 0 && nb > 0) ? dot / (sqrt(na) * sqrt(nb)) : 0.0;
-  }
-
-  /// [route-1] Pearson of two MS1 XICs over the frames where BOTH have a real point (mean-centred on
-  /// that overlap, not zero-padded); -2 below 3 shared points or at zero variance.
-  static double xicCorr(const TraceStore& s, const Trace& a, const Trace& b)
-  {
-    double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0; int m = 0;
-    const uint32_t lo = std::max(a.frame0, b.frame0);
-    const uint32_t hi = std::min(a.frame0 + a.len, b.frame0 + b.len);
-    for (uint32_t f = lo; f < hi; ++f)
-    {
-      const double x = xv(s, a, f - a.frame0), y = xv(s, b, f - b.frame0);
-      if (x > 0.0 && y > 0.0) { sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; ++m; }
-    }
-    if (m < 3) return -2.0;
-    const double cov = sxy - sx * sy / m, vx = sxx - sx * sx / m, vy = syy - sy * sy / m;
-    return (vx > 0 && vy > 0) ? cov / std::sqrt(vx * vy) : -2.0;
   }
 
   /// [isotol] charge:iso_im_tolerance 0 (auto): the run's isotope-partner 1/K0 tolerance, measured on its own MS1 traces
@@ -3809,14 +3716,13 @@ protected:
     return nonincr;
   }
 
-  /// [route-1] Isotope/charge inference on MS1 traces. Scores each (charge, monoisotope) hypothesis
-  /// by averagine-shape agreement x isotope-XIC co-elution, instead of counting partners.
+  /// Isotope/charge inference on MS1 traces: a greedy partner-count walk, brightest seed first, with exact ordered
+  /// speculation.
   vector<Precursor_> inferPrecursors_(const vector<Trace>& ms1, const TraceStore& ms1st, int max_charge,
                                       double delta_rt, double iso_im_tol, double mass_ppm,
-                                      bool envelope_scoring, vector<MonoV2In_>* v2_out = nullptr)
+                                      vector<MonoV2In_>* v2_out = nullptr)
   {
     const double ISO = 1.0033548;
-    const double PROTON_ = 1.00727646;
     const size_t N = ms1.size();
 
     // m/z-sorted index for O(log N) isotope-partner lookup (avoids O(N^2) over all MS1 traces).
@@ -3893,237 +3799,72 @@ protected:
     // and re-evaluates one whose recorded partner has since been claimed. A search that returned -1 saw
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
     // dependency. docs/BASELINE.md, "Ordered speculation on the greedy claim loop".
-    // mc: [monocheck] v1 (true): walks checked, monos moved, rejected by profile, by 1/K0, steps passed with < 3
-    // shared frames (or a flat profile), partners released, moved monos left with no claimed partner, steps
-    // accepted by a profile that could be judged. v2: walks tested, monos moved right, steps rejected, extensions
-    // tested, monos moved left, -, monos moved back onto the seed, -. Summed at commit, not in speculation.
-    // [monocheck-v2] v2: the count walk's result for monoPositionPass_ (MonoV2In_), which runs after the IM charge veto.
-    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; std::array<size_t, 8> mc{}; MonoV2In_ v2; };
+    // [monocheck-v2] the count walk's result for monoPositionPass_ (MonoV2In_), which runs after the IM charge veto.
+    struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; MonoV2In_ v2; };
     auto evalSeed = [&](size_t seed, SeedRes& R)
     {
-      R.emit.clear(); R.claims.clear(); R.deps.clear(); R.mc.fill(0); R.v2 = MonoV2In_();
-      // do/while(0): the body below is the sequential loop body VERBATIM, and its seed-level
-      // `continue` statements exit this wrapper exactly as they used to exit one loop iteration,
-      // while `continue` inside the body's own inner loops keeps binding to those loops.
-      do
-      {
-      if (used[seed]) continue;
+      R.emit.clear(); R.claims.clear(); R.deps.clear(); R.v2 = MonoV2In_();
+      if (used[seed]) return;
       const Trace& s = ms1[seed];
       const double s_rt = rtOf(ms1st, s);     // [soa-rt] hoisted: the candidate scan reads it per probe
       const double tol = s.mz * mass_ppm * 1e-6;
 
       // Find an unused isotope partner near `target` m/z, co-localized in RT and IM (binary-search
-      // the m/z index, scan only the ppm-window candidates); -1 if none.
-      // [isotol] charge:iso_partner closest: the unused candidate nearest the seed in (dRT / delta_rt)^2 + (d1/K0 / iso_im_tol)^2,
-      // ties to the first in m/z. Recording only the chosen partner as the dependency stays exact: `used` is monotone, so a
-      // candidate claimed later that was not chosen cannot change the minimum while the chosen one stays unused.
+      // the m/z index, scan only the ppm-window candidates): the first in m/z order; -1 if none.
       auto findPartner = [&](double target) -> long {
         size_t klo = lbmz(target - tol), khi = ubmz(target + tol);   // [mzidx] same positions, local search
-        long best = -1; double bd = 0.0;
         for (size_t k = klo; k < khi; ++k)
         {
           if (fabs(sorted_rt[k] - s_rt) > delta_rt || fabs(sorted_im[k] - s.im) > iso_im_tol) continue;   // [soa]
           size_t j = by_mz[k];
           if (used[j] || j == seed) continue;
-          if (!iso_closest_) { R.deps.push_back((size_t)j); return (long)j; }
-          const double dr = delta_rt > 0.0 ? (sorted_rt[k] - s_rt) / delta_rt : 0.0;
-          const double di = iso_im_tol > 0.0 ? (sorted_im[k] - s.im) / iso_im_tol : 0.0;
-          const double d = dr * dr + di * di;
-          if (best < 0 || d < bd) { best = (long)j; bd = d; }
+          R.deps.push_back((size_t)j); return (long)j;
         }
-        if (best >= 0) R.deps.push_back((size_t)best);
-        return best;
+        return -1;
       };
 
-      // charge:scoring=count end to end, sharing nothing with the envelope path below (no gapped walk, no
-      // lead offsets; mixing the two was a third, worse algorithm): contiguous walk from the seed with
-      // break-on-first-miss, monoisotope = furthest-left partner reached, z by partner count, ties to lowest z.
-      if (!envelope_scoring)
-      {
-        int best_z = 0, best_n = 1, best_nl = 0;
-        bool best_gstop = false;                // [monocheck-v2] the winning walk stopped at the guard, not on a miss
-        double best_mono = s.mz;
-        vector<size_t> best_partners;
-        for (int z = 1; z <= max_charge; ++z)
-        {
-          vector<size_t> partners;
-          double mono = s.mz;
-          double prev_int = inten[seed];
-          vector<long> lefts;
-          bool gstop = false;
-          for (int k = 1; k <= 5; ++k)          // lighter partners define the monoisotope
-          {
-            long j = findPartner(s.mz - k * ISO / z);
-            if (j < 0) break;                   // BREAK on first miss (contiguous only)
-            // [mono-guard] findPartner never checks intensity, so a leftward step can latch onto noise one
-            // isotope below. Under averagine the lighter of isotopes m, m+1 is (m+1)/lambda times the heavier,
-            // minimised at m=0 -> 1/lambda (see charge:mono_averagine_guard).
-            if (mono_guard_ > 0.0)
-            {
-              const double neutral = (s.mz - k * ISO / z) * z - z * PROTON_;
-              const double lam = std::max(0.10, 0.000594 * neutral);
-              if (inten[j] < mono_guard_ * prev_int / lam) { gstop = true; break; }
-            }
-            lefts.push_back(j);
-            partners.push_back((size_t)j); mono = ms1[j].mz; prev_int = inten[j];
-          }
-          vector<long> rights;
-          for (int k = 1; k <= 5; ++k)          // heavier partners add confidence
-          {
-            long j = findPartner(s.mz + k * ISO / z);
-            if (j < 0) break;
-            rights.push_back(j);
-            partners.push_back((size_t)j);
-          }
-          // [mono-select] Pick the mono by averagine fit over the whole run (see charge:mono_averagine_select);
-          // every found peak is still marked used, so only the reported mono m/z changes.
-          if (mono_select_ && !lefts.empty())
-          {
-            const int nL = (int)lefts.size();
-            vector<double> runI;                                  // ascending m/z: lefts, seed, rights
-            for (int i = nL - 1; i >= 0; --i) runI.push_back(inten[lefts[i]]);
-            runI.push_back(inten[seed]);
-            for (long j : rights) runI.push_back(inten[j]);
-            double best_cos = -1.0; int best_c = nL;              // default: seed is the mono
-            vector<double> theo, obs;
-            for (int c = 0; c <= nL; ++c)                         // mono cannot be right of the seed
-            {
-              const int len = std::min(4, (int)runI.size() - c);
-              if (len < 2) break;                                 // need >=2 peaks to score a shape
-              const double neutral = (s.mz - (double)(nL - c) * ISO / z) * z - z * PROTON_;
-              averagineRatios(neutral, len, theo);
-              obs.assign(runI.begin() + c, runI.begin() + c + len);
-              double mx = 0.0; for (double v : obs) mx = std::max(mx, v);
-              if (mx <= 0.0) continue;
-              for (double& v : obs) v /= mx;
-              // Weighted by evidence as in the envelope scorer, (n-1)/3 capped at 1: raw cosine of the
-              // shorter vector a right-shifted candidate gets favours a too-heavy mono.
-              const double cs = cosineSim(obs, theo) * std::min(1.0, (double)(len - 1) / 3.0);
-              if (cs > best_cos) { best_cos = cs; best_c = c; }
-            }
-            mono = (best_c < nL) ? ms1[lefts[nL - 1 - best_c]].mz : s.mz;
-          }
-          const int n = 1 + (int)partners.size();
-          if (n > best_n) { best_n = n; best_z = z; best_mono = mono; best_partners = partners; best_nl = (int)lefts.size(); best_gstop = gstop; }
-        }
-        // [monocheck] Re-walk the winning charge's leftward partners (best_partners[0, best_nl), nearest first):
-        // each must share the seed's elution profile and mobility, else the walk stops there and the
-        // rejected trace and those beyond it are released unclaimed. Charge and n_isotopes stay as counted.
-        if (mono_check_ == 1 && best_nl > 0)
-        {
-          ++R.mc[0];
-          int acc = 0; double acc_mz = s.mz;
-          for (; acc < best_nl; ++acc)
-          {
-            const Trace& t = ms1[best_partners[acc]];
-            if (fabs(t.im - s.im) > mono_check_max_dim_) { ++R.mc[3]; break; }
-            const double r = xicCorr(ms1st, t, s);   // -2: < 3 shared frames (or flat), too little to judge
-            if (r <= -2.0) ++R.mc[4];
-            else if (r < mono_check_min_corr_) { ++R.mc[2]; break; }
-            else ++R.mc[7];
-            acc_mz = t.mz;
-          }
-          if (acc < best_nl)
-          {
-            R.mc[5] += (size_t)(best_nl - acc);
-            if (acc_mz > best_mono) { best_mono = acc_mz; ++R.mc[1]; }   // mono_averagine_select may already sit further right
-            best_partners.erase(best_partners.begin() + acc, best_partners.begin() + best_nl);
-            if (best_partners.empty()) ++R.mc[6];
-          }
-        }
-        // [monocheck-v2] Record what monoPositionPass_ needs (v2 reads only the immutable arrays and changes only
-        // mono_mz, so deciding it after the loop gives the same result as deciding it here, lets an automatic im_box
-        // use the run's own isotope scatter, and lets the decision follow the IM charge veto).
-        if (mono_check_ == 2 && best_z > 0)
-        {
-          R.v2.z = best_z; R.v2.nl = best_nl; R.v2.mono = best_mono; R.v2.guard_stop = best_gstop;
-          for (int i = 0; i < best_nl; ++i) R.v2.left_mz[(size_t)i] = ms1[best_partners[(size_t)i]].mz;
-        }
-        Precursor_ pc0;
-        pc0.trace_idx = seed;
-        pc0.rt = s_rt; pc0.im = s.im;
-        pc0.mono_mz = best_mono;
-        pc0.charge = best_z;                    // 0 => unknown, default_charge applied later
-        pc0.n_isotopes = best_n;                // [Q4] envelope confidence for the mono call
-        R.emit.push_back(pc0);
-        for (size_t j : best_partners) R.claims.push_back(j);   // de-isotope
-        continue;
-      }
-
-      struct Hyp { int z; double mono; double score; vector<size_t> partners; };
-      vector<Hyp> hyps;
-      vector<double> theo, obs(4), obsn(4);
-
+      // Contiguous walk from the seed with break-on-first-miss, monoisotope = furthest-left partner reached, z by
+      // partner count, ties to lowest z.
+      int best_z = 0, best_n = 1, best_nl = 0;
+      double best_mono = s.mz;
+      vector<size_t> best_partners;
       for (int z = 1; z <= max_charge; ++z)
       {
-        // [route-1] GAPPED envelopes: no break-on-first-miss (a sub-threshold M+1 with a present
-        // M+2 previously killed the whole walk). Try the seed AND up to 3 isotopes below it as the
-        // monoisotope candidate; averagine decides which one really is the mono.
-        for (int lead = 0; lead <= 3; ++lead)
+        vector<size_t> partners;
+        double mono = s.mz;
+        vector<long> lefts;
+        for (int k = 1; k <= 5; ++k)          // lighter partners define the monoisotope
         {
-          const double mono_mz = s.mz - lead * ISO / z;
-          long mono_idx = (lead == 0) ? (long)seed : findPartner(mono_mz);
-          if (lead > 0 && mono_idx < 0) continue;
-          const double neutral = mono_mz * z - z * PROTON_;
-          if (neutral < 400.0 || neutral > 6000.0) continue;
-
-          vector<size_t> members;
-          vector<long> iso_idx(4, -1);
-          obs.assign(4, 0.0);
-          obs[0] = inten[mono_idx];
-          iso_idx[0] = mono_idx;
-          if ((size_t)mono_idx != seed) members.push_back((size_t)mono_idx);
-          int found = 1;
-          for (int k = 1; k <= 3; ++k)
-          {
-            long j = findPartner(mono_mz + k * ISO / z);
-            if (j >= 0) { obs[k] = inten[j]; iso_idx[k] = j; ++found;
-                          if ((size_t)j != seed) members.push_back((size_t)j); }
-          }
-          if (found < 2) continue;   // need >=2 isotopes before a shape can be scored
-
-          averagineRatios(neutral, 4, theo);
-          double mx = 0.0; for (double v : obs) mx = std::max(mx, v);
-          if (mx <= 0) continue;
-          for (int k = 0; k < 4; ++k) obsn[k] = obs[k] / mx;
-          const double cos_sim = cosineSim(obsn, theo);
-
-          double csum = 0.0; int cn = 0;
-          for (int k = 1; k <= 3; ++k)
-            if (iso_idx[k] >= 0) { csum += xicCorr(ms1st, ms1[iso_idx[0]], ms1[iso_idx[k]]); ++cn; }
-          const double mean_corr = cn ? std::max(0.0, csum / cn) : 0.0;
-
-          // Shape AND co-elution, weighted by evidence (n-1)/3 capped at 1: the cosine of a short vector is
-          // nearly always high, so an unweighted 2-isotope hypothesis would beat 4 real isotopes.
-          const double evidence = std::min(1.0, (found - 1) / 3.0);
-          hyps.push_back({z, mono_mz, cos_sim * mean_corr * evidence, members});
+          long j = findPartner(s.mz - k * ISO / z);
+          if (j < 0) break;                   // BREAK on first miss (contiguous only)
+          lefts.push_back(j);
+          partners.push_back((size_t)j); mono = ms1[j].mz;
         }
+        for (int k = 1; k <= 5; ++k)          // heavier partners add confidence
+        {
+          long j = findPartner(s.mz + k * ISO / z);
+          if (j < 0) break;
+          partners.push_back((size_t)j);
+        }
+        const int n = 1 + (int)partners.size();
+        if (n > best_n) { best_n = n; best_z = z; best_mono = mono; best_partners = partners; best_nl = (int)lefts.size(); }
       }
-
-      Precursor_ pc;
-      pc.trace_idx = seed;
-      pc.rt = s_rt; pc.im = s.im;
-
-      if (hyps.empty())
+      // [monocheck-v2] Record what monoPositionPass_ needs (v2 reads only the immutable arrays and changes only
+      // mono_mz, so deciding it after the loop gives the same result as deciding it here, lets an automatic im_box
+      // use the run's own isotope scatter, and lets the decision follow the IM charge veto).
+      if (mono_check_ == 2 && best_z > 0)
       {
-        pc.mono_mz = s.mz; pc.charge = 0;   // no envelope evidence at all -> unknown charge
-        R.emit.push_back(pc);
-        continue;
+        R.v2.z = best_z; R.v2.nl = best_nl; R.v2.mono = best_mono;
+        for (int i = 0; i < best_nl; ++i) R.v2.left_mz[(size_t)i] = ms1[best_partners[(size_t)i]].mz;
       }
-
-      sort(hyps.begin(), hyps.end(), [](const Hyp& a, const Hyp& b) {
-        if (a.score != b.score) return a.score > b.score;
-        if (a.z != b.z) return a.z > b.z;   // [route-1] ties now favour HIGHER z (old code favoured low z)
-        return a.mono < b.mono;
-      });
-      const Hyp& best = hyps[0];
-      pc.mono_mz = best.mono; pc.charge = best.z;
-      // partners + the seed = envelope size. `members` excludes the seed, so this is the whole
-      // envelope only because the seed is always one of its peaks.
-      pc.n_isotopes = 1 + (int)best.partners.size();   // [Q4] envelope confidence for the mono call
-      R.emit.push_back(pc);
-      for (size_t j : best.partners) R.claims.push_back(j);
-      } while (0);
+      Precursor_ pc0;
+      pc0.trace_idx = seed;
+      pc0.rt = s_rt; pc0.im = s.im;
+      pc0.mono_mz = best_mono;
+      pc0.charge = best_z;                    // 0 => unknown: a guessed precursor, dropped later
+      pc0.n_isotopes = best_n;                // [Q4] envelope confidence for the mono call
+      R.emit.push_back(pc0);
+      for (size_t j : best_partners) R.claims.push_back(j);   // de-isotope
     };
 
     // [outer] 2048 (was 8192): the commit is serial and mostly fixed cost per seed, but each re-evaluation in it costs a
@@ -4136,7 +3877,6 @@ protected:
     const int spec_chunk = (int)std::max<size_t>(1, std::min<size_t>(16, spec_batch / (4 * (size_t)std::max(1, omp_get_max_threads()))));
     vector<SeedRes> res(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
-    std::array<size_t, 8> mc_tot{};   // [monocheck] SeedRes::mc over the committed seeds
     vector<MonoV2In_> v2in;           // [monocheck-v2] parallel to `out` when mono_check_ == 2
     double t_spec = 0.0, t_commit = 0.0, t_reeval = 0.0;   // [outer] the walk's sub-steps, log only
     auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
@@ -4150,7 +3890,7 @@ protected:
       {
         SeedRes& R = res[(size_t)ii - b0];
         const size_t seed = order[(size_t)ii];
-        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); R.mc.fill(0); R.v2 = MonoV2In_(); continue; }
+        if (used[seed]) { R.emit.clear(); R.claims.clear(); R.deps.clear(); R.v2 = MonoV2In_(); continue; }
         evalSeed(seed, R);
       }
       const double tc0 = now_s();
@@ -4165,7 +3905,6 @@ protected:
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
         if (stale) { const double tr0 = now_s(); evalSeed(seed, R); ++n_conflict; t_reeval += now_s() - tr0; }
         for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
-        if (mono_check_) for (size_t q = 0; q < mc_tot.size(); ++q) mc_tot[q] += R.mc[q];
         used[seed] = true;
         for (size_t j : R.claims) used[j] = true;
         ++n_committed;
@@ -4220,17 +3959,6 @@ protected:
                     + "; greedy walk: " + String((order.size() + spec_batch - 1) / spec_batch) + " batches, chunk " + String(spec_chunk)
                     + " | speculate " + String(t_spec) + " s | commit " + String(t_commit) + " s (re-evaluation " + String(t_reeval) + " s)");
     }
-    if (mono_check_ == 1)
-    {
-      mono_check_stamp_ = String(envelope_scoring ? "n/a (charge:scoring envelope)" : "on") + ", min_corr " + String(mono_check_min_corr_)
-                          + ", max_dim " + String(mono_check_max_dim_) + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right";
-      writeLogInfo_("[monocheck] " + String(mc_tot[0]) + " count walks checked (winning charge with a leftward partner): "
-                    + String(mc_tot[1]) + " monoisotopes moved right; steps rejected by profile (r < " + String(mono_check_min_corr_) + ") "
-                    + String(mc_tot[2]) + ", by 1/K0 (> " + String(mono_check_max_dim_) + ") " + String(mc_tot[3]) + "; steps accepted "
-                    + String(mc_tot[7]) + " by profile, " + String(mc_tot[4]) + " unchecked (< 3 shared frames or flat); " + String(mc_tot[5])
-                    + " leftward partners released unclaimed; " + String(mc_tot[6]) + " precursors kept no claimed partner"
-                    + (envelope_scoring ? " (charge:scoring envelope: not applied)" : ""));
-    }
     if (v2_out) v2_out->swap(v2in);   // [monocheck-v2] parallel to `out`, for monoPositionPass_
     return out;
   }
@@ -4245,7 +3973,7 @@ protected:
   /// order and IM slicing splits one isotope over several traces, so single-trace ratios are noisy. A: an identified
   /// walk carries at most one spurious step and it is the leftmost (engines search -1..2), so step j = the leftmost is
   /// rejected when PS(-j) / PS(-j+1) x lambda < min_ratio and the mono moves one isotope right (iterate: repeat).
-  /// B: when A rejected nothing and the walk ended on a miss (< 5 steps, not a charge:mono_averagine_guard stop), the
+  /// B: when A rejected nothing and the walk ended on a miss (< 5 steps), the
   /// true mono may be claimed by a brighter precursor, so the next lighter position becomes the mono, unclaimed, on a
   /// ratio >= extend. Only mono_mz changes: claims, charge and n_isotopes are the greedy loop's and the veto's.
   /// im_box 0 (auto): 3.5 x the 90th percentile of |d 1/K0| between the brightest decile of the walks (commit order is
@@ -4253,8 +3981,7 @@ protected:
   /// delta_rt, iso_im_tol), clamped to [0.01, 0.03]. `pcs` must be inferPrecursors_'s output in its order (the veto
   /// edits charges in place); `v2in` is the walk record inferPrecursors_ returned beside it.
   void monoPositionPass_(const vector<Trace>& ms1, const TraceStore& ms1st, vector<Precursor_>& pcs,
-                         const vector<MonoV2In_>& v2in, double delta_rt, double iso_im_tol, double mass_ppm,
-                         bool envelope_scoring)
+                         const vector<MonoV2In_>& v2in, double delta_rt, double iso_im_tol, double mass_ppm)
   {
     const double ISO = 1.0033548;
     const double PROTON_ = 1.00727646;
@@ -4263,171 +3990,163 @@ protected:
     std::array<size_t, 8> mc_tot{};
     double v2_box = mono_pos_im_box_, v2_p90 = -1.0;
     size_t v2_nb = 0, v2_nhit = 0;
-    if (!envelope_scoring)
+    if (v2in.size() != pcs.size())
+      throw Exception::Precondition(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[monocheck-v2] the walk record does not match the precursor list");
+    // The m/z-sorted index of inferPrecursors_ (same comparator on the same container, so the same order; the plain
+    // std searches return the positions its bucket index returns).
+    const size_t N = ms1.size();
+    vector<size_t> by_mz;
+    mzOrder_(ms1, by_mz);   // [outer] the same helper, so the same order
+    vector<double> sorted_mz(N), sorted_rt(N), sorted_im(N);
+    vector<float> inten(N);
+    #pragma omp parallel for schedule(static)
+    for (long ii = 0; ii < (long)N; ++ii)
+    { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im;
+      inten[i] = (float)intensityOf(ms1st, ms1[i]); }
+    auto lbmz = [&](double x) -> size_t { return (size_t)(std::lower_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
+    auto ubmz = [&](double x) -> size_t { return (size_t)(std::upper_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
+    if (v2_box <= 0.0)
     {
-      if (v2in.size() != pcs.size())
-        throw Exception::Precondition(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[monocheck-v2] the walk record does not match the precursor list");
-      // The m/z-sorted index of inferPrecursors_ (same comparator on the same container, so the same order; the plain
-      // std searches return the positions its bucket index returns).
-      const size_t N = ms1.size();
-      vector<size_t> by_mz;
-      mzOrder_(ms1, by_mz);   // [outer] the same helper, so the same order
-      vector<double> sorted_mz(N), sorted_rt(N), sorted_im(N);
-      vector<float> inten(N);
-      #pragma omp parallel for schedule(static)
-      for (long ii = 0; ii < (long)N; ++ii)
-      { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im;
-        inten[i] = (float)intensityOf(ms1st, ms1[i]); }
-      auto lbmz = [&](double x) -> size_t { return (size_t)(std::lower_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
-      auto ubmz = [&](double x) -> size_t { return (size_t)(std::upper_bound(sorted_mz.begin(), sorted_mz.end(), x) - sorted_mz.begin()); };
-      if (v2_box <= 0.0)
+      size_t nz = 0;
+      for (const MonoV2In_& v : v2in) if (v.z > 0) ++nz;
+      v2_nb = (nz + 9) / 10;
+      vector<size_t> idx;
+      idx.reserve(v2_nb);
+      for (size_t i = 0; i < pcs.size() && idx.size() < v2_nb; ++i) if (v2in[i].z > 0) idx.push_back(i);
+      vector<double> gaps(idx.size(), -1.0);
+      #pragma omp parallel for schedule(dynamic, 256)
+      for (long ii = 0; ii < (long)idx.size(); ++ii)
       {
-        size_t nz = 0;
-        for (const MonoV2In_& v : v2in) if (v.z > 0) ++nz;
-        v2_nb = (nz + 9) / 10;
-        vector<size_t> idx;
-        idx.reserve(v2_nb);
-        for (size_t i = 0; i < pcs.size() && idx.size() < v2_nb; ++i) if (v2in[i].z > 0) idx.push_back(i);
-        vector<double> gaps(idx.size(), -1.0);
-        #pragma omp parallel for schedule(dynamic, 256)
-        for (long ii = 0; ii < (long)idx.size(); ++ii)
-        {
-          const size_t seed = pcs[idx[(size_t)ii]].trace_idx;
-          const Trace& s = ms1[seed];
-          const double s_rt = rtOf(ms1st, s), tol = s.mz * mass_ppm * 1e-6;
-          const double target = s.mz + ISO / v2in[idx[(size_t)ii]].z;
-          const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
-          double g = -1.0;
-          for (size_t q = klo; q < khi; ++q)
-          {
-            if (fabs(sorted_rt[q] - s_rt) > delta_rt || by_mz[q] == seed) continue;
-            const double d = fabs(sorted_im[q] - s.im);
-            if (d <= iso_im_tol && (g < 0.0 || d < g)) g = d;
-          }
-          gaps[(size_t)ii] = g;
-        }
-        gaps.erase(std::remove_if(gaps.begin(), gaps.end(), [](double g) { return g < 0.0; }), gaps.end());
-        v2_nhit = gaps.size();
-        if (!gaps.empty())
-        {
-          const size_t k = (size_t)(0.9 * (double)(gaps.size() - 1));
-          std::nth_element(gaps.begin(), gaps.begin() + (long)k, gaps.end());
-          v2_p90 = gaps[k];
-        }
-        v2_box = v2_p90 < 0.0 ? 0.01 : std::min(0.03, std::max(0.01, 3.5 * v2_p90));
-      }
-      // Per precursor: bit 0 walk tested, 1 moved right, 2 moved back onto the seed, 3 extension tested, 4 moved left,
-      // 5 read at a veto-changed charge; rej = steps rejected. Summed below in index order.
-      vector<uint8_t> flag(pcs.size(), 0), rej(pcs.size(), 0);
-      #pragma omp parallel for schedule(dynamic, 1024)
-      for (long ii = 0; ii < (long)pcs.size(); ++ii)
-      {
-        const MonoV2In_& v = v2in[(size_t)ii];
-        Precursor_& pc = pcs[(size_t)ii];
-        // The final charge: the veto re-calls a z=1 walk 2+ (a multiple of the walk's charge) or unsets it (0: the
-        // precursor becomes guessed and is dropped or defaulted later, untested).
-        if (v.z <= 0 || pc.charge <= 0 || pc.charge % v.z != 0) continue;
-        const int z = pc.charge, mul = pc.charge / v.z, nl = v.nl * mul;
-        const size_t seed = pc.trace_idx;
+        const size_t seed = pcs[idx[(size_t)ii]].trace_idx;
         const Trace& s = ms1[seed];
         const double s_rt = rtOf(ms1st, s), tol = s.mz * mass_ppm * 1e-6;
-        auto PS = [&](int k, long* best) -> double {
-          const double target = s.mz + k * ISO / z;
-          const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
-          double sum = 0.0; float bi = -1.0f;
-          for (size_t q = klo; q < khi; ++q)
-          {
-            if (fabs(sorted_rt[q] - s_rt) > delta_rt || fabs(sorted_im[q] - s.im) > v2_box) continue;
-            const size_t j = by_mz[q];
-            sum += inten[j];
-            if (best && inten[j] > bi) { bi = inten[j]; *best = (long)j; }
-          }
-          return sum;
-        };
-        // q of the step onto position -j: PS(-j) / PS(-j+1) x lambda(neutral mass of the mono after that step). A walk
-        // re-read at a veto charge never stood on its in-between positions: an empty one there is no evidence against
-        // the step, so the step is compared over two positions, PS(-j) / PS(-j+2) x lambda^2 / 2 (Poisson M+2/M0).
-        auto ratio = [&](int j, long* best) -> double {
-          const double neutral = (s.mz - j * ISO / z) * z - z * PROTON_;
-          const double lam = std::max(0.10, 0.000594 * neutral);
-          const double den = PS(-j + 1, nullptr);
-          if (den > 0.0) return PS(-j, best) / den * lam;
-          if (mul > 1 && (j - 1) % mul != 0)
-          {
-            const double den2 = PS(-j + 2, nullptr);
-            return den2 > 0.0 ? PS(-j, best) / den2 * lam * lam / 2.0 : 0.0;
-          }
-          return 0.0;
-        };
-        // the m/z standing at position -i: the walk's own partner where the walk stepped, else the most intense trace
-        // there in the box, else the position itself
-        auto leftMz = [&](int i) -> double {
-          if (i % mul == 0) return v.left_mz[(size_t)(i / mul - 1)];
-          long bt = -1;
-          PS(-i, &bt);
-          return bt >= 0 ? ms1[(size_t)bt].mz : s.mz - i * ISO / z;
-        };
-        double mono = v.mono;
-        uint8_t f = mul > 1 ? 32 : 0, r = 0;
-        int acc = nl;
-        if (nl > 0)
+        const double target = s.mz + ISO / v2in[idx[(size_t)ii]].z;
+        const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
+        double g = -1.0;
+        for (size_t q = klo; q < khi; ++q)
         {
-          f |= 1;
-          while (acc > 0 && ratio(acc, nullptr) < mono_pos_min_ratio_)
-          {
-            --acc; ++r;
-            if (!mono_pos_iterate_)
-            {
-              // Leftmost step only, at a veto charge: an EMPTY in-between position cannot be the monoisotope (leftMz
-              // would report a bare position), so the mono moves on to the walk's next own position. mul == 1: no-op.
-              while (acc > 0 && acc % mul != 0 && PS(-acc, nullptr) <= 0.0) --acc;
-              break;
-            }
-          }
-          if (acc < nl)
-          {
-            const double acc_mz = acc > 0 ? leftMz(acc) : s.mz;
-            if (acc_mz > mono) { mono = acc_mz; f |= 2; if (acc == 0) f |= 4; }   // mono_averagine_select may already sit further right
-          }
+          if (fabs(sorted_rt[q] - s_rt) > delta_rt || by_mz[q] == seed) continue;
+          const double d = fabs(sorted_im[q] - s.im);
+          if (d <= iso_im_tol && (g < 0.0 || d < g)) g = d;
         }
-        // B: only when A rejected nothing, the walk ended on a miss (< 5 steps, not a guard stop) and the mono is the
-        // walk's leftmost peak (mono_averagine_select may have moved it right).
-        const double leftmost_mz = v.nl > 0 ? v.left_mz[(size_t)(v.nl - 1)] : s.mz;
-        if (mono_pos_extend_ > 0.0 && acc == nl && v.nl < 5 && !v.guard_stop && mono == leftmost_mz)
-        {
-          f |= 8;
-          long bt = -1;
-          const double q = ratio(nl + 1, &bt);
-          if (q >= mono_pos_extend_ && q > 0.0 && bt >= 0) { mono = ms1[(size_t)bt].mz; f |= 16; pc.mono_ext = true; }
-        }
-        pc.mono_mz = mono;
-        flag[(size_t)ii] = f; rej[(size_t)ii] = r;
+        gaps[(size_t)ii] = g;
       }
-      for (size_t i = 0; i < pcs.size(); ++i)
+      gaps.erase(std::remove_if(gaps.begin(), gaps.end(), [](double g) { return g < 0.0; }), gaps.end());
+      v2_nhit = gaps.size();
+      if (!gaps.empty())
       {
-        const uint8_t f = flag[i];
-        mc_tot[0] += f & 1; mc_tot[1] += (f >> 1) & 1; mc_tot[6] += (f >> 2) & 1; mc_tot[3] += (f >> 3) & 1; mc_tot[4] += (f >> 4) & 1;
-        mc_tot[5] += (f >> 5) & 1; mc_tot[2] += rej[i];
+        const size_t k = (size_t)(0.9 * (double)(gaps.size() - 1));
+        std::nth_element(gaps.begin(), gaps.begin() + (long)k, gaps.end());
+        v2_p90 = gaps[k];
       }
+      v2_box = v2_p90 < 0.0 ? 0.01 : std::min(0.03, std::max(0.01, 3.5 * v2_p90));
+    }
+    // Per precursor: bit 0 walk tested, 1 moved right, 2 moved back onto the seed, 3 extension tested, 4 moved left,
+    // 5 read at a veto-changed charge; rej = steps rejected. Summed below in index order.
+    vector<uint8_t> flag(pcs.size(), 0), rej(pcs.size(), 0);
+    #pragma omp parallel for schedule(dynamic, 1024)
+    for (long ii = 0; ii < (long)pcs.size(); ++ii)
+    {
+      const MonoV2In_& v = v2in[(size_t)ii];
+      Precursor_& pc = pcs[(size_t)ii];
+      // The final charge: the veto re-calls a z=1 walk 2+ (a multiple of the walk's charge) or unsets it (0: the
+      // precursor becomes guessed and is dropped later, untested).
+      if (v.z <= 0 || pc.charge <= 0 || pc.charge % v.z != 0) continue;
+      const int z = pc.charge, mul = pc.charge / v.z, nl = v.nl * mul;
+      const size_t seed = pc.trace_idx;
+      const Trace& s = ms1[seed];
+      const double s_rt = rtOf(ms1st, s), tol = s.mz * mass_ppm * 1e-6;
+      auto PS = [&](int k, long* best) -> double {
+        const double target = s.mz + k * ISO / z;
+        const size_t klo = lbmz(target - tol), khi = ubmz(target + tol);
+        double sum = 0.0; float bi = -1.0f;
+        for (size_t q = klo; q < khi; ++q)
+        {
+          if (fabs(sorted_rt[q] - s_rt) > delta_rt || fabs(sorted_im[q] - s.im) > v2_box) continue;
+          const size_t j = by_mz[q];
+          sum += inten[j];
+          if (best && inten[j] > bi) { bi = inten[j]; *best = (long)j; }
+        }
+        return sum;
+      };
+      // q of the step onto position -j: PS(-j) / PS(-j+1) x lambda(neutral mass of the mono after that step). A walk
+      // re-read at a veto charge never stood on its in-between positions: an empty one there is no evidence against
+      // the step, so the step is compared over two positions, PS(-j) / PS(-j+2) x lambda^2 / 2 (Poisson M+2/M0).
+      auto ratio = [&](int j, long* best) -> double {
+        const double neutral = (s.mz - j * ISO / z) * z - z * PROTON_;
+        const double lam = std::max(0.10, 0.000594 * neutral);
+        const double den = PS(-j + 1, nullptr);
+        if (den > 0.0) return PS(-j, best) / den * lam;
+        if (mul > 1 && (j - 1) % mul != 0)
+        {
+          const double den2 = PS(-j + 2, nullptr);
+          return den2 > 0.0 ? PS(-j, best) / den2 * lam * lam / 2.0 : 0.0;
+        }
+        return 0.0;
+      };
+      // the m/z standing at position -i: the walk's own partner where the walk stepped, else the most intense trace
+      // there in the box, else the position itself
+      auto leftMz = [&](int i) -> double {
+        if (i % mul == 0) return v.left_mz[(size_t)(i / mul - 1)];
+        long bt = -1;
+        PS(-i, &bt);
+        return bt >= 0 ? ms1[(size_t)bt].mz : s.mz - i * ISO / z;
+      };
+      double mono = v.mono;
+      uint8_t f = mul > 1 ? 32 : 0, r = 0;
+      int acc = nl;
+      if (nl > 0)
+      {
+        f |= 1;
+        while (acc > 0 && ratio(acc, nullptr) < mono_pos_min_ratio_)
+        {
+          --acc; ++r;
+          if (!mono_pos_iterate_)
+          {
+            // Leftmost step only, at a veto charge: an EMPTY in-between position cannot be the monoisotope (leftMz
+            // would report a bare position), so the mono moves on to the walk's next own position. mul == 1: no-op.
+            while (acc > 0 && acc % mul != 0 && PS(-acc, nullptr) <= 0.0) --acc;
+            break;
+          }
+        }
+        if (acc < nl)
+        {
+          const double acc_mz = acc > 0 ? leftMz(acc) : s.mz;
+          if (acc_mz > mono) { mono = acc_mz; f |= 2; if (acc == 0) f |= 4; }
+        }
+      }
+      // B: only when A rejected nothing and the walk ended on a miss (< 5 steps).
+      if (mono_pos_extend_ > 0.0 && acc == nl && v.nl < 5)
+      {
+        f |= 8;
+        long bt = -1;
+        const double q = ratio(nl + 1, &bt);
+        if (q >= mono_pos_extend_ && q > 0.0 && bt >= 0) { mono = ms1[(size_t)bt].mz; f |= 16; pc.mono_ext = true; }
+      }
+      pc.mono_mz = mono;
+      flag[(size_t)ii] = f; rej[(size_t)ii] = r;
+    }
+    for (size_t i = 0; i < pcs.size(); ++i)
+    {
+      const uint8_t f = flag[i];
+      mc_tot[0] += f & 1; mc_tot[1] += (f >> 1) & 1; mc_tot[6] += (f >> 2) & 1; mc_tot[3] += (f >> 3) & 1; mc_tot[4] += (f >> 4) & 1;
+      mc_tot[5] += (f >> 5) & 1; mc_tot[2] += rej[i];
     }
     String box = String(mono_pos_im_box_);
     if (mono_pos_im_box_ <= 0.0)
     {
       char b[160];
-      if (envelope_scoring) std::snprintf(b, sizeof b, "auto");
-      else std::snprintf(b, sizeof b, "auto %.4f (3.5 x p90 %.4f of the +1-isotope 1/K0 gap, %zu of %zu brightest seeds)", v2_box,
-                         v2_p90, v2_nhit, v2_nb);
+      std::snprintf(b, sizeof b, "auto %.4f (3.5 x p90 %.4f of the +1-isotope 1/K0 gap, %zu of %zu brightest seeds)", v2_box,
+                    v2_p90, v2_nhit, v2_nb);
       box = String(b);
     }
     const String cfg = "v2, min_ratio " + String(mono_pos_min_ratio_) + ", im_box " + box + ", extend "
                        + String(mono_pos_extend_) + (mono_pos_iterate_ ? ", iterate" : ", leftmost step only") + ", at the final charge";
-    mono_check_stamp_ = (envelope_scoring ? String("n/a (charge:scoring envelope), ") : String("")) + cfg + ": " + String(mc_tot[1]) + " of "
-                        + String(mc_tot[0]) + " monos moved right, " + String(mc_tot[4]) + " of " + String(mc_tot[3]) + " moved left";
+    mono_check_stamp_ = cfg + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right, " + String(mc_tot[4]) + " of " + String(mc_tot[3]) + " moved left";
     writeLogInfo_("[monocheck] " + cfg + ": " + String(mc_tot[0]) + " count walks with a leftward partner tested, " + String(mc_tot[2])
                   + " steps rejected, " + String(mc_tot[1]) + " monoisotopes moved right (" + String(mc_tot[6]) + " back onto the seed); "
                   + String(mc_tot[3]) + " walks tested for extension, " + String(mc_tot[4]) + " monoisotopes moved left (unclaimed); "
-                  + String(mc_tot[5]) + " walks read at the charge the IM veto gave them; claims unchanged"
-                  + (envelope_scoring ? " (charge:scoring envelope: not applied)" : ""));
+                  + String(mc_tot[5]) + " walks read at the charge the IM veto gave them; claims unchanged");
   }
 
   /// [soa2] The fragment RT gate field. 99.4% of scoring visits fail the RT gate, so `q` quantises RT into
@@ -4491,7 +4210,7 @@ protected:
 
   /// [foreign] One window's precursors, the candidate foreign envelopes of its spectra: every precursor whose mono
   /// m/z lies in the window, with a finite apex RT and 1/K0 and an isotope-supported charge (a guessed precursor's
-  /// charge is a default, so its envelope would be fictional; assembly:require_isotope_support drops them anyway),
+  /// charge is a default, so its envelope would be fictional; they are dropped anyway),
   /// sorted by apex RT (ties by index). Built from the run's precursor list, not from the tile's owned subset, so it
   /// is the same in any tiling.
   struct ForeignIdx_
@@ -4586,8 +4305,8 @@ protected:
       ++n;
       if (foreign_w_ <= 0.0) continue;
       frags[i].second *= foreign_w_;
-      const double L = std::log1p(frag_ai[i]);                       // corr_inten keys are linear in it, the others in its log
-      frag_scores[i] = cap_rank_ == 0 ? frag_scores[i] * foreign_w_ : L > 0.0 ? frag_scores[i] * std::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
+      const double L = std::log1p(frag_ai[i]);                       // the key is linear in its log
+      frag_scores[i] = L > 0.0 ? frag_scores[i] * std::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
       frag_ai[i] *= foreign_w_;                                      // [fuse] a fused key sums the attenuated apex
     }
     if (n && foreign_w_ <= 0.0)                                      // remove: compact every parallel array
@@ -4613,18 +4332,17 @@ protected:
   /// [fuse] assembly:fragment_fuse_ppm: one peak per fragment ion. The IM picker keeps 1-2 flight-time bins of an ion
   /// that spans 4-7, so one ion becomes several traces and several peaks 5-20 ppm apart; the same-bin merge reaches only
   /// exact bins. Groups the fragments within @p ppm (anchored: strongest first, each unfused fragment an anchor taking
-  /// every unfused one within ppm of its own m/z; @p linkage: m/z order, joined to the previous member within ppm and to
-  /// the group's first within 2 x ppm). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
-  /// intensity = their sum, rescued flag = the strongest member's, key = the best-keyed member's factor @p kq (its score,
-  /// and shared frames under evidence) times the summed IM-weighted apex @p ai (ln(1 + sum) when @p log_key), the formula
+  /// every unfused one within ppm of its own m/z). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
+  /// intensity = their sum, rescued flag = the strongest member's, key = the best-keyed member's factor @p kq (its score
+  /// and shared frames) times ln(1 + the summed IM-weighted apex @p ai), the formula
   /// of an unfused fragment's key applied to the whole ion; it is never below the best member's key (non-negative keys, up to rounding). It sits at its
   /// members' lowest index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and
   /// @p resc (when not empty) are parallel to @p frags and compacted with it; @p ai and @p kq are parallel to it on entry
   /// and stale on return. Deterministic: every order has a total tie-break and the sums run in m/z order. Returns the
   /// groups of >= 2 fused and adds their members to @p n_members.
   static long long fuseFragments_(vector<pair<double, double>>& frags, vector<double>& keys, vector<char>& resc,
-                                  const vector<double>& ai, const vector<double>& kq, bool log_key,
-                                  double ppm, bool linkage, long long& n_members)
+                                  const vector<double>& ai, const vector<double>& kq,
+                                  double ppm, long long& n_members)
   {
     const size_t n = frags.size();
     if (n < 2 || !(ppm > 0.0)) return 0;
@@ -4635,36 +4353,19 @@ protected:
     std::sort(om.begin(), om.end(), [&](uint32_t a, uint32_t b) { return frags[a].first != frags[b].first ? frags[a].first < frags[b].first : a < b; });
     vector<uint32_t> grp(n, NONE);
     uint32_t ng = 0;
-    if (linkage)
+    vector<uint32_t> oi(om);                                       // by intensity desc, then m/z asc, then index
+    std::sort(oi.begin(), oi.end(), [&](uint32_t a, uint32_t b) {
+      if (frags[a].second != frags[b].second) return frags[a].second > frags[b].second;
+      if (frags[a].first != frags[b].first) return frags[a].first < frags[b].first;
+      return a < b;
+    });
+    for (uint32_t a : oi)
     {
-      size_t s = 0;                                                  // the current group's first member in om
-      for (size_t k = 0; k < n; ++k)
-      {
-        if (k > 0)
-        {
-          const double m = frags[om[k]].first, mp = frags[om[k - 1]].first, ms = frags[om[s]].first;
-          if (!(m - mp <= mp * tol && m - ms <= 2.0 * ms * tol)) { ++ng; s = k; }
-        }
-        grp[om[k]] = ng;
-      }
+      if (grp[a] != NONE) continue;
+      const double m = frags[a].first, d = m * tol;
+      auto it = std::lower_bound(om.begin(), om.end(), m - d, [&](uint32_t i, double v) { return frags[i].first < v; });
+      for (; it != om.end() && frags[*it].first <= m + d; ++it) if (grp[*it] == NONE) grp[*it] = ng;
       ++ng;
-    }
-    else
-    {
-      vector<uint32_t> oi(om);                                       // by intensity desc, then m/z asc, then index
-      std::sort(oi.begin(), oi.end(), [&](uint32_t a, uint32_t b) {
-        if (frags[a].second != frags[b].second) return frags[a].second > frags[b].second;
-        if (frags[a].first != frags[b].first) return frags[a].first < frags[b].first;
-        return a < b;
-      });
-      for (uint32_t a : oi)
-      {
-        if (grp[a] != NONE) continue;
-        const double m = frags[a].first, d = m * tol;
-        auto it = std::lower_bound(om.begin(), om.end(), m - d, [&](uint32_t i, double v) { return frags[i].first < v; });
-        for (; it != om.end() && frags[*it].first <= m + d; ++it) if (grp[*it] == NONE) grp[*it] = ng;
-        ++ng;
-      }
     }
     if (ng == n) return 0;                                           // nothing within ppm: unchanged
     struct Acc { double w = 0.0, wmz = 0.0, ai = 0.0; uint32_t head = NONE, top = NONE, best = NONE, n = 0; };
@@ -4690,7 +4391,7 @@ protected:
       {
         const double mz = g.w > 0.0 ? g.wmz / g.w : frags[g.top].first;
         const char r = resc.empty() ? 0 : resc[g.top];
-        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * (log_key ? std::log1p(g.ai) : g.ai);
+        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * std::log1p(g.ai);
         if (!resc.empty()) resc[w] = r;
         ++groups; n_members += g.n;
       }
@@ -4732,14 +4433,11 @@ protected:
       const int gi = (*fg.nearest_local)[p_tr.frame0 + k];   // MS1 frame -> window frame, precomputed
       if (gi >= 0) { if (pdense[gi] == 0.0f) touched.push_back(gi); pdense[gi] += (float)pval; }
     }
-    double psum = 0, psumsq = 0, plogsum = 0;
-    // plogsum normalises the precursor profile for gate:coelution=logoverlap. Constant across
-    // every fragment of this precursor, so hoist it out of the inner loop.
+    double psum = 0, psumsq = 0;
     for (int gi : touched)
     {
       double v = pdense[gi];
       psum += v; psumsq += v * v;
-      if (log_overlap_) plogsum += std::log1p(v);
     }
     int p_lo = std::numeric_limits<int>::max(), p_hi = -1;              // [short] the precursor's span in window frames
     int p_apex = -1;                                                    // [coloc] the precursor apex frame
@@ -4828,7 +4526,7 @@ protected:
           const int inter = std::min(f_hi, p_hi) - std::max(f_lo, p_lo) + 1, shorter = std::min(f_hi - f_lo, p_hi - p_lo) + 1;
           if (inter < coloc_overlap_ * shorter) continue;
         }
-        double c, c_raw = 0.0;                                          // c_raw: the unshrunk score, for assembly:cap_rank
+        double c, c_raw = 0.0;                                          // c_raw: the unshrunk score, for the cap key
         const bool no_corr = g_shrink ? overlap < shrink_min_pts_ : (short_np || overlap < min_corr_pts);   // [short]/[shrink] precedence
         if (g_conc && no_corr)
         {
@@ -4846,39 +4544,7 @@ protected:
         {
           if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts))    // overlap guard [H-4]; [shrink] its own floor
           { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 1u); continue; }
-          // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
-          // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
-          // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
-          if (var_support_ && !log_overlap_)                             // [Q1] pearson-only, per the flag doc
-          {
-            // [Q1] n = |precursor support U fragment support|; fsum/fsumsq over the fragment's real points.
-            double fsum = 0.0, fsumsq = 0.0;
-            for (size_t k = 0; k < f.span(); ++k)
-            { const double fv = xv(wst, f, k); if (fv > 0.0) { fsum += fv; fsumsq += fv * fv; } }
-            double n = (double)(touched.size() + f.np() - (size_t)overlap);
-            double pm = psum / n, fm = fsum / n;
-            double pv2 = psumsq - n * pm * pm, fv2 = fsumsq - n * fm * fm;
-            if (pv2 <= 0.0 || fv2 <= 0.0) continue;                      // degenerate on union support
-            c = (dot - n * pm * fm) / std::sqrt(pv2 * fv2);
-          }
-          else if (log_overlap_)
-          {
-            // Both log-profiles normalised to unit sum, then intersected: a shape statistic. Normalising by the
-            // precursor's log-sum alone bounded the score by the intensity ratio (-18.9% peptides at gate 0.5).
-            double fsum = 0.0;
-            for (size_t k = 0; k < f.span(); ++k)
-            { const double fv = xv(wst, f, k); if (fv > 0.0) fsum += std::log1p(fv); }
-            if (fsum <= 0.0 || plogsum <= 0.0) continue;
-            double inter = 0.0;
-            for (size_t k = 0; k < f.span(); ++k)
-            {
-              const double fv = xv(wst, f, k); if (fv <= 0.0) continue;
-              inter += std::min(std::log1p(fv) / fsum,
-                                std::log1p((double)pdense[f.frame0 + k]) / plogsum);
-            }
-            c = inter;
-          }
-          else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
+          c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson over the full RT grid
           c_raw = c;
           if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
           {
@@ -4900,11 +4566,9 @@ protected:
         frag_bin.push_back(f.tof);
         frag_span.emplace_back(f_lo, f_hi);
         if (fx || fuse_on) frag_ai.push_back(inten);
-        frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
-                            : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
-                            : c * inten);                              // [cap] the max_fragments ranking key
+        frag_scores.push_back(std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap));   // [cap] the max_fragments ranking key
         if (fuse_on)                                                   // [fuse] the same key without its intensity term
-          frag_kq.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) : cap_rank_ == 2 ? std::max(c_raw, 0.0) * (1.0 + overlap) : c);
+          frag_kq.push_back(std::max(c_raw, 0.0) * (1.0 + overlap));
         if (g_anchor && c >= anchor_min_corr_) anchors.push_back((uint32_t)fi);   // [anchor] a well-correlated accepted fragment
       }
       // [anchor] gate:anchor_rescue. A weak fragment of a strong precursor is a 2-3 point tip that fails the plain gate's
@@ -4995,8 +4659,8 @@ protected:
             frag_bin.push_back(f.tof);
             frag_span.emplace_back(q.t_lo, q.t_hi);
             if (fx || fuse_on) frag_ai.push_back(inten);                 // [foreign]/[fuse] parallel to frags, as above
-            frag_scores.push_back(cap_rank_ == 1 ? c * c * std::log1p(inten) : cap_rank_ == 2 ? c * std::log1p(inten) * (1.0 + q.ov) : c * inten);
-            if (fuse_on) frag_kq.push_back(cap_rank_ == 1 ? c * c : cap_rank_ == 2 ? c * (1.0 + q.ov) : c);
+            frag_scores.push_back(c * std::log1p(inten) * (1.0 + q.ov));
+            if (fuse_on) frag_kq.push_back(c * (1.0 + q.ov));
             resc.push_back(1);
             resc_fi.push_back(q.fi);
             ++n_why[q.why];
@@ -5118,7 +4782,7 @@ protected:
     if (fuse_on && n_merged > 0)
     {
       long long n_mem = 0;
-      const long long n_grp = fuseFragments_(frags, frag_scores, resc, frag_ai, frag_kq, cap_rank_ != 0, fuse_ppm_, fuse_linkage_, n_mem);
+      const long long n_grp = fuseFragments_(frags, frag_scores, resc, frag_ai, frag_kq, fuse_ppm_, n_mem);
       auto& fc = fuseCount_();
       ++fc[0]; fc[1] += (long long)n_merged; fc[2] += (long long)frags.size();
       if (n_grp) { fc[3] += n_grp; fc[4] += n_mem; }
@@ -5430,22 +5094,12 @@ protected:
     const double delta_rt = getDoubleOption_("gate:delta_rt");
     if (getFlag_("diag:selftest_arena")) return selftestArena_();
     if (getFlag_("diag:selftest_twins")) return selftestTwins_();
-    log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
-    mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
-    mono_select_ = getFlag_("charge:mono_averagine_select");
-    {
-      const String mc = getStringOption_("charge:mono_profile_check");
-      mono_check_ = (mc == "true") ? 1 : (mc == "v2") ? 2 : 0;
-    }
-    mono_check_min_corr_ = getDoubleOption_("charge:mono_profile_min_corr");
-    mono_check_max_dim_ = getDoubleOption_("charge:mono_profile_max_dim");
+    mono_check_ = getStringOption_("charge:mono_profile_check") == "v2" ? 2 : 0;
     mono_pos_min_ratio_ = getDoubleOption_("charge:mono_position_min_ratio");
     mono_pos_im_box_ = getDoubleOption_("charge:mono_position_im_box");
     mono_pos_extend_ = getDoubleOption_("charge:mono_position_extend");
     mono_pos_iterate_ = getStringOption_("charge:mono_position_iterate") == "true";
-    iso_closest_ = getStringOption_("charge:iso_partner") == "closest";
-    var_support_ = getFlag_("gate:variance_support");
     short_conc_ = (getStringOption_("gate:short_traces") == "concentric");
     short_center_tol_ = getDoubleOption_("gate:short_center_tol");
     short_min_pts_ = getIntOption_("gate:short_min_points");
@@ -5458,7 +5112,6 @@ protected:
     adaptive_ = (getStringOption_("gate:adaptive") == "faint");
     adaptive_auto_ = (getStringOption_("gate:adaptive") == "auto");
     auto_faint_frac_ = getDoubleOption_("gate:auto_faint_fraction");
-    cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
     im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
     merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
     frag_int_ = getStringOption_("assembly:frag_intensity") == "core" ? 1 : getStringOption_("assembly:frag_intensity") == "sum" ? 2 : 0;
@@ -5471,7 +5124,6 @@ protected:
     foreign_dim_ = getDoubleOption_("assembly:foreign_precursor_dim");
     foreign_min_iso_ = getIntOption_("assembly:foreign_precursor_min_iso");
     fuse_ppm_ = getDoubleOption_("assembly:fragment_fuse_ppm");
-    fuse_linkage_ = getStringOption_("assembly:fragment_fuse_mode") == "linkage";
     faint_frames_ = getIntOption_("gate:faint_max_frames");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
@@ -5480,8 +5132,6 @@ protected:
     anchor_min_corr_ = getDoubleOption_("gate:anchor_min_corr");
     anchor_rescue_corr_ = getDoubleOption_("gate:anchor_rescue_corr");
     anchor_max_rescued_ = getIntOption_("gate:anchor_max_rescued");
-    if (shrink_ && log_overlap_)
-      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "gate:shrinkage fisher needs a correlation: it does not apply to gate:coelution logoverlap");
     corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
@@ -5492,7 +5142,6 @@ protected:
     const String twin_rt_match = getStringOption_("assembly:twin_rt_match");
     const int twin_rt_mode = twin_rt_match == "ppm" ? 0 : twin_rt_match == "bin" ? 1 : 2;
     const int max_charge = getIntOption_("max_charge");
-    mzEstimator() = getStringOption_("trace:mz_estimator");   // before any toTrace() call
     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
 
     PeakMap exp;
@@ -5536,19 +5185,13 @@ protected:
             "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary "
             "can only write mzML.");
 #endif
-    // [3a] trace:band_edges=acquisition needs the tdf's GlobalMetadata bounds: refuse BEFORE the
-    // load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
+    // [3a] The integer detector's band edges come from the acquisition: they need the tdf's GlobalMetadata bounds, so
+    // refuse BEFORE the load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
     // tdf is recovered, below). Milliseconds against minutes of loading.
-    const bool band_edges_acq = (getStringOption_("trace:band_edges") == "acquisition");
     const bool integer_req = (getStringOption_("trace:detector") == "integer");
-    const char* tr_env = std::getenv("DIASPEXTRACT_TILE_RESIDENT");
-    const bool force_resident = tr_env && String(tr_env) != "0" && String(tr_env) != "";
-    if (!band_edges_acq && integer_req && stream_load && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF && !force_resident)
-      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or DIASPEXTRACT_TILE_RESIDENT=1 for the resident source.");
     std::vector<std::string> tdf_cand{in + "/analysis.tdf"};   // the calibration sources, in the order the load tries them
     if (const char* sc = std::getenv("DIASPEXTRACT_MZPEAK_TDF")) tdf_cand.push_back(sc);
-    if (band_edges_acq && integer_req)
+    if (integer_req)
     {
       // [3a] The axis is selected HERE, in the order the load below would use it (the first
       // candidate whose calibration loads is THE source), so the bounds that are checked belong to
@@ -5561,7 +5204,7 @@ protected:
         if (!loadTofAxis(c, w_axis)) continue;   // not a calibration source; try the next
         if (!(tofAxis().n_bins > 1))
           throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                "trace:band_edges=acquisition needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + "). Use -trace:band_edges slab, or -trace:detector openms.");
+                "trace:detector integer needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + "). Use -trace:detector openms.");
         writeLogInfo_("flight-time axis from " + c + " (preflight): " + String(tofAxis().b_by_frame.size()) + " frame factors; digitizer bins " + String(tofAxis().n_bins) + ", acquisition m/z " + String(tofAxis().acq_lo) + "-" + String(tofAxis().acq_hi));
         break;
       }
@@ -5616,8 +5259,7 @@ protected:
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
     // table regardless), pass 2 reads each tile's MS2 frames through the loader's RT range. The
-    // resident source (mzPeak, mzML, perf:stream_load=false, or DIASPEXTRACT_TILE_RESIDENT=1 for an
-    // A/B) holds the whole run and slices it, as before.
+    // resident source (mzPeak, mzML, perf:stream_load=false) holds the whole run and slices it, as before.
     bool tile_source = false;
     PickCompactConsumer::FrameTables run_tables;   // the reader's frozen tables, kept for pass 2
     PeakPickerIM spicker;
@@ -5641,9 +5283,8 @@ protected:
       const bool in_mzpeak = false;
 #endif
       // [3b] the streaming source needs the Bruker loader: a .d only, never an mzML or an mzPeak
-      // archive (the resident path reads those whole). DIASPEXTRACT_TILE_RESIDENT set to any non-empty
-      // value other than 0 (parsed once, above) forces the resident source for a same-build A/B.
-      tile_source = !in_mzpeak && !force_resident && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF;
+      // archive (the resident path reads those whole).
+      tile_source = !in_mzpeak && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF;
       if (tile_source)
       {
         // pass 1: MS1 only; lo > hi selects no MS2 frame, the loader exports the table anyway
@@ -5661,14 +5302,14 @@ protected:
       {
 #ifdef DIASPEXTRACT_WITH_MZPEAK
         table_src_if_ok = "mzpeak";
-        if (band_edges_acq && integer_req)
+        if (integer_req)
         {
           // [3a] the sweep recovers the embedded tdf's calibration and bounds; it is cached, so
           // the load below reuses it -- the refusal comes before any peak is decoded
           const auto m = spx::mzPeakRunMeta(in);
           if (!m->exact || !(m->exact->n_bins > 1))
             throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                  "trace:band_edges=acquisition needs DigitizerNumSamples and MzAcqRangeLower/Upper from the archive's (or sidecar) analysis.tdf; not provided (" + String(m->exact ? m->exact->bounds_why : "no exact calibration") + ").");
+                  "trace:detector integer needs DigitizerNumSamples and MzAcqRangeLower/Upper from the archive's (or sidecar) analysis.tdf; not provided (" + String(m->exact ? m->exact->bounds_why : "no exact calibration") + ").");
         }
         consumer.tablefn = [&]() {
           PickCompactConsumer::FrameTables t;
@@ -6003,14 +5644,10 @@ protected:
       writeLogInfo_("[cell] pitch " + String(cell_pitch) + " s = " + String(n) + " MS1 frames (cycle " + String(cycle) + " s): "
                     + String(cell_edges.size() + 1) + " cells, edges " + (cell_boundaries.empty() ? String("none") : cell_boundaries));
     }
-    double split_scan_time = 0.0;
-    if (getStringOption_("trace:split_scan_time") == "frame")
-    {
-      split_scan_time = cycle;
-      if (split_scan_time > 0.0)
-        writeLogInfo_("[split] scan time " + String(split_scan_time) + " s from " + String(ms1_rt.size()) + " MS1 frames -> chrom_fwhm / scan time is the splitter's window");
-      else writeLogWarn_("[split] no positive gap between MS1 frame times; the valley splitter falls back to each trace's own average cycle time (trace:split_scan_time=trace)");
-    }
+    const double splitter_scan_time = cycle;
+    if (splitter_scan_time > 0.0)
+      writeLogInfo_("[split] scan time " + String(splitter_scan_time) + " s from " + String(ms1_rt.size()) + " MS1 frames -> chrom_fwhm / scan time is the splitter's window");
+    else writeLogWarn_("[split] no positive gap between MS1 frame times; the valley splitter falls back to each trace's own average cycle time");
     const double max_span = getDoubleOption_("trace:max_span_sec");
     int ms1_bands = getIntOption_("perf:ms1_trace_bands");
     if (ms1_bands < 1) ms1_bands = 1;
@@ -6077,7 +5714,7 @@ protected:
         for (auto& sp : part) { smp_pk += sp.size(); smp.addSpectrum(std::move(sp)); }
         vector<MSSpectrum>().swap(part);
         st = detectTraces_(smp, smp_store, delta_im, getDoubleOption_("trace:noise_threshold_int"), ms1_snr, 0.0,
-                           getDoubleOption_("trace:ms1_split_valleys"), ms1_bands, split_scan_time, -1, LC_MS1BAND);
+                           getDoubleOption_("trace:ms1_split_valleys"), ms1_bands, splitter_scan_time, -1, LC_MS1BAND);
       }
       catch (...) { smp_err = std::current_exception(); }
       if (smp_err) std::rethrow_exception(smp_err);
@@ -6128,7 +5765,7 @@ protected:
     {
       ms1_traces = detectTraces_(ms1_map, ms1_store, delta_im, getDoubleOption_("trace:noise_threshold_int"),
                                                ms1_snr, ms1_min_len, getDoubleOption_("trace:ms1_split_valleys"), ms1_bands,
-                                               split_scan_time, LC_MS1MAP, LC_MS1BAND, &ms1_prune);   // [ledger] the partition takes the charge over
+                                               splitter_scan_time, LC_MS1MAP, LC_MS1BAND, &ms1_prune);   // [ledger] the partition takes the charge over
     }
     catch (...) { ms1_err = std::current_exception(); }
     if (ms1_err) std::rethrow_exception(ms1_err);
@@ -6153,7 +5790,6 @@ protected:
     writeLogInfo_("MS2 trace gate: apex > " + String(ms2_snr * ms2_noise) + " (snr " + String(ms2_snr)
                   + " x noise " + String(ms2_noise) + "), membership > " + String(ms2_noise)
                   + ", min_length " + String(ms2_minlen) + " s");
-    const bool env_scoring = (getStringOption_("charge:scoring") == "envelope");
     // [determinism] inferPrecursors_ is greedy, so its output depends on ms1_traces' container order, which
     // EPD's parallel split makes thread-dependent: sort by content first. A non-finite coordinate would make
     // the comparator non-transitive (UB in sort), so those traces are dropped before it.
@@ -6187,12 +5823,11 @@ protected:
     }
     if (iso_im_tol <= 0.0) iso_im_tol = autoIsoImTol_(ms1_traces, ms1_store, max_charge, delta_rt, mass_ppm, iso_tol_stamp);   // [isotol]
     else writeLogInfo_("[isotol] 1/K0 tolerance for isotope partners " + String(iso_im_tol) + " (fixed)");
-    writeLogInfo_(String("[isotol] partner rule: ") + (iso_closest_ ? "closest to the seed in apex RT and 1/K0 (charge:iso_partner closest)" : "first in m/z order"));
     std::optional<Phase> win_phase;                            // [perf-instr] the window loop (function scope)
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
-                                                     mass_ppm, env_scoring, mono_check_ == 2 ? &mono_v2in : nullptr);
+                                                     mass_ppm, mono_check_ == 2 ? &mono_v2in : nullptr);
     const double _t_inf_fn = phase_clock_();   // [outer] sub-step clock of PRECURSOR_INFER, log only
     if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
     {
@@ -6253,7 +5888,7 @@ protected:
           const double r3 = ok3 ? fabs(pc.im - (a3 + b3 * pc.mono_mz)) / s3 : 1e9;
           if (r2 <= kband && r2 <= r3) { pc.charge = 2; ++to2; }
           // On the 3+ band: unset the charge (re-calling it 3+ identified nothing; docs/BASELINE.md, "The
-          // veto's 3+ arm dropped"). It becomes a guessed precursor, which require_isotope_support drops.
+          // veto's 3+ arm dropped"). It becomes a guessed precursor, which is dropped.
           else if (ok3 && r3 <= kband) { pc.charge = 0; ++to3; }
         }
         writeLogInfo_("[im-veto] 2+ line 1/K0 = " + String(a2) + " + " + String(b2) + " * m/z (n=" + String(n2) + ", sigma "
@@ -6268,24 +5903,19 @@ protected:
     const double _t_inf_v2a = phase_clock_();   // [outer]
     if (mono_check_ == 2)
     {
-      monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm, env_scoring);
+      monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm);
       vector<MonoV2In_>().swap(mono_v2in);
     }
     const double _t_inf_v2b = phase_clock_();   // [outer]
-    const int default_charge = getIntOption_("assembly:default_charge");
     Size n_default = 0;
-    // [way-4] A GUESSED charge and an isotope-SUPPORTED charge must not be emitted identically.
-    // Closed search hides the difference (engine enumerates); open search does not.
     for (auto& pc : precursors)
-      if (pc.charge == 0) { pc.guessed = true; pc.charge = default_charge; ++n_default; }
-    // [emission] assembly:require_isotope_support: drop the guessed singletons.
-    const bool require_iso = (getStringOption_("assembly:require_isotope_support") == "true");
-    if (require_iso)
+      if (pc.charge == 0) { pc.guessed = true; ++n_default; }
+    // [emission] isotope support is required: drop the guessed singletons.
     {
       const size_t before = precursors.size();
       precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
                        [](const Precursor_& pc){ return pc.guessed; }), precursors.end());
-      writeLogInfo_("require_isotope_support: dropped " + String(before - precursors.size())
+      writeLogInfo_("[emission] dropped " + String(before - precursors.size())
                     + " guessed precursors, " + String(precursors.size()) + " isotope-supported remain");
     }
     {
@@ -6405,7 +6035,7 @@ protected:
                   + String(_t_inf_cmp - _t_inf_srt) + " s (" + (prec_ties ? "equal keys: std::sort" : "unique order") + ") | compaction "
                   + String(_t_inf_trim - _t_inf_cmp) + " s | trim " + String(phase_clock_() - _t_inf_trim) + " s");
     writeLogInfo_(clk_() + " Detected " + String(ms1_traces.size()) + " MS1 traces -> " + String(precursors.size())
-                  + " precursor hypotheses (" + String(n_default) + " assigned default charge)." + rss_());
+                  + " precursor hypotheses (" + String(n_default) + " without a charge call dropped)." + rss_());
     std::exception_ptr worker_err;
 
     //-------------------------------------------------------------
@@ -6553,36 +6183,23 @@ protected:
       String tl; for (const Tile& t : tiles) tl += (tl.empty() ? "" : " ") + String("[") + String(t.lo) + "," + String(t.hi) + ")";
       writeLogInfo_("[tile] " + String(tiles.size()) + " tile(s) of up to " + String(per) + " cell(s): " + tl);
     }
-    // [tile] Run-level per-window band edges: the whole resident slab's flight-time extremes
-    // (exactly the values the body computed on the whole window), so every tile traces in the
-    // same bands. The bins are converted here, once, in place (toTof is idempotent).
+    // [tile] Run-level per-window band edges from the acquisition, so every tile traces in the same bands. A resident
+    // slab's bins are converted here, once, in place (toTof is idempotent).
     map<WinKey, pair<TofIdx, TofIdx>> wbands;
     if (integer_detector)
     {
-      if (band_edges_acq && !(tofAxis().n_bins > 1))
+      if (!(tofAxis().n_bins > 1))
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:band_edges=acquisition needs DigitizerNumSamples and MzAcqRangeLower/Upper from the tdf's GlobalMetadata, which this input's calibration source did not provide (" + tofAxis().bounds_why + ").");
-      if (!(tofAxis().n_bins > 1)) writeLogInfo_("[tof] no run-level axis bounds from the tdf (" + tofAxis().bounds_why + "); the acquisition edge set is not on record for this run");
-      if (tile_source && !band_edges_acq)   // unreachable: refused before the load
-        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile.");
+              "trace:detector integer needs DigitizerNumSamples and MzAcqRangeLower/Upper from the tdf's GlobalMetadata, which this input's calibration source did not provide (" + tofAxis().bounds_why + ").");
       for (const WinKey& k : fkeys) wbands[k] = {0xFFFFFFFFu, 0};
       #pragma omp parallel for schedule(dynamic, 1)
       for (long i = 0; i < (long)fkeys.size(); ++i)
       {
         const WinKey& k = fkeys[(size_t)i];
-        TofIdx tlo = 0xFFFFFFFFu, thi = 0;
         const auto rs = ms2_by_window.find(k);   // a resident slab: converted here, once, in place
-        if (rs != ms2_by_window.end())
-        {
-          PeakSlab& sl = rs->second;
-          toTof(sl);
-          for (TofIdx t : sl.tof) { tlo = std::min(tlo, t); thi = std::max(thi, t); }
-        }
-        // [3a] the run-level alternative: tlo 0, thi the larger of the digitizer's last bin
-        // (DigitizerNumSamples - 1: no bin index can exceed it) and the acquisition's upper m/z
-        // through the calibration at every frame of the frozen table; logged in both modes so
-        // the two sets are on record side by side
+        if (rs != ms2_by_window.end()) toTof(rs->second);
+        // [3a] tlo 0, thi the larger of the digitizer's last bin (DigitizerNumSamples - 1: no bin index can exceed it)
+        // and the acquisition's upper m/z through the calibration at every frame of the frozen table
         TofIdx thi_mz = 0, thi_acq = 0;
         if (tofAxis().n_bins > 1)
         {
@@ -6600,10 +6217,9 @@ protected:
             throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[tof] the acquisition's upper bin is not representable (the partition would wrap)", String(thi_acq));
         }
         #pragma omp critical(winlog)
-        writeLogInfo_("[tof] window " + String(k[0] / 100.0) + "-" + String(k[1] / 100.0) + " slab tlo=" + String(tlo) + " thi=" + String(thi)
-                      + " | acquisition tlo=0 thi=" + String(thi_acq) + " (digitizer " + String(tofAxis().n_bins > 1 ? tofAxis().n_bins - 1 : 0L) + ", MzAcqRangeUpper " + String(thi_mz) + ")"
-                      + (band_edges_acq ? " (in use)" : " (slab in use)"));
-        wbands.at(k) = band_edges_acq ? pair<TofIdx, TofIdx>{0, thi_acq} : pair<TofIdx, TofIdx>{tlo, thi};
+        writeLogInfo_("[tof] window " + String(k[0] / 100.0) + "-" + String(k[1] / 100.0) + " acquisition tlo=0 thi=" + String(thi_acq)
+                      + " (digitizer " + String(tofAxis().n_bins > 1 ? tofAxis().n_bins - 1 : 0L) + ", MzAcqRangeUpper " + String(thi_mz) + ")");
+        wbands.at(k) = pair<TofIdx, TofIdx>{0, thi_acq};
       }
     }
     // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
@@ -6662,7 +6278,7 @@ protected:
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
     out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
     out_exp.setMetaValue("spx:tile_cells_per_tile", cells_per_tile);
-    out_exp.setMetaValue("spx:band_edges", integer_detector ? getStringOption_("trace:band_edges") : String("none"));   // what was applied
+    out_exp.setMetaValue("spx:band_edges", integer_detector ? String("acquisition") : String("none"));   // what was applied
     out_exp.setMetaValue("spx:tile_source", tile_source ? "stream" : "resident");
     out_exp.setMetaValue("spx:tiles", (int)tiles.size());
     out_exp.setMetaValue("spx:frame_table", frame_table_src);   // the frozen tables' source (loader | mzpeak | slab)
@@ -6674,7 +6290,7 @@ protected:
     out_exp.setMetaValue("spx:gate_shrinkage", shrink_ ? String("fisher r0 ") + String(shrink_r0_) + " sd " + String(shrink_sd_) + " from " + String(shrink_min_pts_) : String("off"));
     out_exp.setMetaValue("spx:gate_colocation", coloc_ ? String("ranges ") + String(coloc_overlap_) : String("off"));
     out_exp.setMetaValue("spx:gate_short_traces", short_conc_ ? String("concentric tol ") + String(short_center_tol_) + " from " + String(short_min_pts_) : String("off"));
-    out_exp.setMetaValue("spx:cap_rank", String(cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten"));
+    out_exp.setMetaValue("spx:cap_rank", String("evidence"));
     out_exp.setMetaValue("spx:same_bin_merge", String("im_slices ") + (!integer_detector ? String("n/a (openms detector)") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) + " (span " + String(2.0 * im_slice_merge_) + ")" : String("off"))
                          + ", assembly " + (merge_same_bin_ ? (integer_detector ? "on" : "on (exact m/z)") : "off"));
     if (anchor_rescue_)   // [anchor] stamped only when on: the default header is unchanged
@@ -6685,14 +6301,13 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
     out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
-    out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
+    out_exp.setMetaValue("spx:require_isotope_support", 1);
     if (!minlen_stamp.empty()) out_exp.setMetaValue("spx:ms1_min_length", minlen_stamp);   // [minlen] auto only: a fixed value leaves the header unchanged
     if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
-    if (getDoubleOption_("charge:iso_im_tolerance") <= 0.0 || iso_closest_)       // [isotol] only when not the 1.5.0 behaviour
-      out_exp.setMetaValue("spx:iso_im_tolerance", iso_tol_stamp + (iso_closest_ ? ", closest partner in RT and 1/K0" : ", first partner in m/z"));
+    if (getDoubleOption_("charge:iso_im_tolerance") <= 0.0)       // [isotol] only when not the 1.5.0 behaviour
+      out_exp.setMetaValue("spx:iso_im_tolerance", iso_tol_stamp + ", first partner in m/z");
     if (post_fusion_cap_)   // [recap] only when on: the default header is unchanged
-      out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the "
-                           + (cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten") + " cap key");
+      out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the evidence cap key");
     out_exp.setMetaValue("spx:twin_merge", twin_im < 0.0 ? String("off") : twin_rt_desc.empty() ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm")
                          : String(twin_rt_desc + ", same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm"));   // [twin-rt] the 1.5.0 text when off
     if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
@@ -6703,8 +6318,7 @@ protected:
                                                  + (foreign_ppm_ > 30.0 ? String(foreign_ppm_) : String("30")) + " ppm)"));   // the own-ion tests' max(ppm, 30)
     if (fuse_ppm_ > 0.0)   // [fuse] stamped only when on (on by default since 1.6.0; 0 leaves the 1.5.0 header)
     {
-      String s = String(fuse_linkage_ ? "linkage " : "anchored ") + String(fuse_ppm_) + " ppm";
-      if (fuse_linkage_) s += String(" (group span <= ") + String(2.0 * fuse_ppm_) + " ppm)";
+      String s = String("anchored ") + String(fuse_ppm_) + " ppm";
       s += ", summed intensity, intensity-weighted m/z, cap key from the summed apex; after the same-bin merge, before min_fragments and max_fragments";
       out_exp.setMetaValue("spx:fragment_fuse", s);
     }
@@ -6982,7 +6596,7 @@ protected:
           // that two bands can take the same peak (each has its own `visited`), which is the same
           // class of error the OpenMS halo carries -- measured at 0.1% of peptides. Bands are
           // TASKS, so they fill the pool alongside every other window's work.
-          // [tile] the window's RUN-LEVEL band edges (the whole slab's extremes), the same in every tile
+          // [tile] the window's RUN-LEVEL band edges (from the acquisition), the same in every tile
           const TofIdx tlo = wbands.at(wl[wi].first).first, thi = wbands.at(wl[wi].first).second;
           const int nb = (thi <= tlo) ? 1 : n_bands;
           size_t n_seeds = 0, n_parents = 0;
@@ -7108,7 +6722,7 @@ protected:
           // Valley splitting, as on the OpenMS path (skipping it lost 92% of peptides); it rebuilds the arena, and the per-frame bins are dead after it.
           n_parents = frag_traces.size();
           auto _ts = std::chrono::steady_clock::now();
-          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, n_bands * 4, split_scan_time);
+          frag_traces = splitIntegerTraces(frag_traces, ms2_split, wst, n_bands * 4, splitter_scan_time);
           w_split = secs(std::chrono::steady_clock::now() - _ts); ledStore();
           if (max_span > 0.0)   // [serial] per trace, independent: as tasks over trace chunks
           { const size_t n = frag_traces.size(); const long nr = parTasks_(n, 1 << 16);
@@ -7126,7 +6740,7 @@ protected:
           { vector<uint32_t> ri; ri.reserve(wmap.size());          // wmap is RT-sorted above
             for (const auto& sp : wmap) ri.push_back(rtIndex(sp.getRT()));
             wst.setFrames(ri, nullptr); }
-          frag_traces = detectTraces_(wmap, wst, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_split, n_bands, split_scan_time);
+          frag_traces = detectTraces_(wmap, wst, delta_im, ms2_noise, ms2_snr, ms2_minlen, ms2_split, n_bands, splitter_scan_time);
           if (max_span > 0.0) for (auto& t : frag_traces) trimToSpan(wst, t, max_span);
         }
         if (detOn_())
@@ -7585,7 +7199,7 @@ protected:
     {   // [fuse] what assembly:fragment_fuse_ppm did (per precursor-window assembly, before min_fragments and the cap)
       auto& c = fuseCount_();
       const long long g = c[3].load();
-      writeLogInfo_("[fuse] assembly:fragment_fuse_ppm " + String(fuse_ppm_) + " (" + (fuse_linkage_ ? "linkage" : "anchored") + "): "
+      writeLogInfo_("[fuse] assembly:fragment_fuse_ppm " + String(fuse_ppm_) + " (anchored): "
                     + String(c[1].load()) + " fragments in, " + String(c[2].load()) + " peaks out, in " + String(c[0].load())
                     + " precursor-window assemblies; " + String(g) + " groups of >= 2 fused, mean size "
                     + String(g ? (double)c[4].load() / (double)g : 0.0, false) + "; " + String(c[5].load())

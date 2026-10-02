@@ -82,7 +82,7 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
           ms1_descending=False):
     """Two precursors that co-elute in one isolation window: a z=2 envelope and a z=1 envelope.
 
-    Both are given a 3-peak isotope envelope so `require_isotope_support` keeps them, matching
+    Both are given a 3-peak isotope envelope so the isotope-support filter keeps them, matching
     fragments that co-elute with the precursor, and a distinct ion mobility.
 
     `gap_cycles`: cycles in which the z=2 precursor AND its first fragment are ABSENT. This is
@@ -179,9 +179,8 @@ def synth_tdf(path, n_frames):
     db.executemany("INSERT INTO Frames VALUES (?,?,1)",
                    [(i + 1, g["T1_ref"] + 0.03 * (i % 3)) for i in range(n_frames)])
     # GlobalMetadata: the run-level bounds of the flight-time axis. A real tdf always has them and
-    # trace:band_edges=acquisition (the default since 2026-09-10) REFUSES a run without them, so a
-    # fixture that omits them cannot exercise the integer detector at all. Values are TEXT, as the
-    # vendor writes them; the digitizer sample count is dataset D's.
+    # the integer detector REFUSES a run without them, so a fixture that omits them cannot exercise
+    # it at all. Values are TEXT, as the vendor writes them; the digitizer sample count is a real run's.
     db.execute("CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT)")
     db.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
                    [("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
@@ -228,7 +227,7 @@ def synth_fake_d(d):
 
 def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
     cmd = [binary, "-in", inp, "-out", out, "-threads", str(threads),
-           "-assembly:min_fragments", "2", "-assembly:require_isotope_support", "true",
+           "-assembly:min_fragments", "2",
            "-trace:ms2_min_length_sec", "0", "-trace:ms1_split_valleys", "0",
            "-trace:ms2_split_valleys", "0"] + list(extra)
     r = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -852,7 +851,7 @@ def main():
     def c21():
         fake = synth_fake_d(os.path.join(work, "fake.d"))
         env = dict(os.environ)
-        for v in ("OPENMS_BRUKER_SDK_PATH", "DIASPEXTRACT_MZPEAK_TDF", "DIASPEXTRACT_TILE_RESIDENT"): env.pop(v, None)
+        for v in ("OPENMS_BRUKER_SDK_PATH", "DIASPEXTRACT_MZPEAK_TDF"): env.pop(v, None)
         setup_line = "MS1 path on the raw frames, before the pick"
         r = run(binary, fake, os.path.join(work, "fake_sdk.mzML"), expect_fail=True, env=dict(env, OPENMS_BRUKER_SDK_PATH="/nonexistent"))
         log = r.stdout + r.stderr
@@ -873,7 +872,7 @@ def main():
         env = {k: v for k, v in os.environ.items() if not k.startswith(("SPEXTRACTOR_", "DIASPEXTRACTOR_"))}
         for tag, old_vars in (("spextractor", {"SPEXTRACTOR_DET": "1"}),
                               ("diaspextractor", {"DIASPEXTRACTOR_DET": "1"}),
-                              ("both", {"SPEXTRACTOR_LEDGER": "x", "DIASPEXTRACTOR_TILE_RESIDENT": "1"})):
+                              ("both", {"SPEXTRACTOR_LEDGER": "x", "DIASPEXTRACTOR_TILE_NO_CARRY": "1"})):
             old = os.path.join(work, f"old_env_{tag}.mzML")
             r = run(binary, inp, old, expect_fail=True, env=dict(env, **old_vars))
             log = r.stdout + r.stderr
