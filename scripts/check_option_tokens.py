@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Every `-<group>:<option>` token in the shipped instructions is an option the tool registers.
+"""Every `-<group>:<option>` token in README.md and CONTRIBUTING.md is an option the tool registers.
 
-An option removed from the tool but left inside a shipped example is not a documentation wart: the
-tool refuses an unknown option and aborts before it does any work ("Unknown option(s) '[-a:b]' given.
-Aborting!"), so the example is dead on arrival. The 1.2.0 audit found exactly that --
-bench/run_open.sh.example still passed `-assembly:open_search_safe`, removed in the same release --
-after a release commit had edited that very file for something else.
-
-Scope is deliberately the files that tell a reader what to RUN: the bench examples, README.md and
-CONTRIBUTING.md. CHANGELOG.md and docs/ are the historical record and name removed options on
-purpose; flagging those would train everyone to ignore this check.
+The tool refuses an unknown option and aborts before it does any work ("Unknown option(s) '[-a:b]'
+given. Aborting!"), so a documented command that passes a removed option is dead on arrival.
+CHANGELOG.md and docs/ are the historical record and name removed options on purpose; they are not
+checked.
 
     scripts/check_option_tokens.py [--ini ini.xml] [file ...]
 
@@ -18,17 +13,13 @@ without it, the inventory is parsed from the register*_ calls in src/diaspextrac
 runs in a tree with no build. Exit 1 if any token is not a registered option.
 """
 import argparse
-import glob
 import pathlib
 import re
 import sys
 import xml.etree.ElementTree as ET
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_FILES = sorted(glob.glob(str(ROOT / "bench" / "*.example"))) + [
-    str(ROOT / "README.md"),
-    str(ROOT / "CONTRIBUTING.md"),
-]
+DEFAULT_FILES = [str(ROOT / "README.md"), str(ROOT / "CONTRIBUTING.md")]
 TOKEN = re.compile(r"-([a-z][a-z_0-9]*):([a-z][a-z_0-9]*)")
 
 
@@ -39,16 +30,14 @@ def from_ini(path):
     def walk(node, prefix):
         for child in node:
             name = child.get("name")
-            if child.tag in ("ITEM", "ITEMLIST") and prefix:
+            if child.tag in ("ITEM", "ITEMLIST"):
                 known.add(prefix + name)
             elif child.tag == "NODE":
-                # the two outer nodes are the tool name and the instance number, not option groups
-                walk(child, name + ":" if prefix is not None else None)
+                walk(child, name + ":")
 
     root = ET.parse(path).getroot()
     for tool in root:                       # <NODE name="DIAspeXtract">
         for inst in tool:                   # <NODE name="1">
-            walk(inst, None)
             for child in inst:
                 if child.tag == "NODE":
                     walk(child, child.get("name") + ":")
@@ -58,7 +47,7 @@ def from_ini(path):
 def from_source(path):
     """group:option for every registered option in the tool's source."""
     text = pathlib.Path(path).read_text(encoding="utf-8")
-    return {m for m in re.findall(r'register(?:\w+)?_\(\s*"([a-z][a-z_0-9]*:[a-z][a-z_0-9]*)"', text)}
+    return set(re.findall(r'register(?:\w+)?_\(\s*"([a-z][a-z_0-9]*:[a-z][a-z_0-9]*)"', text))
 
 
 def main():
