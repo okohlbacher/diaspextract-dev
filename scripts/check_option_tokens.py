@@ -58,7 +58,7 @@ def from_ini(path):
 def from_source(path):
     """group:option for every registered option in the tool's source."""
     text = pathlib.Path(path).read_text(encoding="utf-8")
-    return {m for m in re.findall(r'register(?:\w+)?_\(\s*"([a-z][a-z_0-9]*:[a-z][a-z_0-9]*)"', text)}
+    return set(re.findall(r'(?:register\w*_|regBool)\(\s*"([a-z][a-z_0-9]*:[a-z][a-z_0-9]*)"', text))
 
 
 def main():

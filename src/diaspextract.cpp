@@ -88,8 +88,6 @@ using namespace std;
   a discovery front-end (enables open / semi-tryptic / PTM searches); it does not perform the database
   search, FDR, library building or quantification.
 
-  See docs/BASELINE.md for the measured decisions behind every default.
-
   <B>The command line parameters of this tool are:</B>
   @verbinclude TOPP_DIAspeXtract.cli
   <B>INI file documentation of this tool:</B>
@@ -909,7 +907,7 @@ namespace
 
   /// The m/z axis is the instrument's flight-time bin: lossless, the same bin for the same ion in every
   /// frame, and a ppm tolerance is a handful of integer bins. The per-frame factor `b` (digitizer
-  /// temperature) turns a bin into m/z at report time. See docs/MZ-AXIS-DESIGN.md.
+  /// temperature) turns a bin into m/z at report time.
   using TofIdx = uint32_t;
 
   /// The flight-time axis for one run: the calibration model plus each frame's temperature factor.
@@ -1049,7 +1047,7 @@ namespace
 
   /// A window's peaks in index space, frame-major, appended by the loader one frame at a time and
   /// moved into the detector. Until toTof() runs, `tof` holds the 1e-5 Da m/z quantum (`mzq`), which
-  /// the OpenMS-detector path reads as is. See docs/MZ-AXIS-DESIGN.md.
+  /// the OpenMS-detector path reads as is.
   struct PeakSlab
   {
     vector<uint32_t> frame_off;    ///< size F+1: frame f owns [frame_off[f], frame_off[f+1])
@@ -1422,7 +1420,7 @@ namespace
   ///   * valid iff RT span >= min length and size / (visited - trailing misses) >= min_sample_rate;
   ///     peaks are marked taken only for a valid trace; the seed counts twice in the centroid.
   /// It does not reproduce the OpenMS detector peak for peak: judge it on identified peptides with both
-  /// engines, never on a digest (docs/MZ-AXIS-DESIGN.md). Valley splitting runs afterwards.
+  /// engines, never on a digest. Valley splitting runs afterwards.
   vector<Trace> detectTracesInteger_(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm,
                                      double im_tol, double noise, double min_len_sec, int band = -1)
   {
@@ -2665,7 +2663,7 @@ class TOPPDIAspeXtract : public TOPPBase
 public:
   TOPPDIAspeXtract() :
     // official=false: a standalone tool, absent from ToolHandler's official list (TOPPBase rejects an unregistered official name).
-    TOPPBase("DIAspeXtract", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
+    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data for DDA search engines.", false)
   {
     // Otherwise TOPPBase reports OpenMS's version as ours: version_ feeds the ini and the mzML software entry,
     // verboseVersion_ the --help Version line, which carries both numbers because a bug report needs the OpenMS build too.
@@ -2683,218 +2681,231 @@ protected:
     // a true/false option: a string option restricted to "true" and "false"
     auto regBool = [this](const String& name, const String& def, const String& desc, bool advanced = false)
     { registerStringOption_(name, "<true/false>", def, desc, false, advanced); setValidStrings_(name, {"true", "false"}); };
-    registerInputFile_("in", "<file>", "", "Input diaPASEF data (ion-mobility DIA; 1/K0 / VSSC): mzML, mzPeak, or a Bruker .d directory.");
+    registerInputFile_("in", "<file>", "", "Input diaPASEF run (ion-mobility DIA): a Bruker .d directory, mzML, or mzPeak in a build that supports it.");
 #ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("in", {"mzML", "mzpeak", "d"});
 #else
     setValidFormats_("in", {"mzML", "d"});      // stock OpenMS does not know the mzpeak format
 #endif
-    registerOutputFile_("out", "<file>", "", "Output pseudo-MS2 spectra. The FORMAT FOLLOWS THE "
-                        "EXTENSION: .mzpeak (the default in a build with mzPeak support) or .mzML (the only format otherwise). mzPeak is columnar and much smaller; "
-                        "mzML is what DDA search engines read today, so pass an .mzML name (or "
-                        "-out_type mzML) if the next step is a search. mzPeak is written in one piece, "
-                        "so it runs as one tile (the whole run's memory).");
+    registerOutputFile_("out", "<file>", "", "Output spectra. The format follows the extension: .mzML, or .mzpeak in a build with mzPeak support. "
+                            "Search engines read mzML, so use .mzML if the next step is a search. mzPeak output runs as one tile and needs the whole run's memory.");
 #ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("out", {"mzpeak", "mzML"});
 #else
     setValidFormats_("out", {"mzML"});
 #endif
-    registerStringOption_("out_type", "<type>", "", "Force the output format instead of taking it "
-                          "from the extension of -out. Empty = follow the extension; mzPeak if the "
-                          "extension says nothing (mzML in a build without mzPeak support). mzPeak output runs as one tile (see -out).", false);
+    registerStringOption_("out_type", "<type>", "", "Set the output format instead of taking it from the extension of -out. Empty (default) = follow "
+                              "the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support).", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
-    registerTOPPSubsection_("gate", "Precursor-to-fragment co-localization gate");
-    registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Max |precursor - fragment| ion mobility difference (1/K0). (the reference implementation deltaApexIM default 0.01)", false);
-    registerDoubleOption_("gate:delta_rt", "<sec>", 3.0, "Max |precursor - fragment| apex RT difference (seconds).", false);
-    registerDoubleOption_("gate:min_correlation", "<0..1>", 0.3, "Min Pearson correlation of elution profiles. (the reference implementation ms1MS2Corr default 0.3; raise for cleaner but sparser spectra)", false);
-    registerIntOption_("gate:min_correlation_points", "<n>", 3, "Min overlapping XIC points required to accept a correlation.", false, true);
+    registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum");
+    registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets "
+                              "the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.", false);
+    registerDoubleOption_("gate:delta_rt", "<sec>", 3.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
+    registerDoubleOption_("gate:min_correlation", "<0..1>", 0.3, "Least correlation between the elution profiles of a precursor and a fragment. Raise "
+                              "it for cleaner but sparser spectra.", false);
+    registerIntOption_("gate:min_correlation_points", "<n>", 3, "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, "
+                           "gate:shrink_min_points is used instead.", false, true);
 
-    registerTOPPSubsection_("assembly", "Pseudo-spectrum assembly");
-    registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
-    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance; assembly:post_fusion_cap re-applies it after the fold).", false);
-    registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off, as in 1.5.0. Default 0.005 since 1.6.0: together with assembly:foreign_precursor_weight 0, +5.8 % Sage and +4.2 % MSFragger peptides over 1.5.0 on 43 public runs at unchanged entrapment (CHANGELOG, v1.6.0); earlier measurements in docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. It changes the emitted intensity, not the cap key; but assembly:fragment_fuse_ppm (on by default, mode anchored) groups the fragments strongest first by emitted intensity, so it can change which pieces fuse and with them which peaks survive assembly:max_fragments. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
-    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame (or nearby frames, see assembly:twin_rt_frames), same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
-    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Let the twin fold (assembly:twin_im_tolerance) also join two spectra of one monoisotope from nearby MS1 frames: charge:mono_profile_check v2's extension can move a monoisotope onto another precursor's monoisotope trace at another frame, which the same-frame fold cannot join. A pair folds across frames with the same charge, precursor m/z in one flight-time bin (within 0.05 ppm) and, by default, one of the two monoisotopes placed by the extension (assembly:twin_rt_match), 1/K0 within assembly:twin_im_tolerance, apexes at most n MS1 cycles apart (|dRT| <= (n + 0.5) x the cycle) and in one retention-time cell (tile:rt_sec; a pair across a cell edge stays two spectra). The survivor rule and the fusion are the fold's. 0 = auto: the run's median MS1 peak width (FWHM of the precursors' seed traces with at least 3 points) in MS1 cycles, rounded, at least 1. -1 = off: the same MS1 frame only (the fold before 1.6.0). Logged as [twins], stamped in spx:twin_merge. CHANGES OUTPUT.", false);
-    registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "assembly:twin_rt_frames: which pairs from two different MS1 frames fold. 'ext': precursor m/z in one flight-time bin (within 0.05 ppm) and the monoisotope of at least one of the two placed by charge:mono_profile_check v2's extension, i.e. the extension moved it onto another precursor's monoisotope (nothing folds across frames without v2). 'bin': any pair in one flight-time bin (one MS1 trace, or one bin at two frames, is the monoisotope of both; distinct monoisotope traces of one charge and 1/K0 at nearby frames lie 0.3 ppm or more apart). 'ppm': within 20 ppm, as at one frame; it also folds the spectra of one ion seeded from different flight-time bins. 'bin' and 'ppm' cost peptides in the screen.", false, true);
+    registerTOPPSubsection_("assembly", "Building the spectra");
+    registerIntOption_("assembly:min_fragments", "<n>", 3, "Write a spectrum only if it has at least this many fragments.", false);
+    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many fragments per spectrum, best-ranked first. The twin fold can "
+                           "exceed it; assembly:post_fusion_cap applies it again after the fold.", false);
+    registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Weight each fragment's intensity by a Gaussian of its 1/K0 distance to the "
+                              "precursor (sigma in 1/K0), before the fragment cap. 0 = off (as in 1.5.0).", false);
+    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Weight each fragment's intensity by corr^k, corr its elution correlation with the precursor. 0 = off.", false);
+    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim the same precursor twice (same charge, m/z within "
+                              "20 ppm, 1/K0 within this tolerance) into one spectrum with the fragments of both. Negative = off; 0 folds only twins of identical 1/K0.", false);
+    registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Also fold twins whose apexes are up to n MS1 cycles apart, as assembly:twin_rt_match "
+                           "allows. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only (as before 1.6.0).", false);
+    registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "Which twins from different MS1 frames fold. 'ext' (default): same flight-time "
+                              "bin, and charge:mono_profile_check v2 moved one of the two monoisotopes; 'bin': any pair in the same flight-time bin; "
+                              "'ppm': within 20 ppm. 'bin' and 'ppm' fold more and are not recommended.", false, true);
 
-    registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
-    registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance for trace detection.", false);
-    registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise intensity threshold.", false);
-    registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise intensity threshold.", false);
-    registerDoubleOption_("trace:min_length_sec", "<sec>", -1.0, "Minimum MS1 mass-trace length in seconds (last minus first point). "
-                          "Negative = auto (the default since 1.6.0): trace:min_length_fwhm x the run's median MS1 peak FWHM, at least half an MS1 cycle, so a trace needs 2 MS1 points. "
-                          "The FWHM is that of the brightest tenth of a fixed sample of MS1 traces (1-Th m/z slices every 25 Th, traced like the run but with no minimum length). "
-                          "Logged as [minlen], stamped spx:ms1_min_length. 0 = no length filter; 3 = the value before 1.6.0. CHANGES OUTPUT.", false);
-    registerDoubleOption_("trace:min_length_fwhm", "<x>", 0.4, "trace:min_length_sec auto: the minimum MS1 trace length as this fraction of the run's median MS1 peak FWHM.", false, true);
-    registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "Apex signal-to-noise multiplier for MS1 traces (effective apex threshold = this x noise_threshold_int). OpenMS default 3.0.", false, true);
-    registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "Apex signal-to-noise multiplier for MS2 (fragment) traces: the apex threshold is this x trace:ms2_noise_threshold_int (OpenMS default 3.0). Lower recovers weaker fragments.", false);
-    registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Minimum MS2 (fragment) mass-trace length (seconds). 0 = no length filter (the reference implementation-style relaxed MS2); MS1 keeps trace:min_length_sec.", false);
-    registerTOPPSubsection_("tile", "Retention-time cells and tiles (integer detector)");   // without it --helphelp threw ElementNotFound
-    registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Pitch (seconds) of the fixed retention-time cells the integer detector traces in, cut at the run's MS1 frame times and stamped in the header (spx:tile_boundaries). The spectra are digest-identical for any grouping into tiles and any thread count at a fixed perf:trace_bands (the header stamps the grouping); a trace eluting across a cut is cut there. -1 = one cell (the whole run). CHANGES OUTPUT; the price of 600: docs/BASELINE.md '2026-09-09: the cell-atomic grid, step 2'.", false, true);
-    registerIntOption_("tile:cells_per_tile", "<n>", 1, "Group the retention-time cells into TILES of n cells each and run the window loop tile by tile: "
-                       "detection on the tile's frames only, scoring of the precursors the tile owns (an MS1 frame time in [T_k - gate:delta_rt, T_{k+1} - gate:delta_rt)) "
-                       "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
-                       "Output is digest-identical for any tile count (the cell grid); memory is one tile's. At the defaults TNBC 009 peaks at 99.70 GB in one "
-                       "tile and 21.07 GB in 13 tiles with a trim between tiles (wall 9:42 -> 9:57, same node), dataset D at 37.44 -> 21.99 GB in 3 tiles "
-                       "(3:15 -> 3:47). 0 = all cells in one tile; mzPeak output always runs as one tile (it is written in one piece).", false, true);
-    registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' works on the instrument's flight-time bins "
-                          "and needs the vendor calibration (without it: 'openms', logged). 'openms' runs OpenMS MassTraceDetection. Different "
-                          "algorithms: they share ~85% of identified peptides, neither wins on every file and engine, integer uses ~40% less memory. docs/MZ-AXIS-DESIGN.md.", false);
+    registerTOPPSubsection_("trace", "Mass-trace detection");
+    registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance (ppm) of mass-trace detection.", false);
+    registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise level: peaks at or below it are not traced.", false);
+    registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise level: peaks at or below it are not traced.", false);
+    registerDoubleOption_("trace:min_length_sec", "<sec>", -1.0, "Shortest MS1 trace kept (seconds, first to last point). Negative (default) = auto: "
+                              "trace:min_length_fwhm times the run's median MS1 peak width. 0 = no filter; 3 = the fixed value before 1.6.0.", false);
+    registerDoubleOption_("trace:min_length_fwhm", "<x>", 0.4, "Auto trace:min_length_sec: the shortest MS1 trace as this fraction of the run's median MS1 peak width.", false, true);
+    registerDoubleOption_("trace:ms1_chrom_peak_snr", "<x>", 3.0, "An MS1 trace's apex must exceed this times trace:noise_threshold_int.", false, true);
+    registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "A fragment trace's apex must exceed this times trace:ms2_noise_threshold_int. "
+                              "Lower it to keep weaker fragments.", false);
+    registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Shortest fragment trace kept (seconds). 0 = no filter.", false);
+    registerTOPPSubsection_("tile", "Retention-time cells and tiles");   // without it --helphelp threw ElementNotFound
+    registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Width (seconds) of the fixed retention-time cells the integer detector traces in; a trace "
+                              "that crosses a cell edge is cut there. 0 or negative = the whole run as one cell. Changes the output.", false, true);
+    registerIntOption_("tile:cells_per_tile", "<n>", 1, "Process the run in tiles of this many retention-time cells to bound memory; fewer cells per "
+                           "tile use less memory. 0 = the whole run as one tile, at several times the memory. mzPeak output always runs as one tile.", false, true);
+    registerStringOption_("trace:detector", "<mode>", "integer", "'integer' (default) traces on the instrument's flight-time bins and needs the "
+                              "Bruker calibration; without it the run falls back to 'openms' with a warning. 'openms' uses OpenMS MassTraceDetection. "
+                              "The two find partly different peptides; integer uses much less memory.", false);
     setValidStrings_("trace:detector", {"openms", "integer"});
-    registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic valleys (ElutionPeakDetection, width filtering off). Value = chrom_fwhm (seconds); 0 = off.", false);
-    registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation (also across nearby frames), the cluster closure, the survivor order, the 10-ppm fusion and the keyed fold with the post-fusion cap (assembly:post_fusion_cap)", true);
-    registerFlag_("diag:selftest_arena", "Run assertions on the MS1 arena compaction (compactUnreferenced) and exit: kept spans must survive a container order that differs from their offset order", true);
-    registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys (ElutionPeakDetection), so two peptides eluting apart within the m/z tolerance do not merge into one precursor with the wrong monoisotope and charge. Value = chrom_fwhm (seconds); 0 = off.", false);
-    registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each mass trace (precursor and fragment) to at most this many seconds "
-                          "around its apex, after detection and valley splitting. 0 = no cap. CHANGES OUTPUT (peptides within 0.08% from 0 "
-                          "to 240 on dataset D: docs/BASELINE.md '0c. trace:max_span_sec sweep').", false);
+    registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split fragment traces at chromatographic valleys; the value is the "
+                              "expected peak width (seconds). 0 = off.", false);
+    registerFlag_("diag:selftest_twins", "Run the built-in twin-fold self-test and exit.", true);
+    registerFlag_("diag:selftest_arena", "Run the built-in MS1 storage self-test and exit.", true);
+    registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split precursor traces at chromatographic valleys, so two peptides that "
+                              "elute apart at the same m/z stay separate; the value is the expected peak width (seconds). 0 = off.", false);
+    registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each trace to at most this many seconds around its apex. 0 = no limit.", false);
     setMinFloat_("trace:max_span_sec", 0.0);
 
     // NB: "threads" is reserved by TOPPBase (the standard -threads option), so this lives under "perf".
 
     regBool("perf:malloc_trim", "true",
-                          "Return the allocator's free pages to the OS (glibc only) at the two phase boundaries and between tiles. "
-                          "The window loop's allocations otherwise stack on top of everything the loading and MS1 "
-                          "phases freed but the allocator kept: measured on a 2-h acquisition in one tile that floor is 138 GB "
-                          "at the loop start, and trimming it first takes the run's PEAK from 265 to 186 GB. "
-                          "IT IS NOT FREE: the loop then faults those pages back in cold (minor faults +26%), which "
-                          "costs about 8.5% of wall time -- so this trades ~30% of peak memory for ~8% of runtime, "
-                          "measured interleaved on one node. Between tiles (after tile k is written, before tile k+1 is read) it "
-                          "takes about 4 GB off TNBC 009 and 0.5 GB off dataset D at the defaults. On by default because memory is "
-                          "what bounds this tool (it decides how many isolation windows fit at once, and whether the run fits the "
-                          "machine at all). Turn it off when time is the binding constraint. The spectra are digest-identical "
-                          "either way.");
+                          "Return freed memory to the system between phases and tiles (Linux/glibc only). Lowers peak memory at some extra run time; set "
+                          "false when run time matters more.");
     regBool("perf:stream_load", "true",
-                          "Read the input frame by frame, picking each frame on arrival: a Bruker .d, or an .mzpeak in a build with mzPeak "
-                          "support (mzML is read whole either way). false reads the whole run first: ~1.75x the memory and ~1.7x the wall on a "
-                          "large .d, and CHANGES OUTPUT (+2.0% Sage peptides at unchanged entrapment FDR): docs/BASELINE.md 'THE READER QUESTION, SETTLED'.");
-    registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Sum n neighbouring MS1 frames on each side in the .d reader, before peak picking: 0 = off, 1 = 3-frame sum, 2 = 5-frame sum. Needs perf:stream_load true and -dnoise:ms1 false. CHANGES OUTPUT: at 1 (2026-07-27, older defaults) Sage +7.8% for 2.7x the spectra.", false);
+                          "Read the input frame by frame (Bruker .d, or mzPeak in a build that supports it; mzML is always read whole). false loads "
+                          "the whole run first: much more memory and a longer run. Changes the output.");
+    registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Add n neighbouring MS1 frames on each side to every MS1 frame before peak picking "
+                           "(Bruker .d with perf:stream_load true). 0 = off. Needs -dnoise:ms1 false.", false);
 
-    registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
-    registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
+    registerTOPPSubsection_("perf", "Speed and memory (the output does not change unless an option says so)");
+    registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces too short for a correlation: 'concentric' (default) keeps one "
+                              "whose retention-time span lies inside the precursor's and is centred on it; 'off' drops them. Applies to the "
+                              "precursors gate:adaptive selects.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
-    registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: centre tolerance as a fraction of the precursor half-span (at least one cycle).", false, true);
+    registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: how far the fragment's span centre may lie from the "
+                              "precursor's, as a fraction of the precursor's half-span (at least one cycle).", false, true);
     setMinFloat_("gate:short_center_tol", 0.0);
     registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
     setMinInt_("gate:short_min_points", 1);
-    registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
-    regBool("gate:anchor_rescue", "false", "Rescue weak fragments of well-sampled precursors (signal in more than gate:faint_max_frames window frames, the faint test of gate:adaptive in every mode). When at least gate:anchor_min_count fragments pass the gate with a correlation of gate:anchor_min_corr or more, their profiles, each scaled to unit maximum, are summed into a consensus over the window frames. A fragment trace inside the RT and 1/K0 windows that the gate rejected only for too few shared points or by gate:min_correlation, with at least 2 points, then joins when its apex is within one cycle of the consensus apex and its points correlate with the consensus at those frames (Pearson over its own points, not the full grid) by gate:anchor_rescue_corr or more; a 2-point trace instead needs both points in the consensus core (at least half its maximum) rising or falling with it, and scores gate:anchor_rescue_corr. The emitted intensity and the cap key use that score, capped at gate:anchor_min_corr; at most gate:anchor_max_rescued per spectrum, best score first. Logged as [anchor], stamped spx:anchor. Experimental.", true);
-    registerIntOption_("gate:anchor_min_count", "<n>", 3, "gate:anchor_rescue: fewest anchors (accepted fragments at gate:anchor_min_corr or more) a precursor needs for the rescue.", false, true);
+    registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Largest precursor-fragment 1/K0 difference for the fragment match only, leaving "
+                              "the tracing tolerance unchanged. Negative (default) = gate:delta_im. Experimental.", false, true);
+    regBool("gate:anchor_rescue", "false", "Rescue weak fragments of well-sampled precursors: when at least gate:anchor_min_count fragments pass with "
+                "a correlation of gate:anchor_min_corr or more, a rejected fragment joins if it correlates with their summed profile by "
+                "gate:anchor_rescue_corr or more. At most gate:anchor_max_rescued per spectrum. Experimental.", true);
+    registerIntOption_("gate:anchor_min_count", "<n>", 3, "gate:anchor_rescue: fewest anchor fragments a precursor needs.", false, true);
     setMinInt_("gate:anchor_min_count", 1);
-    registerDoubleOption_("gate:anchor_min_corr", "<r>", 0.8, "gate:anchor_rescue: least gate correlation of an anchor; also caps the correlation score of a rescued fragment (its cap key can still exceed an anchor's through intensity and shared frames).", false, true);
+    registerDoubleOption_("gate:anchor_min_corr", "<r>", 0.8, "gate:anchor_rescue: least correlation of an anchor fragment; also the highest score a rescued fragment gets.", false, true);
     setMinFloat_("gate:anchor_min_corr", 0.0);
     setMaxFloat_("gate:anchor_min_corr", 1.0);
-    registerDoubleOption_("gate:anchor_rescue_corr", "<r>", 0.7, "gate:anchor_rescue: least Pearson correlation of a rejected fragment's points with the anchor consensus.", false, true);
+    registerDoubleOption_("gate:anchor_rescue_corr", "<r>", 0.7, "gate:anchor_rescue: least correlation of a rejected fragment with the anchors' summed profile.", false, true);
     setMinFloat_("gate:anchor_rescue_corr", 0.0);
     setMaxFloat_("gate:anchor_rescue_corr", 1.0);
-    registerIntOption_("gate:anchor_max_rescued", "<n>", 50, "gate:anchor_rescue: most rescued fragments per spectrum (best score first, ties by m/z).", false, true);
+    registerIntOption_("gate:anchor_max_rescued", "<n>", 50, "gate:anchor_rescue: most rescued fragments per spectrum, best first.", false, true);
     setMinInt_("gate:anchor_max_rescued", 0);
-    registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's picked MS2 peaks that fall in one flight-time bin into one peak (intensity summed, 1/K0 intensity-weighted). Peaks join when their 1/K0 is within this distance of the previous one and the group spans at most twice this distance: the IM picker (box gate:delta_im) cuts an ion with a wider mobility peak into several same-bin centroids, which would otherwise become separate traces and duplicate m/z in a spectrum. Negative = off.", false, true);
+    registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's fragment peaks in one "
+                              "flight-time bin whose 1/K0 values lie within this distance, so one ion does not become several traces. Negative = off.", false, true);
     setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
-    regBool("assembly:merge_same_bin", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", true);
-    regBool("assembly:post_fusion_cap", "false", "Re-apply assembly:max_fragments after the twin fold (assembly:twin_im_tolerance), whose union of the members' capped fragments can exceed it. Every peak carries its cap key (as a 32-bit float) through the same-bin merge and the fold (a fused peak keeps its members' best key); a spectrum over the cap keeps its top-ranked peaks (ties: higher intensity, then lower m/z). Logged as [recap], stamped spx:post_fusion_cap. CHANGES OUTPUT. Experimental.", true);
-    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "The base amplitude of each emitted fragment, before the 1/K0 weight (assembly:im_weight_sigma) and corr^assembly:corr_power: 'apex' the fragment trace's maximum in one frame; 'core' its intensity summed over the assembly:frag_core_frames window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor; a missing point counts 0); 'sum' its intensity summed over the precursor's span, the window frames from its first to its last point (gaps included). A fragment with no point in those frames takes its point nearest the precursor's apex frame, so none is dropped or written at 0. The gate and the cap key (still the apex) are unchanged; the later steps that weigh by intensity follow the new values (the same-bin merge's strongest member, the anchored grouping and the sums of assembly:fragment_fuse_ppm, the twin fold's intensity-weighted m/z), so peaks can move, fuse differently and change which survive the cap. Experimental.", false, true);
+    regBool("assembly:merge_same_bin", "true", "Merge a spectrum's fragments at the same m/z (one flight-time bin) into one peak before the fragment "
+                "cap. Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", true);
+    regBool("assembly:post_fusion_cap", "false", "Apply assembly:max_fragments again after the twin fold. Experimental.", true);
+    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "Fragment intensity written to the spectrum: 'apex' (default) the trace's "
+                              "maximum; 'core' its sum over assembly:frag_core_frames frames centred on the precursor's apex; 'sum' its sum over the "
+                              "precursor's retention-time span. Experimental.", false, true);
     setValidStrings_("assembly:frag_intensity", {"apex", "core", "sum"});
-    registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: the number of window frames (odd) centred on the precursor's apex frame.", false, true);
+    registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: number of frames (odd) centred on the precursor's apex.", false, true);
     setMinInt_("assembly:frag_core_frames", 1);
     setMaxInt_("assembly:frag_core_frames", 15);
-    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 0.0, "Multiply the fragments that lie on the residual isotope envelope of ANOTHER precursor isolated with this one by w, before assembly:max_fragments (0 removes them; 1 = off, as in 1.5.0); the cap key follows the attenuated intensity. Default 0 since 1.6.0. A foreign precursor is one of the run's isotope-supported precursors whose mono lies in the same isolation window, with its apex within the gate's RT window of this precursor's, 1/K0 within assembly:foreign_precursor_dim, and neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid, up to 3 steps, within the larger of assembly:foreign_precursor_ppm and 30 ppm). Its envelope counts when at least assembly:foreign_precursor_min_iso of its positions mono + k x 1.00335/z, k = 0..3, carry a fragment within assembly:foreign_precursor_ppm. Fragments within that larger tolerance of this precursor's own envelope (mono to M+3) are never touched. Logged as [foreign], stamped spx:foreign. CHANGES OUTPUT.", false, false);
+    registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 0.0, "Multiply fragments that lie on the isotope envelope of another precursor "
+                              "isolated in the same window by this weight. 0 (default) removes them; 1 = off (as in 1.5.0). The precursor's own "
+                              "envelope is never touched.", false, false);
     setMinFloat_("assembly:foreign_precursor_weight", 0.0);
     setMaxFloat_("assembly:foreign_precursor_weight", 1.0);
-    registerDoubleOption_("assembly:foreign_precursor_ppm", "<ppm>", 10.0, "assembly:foreign_precursor_weight: m/z tolerance between a foreign envelope position and a fragment (ppm).", false, true);
+    registerDoubleOption_("assembly:foreign_precursor_ppm", "<ppm>", 10.0, "assembly:foreign_precursor_weight: m/z tolerance (ppm) between a foreign "
+                              "envelope position and a fragment.", false, true);
     setMinFloat_("assembly:foreign_precursor_ppm", 0.0);
-    registerDoubleOption_("assembly:foreign_precursor_dim", "<1/K0>", 0.015, "assembly:foreign_precursor_weight: largest 1/K0 distance between this precursor and a foreign one.", false, true);
+    registerDoubleOption_("assembly:foreign_precursor_dim", "<1/K0>", 0.015, "assembly:foreign_precursor_weight: largest 1/K0 difference between this "
+                              "precursor and a foreign one.", false, true);
     setMinFloat_("assembly:foreign_precursor_dim", 0.0);
-    registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (mono to M+3) must carry a fragment before its fragments are attenuated.", false, true);
+    registerIntOption_("assembly:foreign_precursor_min_iso", "<n>", 2, "assembly:foreign_precursor_weight: how many of a foreign envelope's four "
+                           "positions (M to M+3) must carry a fragment.", false, true);
     setMinInt_("assembly:foreign_precursor_min_iso", 1);
     setMaxInt_("assembly:foreign_precursor_min_iso", 4);
-    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments that lie within this many ppm into one peak, after the same-bin merge and before assembly:min_fragments and assembly:max_fragments (0 = off, as in 1.5.0; default 25 since 1.6.0): the IM picker keeps 1-2 flight-time bins of an ion that spans 4-7, so one fragment ion becomes several traces and several peaks a few ppm apart. A fused peak's intensity is the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), its m/z their intensity-weighted mean and its cap key the key of one fragment applied to the whole ion: the best-keyed member's score and shared frames with the sum of the members' IM-weighted apex intensities, never below that member's own key (non-negative keys, up to rounding); a fused ion takes one cap slot and the slots it frees refill. A spectrum that fuses below assembly:min_fragments is not written. Grouping is anchored: the fragments by emitted intensity, strongest first (ties: lower m/z), each one not yet fused takes every unfused fragment within the tolerance of its own m/z. Logged as [fuse], stamped spx:fragment_fuse. CHANGES OUTPUT.", false, false);
+    registerDoubleOption_("assembly:fragment_fuse_ppm", "<ppm>", 25.0, "Fuse a spectrum's fragments within this many ppm into one peak (summed "
+                              "intensity, intensity-weighted m/z) before the fragment cap: one fragment ion often shows up as several peaks a few ppm "
+                              "apart. 0 = off (as in 1.5.0).", false, false);
     setMinFloat_("assembly:fragment_fuse_ppm", 0.0);
     setMaxFloat_("assembly:fragment_fuse_ppm", 50.0);
-    registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
+    registerStringOption_("gate:adaptive", "<mode>", "faint", "Which precursors get the extra gate rules (gate:shrinkage, gate:colocation, "
+                              "gate:short_traces). 'faint' (default): only faint precursors, which also use gate:faint_delta_rt and "
+                              "gate:faint_corr_power. 'auto': 'faint' on runs with many faint precursors (gate:auto_faint_fraction), otherwise no "
+                              "extra rules; 'off': the rules apply to every precursor.", false, true);
     setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
-    registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
+    registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: use the faint gate when at least this fraction of the "
+                              "run's precursors are faint.", false, true);
     setMinFloat_("gate:auto_faint_fraction", 0.0);
     setMaxFloat_("gate:auto_faint_fraction", 1.0);
-    registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive faint: most window frames with precursor signal for a faint precursor.", false, true);
+    registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive: a precursor with signal in at most this many frames counts as faint.", false, true);
     setMinInt_("gate:faint_max_frames", 1);
-    registerDoubleOption_("gate:faint_delta_rt", "<sec>", 6.0, "gate:adaptive faint: the apex RT window for faint precursors.", false, true);
+    registerDoubleOption_("gate:faint_delta_rt", "<sec>", 6.0, "gate:adaptive faint: gate:delta_rt for faint precursors.", false, true);
     setMinFloat_("gate:faint_delta_rt", 0.0);
     registerDoubleOption_("gate:faint_corr_power", "<k>", 1.0, "gate:adaptive faint: assembly:corr_power for faint precursors.", false, true);
     setMinFloat_("gate:faint_corr_power", 0.0);
-    registerStringOption_("gate:colocation", "<mode>", "ranges", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
+    registerStringOption_("gate:colocation", "<mode>", "ranges", "'ranges' (default): keep a fragment only if its apex lies inside the precursor's "
+                              "retention-time span, the precursor's apex inside the fragment's, and the spans overlap by at least "
+                              "gate:colocation_overlap. 'off' skips this test.", false, true);
     setValidStrings_("gate:colocation", {"off", "ranges"});
-    registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
+    registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least overlap of the two spans, as a fraction of the shorter one.", false, true);
     setMinFloat_("gate:colocation_overlap", 0.0);
-    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the Pearson co-elution statistic over the full RT grid, with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Experimental. Replaces gate:min_correlation_points with gate:shrink_min_points.", false, true);
+    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher' (default): pull the correlation of a fragment with few shared points toward "
+                              "a prior (gate:shrink_prior_r, gate:shrink_prior_sd) before the gate:min_correlation test, instead of requiring "
+                              "gate:min_correlation_points points. 'off' uses the plain point count.", false, true);
     setValidStrings_("gate:shrinkage", {"off", "fisher"});
-    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.6, "gate:shrinkage fisher: prior mean correlation; 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments).", false, true);
-    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.3, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
+    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.6, "gate:shrinkage fisher: prior mean correlation.", false, true);
+    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.3, "gate:shrinkage fisher: prior standard deviation in Fisher-z units; smaller pulls harder.", false, true);
     setMinFloat_("gate:shrink_prior_sd", 0.01);
-    registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation; at 1 a one-frame overlap is scored almost at the prior (the data get weight 1/(1 + 1/gate:shrink_prior_sd^2)), so pair it with gate:adaptive faint.", false, true);
+    registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest shared points to compute a correlation (replaces gate:min_correlation_points).", false, true);
     setMinInt_("gate:shrink_min_points", 1);
-    registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
+    registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Trace MS1 in this many m/z bands in parallel. Changes the output slightly. 1 = off; 0 is read as 1.", false);
     regBool("perf:ms1_prune", "true",
-                          "Drop picked MS1 centroids at or below trace:noise_threshold_int as they load, keeping the witnesses that leave every MS1 "
-                          "band spectrum as it was. Digest-identical spectra, smaller MS1 map (peak at one cell per tile, dnoise off: dataset D 31.99 -> "
-                          "25.90 GB, TNBC 009 69.11 -> 31.97 GB). false = keep every centroid. docs/BASELINE.md 'MS1 prune, output-identical'.");
-    registerIntOption_("perf:trace_bands", "<n>", 12, "Split each window's fragment m/z range into N bands traced concurrently, lifting parallelism past the window count. The band count changes the output: docs/BASELINE.md 'perf:trace_bands 48: FAILS the gate'. 1 = off. 0 = auto (windows x bands >= threads), which the integer detector refuses at a positive tile:rt_sec (the default) and on the .d streaming source.", false);
-    registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "Fraction of currently-FREE RAM (/proc/meminfo MemAvailable) the window loop may commit. Concurrency is re-decided at every window admission, so the run adapts to other jobs on a shared node. One window is always admitted regardless, so a single oversized window cannot deadlock.", false);
-    registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "UPPER bound on isolation windows processed concurrently (memory admission may run fewer). Peak RAM scales with windows IN FLIGHT (each holds its frames + traces + grid), not with the total window count, so lowering this trades wall time for RAM. 0 = unlimited (use all threads).", false);
+                          "Drop MS1 peaks at or below trace:noise_threshold_int while loading, which saves memory. false keeps every peak.");
+    registerIntOption_("perf:trace_bands", "<n>", 12, "Trace each window's fragments in this many m/z bands in parallel, for more parallelism than "
+                           "the window count gives. Changes the output. 1 = off; 0 = auto (the output then depends on the thread count; the integer "
+                           "detector refuses it with tile:rt_sec > 0 or a streamed .d).", false);
+    registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "Fraction of free memory the window loop may use, re-checked for every window. Linux "
+                              "only; elsewhere windows run one at a time. One window always runs, however large.", false);
+    registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "Most isolation windows processed at once; fewer use less memory but take longer. 0 = "
+                           "no cap (free memory still limits them).", false);
 
-    registerTOPPSubsection_("diag", "Diagnostics ('debug' is reserved by TOPP)");
-    registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write MS1 traces and inferred precursors to <prefix>.traces.tsv / <prefix>.precursors.tsv so precursor loss can be attributed to a stage (no trace / no hypothesis / no spectrum) rather than inferred from the final count. Empty = off.", false, true);
+    registerTOPPSubsection_("diag", "Diagnostics");
+    registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write the MS1 traces and the precursors inferred from them to <prefix>.traces.tsv and "
+                              "<prefix>.precursors.tsv, to see where a precursor was lost. Empty = off.", false, true);
 
-    registerIntOption_("max_charge", "<n>", 5, "Maximum precursor charge considered during isotope inference.", false);
+    registerIntOption_("max_charge", "<n>", 5, "Highest precursor charge considered.", false);
 
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message.
-    registerTOPPSubsection_("charge", "Isotope / charge-state inference");
-    registerIntOption_("charge:min_charge", "<n>", 1, "Minimum precursor charge to emit. Default 1 since 2026-09-08: identified z=1 peptides on tryptic data are genuine 1+ ions (mobility on the 1+ trend line; 14-20% of Sage peptides on a 2-hour acquisition), but their stratum carries a higher entrapment FDR than a pooled 1% cut implies, so control FDR per charge downstream. "
-                       "-charge:min_charge 2 -charge:im_charge_veto false restores the old charge handling (the veto runs first). docs/BASELINE.md 'charge:min_charge 1 + the ion-mobility charge veto'.", false);
-    regBool("charge:im_charge_veto", "true", "Correct charge halving by ion mobility: fit the run's 2+ and 3+ 1/K0 trend lines from its confident calls (>= 3 isotopes); a z=1 call within charge:im_veto_band sigma of the 2+ line (and nearer it than the 3+ line) is re-called 2+, "
-                          "one on the 3+ line loses its charge and becomes a guessed precursor, which is dropped. Genuine 1+ ions sit on their own line and stay. docs/BASELINE.md 'The veto's 3+ arm dropped'.");
-    registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "Half-width of the 2+/3+ mobility band, in MAD-sigma of "
-                          "the confident calls' residuals (measured residual sd ~0.037 1/K0 against a 1+/2+ separation of ~0.29).", false);
-    registerStringOption_("charge:mono_profile_check", "<false/v2>", "v2", "Check the monoisotope of the partner-count walk, for the winning charge only (default v2 since 1.6.0; false = off, as in 1.5.0). "
-                          "'v2': isotope-position intensity sums (charge:mono_position_*). PS(k) = summed apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (the partner tolerance in m/z, gate:delta_rt, charge:mono_position_im_box 1/K0 of the seed, by default from the run's own isotope scatter). "
-                          "The walk's leftmost step j is rejected when PS(-j) / PS(-j+1) x lambda < charge:mono_position_min_ratio (lambda = max(0.1, 0.000594 x neutral mass), averagine's M-1/M0 bound; an empty heavier position counts as 0); "
-                          "the monoisotope moves one isotope right, the rejected trace stays claimed, and (charge:mono_position_iterate true) the new leftmost step is tested in turn. If nothing was rejected and the walk ended on a miss, the next lighter position is accepted without claiming when its ratio is >= charge:mono_position_extend (0 = off). "
-                          "v2 judges each walk at its precursor's final charge, after charge:im_charge_veto: a z=1 walk re-called 2+ stepped 1.003 m/z, two isotopes at 2+, and is read at 2+ spacing. "
-                          "'v2' keeps the charge, the seed and the envelope size (spx_n_isotopes). Logged as [monocheck], stamped spx:monocheck. CHANGES OUTPUT.", false, false);
+    registerTOPPSubsection_("charge", "Isotopes, charge and monoisotope");
+    registerIntOption_("charge:min_charge", "<n>", 1, "Lowest precursor charge written. Default 1: singly charged precursors are real 1+ ions but "
+                           "carry a higher FDR, so control FDR per charge downstream. 2 writes only 2+ and higher.", false);
+    regBool("charge:im_charge_veto", "true", "Use ion mobility to correct charge calls: a 1+ call on the run's 2+ mobility trend is re-called 2+, one "
+                "on the 3+ trend is dropped. Genuine 1+ ions keep their charge.");
+    registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "charge:im_charge_veto: half-width of the 2+ and 3+ mobility bands, in robust "
+                              "standard deviations of the fit.", false);
+    registerStringOption_("charge:mono_profile_check", "<false/v2>", "v2", "Check each precursor's monoisotope against the summed MS1 intensity at "
+                              "its isotope positions and move it by one isotope when averagine disagrees. 'v2' (default) = on; 'false' = off (as in 1.5.0).", false, false);
     setValidStrings_("charge:mono_profile_check", {"false", "v2"});
-    registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: the walk's leftmost step is rejected when its averagine-scaled position ratio PS(-j) / PS(-j+1) x lambda is below this.", false, true);
-    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width around the seed of the isotope-position intensity sums. 0 = auto: 3.5 x the 90th percentile of the 1/K0 gap between the brightest tenth of the count-walk seeds and their nearest MS1 trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703, whose isotope traces scatter widely in 1/K0). A value > 0 fixes the box. The count walk accepts partners up to charge:iso_im_tolerance away (auto: 0.01-0.05 per run), so a walk's own partner can lie outside the box and then counts as an empty position.", false, true);
-    registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when no step was rejected and the walk ended on a miss, move the monoisotope one isotope lighter (the most intense trace there, not claimed) if that position's ratio is >= this. 0 = off.", false, true);
-    regBool("charge:mono_position_iterate", "true", "charge:mono_profile_check v2: after a rejected leftmost step, test the new leftmost step too, and repeat while steps fail. false tests the leftmost step only.", true);
-    registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.0, "1/K0 tolerance for matching isotope partners (default 0 = auto since 1.6.0; 0.05 = the fixed value of 1.5.0). "
-                          "auto measures it per run before the isotope walk: a stride sample of the MS1 traces is probed at each charge's +1 isotope position (the partner m/z tolerance, gate:delta_rt) "
-                          "and at two control positions 50 ppm either side, where no isotope of the probe at that charge can sit; the nearest trace's 1/K0 gap is recorded at each. "
-                          "The tolerance is the one that admits the most isotope-position traces net of twice the control traces (true partners admitted minus chance partners admitted), "
-                          "on a 0.001 grid, clamped to [0.01, 0.05]: about 0.01 on dense short-gradient runs, up to 0.05 on sparse low-load runs. A value > 0 fixes it. Logged as [isotol], stamped spx:iso_im_tolerance. CHANGES OUTPUT.", false);
+    registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: reject the lightest isotope when its "
+                              "averagine-scaled intensity ratio is below this; the monoisotope then moves one isotope heavier.", false, true);
+    registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width of the isotope intensity sums. "
+                              "0 = auto (per run, 0.01 to 0.03).", false, true);
+    registerDoubleOption_("charge:mono_position_extend", "<q>", 0.6, "charge:mono_profile_check v2: when nothing was rejected, move the monoisotope "
+                              "one isotope lighter if that position's ratio is at least this. 0 = off.", false, true);
+    regBool("charge:mono_position_iterate", "true", "charge:mono_profile_check v2: after a rejection, test the new lightest isotope too, and repeat. false tests once.", true);
+    registerDoubleOption_("charge:iso_im_tolerance", "<1/K0>", 0.0, "1/K0 tolerance for matching isotope partners. 0 (default) = measured per run "
+                              "(0.01 to 0.05); a value above 0 fixes it (1.5.0 used 0.05).", false);
 
-    registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
+    registerTOPPSubsection_("dnoise", "MS1 denoising before peak picking (Bruker .d only)");
     regBool("dnoise:ms1", "true",
-                          "Denoise every MS1 frame on its raw points before picking: a port of dnoise v0.1.0's default MS1 path, bit-identical up to AccumulationTime 100 ms "
-                          "(Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT, LICENSES/dnoise-MIT.txt). Bruker .d only: other inputs "
-                          "pass through, logged and stamped spx:dnoise_ms1. Above 100 ms several raw counts share one intensity and the nearest is taken. A run whose raw points do not recover is refused, as is "
-                          "trace:native_ms1_neighbors > 0. CHANGES OUTPUT (dataset D -4.3% Sage peptides, TNBC 009 +1.5%) and lowers peak memory "
-                          "13-21% at one cell per tile: CHANGELOG, 2026-09-10 'MS1 denoising is on by default'. false = the output before 2026-09-10.");
-    registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: TOF bins on each side of a point's own bin summed per scan (dnoise --mz-half-width).", false, true);
-    registerIntOption_("dnoise:min_feature_length", "<scans>", 5, "Streak filter: OCCUPIED scans a run needs; bridged empty scans do not count (dnoise --min-feature-length).", false, true);
-    registerIntOption_("dnoise:max_internal_gap", "<scans>", 2, "Streak filter: empty scans a run may bridge (dnoise --max-internal-gap).", false, true);
-    registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes, each over the previous pass's survivors; 0 skips the streak filter, and the halo filter and the window gate still run unless dnoise:halo / dnoise:dia_ms1_window are false (dnoise --iterations).", false, true);
-    registerIntOption_("dnoise:min_window_intensity", "<counts>", 0, "Streak filter: raw window sum a scan needs to count as occupied (dnoise --min-window-intensity).", false, true);
-    registerIntOption_("dnoise:min_feature_intensity", "<counts>", 0, "Streak filter: raw sum a run needs over its span (dnoise --min-feature-intensity).", false, true);
-    regBool("dnoise:halo", "true", "Halo filter, once, on the streak survivors: keep a point at >= halo_peak_fraction of the most intense survivor in its box outside its own TOF bin (false = dnoise --no-halo).", true);
+                          "Denoise every MS1 frame before peak picking, with a port of dnoise v0.1.0 (Garrett, Diedrich & Yates III, bioRxiv "
+                          "2026.08.27.747603). Bruker .d input only; other inputs pass through. Lowers peak memory; false turns it off.");
+    registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: flight-time bins on each side of a point summed per scan (dnoise --mz-half-width).", false, true);
+    registerIntOption_("dnoise:min_feature_length", "<scans>", 5, "Streak filter: occupied scans a streak needs (dnoise --min-feature-length).", false, true);
+    registerIntOption_("dnoise:max_internal_gap", "<scans>", 2, "Streak filter: empty scans a streak may bridge (dnoise --max-internal-gap).", false, true);
+    registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes; 0 skips the streak filter (dnoise --iterations).", false, true);
+    registerIntOption_("dnoise:min_window_intensity", "<counts>", 0, "Streak filter: raw intensity a scan needs to count as occupied (dnoise --min-window-intensity).", false, true);
+    registerIntOption_("dnoise:min_feature_intensity", "<counts>", 0, "Streak filter: raw intensity a streak needs in total (dnoise --min-feature-intensity).", false, true);
+    regBool("dnoise:halo", "true", "Halo filter: keep a point only if it reaches dnoise:halo_peak_fraction of the strongest nearby point (false = dnoise --no-halo).", true);
     registerDoubleOption_("dnoise:halo_peak_fraction", "<f>", 0.15, "Halo filter: the fraction (dnoise --halo-peak-fraction).", false, true);
-    registerIntOption_("dnoise:halo_mz_idx_half_width", "<bins>", 80, "Halo filter: the box's half-width in TOF bins (dnoise --halo-mz-idx-half-width).", false, true);
-    registerIntOption_("dnoise:halo_scan_half_width", "<scans>", 2, "Halo filter: the box's half-width in scans (dnoise --halo-scan-half-width).", false, true);
-    regBool("dnoise:dia_ms1_window", "true", "Keep only MS1 points inside one of the run's diaPASEF isolation windows (every DiaFrameMsMsWindows row), padded, in dnoise's own two-point calibration (false = dnoise --no-dia-ms1-window).", true);
-    registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window gate: m/z added on both sides of every window (dnoise --dia-ms1-mz-pad).", false, true);
-    registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window gate: 1/K0 added on both sides of every window (dnoise --dia-ms1-im-pad).", false, true);
+    registerIntOption_("dnoise:halo_mz_idx_half_width", "<bins>", 80, "Halo filter: box half-width in flight-time bins (dnoise --halo-mz-idx-half-width).", false, true);
+    registerIntOption_("dnoise:halo_scan_half_width", "<scans>", 2, "Halo filter: box half-width in scans (dnoise --halo-scan-half-width).", false, true);
+    regBool("dnoise:dia_ms1_window", "true", "Keep only MS1 points inside one of the run's diaPASEF isolation windows, padded (false = dnoise --no-dia-ms1-window).", true);
+    registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window filter: m/z added on both sides of each window (dnoise --dia-ms1-mz-pad).", false, true);
+    registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window filter: 1/K0 added on both sides of each window (dnoise --dia-ms1-im-pad).", false, true);
 
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
@@ -3274,8 +3285,7 @@ protected:
     { const size_t i = (size_t)ii; const Trace& t = ms1[by_mz[i]]; sorted_mz[i] = t.mz; sorted_rt[i] = rtOf(ms1st, t); sorted_im[i] = t.im; }
     // [mzidx] Bucket index over sorted_mz keyed on the top bits of the IEEE-754 pattern: monotone for
     // positive doubles, so the bucket width is relative (ppm-shaped) and the std search on the bucket's
-    // sub-range returns the same position as on the whole array. docs/BASELINE.md, "Computed indices
-    // instead of binary searches".
+    // sub-range returns the same position as on the whole array.
     const double mz_lo = N ? sorted_mz.front() : 0.0, mz_hi = N ? sorted_mz.back() : 1.0;
     unsigned kshift = 32;
     auto rawKey = [](double x, unsigned sh) { uint64_t b; std::memcpy(&b, &x, sizeof b); return b >> sh; };
@@ -3333,7 +3343,7 @@ protected:
     // search returned; the commit walks the batch in the original order, skips a seed that is now used,
     // and re-evaluates one whose recorded partner has since been claimed. A search that returned -1 saw
     // only gate failures or used candidates, both stable under a monotone bitmap, so it needs no
-    // dependency. docs/BASELINE.md, "Ordered speculation on the greedy claim loop".
+    // dependency.
     // [monocheck-v2] the count walk's result for monoPositionPass_ (MonoV2In_), which runs after the IM charge veto.
     struct SeedRes { vector<Precursor_> emit; vector<size_t> claims; vector<size_t> deps; MonoV2In_ v2; };
     auto evalSeed = [&](size_t seed, SeedRes& R)
@@ -4509,8 +4519,8 @@ protected:
       {
         n_threads_req = std::max(1, (int)std::thread::hardware_concurrency());
         omp_set_num_threads(n_threads_req);
-        writeLogInfo_("-threads not given: using all " + String(n_threads_req) + " cores. Pass "
-                      "-threads <n> to limit it, which is what you want on a shared machine.");
+        writeLogInfo_("-threads not given: using all " + String(n_threads_req) + " cores. Pass -threads <n> to use fewer, "
+                      "for example on a shared machine.");
       }
     }
     const String in = getStringOption_("in");
@@ -4543,7 +4553,7 @@ protected:
     merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
     frag_int_ = getStringOption_("assembly:frag_intensity") == "core" ? 1 : getStringOption_("assembly:frag_intensity") == "sum" ? 2 : 0;
     if (frag_int_ == 1 && getIntOption_("assembly:frag_core_frames") % 2 == 0)   // used by 'core' only
-      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:frag_core_frames must be odd: the core is centred on the precursor's apex frame");
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:frag_core_frames must be odd (the frames are centred on the precursor's apex).");
     frag_core_half_ = getIntOption_("assembly:frag_core_frames") / 2;
     post_fusion_cap_ = getStringOption_("assembly:post_fusion_cap") == "true";
     foreign_w_ = getDoubleOption_("assembly:foreign_precursor_weight");
@@ -4602,15 +4612,13 @@ protected:
                                                                              : FileTypes::MZPEAK;
     }
     if (out_type == FileTypes::MZPEAK)
-      writeLogInfo_("Writing mzPeak. NOTE: DDA search engines read mzML, not mzPeak -- if this file "
-                    "is going straight into a search, write .mzML instead (or -out_type mzML).");
+      writeLogInfo_("Writing mzPeak. Search engines read mzML: for a search, name the output .mzML (or pass -out_type mzML).");
 #else
     // Built without mzPeak support: mzML is the only container this binary can write. Refuse an
     // explicit request for mzPeak rather than silently writing something else.
     if (!out_type_opt.empty() && out_type_opt != "mzML")
       throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary "
-            "can only write mzML.");
+            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary writes mzML only.");
 #endif
     // [3a] The integer detector's band edges come from the acquisition: they need the tdf's GlobalMetadata bounds, so
     // refuse BEFORE the load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
@@ -4632,7 +4640,7 @@ protected:
         if (!loadTofAxis(c, why)) continue;   // not a calibration source; try the next
         if (!(tofAxis().n_bins > 1))
           throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                "trace:detector integer needs MzAcqRangeLower/Upper and DigitizerNumSamples from the tdf's GlobalMetadata; the calibration source " + c + " does not provide them (" + tofAxis().bounds_why + "). Use -trace:detector openms.");
+                "trace:detector integer needs the acquisition m/z range and digitizer size (GlobalMetadata) from the calibration source " + c + ", which lacks them (" + tofAxis().bounds_why + "). Use -trace:detector openms.");
         writeLogInfo_("flight-time axis from " + c + " (preflight): " + String(tofAxis().b_by_frame.size()) + " frame factors; digitizer bins " + String(tofAxis().n_bins) + ", acquisition m/z " + String(tofAxis().acq_lo) + "-" + String(tofAxis().acq_hi));
         break;
       }
@@ -4649,9 +4657,9 @@ protected:
     else if (dnoise_req)
     {
       auto refuse = [](const String& why) {
-        return Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "dnoise:ms1 " + why + " -dnoise:ms1 false runs without MS1 denoising."); };
+        return Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "dnoise:ms1 " + why + " Pass -dnoise:ms1 false to run without MS1 denoising."); };
       if (cfg.ms1_n_neighbors > 0)
-        throw refuse("denoises each raw MS1 frame, and trace:native_ms1_neighbors > 0 sums neighbouring frames before DIAspeXtract sees them.");
+        throw refuse("cannot be combined with trace:native_ms1_neighbors > 0.");
       // The loader's m/z model, predicted: under the default AUTO strategy an SDK path (the Config's, else
       // OPENMS_BRUKER_SDK_PATH) makes openTimsDataHandle calibrate m/z through the Bruker SDK, which the TOF recovery
       // cannot invert. An SDK that then fails to load would leave the table model, so this can refuse a run that would
@@ -4659,11 +4667,11 @@ protected:
       { const char* env_sdk = std::getenv("OPENMS_BRUKER_SDK_PATH");
         const std::string sdk = !cfg.bruker_sdk_path.empty() ? cfg.bruker_sdk_path : std::string(env_sdk ? env_sdk : "");
         if (!sdk.empty())
-          throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, but with a Bruker SDK path set (" + String(sdk)
-                       + ") the loader calibrates m/z through the Bruker SDK: unset OPENMS_BRUKER_SDK_PATH to denoise."); }
+          throw refuse("needs the run's own m/z calibration table, but a Bruker SDK path is set (" + String(sdk)
+                       + "): unset OPENMS_BRUKER_SDK_PATH to denoise."); }
       String why_axis;
       if (!tofAxis().ok && !loadTofAxis(in + "/analysis.tdf", why_axis))   // the TOF recovery runs during the load
-        throw refuse("recovers each point's TOF bin through the tdf's MzCalibration table model, which is not usable here (" + why_axis + ").");
+        throw refuse("needs the run's m/z calibration table (MzCalibration in analysis.tdf), which is not usable here (" + why_axis + ").");
       spx::dnoise::Params& p = dnoise.p;
       p.mz_half_width = (uint32_t)getIntOption_("dnoise:mz_half_width");
       p.min_feature_length = (size_t)getIntOption_("dnoise:min_feature_length");
@@ -4737,7 +4745,7 @@ protected:
           const auto m = spx::mzPeakRunMeta(in);
           if (!m->exact || !(m->exact->n_bins > 1))
             throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                  "trace:detector integer needs DigitizerNumSamples and MzAcqRangeLower/Upper from the archive's (or sidecar) analysis.tdf; not provided (" + String(m->exact ? m->exact->bounds_why : "no exact calibration") + ").");
+                  "trace:detector integer needs the acquisition m/z range and digitizer size from the analysis.tdf in or beside the mzPeak archive, which lacks them (" + String(m->exact ? m->exact->bounds_why : "no exact calibration") + "). Use -trace:detector openms.");
         }
         consumer.tablefn = [&]() {
           PickCompactConsumer::FrameTables t;
@@ -4795,12 +4803,12 @@ protected:
       catch (const Exception::BaseException& e)
       {
         writeLogWarn_(String("[stream] streaming load failed (") + e.getName()
-                      + "); falling back to loadExperiment. " + e.getMessage());
+                      + "); reading the whole run instead. " + e.getMessage());
       }
       // [3b] the source is COMMITTED only by a successful pass 1: a fallback to the resident load
       // reads the whole run, so the tile loop must slice it rather than call the loader again
       if (!streamed && tile_source)
-      { tile_source = false; writeLogWarn_("[3b] the streaming source did not read pass 1; the resident source takes over (the whole run is loaded)."); }
+      { tile_source = false; writeLogWarn_("[stream] the streaming read did not finish; reading the whole run instead."); }
       // [frames] the invariant the frozen tables rest on, checked OUTSIDE the recoverable catch: a
       // delivered window's slab is its table (rt and id, frame for frame) after padding
       if (streamed && tile_source && consumer.tables().empty())
@@ -4859,7 +4867,7 @@ protected:
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        writeLogError_("Error: input has no ion-mobility data at MS1. DIAspeXtract requires diaPASEF (IM DIA) input.");
+        writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
         return ILLEGAL_PARAMETERS;
       }
       // Pick all IM frames in parallel. firstprivate gives each thread a deep copy (Param is a value type), so the
@@ -4930,8 +4938,7 @@ protected:
       {
         writeLogWarn_("[compact] DROPPED " + String(lost) + " peaks: no_im_array=" + String(cstat.no_im_array)
                       + " size_mismatch=" + String(cstat.size_mismatch) + " bad_mz=" + String(cstat.bad_mz)
-                      + " bad_im=" + String(cstat.bad_im) + " (kept " + String(cstat.kept) + ") -- if this is"
-                      + " nonzero the compact store is NOT lossless.");
+                      + " bad_im=" + String(cstat.bad_im) + " (kept " + String(cstat.kept) + "); they are left out of the analysis.");
       }
       size_t ms1_pk = 0; for (const auto& sp : ms1_map) ms1_pk += sp.size();
       writeLogInfo_("Split into MS1 + " + String(ms2_by_window.size()) + " windows (picked); compact store "
@@ -4952,7 +4959,7 @@ protected:
 
     if (ms1_map.empty())
     {
-      writeLogError_("Error: no MS1 ion-mobility frames found; cannot seed precursors.");
+      writeLogError_("Error: the input has no MS1 frames with ion mobility, so there are no precursors.");
       return INCOMPATIBLE_INPUT_DATA;
     }
 
@@ -4979,7 +4986,7 @@ protected:
                     + (ax.empty() ? "" : " spanning " + String(ax.front()) + "-" + String(ax.back()) + " s"));
       if (ax.empty())
       {
-        writeLogError_("Error: no frame retention times; cannot build the RT axis.");
+        writeLogError_("Error: the input's frames carry no retention times.");
         return INCOMPATIBLE_INPUT_DATA;
       }
       // [tile-2d] frame times -> axis indices, and the load-time growth slack returned, window by
@@ -5043,7 +5050,7 @@ protected:
     const double splitter_scan_time = cycle;
     if (splitter_scan_time > 0.0)
       writeLogInfo_("[split] scan time " + String(splitter_scan_time) + " s from " + String(ms1_rt.size()) + " MS1 frames -> chrom_fwhm / scan time is the splitter's window");
-    else writeLogWarn_("[split] no positive gap between MS1 frame times; the valley splitter falls back to each trace's own average cycle time");
+    else writeLogWarn_("[split] the MS1 frame times show no positive gap; valley splitting uses each trace's own cycle time.");
     const double max_span = getDoubleOption_("trace:max_span_sec");
     int ms1_bands = getIntOption_("perf:ms1_trace_bands");
     if (ms1_bands < 1) ms1_bands = 1;
@@ -5142,7 +5149,7 @@ protected:
       else
       {
         ms1_min_len = 3.0;
-        writeLogWarn_("[minlen] auto: " + head + ", cycle " + String(cycle) + " s: too few to estimate (100 needed, and a positive cycle); trace:min_length_sec 3, the value before 1.6.0");
+        writeLogWarn_("[minlen] auto: " + head + ", cycle " + String(cycle) + " s: too few traces to measure the peak width (100 and a positive cycle time needed); using trace:min_length_sec 3.");
         minlen_stamp = "auto fallback 3 s (" + String(w.size()) + " bright sampled traces with a FWHM, cycle " + String(cycle) + " s)";
       }
     }
@@ -5468,22 +5475,18 @@ protected:
     // integer detector must not calibrate it at reference temperature -- fall back to openms instead.
     if (integer_detector && tofAxis().ok && cstat.unmapped_frame > 0)
     {
-      writeLogWarn_("trace:detector=integer needs a per-frame calibration factor for EVERY frame, and "
-                    + String(cstat.unmapped_frame) + " frame(s) carry a nativeID with no parseable "
-                    "\"frame=<Id>\" key, so they cannot be addressed in the tdf's Frames table. Falling "
-                    "back to trace:detector=openms rather than calibrating them at reference "
-                    "temperature. A Bruker .d always names its frames; an mzML converted from one may "
-                    "not. Pass -trace:detector openms to silence this.");
+      writeLogWarn_("trace:detector integer needs a calibration for every frame, but " + String(cstat.unmapped_frame)
+                    + " frame(s) have no \"frame=<Id>\" in their nativeID (an mzML converted from a .d may lack it). "
+                    "Falling back to trace:detector openms. Pass -trace:detector openms to silence this.");
       integer_detector = false;
     }
     if (integer_detector && !tofAxis().ok)
     {
       // Fall back rather than refuse: the OpenMS detector needs no calibration, and spx:detector records which ran.
-      writeLogWarn_("trace:detector=integer needs the vendor flight-time calibration (MzCalibration "
-                    "+ Frames.T1 from analysis.tdf) and it was not available for this input ("
-                    + why + "). Falling back to trace:detector=openms; the two detectors are different algorithms, "
-                    "so this file is NOT comparable peptide-for-peptide "
-                    "with one traced on the integer axis. Pass -trace:detector openms to silence this.");
+      writeLogWarn_("trace:detector integer needs the Bruker flight-time calibration (MzCalibration and Frames.T1 in "
+                    "analysis.tdf), which this input lacks (" + why + "). Falling back to trace:detector openms, a different "
+                    "algorithm, so the result is not comparable with an integer-detector run. Pass -trace:detector openms to "
+                    "silence this.");
       integer_detector = false;
     }
     const double mem_frac = getDoubleOption_("perf:mem_fraction");
@@ -5503,15 +5506,15 @@ protected:
     }
     if (cell_pitch > 0.0 && !integer_detector)
     {
-      writeLogWarn_("tile:rt_sec applies to the integer detector; trace:detector=openms traces whole windows (no cells) -- the header records no grid.");
+      writeLogWarn_("tile:rt_sec is ignored: trace:detector openms traces whole windows, without retention-time cells.");
       cell_edges.clear(); cell_boundaries.clear(); cell_pitch = -1.0;
     }
     if (cell_pitch > 0.0 && bands_opt <= 0)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "tile:rt_sec needs a fixed perf:trace_bands: the auto setting (0) ties the band count to the thread count, and each band has its own `visited`, so the output would depend on the threads.");
+            "perf:trace_bands 0 (auto) would make the output depend on the thread count, so it cannot be combined with tile:rt_sec > 0. Set a fixed perf:trace_bands.");
     if (tile_source && integer_detector && bands_opt <= 0)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "the .d streaming source needs a fixed perf:trace_bands: the auto setting derives the band count from the WINDOW COUNT, and the streaming source counts every window of the acquisition while the resident source counts only the windows that delivered a frame -- the two would band differently.");
+            "perf:trace_bands 0 (auto) cannot be used when a .d is streamed (perf:stream_load true). Set a fixed perf:trace_bands.");
     // [tile] The cells grouped into TILES. A tile owns the precursors whose MS1 frame time lies in
     // [lo - tile_drt, hi - tile_drt) -- the half-open ranges partition RT (lo = -inf for the first,
     // hi = +inf for the last) -- and traces its windows on the tile's frames only; a precursor's
@@ -5529,7 +5532,7 @@ protected:
       const bool one_piece = (out_type != FileTypes::MZML);   // mzPeak output is bulk-only: one tile
       const size_t per = (cells_per_tile <= 0 || cell_pitch <= 0.0 || one_piece) ? n_cells_run : (size_t)cells_per_tile;
       if (one_piece && cells_per_tile > 0 && cell_pitch > 0.0 && n_cells_run > 1)
-        writeLogWarn_("[tile] mzPeak output is written in one piece: the " + String(n_cells_run) + " cells run as one tile (the whole run's memory); write mzML (-out_type mzML) for tiled memory.");
+        writeLogWarn_("[tile] mzPeak output is written in one piece: the " + String(n_cells_run) + " cells run as one tile and need the whole run's memory. Write mzML (-out_type mzML) to run in tiles.");
       for (size_t c0 = 0; c0 < n_cells_run; c0 += per)
       {
         const size_t c1 = std::min(n_cells_run, c0 + per);
@@ -5546,7 +5549,7 @@ protected:
     {
       if (!(tofAxis().n_bins > 1))
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "trace:detector integer needs DigitizerNumSamples and MzAcqRangeLower/Upper from the tdf's GlobalMetadata, which this input's calibration source did not provide (" + tofAxis().bounds_why + ").");
+              "trace:detector integer needs the acquisition m/z range and digitizer size (GlobalMetadata), which this input's calibration source lacks (" + tofAxis().bounds_why + "). Use -trace:detector openms.");
       for (const WinKey& k : fkeys) wbands[k] = {0xFFFFFFFFu, 0};
       #pragma omp parallel for schedule(dynamic, 1)
       for (long i = 0; i < (long)fkeys.size(); ++i)
@@ -6433,10 +6436,8 @@ protected:
     win_phase.reset();   // [perf-instr] WINDOW_LOOP ends here: the tile loop's own phases were enclosed in it, the final write is not
     writeLogInfo_("[soa-rt] off-grid " + String(rtOffGrid().load()));
     if (rtOffGrid().load() != 0)
-      writeLogWarn_("[soa-rt] " + String(rtOffGrid().load()) + " traces had an RT that is not one of "
-                    "the store's frame times (ElutionPeakDetection skipped, or a span trimmed away from "
-                    "its smoothed apex); their RT was snapped to the nearest frame. Zero is the "
-                    "output-identical case -- a nonzero count here means the digest will differ.");
+      writeLogWarn_("[soa-rt] " + String(rtOffGrid().load()) + " traces had a retention time between frames; "
+                    "it was moved to the nearest frame time.");
     else writeLogInfo_("[soa-rt] every trace RT was exactly a frame time (0 snapped).");
     writeLogInfo_("All windows done (admission high-water " + String(adm_hwm.load()) + " of "
                   + String(n_conc) + " allowed concurrent windows)." + clk_() + rss_() + mem_()); // [mem]
@@ -6536,8 +6537,7 @@ int main(int argc, const char** argv)
       if (std::strncmp(*e, op.prefix, op.len) != 0) continue;
       const int n = (int)std::strcspn(*e, "=");                 // the variable name
       const int m = n - (int)op.len;                            // the part after the old prefix
-      std::fprintf(stderr, "Error: %.*s is set, but the tool is now DIAspeXtract and reads only DIASPEXTRACT_* variables "
-                           "(SpeXtractor's SPEXTRACTOR_* and DIAspeXtractor's DIASPEXTRACTOR_* are refused, not ignored): "
+      std::fprintf(stderr, "Error: %.*s is set, but this tool reads only DIASPEXTRACT_* variables: "
                            "rename it to DIASPEXTRACT_%.*s or unset it. Nothing was run.\n", n, *e, m, *e + op.len);
       old_name = true;
     }
