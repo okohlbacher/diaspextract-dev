@@ -117,8 +117,9 @@ At the defaults the correlation test does not reject a fragment of a faint precu
 the shrinkage pulls every correlation, even -1, to at least 0.31, above `-gate:min_correlation`. Such a fragment is
 kept when it elutes with the precursor (`-gate:faint_delta_rt`, `-gate:delta_im`) and passes `-gate:colocation` or,
 when it has too few points for a correlation, `-gate:short_traces`. With `-gate:adaptive off` the same holds for
-every precursor, up to 16 shared points for an uncorrelated fragment. A smaller `-gate:shrink_prior_sd` or
-`-gate:shrink_prior_r`, or a higher `-gate:min_correlation`, makes the test bite.
+every precursor, up to 16 shared points for an uncorrelated fragment. A larger `-gate:shrink_prior_sd` (a weaker
+pull), a smaller `-gate:shrink_prior_r` or a higher `-gate:min_correlation` makes the test bite; a smaller
+`-gate:shrink_prior_sd` pulls harder toward the prior and lets even more fragments pass.
 
 | option | default | what it does |
 |---|---|---|
