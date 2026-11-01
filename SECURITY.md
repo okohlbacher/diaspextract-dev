@@ -14,10 +14,12 @@ sockets, runs no server, and requires no credentials. The realistic security sur
 parser. Reports of crashes, out-of-bounds reads or unbounded allocation triggered by an input file
 are in scope and welcome.
 
-Most parsing is done by OpenMS and by the vendor libraries. If the flaw is there, we will help
-route it upstream.
+Before the reader runs, the tool checks a `.d` itself: that it is diaPASEF, that every frame lies inside
+`analysis.tdf_bin`, that no frame claims more points than the file can hold, and that the calibration tables hold
+numbers. Most parsing is still done by OpenMS and by the vendor libraries. If the flaw is there, we will help route it
+upstream.
 
 ## Data handling
 
 DIAspeXtract reads local files and writes local files. It does not phone home, collect telemetry, or
-transmit anything. If you find otherwise, that is a security bug — report it.
+transmit anything; it switches OpenMS's update check off whatever the environment says. If you find otherwise, that is a security bug — report it.
