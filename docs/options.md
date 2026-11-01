@@ -1,6 +1,6 @@
 # DIAspeXtract options
 
-This page lists every option of DIAspeXtract 1.7.0 with its default. The defaults are the recommended settings, so a
+This page lists every option of DIAspeXtract 1.7.1 with its default. The defaults are the recommended settings, so a
 normal run needs only `-in` and `-out`:
 
 ```bash

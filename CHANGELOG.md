@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (1.7.1)
+## v1.7.1 — unreleased
 
 **The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on
 public runs), with two exceptions listed below: `-charge:min_charge 2` and above now gives the same higher-charge spectra
