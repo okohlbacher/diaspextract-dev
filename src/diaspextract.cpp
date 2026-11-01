@@ -488,6 +488,7 @@ namespace
   double anchor_rescue_corr_ = 0.7;  ///< [anchor] gate:anchor_rescue_corr
   int anchor_max_rescued_ = 50;      ///< [anchor] gate:anchor_max_rescued
   bool post_fusion_cap_ = false;     ///< [recap] assembly:post_fusion_cap: carry the cap key per peak, re-cap after the twin fold
+  bool spectrum_meta_ = false;      ///< [diag] diag:spectrum_meta: per-spectrum precursor support userParams
   bool twin_ext_mark_ = false;       ///< [twin-rt] assembly:twin_rt_match ext: mark spectra whose mono v2's extension placed (spx_mono_ext, never written); set only when the cross-frame fold is active
   double foreign_w_ = 0.0;           ///< [foreign] assembly:foreign_precursor_weight (1 = off, 0 removes)
   double foreign_ppm_ = 10.0;        ///< [foreign] assembly:foreign_precursor_ppm
@@ -2797,6 +2798,8 @@ protected:
                               "expected peak width (seconds). 0 = off.", false);
     registerFlag_("diag:selftest_twins", "Run the built-in twin-fold self-test and exit.", true);
     registerFlag_("diag:selftest_arena", "Run the built-in MS1 storage self-test and exit.", true);
+    registerFlag_("diag:spectrum_meta", "Write per-spectrum userParams for diagnosis: spx_p_frames (window frames with precursor signal), "
+                  "spx_faint (1: at most gate:faint_max_frames of them), spx_p_apex (precursor apex intensity).", true);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split precursor traces at chromatographic valleys, so two peptides that "
                               "elute apart at the same m/z stay separate; the value is the expected peak width (seconds). 0 = off.", false);
     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each trace to at most this many seconds around its apex. 0 = no limit.", false);
@@ -4022,6 +4025,8 @@ protected:
     };
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
+    const size_t n_touched = touched.size();                            // [diag] spectrum_meta, after pdense is reset
+    const double p_top = p_apex >= 0 ? (double)pdense[p_apex] : 0.0;
     const bool g_shrink = shrink_ && all_p, g_coloc = coloc_ && all_p, g_conc = short_conc_ && all_p;
     const double g_drt = faint ? faint_drt_ : delta_rt, g_cp = faint ? faint_cp_ : corr_power_;
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
@@ -4350,6 +4355,12 @@ protected:
     out.setMetaValue("spx_guessed", 0);
     out.setMetaValue("spx_n_isotopes", pc.n_isotopes);
     if (twin_ext_mark_ && pc.mono_ext) out.setMetaValue("spx_mono_ext", 1);   // [twin-rt] read and removed by mergeTwins_
+    if (spectrum_meta_)                                                // [diag] diag:spectrum_meta
+    {
+      out.setMetaValue("spx_p_frames", (int)n_touched);
+      out.setMetaValue("spx_faint", (int)n_touched <= faint_frames_ ? 1 : 0);
+      out.setMetaValue("spx_p_apex", p_top);
+    }
   }
 
   /// [arena] Assertions on the SHIPPED compactUnreferenced(): the compaction must survive traces
@@ -4653,6 +4664,7 @@ protected:
     foreign_min_iso_ = getIntOption_("assembly:foreign_precursor_min_iso");
     fuse_ppm_ = getDoubleOption_("assembly:fragment_fuse_ppm");
     faint_frames_ = getIntOption_("gate:faint_max_frames");
+    spectrum_meta_ = getFlag_("diag:spectrum_meta");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
     anchor_rescue_ = getStringOption_("gate:anchor_rescue") == "true";
