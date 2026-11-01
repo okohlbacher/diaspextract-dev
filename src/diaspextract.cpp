@@ -2452,8 +2452,8 @@ namespace
     }
     // A component is a chain of pairwise links and can span more than the tolerances (500.0000, 500.0095 and 500.0190
     // link pairwise within 20 ppm, the ends 38 ppm apart). The whole component folds: on real runs such chains are one
-    // ion called at drifting m/z; folding only the survivor's direct links wrote 10.7 % more spectra on K562 9905 for
-    // the same peptides (Sage +0.02 %, MSFragger -0.19 %).
+    // ion called at drifting m/z; folding only the survivor's direct links wrote 10.7 % more spectra on a public
+    // cell-line run for the same peptides (Sage +0.02 %, MSFragger -0.19 %).
     vector<uint32_t> grp(v.size(), NONE);   // the survivor a spectrum folds into (itself for a survivor)
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
       if (n_in[root(i)] >= 2) grp[i] = best[root(i)];
