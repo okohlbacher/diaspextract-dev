@@ -128,7 +128,7 @@ Exit codes, for pipelines:
 | code | meaning |
 |---|---|
 | 0 | spectra written (a run that finds none writes a valid mzML with an empty spectrum list) |
-| 3 | the input is corrupt: a truncated `analysis.tdf_bin`, impossible frame metadata, no diaPASEF frames |
+| 3 | the input is corrupt: a truncated `analysis.tdf_bin`, impossible frame metadata, no diaPASEF frames, a calibration value that is missing or not a number (when `-dnoise:ms1` reads it, as at the defaults) |
 | 5 | the output could not be written completely (disk full, quota); only `<out>.part` is left |
 | 6 | an option value is invalid |
 | 11 | the `.d` is ddaPASEF (MsMsType 8), not diaPASEF: search it directly |

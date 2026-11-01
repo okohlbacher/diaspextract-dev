@@ -312,6 +312,17 @@ inline std::string tdfNotDiaReason(const std::string& tdf, bool& dda)
          + (counts.empty() ? "none" : counts) + "; diaPASEF is 9, ddaPASEF 8)";
 }
 
+/// A refusal reason of loadTdfCalibration or loadTdfDnoise that names a value no instrument writes (NULL or text where a
+/// number belongs, NaN, an implausible id, a malformed database page): the file is corrupt, not merely unsupported
+/// (another model type, several calibrations), and the tool exits with INPUT_FILE_CORRUPT as the preflight does.
+inline bool tdfReasonIsCorrupt(const std::string& why)
+{
+  for (const char* k : {"is NULL", "is not a number", "not a finite number", "contains NaN", "implausible", "malformed",
+                        "is not an INTEGER", "references an unknown", "has no AccumulationTime", "appears twice"})
+    if (why.find(k) != std::string::npos) return true;
+  return false;
+}
+
 /// Why analysis.tdf_bin cannot hold every frame, or empty. A frame's block starts at Frames.TimsId; with
 /// TimsCompressionType 2 its first 4 bytes (little-endian) are the block length. A cut file loses its tail, so the frames
 /// that start past the end are counted without a read, and only the last block that starts inside the file is read: one

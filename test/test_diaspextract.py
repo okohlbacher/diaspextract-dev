@@ -23,14 +23,15 @@ checks that fail if the things most likely to break do break:
      19c. stored order     MS1 spectra stored in descending m/z give the ascending fixture's result, prune off or on
      19d. non-finite m/z   a NaN or infinite MS1 m/z is refused right after the pick, before the prune, prune off or on
       20. dnoise:ms1       on by default, it filters a Bruker .d only: an mzML is skipped, logged, stamped, unchanged
-      21. dnoise SDK       a .d holding only its analysis.tdf: with a Bruker SDK path set, dnoise:ms1 refuses before the
-                           load; without one the run gets past the dnoise setup and is refused by the preflight
-                           (no analysis.tdf_bin)
+      21. dnoise SDK       a .d without decodable frames: with a Bruker SDK path set, dnoise:ms1 refuses before the
+                           load; without one the run gets past the dnoise setup and fails in the loader; without
+                           analysis.tdf_bin the preflight refuses it first (exit 3), and so a NULL calibration value
       22. old variables    a set SPEXTRACTOR_* (SpeXtractor) or DIASPEXTRACTOR_* (DIAspeXtractor) variable refuses the run
                            before anything, naming it and its DIASPEXTRACT_ name; DIASPEXTRACT_DET runs and prints its
                            [det] lines
-      23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults writes spectra, and is thread-,
-                           tile- and tile-pipeline-invariant (skipped without it)
+      23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults is streamed, dnoise-filtered and
+                           traced by the integer detector, writes spectra, and is thread-, tile- and tile-pipeline-invariant
+                           (skipped without it); with DIASPEXTRACT_TEST_D_DIGEST set, its spectra digest must equal it
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
@@ -194,8 +195,9 @@ def synth_tdf(path, n_frames):
     return path
 
 
-def synth_fake_d(d):
-    """A Bruker .d holding only its analysis.tdf: no analysis.tdf_bin, so the loader cannot read a single frame.
+def synth_fake_d(d, calib_sql=None):
+    """A Bruker .d whose analysis.tdf_bin is zeros: it passes the preflight (frames inside the file, NumPeaks within
+    256x of each 64-byte block), but the loader cannot decode a single frame. `calib_sql` runs on the tdf at the end.
 
     The metadata carries everything the tool decides before the load: a real run's MzCalibration row and the
     GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- a real run's TimsCalibration row,
@@ -219,14 +221,18 @@ def synth_fake_d(d):
                (1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644,
                 167.9496150068565, 16.646316600032645, 2241.865411900982))
     db.execute("CREATE TABLE Frames (Id INTEGER PRIMARY KEY, Time REAL, MsMsType INTEGER, NumScans INTEGER, NumPeaks INTEGER,"
-               " AccumulationTime REAL, TimsCalibration INTEGER, MzCalibration INTEGER, T1 REAL)")
-    db.executemany("INSERT INTO Frames VALUES (?,?,?,944,1000,99.958,1,1,?)",
-                   [(i, 0.1 * i, 0 if i % 5 == 1 else 9, g["T1_ref"] + 0.03 * (i % 3)) for i in range(1, 11)])
+               " AccumulationTime REAL, TimsCalibration INTEGER, MzCalibration INTEGER, T1 REAL, TimsId INTEGER)")
+    db.executemany("INSERT INTO Frames VALUES (?,?,?,944,1000,99.958,1,1,?,?)",
+                   [(i, 0.1 * i, 0 if i % 5 == 1 else 9, g["T1_ref"] + 0.03 * (i % 3), 64 * (i - 1)) for i in range(1, 11)])
     db.execute("CREATE TABLE DiaFrameMsMsWindows (WindowGroup INTEGER, ScanNumBegin INTEGER, ScanNumEnd INTEGER,"
                " IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL)")
     db.executemany("INSERT INTO DiaFrameMsMsWindows VALUES (?,?,?,?,?,?)",
                    [(1 + k % 12, 34 + (k * 7) % 400, 500 + (k * 13) % 400, 400.0 + 0.5 * k, 25.0, 30.0) for k in range(24)])
+    if calib_sql:
+        db.executescript(calib_sql)
     db.commit(); db.close()
+    with open(os.path.join(d, "analysis.tdf_bin"), "wb") as f:
+        f.write(b"\0" * 640)
     return d
 
 
@@ -876,11 +882,12 @@ def main():
     check("dnoise:ms1 skips an mzML (logged and stamped), 'false' stamps off, the spectra are unchanged", c20)
 
     # 21: dnoise:ms1 inverts the loader's m/z through the tdf's MzCalibration table model, but with a Bruker SDK path set
-    #     the loader calibrates through the SDK, so the setup refuses before the load. The input is a .d holding only its
-    #     analysis.tdf (synth_fake_d: no analysis.tdf_bin, the loader cannot read a frame). With OPENMS_BRUKER_SDK_PATH the
-    #     run must be refused naming dnoise:ms1 and the SDK, with no dnoise setup line and no loader output; without it the
-    #     same input must get past the dnoise setup and be refused by the preflight (no analysis.tdf_bin), which shows the
-    #     refusal comes first.
+    #     the loader calibrates through the SDK, so the setup refuses before the load. The input (synth_fake_d) passes the
+    #     preflight but holds no decodable frame. With OPENMS_BRUKER_SDK_PATH the run must be refused naming dnoise:ms1
+    #     and the SDK, with no dnoise setup line and no loader output; without it the same input must get past the dnoise
+    #     setup and fail in the loader. The preflight runs first: without analysis.tdf_bin the run is refused there (exit
+    #     3) before the dnoise setup, and a corrupt calibration value (NULL) is refused with exit 3 too, not as an option
+    #     error.
     def c21():
         fake = synth_fake_d(os.path.join(work, "fake.d"))
         env = dict(os.environ)
@@ -893,8 +900,18 @@ def main():
         r = run(binary, fake, os.path.join(work, "fake_table.mzML"), expect_fail=True, env=env)
         log = r.stdout + r.stderr
         assert setup_line in log, "no Bruker SDK path: the fake .d did not get past the dnoise setup:\n" + log[-1500:]
-        assert "analysis.tdf_bin" in log and r.returncode == 3, "no Bruker SDK path: the run was not refused at the missing analysis.tdf_bin (exit 3):\n" + log[-800:]
-    check("dnoise:ms1 refuses a Bruker SDK calibration before the load, and gets past its setup without one", c21)
+        assert r.returncode > 0, f"no Bruker SDK path: the undecodable frames ended the run with signal {-r.returncode}:\n" + log[-800:]
+        os.remove(os.path.join(fake, "analysis.tdf_bin"))
+        r = run(binary, fake, os.path.join(work, "fake_nobin.mzML"), expect_fail=True, env=env)
+        log = r.stdout + r.stderr
+        assert r.returncode == 3 and "analysis.tdf_bin" in log and setup_line not in log, \
+            f"no analysis.tdf_bin: not refused by the preflight (exit 3, before the dnoise setup), exit {r.returncode}:\n" + log[-800:]
+        bad = synth_fake_d(os.path.join(work, "fake_badcal.d"), calib_sql="UPDATE MzCalibration SET C4 = NULL;")
+        r = run(binary, bad, os.path.join(work, "fake_badcal.mzML"), expect_fail=True, env=env)
+        log = r.stdout + r.stderr
+        assert r.returncode == 3 and "corrupt" in log and "C4 is NULL" in log, \
+            f"a NULL calibration value: not refused as a corrupt file (exit 3), exit {r.returncode}:\n" + log[-800:]
+    check("dnoise:ms1 refuses a Bruker SDK calibration before the load, gets past its setup without one; the preflight comes first", c21)
 
     # 22: the renames' fail-closed guard. Every variable is DIASPEXTRACT_* since the tool became DIAspeXtract; before that
     #     it was SPEXTRACTOR_* (SpeXtractor) and DIASPEXTRACTOR_* (DIAspeXtractor), and an old name would be ignored

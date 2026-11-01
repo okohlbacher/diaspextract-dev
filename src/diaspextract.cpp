@@ -4690,6 +4690,23 @@ protected:
       throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary writes mzML only.");
 #endif
+    // [preflight] what the .d loader would abort on, refused here with its cause and an exit code a caller can route on:
+    // a ddaPASEF run (INCOMPATIBLE_INPUT_DATA) and a cut analysis.tdf_bin (INPUT_FILE_CORRUPT). First, before the
+    // calibration and dnoise setups read the same tdf, so a broken file is named as such whatever it breaks there.
+    if (FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF)
+    {
+      bool dda = false;
+      if (const std::string w = diaspextract::tdfNotDiaReason(in + "/analysis.tdf", dda); !w.empty())
+      {
+        writeLogError_("Error: " + in + " " + w + ". DIAspeXtract needs diaPASEF data" + (dda ? "; search ddaPASEF runs directly." : "."));
+        return dda ? INCOMPATIBLE_INPUT_DATA : INPUT_FILE_CORRUPT;
+      }
+      if (const std::string w = diaspextract::tdfBinTruncationReason(in); !w.empty())
+      {
+        writeLogError_("Error: " + in + ": " + w + ".");
+        return INPUT_FILE_CORRUPT;
+      }
+    }
     // [tof] The integer detector's band edges come from the acquisition: they need the tdf's GlobalMetadata bounds, so
     // refuse BEFORE the load when no candidate tdf provides them (an mzPeak archive is checked after its embedded
     // tdf is recovered, below). Milliseconds against minutes of loading.
@@ -4741,7 +4758,14 @@ protected:
                        + "): unset OPENMS_BRUKER_SDK_PATH to denoise."); }
       String why_axis;
       if (!tofAxis().ok && !loadTofAxis(in + "/analysis.tdf", why_axis))   // the TOF recovery runs during the load
+      {
+        if (diaspextract::tdfReasonIsCorrupt(why_axis))   // values no instrument writes: the file is broken, not unsupported
+        {
+          writeLogError_("Error: " + in + ": the m/z calibration in analysis.tdf is corrupt (" + why_axis + ").");
+          return INPUT_FILE_CORRUPT;
+        }
         throw refuse("needs the run's m/z calibration table (MzCalibration in analysis.tdf), which is not usable here (" + why_axis + ").");
+      }
       spx::dnoise::Params& p = dnoise.p;
       p.mz_half_width = (uint32_t)getIntOption_("dnoise:mz_half_width");
       p.min_feature_length = (size_t)getIntOption_("dnoise:min_feature_length");
@@ -4757,26 +4781,15 @@ protected:
       p.dia_ms1_mz_pad = getDoubleOption_("dnoise:dia_ms1_mz_pad");
       p.dia_ms1_im_pad = getDoubleOption_("dnoise:dia_ms1_im_pad");
       const std::string why = dnoise.setup(in + "/analysis.tdf");
+      if (!why.empty() && diaspextract::tdfReasonIsCorrupt(why))
+      {
+        writeLogError_("Error: " + in + ": analysis.tdf is corrupt (" + why + ").");
+        return INPUT_FILE_CORRUPT;
+      }
       if (!why.empty()) throw refuse("cannot be exact on this input: " + why + ".");
       writeLogInfo_("[dnoise] " + String(spx::dnoise::kPortedFrom) + " MS1 path on the raw frames, before the pick: " + dnoise.params()
                     + "; " + String(dnoise.im_asc.size()) + " TimsCalibration row(s) over " + String(dnoise.tdf.meta.max_num_scans)
                     + " scans (MAX(Frames.NumScans), the gate's); scan tables per row over its MS1 frames' scans: " + dnoise.scanTables());
-    }
-    // [preflight] what the .d loader would abort on, refused here with its cause and an exit code a caller can route on:
-    // a ddaPASEF run (INCOMPATIBLE_INPUT_DATA) and a cut analysis.tdf_bin (INPUT_FILE_CORRUPT)
-    if (FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF)
-    {
-      bool dda = false;
-      if (const std::string w = diaspextract::tdfNotDiaReason(in + "/analysis.tdf", dda); !w.empty())
-      {
-        writeLogError_("Error: " + in + " " + w + ". DIAspeXtract needs diaPASEF data" + (dda ? "; search ddaPASEF runs directly." : "."));
-        return dda ? INCOMPATIBLE_INPUT_DATA : INPUT_FILE_CORRUPT;
-      }
-      if (const std::string w = diaspextract::tdfBinTruncationReason(in); !w.empty())
-      {
-        writeLogError_("Error: " + in + ": " + w + ".");
-        return INPUT_FILE_CORRUPT;
-      }
     }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
     // [stream] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame

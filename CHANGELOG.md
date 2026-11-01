@@ -11,7 +11,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
 - **Bruker input that is not diaPASEF, or broken, aborted the process.** A ddaPASEF `.d` (MsMsType 8, empty DIA tables)
   now stops with exit code 11 (`INCOMPATIBLE_INPUT_DATA`), naming the acquisition mode. A truncated `analysis.tdf_bin`, a
   frame claiming more points than its block in the file can hold, or no diaPASEF frame at all stop with exit code 3
-  (`INPUT_FILE_CORRUPT`). These checks run before the reader and take one header read. An exception from a library
+  (`INPUT_FILE_CORRUPT`). These checks run first, before the calibration and dnoise setups, and take one header read; a calibration or
+  frame value no instrument writes (NULL, text, NaN) found by the dnoise setup also exits with 3. An exception from a library
   (SQLite, opentims) now ends the run with its message and exit code 8 instead of an abort.
 - **A run that emitted no spectrum wrote a 0-byte file** and exited 0. It now writes a valid, indexed mzML with an empty
   spectrum list.
