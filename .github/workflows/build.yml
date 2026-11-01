@@ -160,9 +160,13 @@ jobs:
           [ -n "$D" ] || { echo "::error::no analysis.tdf in the test data"; exit 1; }
           echo "DIASPEXTRACT_TEST_D=$D" >> "$GITHUB_ENV"
 
+      # The golden spectra digest of that run at the defaults (repository variable DIASPEXTRACT_TEST_D_DIGEST): check 23
+      # compares against it when it is set and prints the digest when it is not; set it from the first green run's log
+      # ("real .d spectra digest ...") and update it only with a CHANGELOG entry that changes the spectra.
       - name: End-to-end suite against the freshly built binary
         env:
           OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS
+          DIASPEXTRACT_TEST_D_DIGEST: ${{ vars.DIASPEXTRACT_TEST_D_DIGEST }}
         run: |
           set -o pipefail
           python3 diaspextract/test/test_diaspextract.py diaspextract/build/diaspextract | tee e2e.log

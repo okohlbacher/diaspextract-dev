@@ -518,12 +518,20 @@ def main():
 
     # 13: the concurrency cap is enforced. It used to be computed, logged and never checked: the
     #     only bound was a byte budget that over-booked every window, so nothing ever throttled.
+    #     Two windows (one m/z window in two window groups), so the cap has something to bound: uncapped, on Linux
+    #     (where admission reads MemAvailable; elsewhere windows run one at a time) both are admitted at once.
     def c13():
         hw = lambda r: int(re.search(r"admission high-water (\d+) of (\d+)", r.stdout).group(1))
         cap = lambda r: int(re.search(r"admission high-water (\d+) of (\d+)", r.stdout).group(2))
-        r1 = run(binary, inp, os.path.join(work, "cap1.mzML"), extra=("-perf:max_concurrent_windows", "1"), threads=4)
+        inp_c = os.path.join(work, "cap_groups.mzML")
+        synth(inp_c, groups=(1, 9))
+        r1 = run(binary, inp_c, os.path.join(work, "cap1.mzML"), extra=("-perf:max_concurrent_windows", "1"), threads=4)
         assert cap(r1) == 1 and hw(r1) <= 1, f"cap 1 admitted {hw(r1)} windows at once"
-        rN = run(binary, inp, os.path.join(work, "capN.mzML"), threads=4)
+        rN = run(binary, inp_c, os.path.join(work, "capN.mzML"), threads=4)
+        nwin = int(re.search(r"Processing (\d+) isolation windows", rN.stdout).group(1))
+        assert nwin == 2 and cap(rN) >= 2, f"the fixture must give 2 windows and an uncapped run room for both ({nwin}, {cap(rN)})"
+        if sys.platform.startswith("linux"):
+            assert hw(rN) == 2, f"uncapped, both windows should be admitted at once (high-water {hw(rN)}): the cap check tests nothing"
         assert digest(os.path.join(work, "cap1.mzML")) == digest(os.path.join(work, "capN.mzML")), \
             "the concurrency cap changed the output; results must be written to index-addressed slots"
     check("the concurrency cap bounds admitted windows and does not change output", c13)
@@ -953,8 +961,19 @@ def main():
                 assert "TDF MzCalibration table model (exact" in log, f"real .d ({tag}): not the exact calibration:\n" + log[-800:]
                 n = int(re.search(r"Wrote (\d+) pseudo-MS2 spectra", log).group(1))
                 assert n > 0, f"real .d ({tag}): no spectrum written"
+                if tag == "default":   # the default path actually ran: streamed, dnoise on the frames, the integer detector
+                    assert "[stream] frame-by-frame load done" in log, "real .d: not streamed:\n" + log[-800:]
+                    assert re.search(r"\[dnoise\] .* MS1: \d+ frames", log), "real .d: dnoise did not filter the MS1 frames:\n" + log[-800:]
+                    assert "trace:detector integer needs" not in log, "real .d: the integer detector fell back:\n" + log[-800:]
                 return digest(o)
             base = go("default", 4)
+            # a golden digest pins the output across versions: the invariance checks below compare the build with itself
+            # only. DIASPEXTRACT_TEST_D_DIGEST is the digest of this file's digest() for this .d at the defaults.
+            pin = os.environ.get("DIASPEXTRACT_TEST_D_DIGEST")
+            if pin:
+                assert base == pin, f"real .d: spectra digest {base} differs from the pinned DIASPEXTRACT_TEST_D_DIGEST {pin}"
+            else:
+                print(f"        real .d spectra digest {base} (set DIASPEXTRACT_TEST_D_DIGEST to pin it)")
             assert go("t1", 1) == base, "real .d: 1 thread differs from 4"
             cells = ("-tile:rt_sec", "20")
             one = go("one_tile", 4, cells + ("-tile:cells_per_tile", "0"))
