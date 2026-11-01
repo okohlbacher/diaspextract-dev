@@ -34,9 +34,9 @@ namespace spx_noims
     int ms1_min_scans = 2;      ///< MS1 traces need at least this many MS1 scans
     bool ms1_split = true;      ///< split MS1 traces at valleys (ElutionPeakDetection)
     double few_apex_cycles = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
-    int ms2_min_scans = 2;
+    int ms2_min_scans = 2;      ///< fragment traces need at least this many of the window's scans (1 = single points too)
     bool singles = true;        ///< MS1 traces in no isotope envelope become precursors at z = 2 and z = 3 (DIA-Umpire Q2-like)
-    bool ms2_prec = true;       ///< isotope envelopes (z >= 2) of unfragmented precursors in the window's MS2 traces (DIA-Umpire Q3-like)      ///< fragment traces need at least this many of the window's scans (1 = single points too)
+    bool ms2_prec = true;       ///< isotope envelopes (z >= 2) of unfragmented precursors in the window's MS2 traces (DIA-Umpire Q3-like)
   };
 
   struct Stats { size_t windows = 0, ms1_traces = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
