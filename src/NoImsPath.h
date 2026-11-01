@@ -34,8 +34,10 @@ namespace spx_noims
     int ms1_min_scans = 2;      ///< MS1 traces need at least this many MS1 scans
     bool ms1_split = true;      ///< split MS1 traces at valleys (ElutionPeakDetection)
     double few_apex_cycles = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
-    int ms2_min_scans = 2;      ///< fragment traces need at least this many of the window's scans (1 = single points too)
-    bool singles = true;        ///< MS1 traces in no isotope envelope become precursors at z = 2 and z = 3 (DIA-Umpire Q2-like)
+    int ms2_min_scans = 0;      ///< fragment traces need at least this many of the window's scans (1 = single points too; 0 = auto: 1 if sparse, else 2)
+    int singles = -1;           ///< MS1 traces in no isotope envelope become precursors at z = 2 and z = 3 (-1 = auto: only if sparse)
+    double weight_pow = 0.0;    ///< fragment intensity x r^weight_pow (few-point profiles: x exp(-(apex distance / cycle)^2)^(weight_pow/4))
+    int min_frags = 3;          ///< fewest fragments a spectrum needs
     bool ms2_prec = true;       ///< isotope envelopes (z >= 2) of unfragmented precursors in the window's MS2 traces (DIA-Umpire Q3-like)
   };
 
@@ -203,6 +205,13 @@ namespace spx_noims
     log("[noims] " + String(keys.size()) + " isolation windows, " + String(ms1.size()) + " MS1 scans every " + String(ms1_dt)
         + " s, MS2 cycle " + String(cycle) + " s");
 
+    // sparse: each window is sampled much less often than MS1 (narrow-window schemes): fragments seen once and precursors
+    // without an isotope partner carry information there; on dense data they only add noise
+    const bool sparse = cycle > 2.0 * ms1_dt;
+    const bool singles = P.singles < 0 ? sparse : P.singles != 0;
+    const int ms2_min = P.ms2_min_scans > 0 ? P.ms2_min_scans : (sparse ? 1 : 2);
+    log(String("[noims] ") + (sparse ? "sparse" : "dense") + " sampling: single-scan fragments " + (ms2_min == 1 ? "on" : "off")
+        + ", unpaired MS1 traces as z = 2/3 " + (singles ? "on" : "off"));
     std::vector<std::vector<MSSpectrum>> res(keys.size());
     std::vector<size_t> nprec(keys.size(), 0), ntr1(keys.size(), 0), ntr2(keys.size(), 0);
     std::vector<double> busy(keys.size(), 0.0);
@@ -226,7 +235,7 @@ namespace spx_noims
       }
       std::vector<MassTrace> mt1 = traces(m1, P.ppm, (P.ms1_min_scans - 1) * ms1_dt * 0.99, P.ms1_noise, P.ms1_split);
       ntr1[w] = mt1.size();
-      std::vector<Prec> prec = envelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, P.singles);
+      std::vector<Prec> prec = envelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, singles);
       prec.erase(std::remove_if(prec.begin(), prec.end(), [&](const Prec& p) { return owner(p.mz) != w; }), prec.end());
       nprec[w] = prec.size();
       m1.clear(true);
@@ -236,7 +245,7 @@ namespace spx_noims
       std::vector<double> grid;
       for (size_t i : win.at(keys[w]))
       { m2.addSpectrum(exp[i]); m2.getSpectra().back().setMSLevel(1); grid.push_back(exp[i].getRT()); }   // MassTraceDetection reads MS1 only
-      std::vector<MassTrace> ft = traces(m2, P.ppm, (P.ms2_min_scans - 1) * cycle * 0.99, 0.0, false);
+      std::vector<MassTrace> ft = traces(m2, P.ppm, (ms2_min - 1) * cycle * 0.99, 0.0, false);
       ntr2[w] = ft.size();
       m2.clear(true);
       if (P.ms2_prec)   // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)
@@ -287,11 +296,15 @@ namespace spx_noims
               const size_t g = std::lower_bound(grid.begin(), grid.end(), q.first - 1e-6) - grid.begin();
               if (g >= g0 && g < g1) fp[g - g0] = q.second;
             }
-            if (pearson(pp, fp) < P.min_corr) continue;
+            const double r = pearson(pp, fp);
+            if (r < P.min_corr) continue;
+            pk.emplace_back(f.inten * std::pow(r, P.weight_pow), f.mz);
+            continue;
           }
-          pk.emplace_back(f.inten, f.mz);
+          const double d = (f.apex_rt - p.rt) / cycle;
+          pk.emplace_back(f.inten * std::pow(std::exp(-d * d), P.weight_pow / 4.0), f.mz);
         }
-        if (pk.size() < 3) continue;
+        if ((int)pk.size() < P.min_frags) continue;
         if ((int)pk.size() > P.max_peaks)
         { std::nth_element(pk.begin(), pk.begin() + P.max_peaks, pk.end(), std::greater<>()); pk.resize(P.max_peaks); }
         MSSpectrum s;
@@ -302,6 +315,7 @@ namespace spx_noims
         pr.setMZ(p.mz); pr.setCharge(p.z); pr.setIntensity(p.inten);
         pr.setIsolationWindowLowerOffset(p.mz - lo); pr.setIsolationWindowUpperOffset(hi - p.mz);
         s.setPrecursors({pr});
+        s.setMetaValue("spx_tier", p.tier);   // 1 MS1 envelope, 2 unpaired MS1 trace, 3 MS2-detected precursor
         for (const auto& q : pk) { Peak1D x; x.setMZ(q.second); x.setIntensity(q.first); s.push_back(x); }
         s.sortByPosition();
         res[w].push_back(std::move(s));

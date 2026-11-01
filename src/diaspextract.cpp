@@ -4599,7 +4599,10 @@ protected:
     if (const char* e = getenv("SPX_NOIMS_MS2_MIN_SCANS")) P.ms2_min_scans = atoi(e);
     if (const char* e = getenv("SPX_NOIMS_MIN_CORR")) P.min_corr = atof(e);
     if (const char* e = getenv("SPX_NOIMS_FEW_APEX")) P.few_apex_cycles = atof(e);
-    if (const char* e = getenv("SPX_NOIMS_SINGLES")) P.singles = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_SINGLES")) P.singles = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MAX_PEAKS")) P.max_peaks = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_WEIGHT_POW")) P.weight_pow = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_MIN_FRAGS")) P.min_frags = atoi(e);
     if (const char* e = getenv("SPX_NOIMS_MS2_PREC")) P.ms2_prec = atoi(e) != 0;
     PeakMap res;
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
