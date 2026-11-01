@@ -53,11 +53,18 @@ def groups(path):
     if run: yield key, run
 
 def pair_group(ra, rb):
-    """Pairs of one group: same (1/K0, offsets), in file order; the unpaired ones of either side."""
+    """Pairs of one group: same (1/K0, offsets); among spectra that share that key too, identical spectra (same
+    peaks) pair first, whatever their file order, and only the rest pair in file order. The unpaired ones of either
+    side are returned too."""
     pool = {}
     for sp in rb: pool.setdefault(sp[4], []).append(sp)
-    pairs, only_a = [], []
+    pairs, only_a, rest_a = [], [], []
     for sp in ra:
+        lst = pool.get(sp[4], [])
+        k = next((i for i, o in enumerate(lst) if o[1:4] == sp[1:4]), None)
+        if k is not None: pairs.append((sp, lst.pop(k)))
+        else: rest_a.append(sp)
+    for sp in rest_a:
         lst = pool.get(sp[4])
         if lst: pairs.append((sp, lst.pop(0)))
         else: only_a.append(sp)

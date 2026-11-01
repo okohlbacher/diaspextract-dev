@@ -13,9 +13,9 @@ Streaming, line-oriented: the 14.8 GB file never lands in memory. Only cvParam T
 the base64 binary arrays (the bulk) pass through untouched. A cvParam that already has value= is
 left exactly as-is, so RT/mz/intensity values are never altered. The added bytes move every spectrum, so an
 indexedmzML gets its <indexList> and <indexListOffset> rebuilt from the offsets written here (an indexed reader
-seeks by them); the <fileChecksum> line is copied as it was.
+seeks by them), and its <fileChecksum> is recomputed: the SHA-1 of the output up to and including "<fileChecksum>".
 """
-import re, sys
+import hashlib, re, sys
 
 SRC, DST = sys.argv[1], sys.argv[2]
 TAG = re.compile(rb"<cvParam\b[^>]*?/?>")                              # a whole <cvParam ...> or <cvParam .../> tag
@@ -33,7 +33,20 @@ def fix(tag):
 
 n_lines = n_fixed = 0
 offsets = {b"spectrum": [], b"chromatogram": []}   # (id, byte offset of its '<' in DST)
-with open(SRC, "rb") as fi, open(DST, "wb") as fo:
+sha1 = hashlib.sha1()
+
+
+class Hashed:
+    """The output file; every byte written also goes into the checksum."""
+    def __init__(self, f): self.f = f
+    def tell(self): return self.f.tell()
+    def write(self, b): sha1.update(b); self.f.write(b)
+    def writelines(self, bs):
+        for b in bs: self.write(b)
+
+
+with open(SRC, "rb") as fi, open(DST, "wb") as raw:
+    fo = Hashed(raw)
     for line in fi:
         n_lines += 1
         if line.lstrip().startswith(b"<indexList"):  # the old index points into SRC: write the new one
@@ -48,6 +61,10 @@ with open(SRC, "rb") as fi, open(DST, "wb") as fo:
             for rest in fi:                          # skip the old index; keep what follows it
                 if rest.lstrip().startswith(b"<indexListOffset>"):
                     fo.write(b"<indexListOffset>%d</indexListOffset>\n" % at)
+                elif b"<fileChecksum>" in rest:      # the checksum covers everything up to and including this tag
+                    head = rest[:rest.index(b"<fileChecksum>") + len(b"<fileChecksum>")]
+                    fo.write(head)
+                    raw.write(sha1.hexdigest().encode() + b"</fileChecksum>\n")
                 elif not (rest.lstrip().startswith((b"<offset", b"<index ", b"<indexList")) or
                           rest.strip() in (b"</index>", b"</indexList>")):
                     fo.write(rest)
