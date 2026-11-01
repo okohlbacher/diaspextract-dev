@@ -256,6 +256,7 @@ namespace spx_noims
         { std::nth_element(pk.begin(), pk.begin() + P.max_peaks, pk.end(), std::greater<>()); pk.resize(P.max_peaks); }
         MSSpectrum s;
         s.setMSLevel(2);
+        s.setType(SpectrumSettings::SpectrumType::CENTROID);
         s.setRT(p.rt);
         Precursor pr;
         pr.setMZ(p.mz); pr.setCharge(p.z); pr.setIntensity(p.inten);
