@@ -50,7 +50,7 @@ flowchart TD
   other precursors in the window are removed, split peaks of one fragment ion are fused, and the best 500 fragments
   are kept; a spectrum needs at least 3. A precursor found twice gets one spectrum with the fragments of both, so it
   can hold more than 500.
-- **Tiles and memory.** Tiles run in time order, and the next tile is read while the current one runs. On Linux, a
+- **Tiles and memory.** Tiles run in time order, and the next tile is read while the current one runs. On Linux and Windows, a
   window starts only when it fits in 75 % of the free memory (under a Slurm or container memory limit, of the room
   left under it); elsewhere windows run one at a time. The output does not depend on the thread count or the tiling.
 
@@ -148,7 +148,7 @@ The defaults are the recommended configuration. These are the settings users cha
 | `-charge:min_charge` | 1 | lowest precursor charge written; 2 leaves out singly charged precursors |
 | `-tile:cells_per_tile` | 1 | 10-minute cells per tile; 0 processes the whole run as one tile, at several times the memory. The spectra do not change |
 | `-perf:max_concurrent_windows` | 0 (no cap) | most isolation windows processed at once; fewer use less memory and take longer |
-| `-perf:mem_fraction` | 0.75 | share of the free memory the windows may use (Linux) |
+| `-perf:mem_fraction` | 0.75 | share of the free memory the windows may use (Linux, Windows) |
 | `DIASPEXTRACT_PIPE_TILES=1` | 2 | environment variable: one tile at a time instead of two. Less memory, longer run, same spectra |
 | `-perf:stream_load` | true | `false` loads the whole run first: much more memory, a longer run and different spectra |
 | `-trace:detector` | integer | `openms` uses OpenMS mass-trace detection on whole windows, without tiles. The two find partly different peptides; `integer` needs a `.d` and uses much less memory |

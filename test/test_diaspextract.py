@@ -511,7 +511,8 @@ def main():
             env = dict(os.environ, DIASPEXTRACT_TASK_THROW=site)
             r = run(binary, inp, os.path.join(work, f"task_{site}.mzML"), threads=4, expect_fail=True, env=env)
             log = r.stdout + r.stderr
-            assert r.returncode > 0, f"{site}: the run was killed by a signal ({r.returncode}) instead of failing cleanly"
+            # Windows reports a crash as an NTSTATUS (0xC0000005, 0xC0000409, ...), a positive code, not a signal
+            assert 0 < r.returncode < 0xC0000000, f"{site}: the run was killed by a signal ({r.returncode}) instead of failing cleanly"
             assert f"injected failure in task {site}" in log, f"{site}: the task's exception did not reach the log:\n" + log[-800:]
     check("an exception inside an OpenMP task ends the run with its message, not an abort", c12e)
 

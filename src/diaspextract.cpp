@@ -10,7 +10,6 @@
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
-#include <sys/resource.h>
 #include <OpenMS/FORMAT/BrukerTimsFile.h>
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
@@ -60,6 +59,23 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 #include <omp.h>
 #include <iomanip>
 #include <sstream>
+
+// [win] Windows portability: Win32 stand-ins for the POSIX and /proc probes (cpu_seconds_, procKb_, threadCpu_).
+// Included after every other header, so the Win32 macros reach this file only. The Windows compiler is clang-cl (see
+// CMakeLists.txt: cl's OpenMP has no taskloop).
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#define NOGDI
+#include <windows.h>
+#include <psapi.h>     // GetProcessMemoryInfo (kernel32's K32 entry point: no extra library)
+#include <stdlib.h>    // _environ, _putenv_s
+static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs (100 ns ticks) summed, in seconds
+{ return ((double)(((unsigned long long)a.dwHighDateTime << 32) | a.dwLowDateTime)
+        + (double)(((unsigned long long)b.dwHighDateTime << 32) | b.dwLowDateTime)) * 1e-7; }
+#else
+#include <sys/resource.h>
+#endif
 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
@@ -406,17 +422,31 @@ namespace
   { static std::vector<std::string> v; return v; }
   static double cpu_seconds_()
   {
+#ifdef _WIN32
+    FILETIME c, e, k, u;                    // kernel + user over all threads, as RUSAGE_SELF
+    return GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u) ? spxFileTimeSec_(k, u) : 0.0;
+#else
     struct rusage ru;                       // RUSAGE_SELF sums ALL threads -> parallel efficiency
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
     return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6
          + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+#endif
   }
-  /// The kB value of `key` in a /proc file; -1 where it is absent (Linux-only: always -1 elsewhere).
+  /// The kB value of `key` in a /proc file; -1 where it is absent (Linux; Windows answers its keys from Win32; else -1).
   static long long procKb_(const char* path, const char* key)
   {
+#ifdef _WIN32
+    // [win] the three keys read here, from Win32: VmRSS/VmHWM = working set and its peak, MemAvailable = free physical
+    (void)path; const std::string k(key);
+    if (k == "MemAvailable:") { MEMORYSTATUSEX m{}; m.dwLength = sizeof m; return GlobalMemoryStatusEx(&m) ? (long long)(m.ullAvailPhys / 1024) : -1; }
+    PROCESS_MEMORY_COUNTERS pm{};
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) return -1;
+    return k == "VmRSS:" ? (long long)(pm.WorkingSetSize / 1024) : k == "VmHWM:" ? (long long)(pm.PeakWorkingSetSize / 1024) : -1;
+#else
     std::ifstream f(path); std::string k;
     while (f >> k) { if (k == key) { long long v = -1; f >> v; return v; } f.ignore(1 << 20, '\n'); }
     return -1;
+#endif
   }
   static long rss_mb_() { return (long)(std::max(0LL, procKb_("/proc/self/status", "VmRSS:")) / 1024); }
   static void phaseAdd_(const std::string& name, double w0, double c0, bool nested)
@@ -1878,7 +1908,11 @@ namespace
     Counts total;
     spx::dnoise::FrameCoverage seen;          ///< the frame ids add() merged, each once
 
+#ifdef _WIN32
+    static double threadCpu_() { FILETIME c, e, k, u; return GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u) ? spxFileTimeSec_(k, u) : 0.0; }
+#else
     static double threadCpu_() { timespec ts; return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 : 0.0; }
+#endif
 
     /// Read the tdf, build the gate and the scan tables. Empty = ready; anything else is why the run is refused.
     std::string setup(const std::string& tdf_path)
@@ -6651,7 +6685,11 @@ protected:
 
 /// @endcond
 
+#ifdef _WIN32
+#define environ _environ
+#else
 extern char** environ;
+#endif
 
 int main(int argc, const char** argv)
 {
@@ -6677,7 +6715,11 @@ int main(int argc, const char** argv)
   // TOPPBase's update check sends this tool's name and version to an OpenMS REST endpoint and, offline, prints Qt
   // QIODevice errors on the stderr the harness parses (build.yml asserts --help stays clean). Always off: the tool makes
   // no network request (SECURITY.md), whatever the environment says.
+#ifdef _WIN32
+  _putenv_s("OPENMS_DISABLE_UPDATE_CHECK", "ON");
+#else
   ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 1);
+#endif
   TOPPDIAspeXtract tool;
   // TOPPBase catches OpenMS exceptions only; one from a library (SQLite, opentims) would otherwise abort with no exit code
   try { return tool.main(argc, argv); }

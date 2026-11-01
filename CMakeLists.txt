@@ -18,7 +18,11 @@ endif()
 # contraction: an FMA flips 3 of the 24 gate boxes of a real run, and Apple clang on arm64 contracts by default.
 # The header guards its own arithmetic; the flag keeps the translation units around it honest too, and
 # matches the cluster's in-tree build, where OpenMS compiles with it but does not export it.
-add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+  add_compile_options(/clang:-ffp-contract=off)   # clang-cl ignores the plain flag
+else()
+  add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
+endif()
 
 # The tool itself cannot be built without a PATCHED OpenMS: it includes
 # <OpenMS/FORMAT/TdfMzCalibration.h>, which scripts/apply_openms_patches.sh installs into the
@@ -57,6 +61,11 @@ endif()
 
 find_package(OpenMS REQUIRED)
 find_package(OpenMP REQUIRED)   # the window loop and the picker call omp_* unconditionally
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  # cl's OpenMP lacks taskloop and taskgroup even under /openmp:llvm, and 19.44 mis-shares a lambda's locals in tasks and
+  # ends in internal compiler errors on this file. On Windows build the tool with clang-cl (MSVC ABI, full OpenMP).
+  message(FATAL_ERROR "diaspextract needs clang-cl on Windows, not cl: configure with -T ClangCL or -DCMAKE_CXX_COMPILER=clang-cl")
+endif()
 find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLite is a build error, not a fallback
 
 add_executable(diaspextract src/diaspextract.cpp)
