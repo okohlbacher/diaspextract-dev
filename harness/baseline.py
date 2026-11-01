@@ -159,7 +159,10 @@ def validate_cluster(name: str, cl) -> None:
     for k in ("path", "sbatch_args"):
         if k in cl and not (isinstance(cl[k], list) and all(isinstance(x, str) for x in cl[k])):
             die("G-B01", "plan %s: cluster.%s must be a list of strings" % (name, k))
-    bad = [a for a in cl.get("sbatch_args", []) if a.split("=")[0] in
+    def opt(a):   # the option of "--mem=1G", "--mem 1G", "-N2" or "-N 2"
+        t = re.split(r"[=\s]", a.strip(), maxsplit=1)[0]
+        return t[:2] if re.fullmatch(r"-[A-Za-z].+", t) else t
+    bad = [a for a in cl.get("sbatch_args", []) if opt(a) in
            ("--exclusive", "--nodes", "-N", "--mem", "--partition", "-p", "--time", "-t", "--output", "-o", "--job-name", "-J")]
     if bad:
         die("G-B01", "plan %s: cluster.sbatch_args %s are set by the harness" % (name, bad))
@@ -1056,8 +1059,8 @@ def render(name: str, plan: dict, reg: dict, recs: list) -> tuple:
                     if r.get("cpu_util") is not None:
                         util.setdefault(p, []).append(r["cpu_util"])
             for x in scaling(walls, cell["threads"][0], row["physical_cores"]) if walls else []:
-                x["rss_gb"] = round(statistics.median(rss[x["p"]]) / 1e6, 2)
-                x["rss_max_gb"] = round(max(rss[x["p"]]) / 1e6, 2)
+                x["rss_gb"] = round(statistics.median(rss[x["p"]]) * 1024 / 1e9, 2)   # time -v reports KiB
+                x["rss_max_gb"] = round(max(rss[x["p"]]) * 1024 / 1e9, 2)
                 x["cpu_util"] = round(statistics.median(util[x["p"]]), 4) if util.get(x["p"]) else None
                 x["contended"] = any(runs[(sid, n, x["p"], k)].get("contended") for k in range(plan["repeats"])
                                      if runs.get((sid, n, x["p"], k), {}).get("status") == "ok")
@@ -1538,6 +1541,8 @@ def selftest(args=None) -> int:
                 ("cluster job_unit typo", lambda p: p["cluster"].update(job_unit="node"), "job_unit"),
                 ("walltime not H:MM:SS", lambda p: p["cluster"].update(walltime="12h"), "walltime"),
                 ("sbatch_args set --mem", lambda p: p["cluster"].update(sbatch_args=["--mem=10G"]), "set by the harness"),
+                ("sbatch_args set --mem, space form", lambda p: p["cluster"].update(sbatch_args=["--mem 10G"]), "set by the harness"),
+                ("sbatch_args set -N, attached form", lambda p: p["cluster"].update(sbatch_args=["-N2"]), "set by the harness"),
                 ("results relative", lambda p: p.update(results="results/bt"), "absolute"),
                 ("n_samples mismatch", lambda p: p.update(n_samples=2), "n_samples"),
                 ("mzML sample no cell reads", lambda p: (p["samples"].append("O"), p.update(n_samples=2), p.pop("raw_map")), "no cell"),
