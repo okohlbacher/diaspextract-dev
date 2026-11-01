@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.7.1 — unreleased
+## v1.7.1 — 2026-11-01
 
 **The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on
 public runs), with two exceptions listed below: `-charge:min_charge 2` and above now gives the same higher-charge spectra
@@ -61,8 +61,9 @@ as the default, and mzPeak archives with two isolation windows of one centre get
   `bench/mzml_specdiff.py` pairs spectra within one (RT, m/z, charge) by 1/K0 and isolation window, identical spectra
   first.
 
-Screened and not adopted (peptides unchanged within noise on K562, HeLa 10/100 ng and TNBC, both engines): folding only
-the twins linked directly to the survivor (10.7 % more spectra on K562) and foreign-isotope candidates below the window.
+Screened and not adopted (peptides unchanged within noise on public HeLa 10/100 ng, TNBC and cell-line runs, both
+engines): folding only the twins linked directly to the survivor (10.7 % more spectra on the largest run) and
+foreign-isotope candidates below the window.
 
 ## v1.7.0 — 2026-10-02
 
