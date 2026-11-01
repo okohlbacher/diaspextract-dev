@@ -19,6 +19,7 @@
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include "CgroupMem.h"   // [dyn-mem] cgroup headroom net of page cache
 #include "TdfLoad.h"   // loadTdfCalibration: sqlite3, tool-only
+#include "NoImsPath.h"   // [noims] the separate extraction path for input without ion mobility
 #include "DnoiseMs1.h"   // [dnoise] the dnoise v0.1.0 MS1 port (header-only; tests/test_dnoise_ms1.cpp compiles the same code)
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
@@ -2959,6 +2960,13 @@ protected:
     registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window filter: m/z added on both sides of each window (dnoise --dia-ms1-mz-pad).", false, true);
     registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window filter: 1/K0 added on both sides of each window (dnoise --dia-ms1-im-pad).", false, true);
 
+    registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path");
+    registerStringOption_("noims:path", "<auto/off>", "auto", "auto: input without ion mobility goes to the separate non-IMS path "
+                          "(prototype); off: refuse such input, as 1.7.1 does. Input with ion mobility never uses it.", false, true);
+    setValidStrings_("noims:path", {"auto", "off"});
+    registerDoubleOption_("noims:min_corr", "<r>", 0.6, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
+    registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
+
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
     // everything out. Both fail as an empty-but-valid result, the worst failure mode here.
@@ -4567,6 +4575,20 @@ protected:
     writeLogInfo_("[trim] " + what + ": " + String(r0) + " -> " + String(rss_mb_()) + " MB RSS in " + num_(phase_clock_() - t0) + " s");
   }
 
+  /// [noims] input without ion mobility: the separate path of NoImsPath.h, then the plain mzML write
+  ExitCodes runNoIms_(PeakMap& exp, const String& out)
+  {
+    writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path (prototype).");
+    spx_noims::Params P;
+    P.min_corr = getDoubleOption_("noims:min_corr");
+    P.ppm = getDoubleOption_("noims:ppm");
+    PeakMap res;
+    spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
+    exp.clear(true);
+    FileHandler().storeExperiment(out, res, {FileTypes::MZML}, log_type_);
+    return EXECUTION_OK;
+  }
+
   ExitCodes main_(int argc, const char** argv) override
   {
     phase_clock_();   // [perf-instr] fix the epoch (a first-call static) before loading
@@ -4965,8 +4987,12 @@ protected:
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
-        return ILLEGAL_PARAMETERS;
+        if (getStringOption_("noims:path") == "off")
+        {
+          writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
+          return ILLEGAL_PARAMETERS;
+        }
+        return runNoIms_(exp, out);   // [noims] a separate path; the IMS path below is never entered
       }
       // Pick all IM frames in parallel. firstprivate gives each thread a deep copy (Param is a value type), so the
       // mutable ccs_warning_shown_ flag is not shared.
