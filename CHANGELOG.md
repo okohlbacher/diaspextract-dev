@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.8.0 — unreleased
+
+### Changed
+
+- **`-gate:delta_rt` defaults to 4 s** (was 3 s). Faint precursors keep `-gate:faint_delta_rt` (6 s). On the four PXD017703
+  HeLa runs (three at 10 ng) Sage finds 3.5–8.5 % and MSFragger 3.0–5.3 % more peptides at 1 % FDR, with about 5 % more
+  spectra; the entrapment FDR estimate stays within the 3 s interval. 3 s gives the 1.7.x output.
+
+### Added
+
+- **`-diag:spectrum_meta`** writes the precursor's support per spectrum (`spx_p_frames`, `spx_faint`, `spx_p_apex`), to
+  join search results to faint precursors. Off by default; the spectra do not change.
+
 ## v1.7.1 — unreleased
 
 **The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on

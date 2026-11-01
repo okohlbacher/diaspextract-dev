@@ -2751,7 +2751,7 @@ protected:
     registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum");
     registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets "
                               "the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.", false);
-    registerDoubleOption_("gate:delta_rt", "<sec>", 3.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
+    registerDoubleOption_("gate:delta_rt", "<sec>", 4.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
     registerDoubleOption_("gate:min_correlation", "<-1..1>", 0.3, "Least correlation between the elution profiles of a precursor and a fragment. Raise "
                               "it for cleaner but sparser spectra.", false);
     registerIntOption_("gate:min_correlation_points", "<n>", 3, "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, "

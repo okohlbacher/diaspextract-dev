@@ -105,7 +105,7 @@ ion mobility.
 | option | default | what it does |
 |---|---|---|
 | `-gate:delta_im` | 0.01 | Largest 1/K0 difference between a precursor and a fragment. It also sets the 1/K0 tolerance of peak picking and tracing, so it changes detection too. To widen only the fragment match, use `-gate:fragment_delta_im`. At least 0. |
-| `-gate:delta_rt` | 3 | Largest difference (seconds) between the apex times of a precursor and a fragment. At least 0. |
+| `-gate:delta_rt` | 4 | Largest difference (seconds) between the apex times of a precursor and a fragment. At least 0. 3 before 1.8.0. |
 | `-gate:min_correlation` | 0.3 | Least correlation between the elution profiles of a precursor and a fragment. Raise it for cleaner but sparser spectra. -1 to 1. The correlation is a Pearson correlation over every frame of the isolation window in the run, frames without signal counting as zero; for two short elution peaks it is close to the cosine similarity of their profiles. |
 | `-gate:min_correlation_points` | 3 | Fewest shared points a correlation needs. Where `-gate:shrinkage` applies, `-gate:shrink_min_points` is used instead. |
 
@@ -223,6 +223,7 @@ The detail options match the dnoise command-line flags named in brackets. Leave 
 | `-diag:dump_ms1_tsv` | (empty) | Write the MS1 traces and the precursors found in them to `<prefix>.traces.tsv` and `<prefix>.precursors.tsv`, to see where a precursor was lost. Empty: off. |
 | `-diag:selftest_twins` | off (flag) | Run the built-in twin-fold self-test and exit. |
 | `-diag:selftest_arena` | off (flag) | Run the built-in MS1 storage self-test and exit. |
+| `-diag:spectrum_meta` | off (flag) | Write three userParams per spectrum: `spx_p_frames` (frames with precursor signal), `spx_faint` (1 when that is at most `-gate:faint_frames`), `spx_p_apex` (the precursor's apex intensity). The spectra do not change. |
 
 ## Environment variables
 
