@@ -25,7 +25,7 @@ Ported code, used under its own licence (full text in LICENSES/):
 
 Algorithmic ideas were reviewed against, but no code was taken from:
 
-  the reference implementation (Nesvizhskii Lab)     -- pseudo-MS/MS extraction from diaPASEF
+  diaTracer (Nesvizhskii Lab)     -- pseudo-MS/MS extraction from diaPASEF
   AlphaDIA (Mann Lab, Apache-2.0) -- feature-free extraction; the log-sum co-elution
                                      statistic here is an independent reimplementation
                                      of a published idea, not a port

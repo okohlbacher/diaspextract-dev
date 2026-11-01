@@ -34,7 +34,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
   limit (mzPeak member buffers grow with the data read). SECURITY.md lists what is still open: the opentims frame
   decoder trusts a frame's per-scan counts. The OpenMS update check is always off.
 - **Log lines could be lost or garbled** when several threads logged at once (it also made one end-to-end check flaky);
-  logging is serialised. Log numbers print at four significant digits.
+  logging is serialised. Timings, rates and fitted values in the log print at four significant digits; a line that
+  repeats a header stamp (`[twins]`) keeps the stamp's full precision.
 
 ### Changed
 

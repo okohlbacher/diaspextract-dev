@@ -809,8 +809,9 @@ namespace
     if (L >= 65536) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
     if (off == SIZE_MAX) off = store.inten.size();
     if (off + L > (size_t)std::numeric_limits<uint32_t>::max())   // Trace::off is 32-bit: a wrapped offset would overwrite another trace
-      throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "one trace store holds more than 2^32 profile "
-            "points; run in smaller tiles (-tile:cells_per_tile 1, a smaller -tile:rt_sec)", String(off + L));
+      throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "one trace store holds 2^32 or more profile "
+            "points; for an isolation window, run in smaller tiles (-tile:cells_per_tile 1, a smaller -tile:rt_sec); the MS1 store "
+            "is built before tiling, so a run this large has to be split by retention time (bench/slice_d.py)", String(off + L));
     if (off + L > store.inten.size()) store.inten.resize(off + L, 0.0f);
     t.frame0 = f0; t.len = (uint16_t)L; t.off = (uint32_t)off;
     float best = -1.0f; uint16_t np = 0;
@@ -2813,7 +2814,7 @@ protected:
 
     registerTOPPSubsection_("perf", "Speed and memory (the output does not change unless an option says so)");
     registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces too short for a correlation: 'concentric' (default) keeps one "
-                              "whose retention-time span lies inside the precursor's and is centred on it; 'off' drops them. Applies to the "
+                              "whose retention-time span lies inside the precursor's (one frame of slack) and is centred on it; 'off' drops them. Applies to the "
                               "precursors gate:adaptive selects.", false, true);
     setValidStrings_("gate:short_traces", {"off", "concentric"});
     registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: how far the fragment's span centre may lie from the "
@@ -2886,7 +2887,7 @@ protected:
     registerDoubleOption_("gate:faint_corr_power", "<k>", 1.0, "gate:adaptive faint: assembly:corr_power for faint precursors.", false, true);
     setMinFloat_("gate:faint_corr_power", 0.0);
     registerStringOption_("gate:colocation", "<mode>", "ranges", "'ranges' (default): keep a fragment only if its apex lies inside the precursor's "
-                              "retention-time span, the precursor's apex inside the fragment's, and the spans overlap by at least "
+                              "retention-time span, the precursor's apex inside the fragment's (each with one frame of slack), and the spans overlap by at least "
                               "gate:colocation_overlap. 'off' skips this test.", false, true);
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least overlap of the two spans, as a fraction of the shorter one.", false, true);
@@ -4563,7 +4564,7 @@ protected:
 #ifdef __GLIBC__
     malloc_trim(0);
 #endif
-    writeLogInfo_("[trim] " + what + ": " + String(r0) + " -> " + String(rss_mb_()) + " MB RSS in " + String(phase_clock_() - t0) + " s");
+    writeLogInfo_("[trim] " + what + ": " + String(r0) + " -> " + String(rss_mb_()) + " MB RSS in " + num_(phase_clock_() - t0) + " s");
   }
 
   ExitCodes main_(int argc, const char** argv) override
@@ -5228,9 +5229,9 @@ protected:
         const double w50 = q(0.5);
         ms1_min_len = std::max(frac * w50, 0.5 * cycle);
         const int pts = 1 + (int)std::min(std::ceil(ms1_min_len / cycle - 1e-9), 1e9);   // capped before the int conversion
-        writeLogInfo_("[minlen] auto: " + head + "; FWHM median " + String(w50) + " s = " + String(w50 / cycle) + " cycles (p10 " + String(q(0.1))
-                      + " s = " + String(q(0.1) / cycle) + ", p90 " + String(q(0.9)) + " s = " + String(q(0.9) / cycle) + "), cycle " + String(cycle)
-                      + " s -> trace:min_length_sec " + String(ms1_min_len) + " = max(" + String(frac) + " x median, half a cycle): >= "
+        writeLogInfo_("[minlen] auto: " + head + "; FWHM median " + num_(w50) + " s = " + num_(w50 / cycle) + " cycles (p10 " + num_(q(0.1))
+                      + " s = " + num_(q(0.1) / cycle) + ", p90 " + num_(q(0.9)) + " s = " + num_(q(0.9) / cycle) + "), cycle " + num_(cycle)
+                      + " s -> trace:min_length_sec " + num_(ms1_min_len) + " = max(" + num_(frac) + " x median, half a cycle): >= "
                       + String(pts) + " MS1 points");
         minlen_stamp = "auto " + String(ms1_min_len) + " s = max(" + String(frac) + " x FWHM median " + String(w50) + " s, half the cycle " + String(cycle)
                        + " s), >= " + String(pts) + " MS1 points; FWHM of " + String(w.size()) + " bright sampled traces";
@@ -5238,7 +5239,7 @@ protected:
       else
       {
         ms1_min_len = 3.0;
-        writeLogWarn_("[minlen] auto: " + head + ", cycle " + String(cycle) + " s: too few traces to measure the peak width (100 and a positive cycle time needed); using trace:min_length_sec 3.");
+        writeLogWarn_("[minlen] auto: " + head + ", cycle " + num_(cycle) + " s: too few traces to measure the peak width (100 and a positive cycle time needed); using trace:min_length_sec 3.");
         minlen_stamp = "auto fallback 3 s (" + String(w.size()) + " bright sampled traces with a FWHM, cycle " + String(cycle) + " s)";
       }
     }
