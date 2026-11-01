@@ -10,7 +10,7 @@ as the default, and mzPeak archives with two isolation windows of one centre get
 
 - **Bruker input that is not diaPASEF, or broken, aborted the process.** A ddaPASEF `.d` (MsMsType 8, empty DIA tables)
   now stops with exit code 11 (`INCOMPATIBLE_INPUT_DATA`), naming the acquisition mode. A truncated `analysis.tdf_bin`, a
-  frame claiming more points than the file holds, or no diaPASEF frame at all stop with exit code 3
+  frame claiming more points than its block in the file can hold, or no diaPASEF frame at all stop with exit code 3
   (`INPUT_FILE_CORRUPT`). These checks run before the reader and take one header read. An exception from a library
   (SQLite, opentims) now ends the run with its message and exit code 8 instead of an abort.
 - **A run that emitted no spectrum wrote a 0-byte file** and exited 0. It now writes a valid, indexed mzML with an empty
@@ -30,7 +30,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
   loudly; an mzPeak archive with such a frame is refused.
 - `-assembly:max_fragments` below `-assembly:min_fragments` is refused. Overflows of internal 32- and 16-bit offsets are refused with a message,
   and size fields from mzPeak archives and dnoise window tables are bounded, instead of wrapping or allocating without
-  limit. The OpenMS update check is always off.
+  limit (mzPeak member buffers grow with the data read). SECURITY.md lists what is still open: the opentims frame
+  decoder trusts a frame's per-scan counts. The OpenMS update check is always off.
 - **Log lines could be lost or garbled** when several threads logged at once (it also made one end-to-end check flaky);
   logging is serialised. Log numbers print at four significant digits.
 

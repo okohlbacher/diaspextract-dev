@@ -331,26 +331,30 @@ inline std::string tdfBinTruncationReason(const std::string& d)
       && sqlite3_step(st) == SQLITE_ROW)
     has_len = sqlite3_column_int(st, 0) == 2;
   sqlite3_finalize(st); st = nullptr;
-  long long n = 0, n_out = 0, out_id = -1, out_off = 0, last_id = -1, last_off = -1, big_id = -1, big_peaks = 0;
+  long long n_bins = 0;   // DigitizerNumSamples: a scan holds at most one point per flight-time bin
+  if (sqlite3_prepare_v2(db, "SELECT Value FROM GlobalMetadata WHERE Key = 'DigitizerNumSamples'", -1, &st, nullptr) == SQLITE_OK
+      && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL)
+    n_bins = sqlite3_column_int64(st, 0);
+  sqlite3_finalize(st); st = nullptr;
+  struct Row { long long id, off, peaks, scans; };
+  std::vector<Row> rows;
+  long long n = 0, n_out = 0, out_id = -1, out_off = 0, last_id = -1, last_off = -1;
   std::string why;
-  int rc = sqlite3_prepare_v2(db, "SELECT Id, TimsId, NumPeaks FROM Frames ORDER BY TimsId", -1, &st, nullptr);
+  int rc = sqlite3_prepare_v2(db, "SELECT Id, TimsId, NumPeaks, NumScans FROM Frames ORDER BY TimsId", -1, &st, nullptr);
+  const bool have_scans = rc == SQLITE_OK;
+  if (!have_scans) { sqlite3_finalize(st); st = nullptr; rc = sqlite3_prepare_v2(db, "SELECT Id, TimsId, NumPeaks FROM Frames ORDER BY TimsId", -1, &st, nullptr); }
   if (rc == SQLITE_OK)
     while ((rc = sqlite3_step(st)) == SQLITE_ROW)
     {
       ++n;
       const long long id = sqlite3_column_int64(st, 0), off = sqlite3_column_int64(st, 1), peaks = sqlite3_column_int64(st, 2);
-      if (off >= 0 && off < size) { last_id = id; last_off = off; }
+      const long long scans = have_scans ? std::max(0LL, (long long)sqlite3_column_int64(st, 3)) : 0;
+      if (off >= 0 && off < size) { last_id = id; last_off = off; rows.push_back({id, off, peaks, scans}); }
       else if (n_out++ == 0) { out_id = id; out_off = off; }
-      if (peaks > big_peaks) { big_peaks = peaks; big_id = id; }
     }
   if (rc != SQLITE_DONE) why = std::string("cannot read Frames.TimsId: ") + sqlite3_errmsg(db);
   sqlite3_finalize(st); sqlite3_close(db);
   if (!why.empty()) return why;
-  // the loader sizes its arrays from Frames.NumPeaks before it reads a byte (8 bytes per point and more): a frame cannot
-  // decode to more points than 256 times the whole file holds bytes, however well it compresses
-  if (big_peaks > 0 && (double)big_peaks * 8.0 > 256.0 * (double)size)
-    return "frame " + std::to_string(big_id) + " claims " + std::to_string(big_peaks) + " points (Frames.NumPeaks), more than "
-           "analysis.tdf_bin (" + std::to_string(size) + " bytes) can hold: the file is corrupt";
   long long end = last_off;   // the end of the last block that starts inside the file
   if (has_len && last_off >= 0)
   {
@@ -360,7 +364,28 @@ inline std::string tdfBinTruncationReason(const std::string& d)
       end = last_off + (long long)((std::uint32_t)h[0] | (std::uint32_t)h[1] << 8 | (std::uint32_t)h[2] << 16 | (std::uint32_t)h[3] << 24);
   }
   const bool cut = end > size;
-  if (!cut && n_out == 0) return std::string();
+  if (!cut && n_out == 0)
+  {
+    // The loader sizes its arrays from Frames.NumPeaks before it reads a byte (8 bytes per point and more). Per frame: its
+    // block runs to the next frame's start (or the end of the file), and its points (8 bytes each, decoded) cannot exceed
+    // 256 times that block however well they compress (the per-scan counts, mostly zeros in a sparse frame, can, so they
+    // are left out); nor can a scan hold more points than the digitizer has bins. The blocks come from the frame table
+    // alone, no read per frame.
+    for (size_t i = 0, j = 0; i < rows.size(); ++i)
+    {
+      while (j < rows.size() && rows[j].off <= rows[i].off) ++j;   // the next block that starts later (ties share one end)
+      const long long block = (j < rows.size() ? rows[j].off : size) - rows[i].off;
+      const Row& r = rows[i];
+      if (r.peaks <= 0) continue;
+      if ((double)r.peaks * 8.0 > 256.0 * (double)block)
+        return "frame " + std::to_string(r.id) + " claims " + std::to_string(r.peaks) + " points (Frames.NumPeaks), more than its "
+               + std::to_string(block) + "-byte block of analysis.tdf_bin can hold: the file is corrupt";
+      if (have_scans && n_bins > 0 && (double)r.peaks > (double)r.scans * (double)n_bins)
+        return "frame " + std::to_string(r.id) + " claims " + std::to_string(r.peaks) + " points (Frames.NumPeaks), more than its "
+               + std::to_string(r.scans) + " scans of " + std::to_string(n_bins) + " flight-time bins can hold: the file is corrupt";
+    }
+    return std::string();
+  }
   const std::string first = cut ? "frame " + std::to_string(last_id) + " ends " + std::to_string(end - size) + " bytes past the end of analysis.tdf_bin"
                                 : "frame " + std::to_string(out_id) + " starts at byte " + std::to_string(out_off) + ", outside analysis.tdf_bin";
   return first + " (" + std::to_string(size) + " bytes): the file is truncated (" + std::to_string(n_out + (cut ? 1 : 0)) + " of "

@@ -377,6 +377,17 @@ static void testPreflight()
   makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
                                 "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 4294967295), (3, 300, 70);");
   CHECK(has(bin(600), "frame 2 claims 4294967295 points"), "a NumPeaks no file of 600 bytes can hold: %s", bin(600).c_str());
+  // per frame: 6401 points (51208 bytes) cannot come out of frame 2's 200-byte block, though the whole file could hold them
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 6401), (3, 300, 70);");
+  CHECK(has(bin(600), "frame 2 claims 6401 points") && has(bin(600), "200-byte block"), "a NumPeaks beyond the frame's block: %s", bin(600).c_str());
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 6400), (3, 300, 70);");
+  CHECK(bin(600).empty(), "6400 points, exactly 256 x the 200-byte block: %s", bin(600).c_str());
+  // per scan: no more points than scans x digitizer bins
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2'), ('DigitizerNumSamples', '10');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER, NumScans INTEGER); INSERT INTO Frames VALUES (1, 0, 50, 5), (2, 100, 60, 5), (3, 300, 70, 7);");
+  CHECK(has(bin(600), "frame 2 claims 60 points") && has(bin(600), "5 scans of 10"), "more points than scans x bins: %s", bin(600).c_str());
   std::filesystem::remove(d / "analysis.tdf_bin");
   CHECK(has(diaspextract::tdfBinTruncationReason(d.string()), "cannot open"), "no analysis.tdf_bin");
 }

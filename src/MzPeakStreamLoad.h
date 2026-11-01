@@ -81,8 +81,17 @@ namespace spx
       zip_file_t* f = zip_fopen_index(z, (zip_uint64_t)idx, 0);
       if (!f) throw std::runtime_error(std::string("mzpeak: cannot open member ") + name);
       if (from > 0 && zip_fseek(f, from, SEEK_SET) != 0) { zip_fclose(f); throw std::runtime_error(std::string("mzpeak: cannot seek in ") + name + " (member not stored?)"); }
-      std::vector<char> buf((size_t)len); zip_int64_t got = 0;
-      while (got < len) { zip_int64_t n = zip_fread(f, buf.data() + got, (zip_uint64_t)(len - got)); if (n <= 0) break; got += n; }
+      // the advertised size is not trusted for the allocation: the buffer grows only as data actually arrive (64 MiB at a
+      // time), so a member claiming more than the archive holds ends in a short read, not in a huge allocation
+      constexpr zip_int64_t kChunk = zip_int64_t(1) << 26;
+      std::vector<char> buf; zip_int64_t got = 0;
+      while (got < len)
+      {
+        buf.resize((size_t)std::min(len, got + kChunk));
+        zip_int64_t n = zip_fread(f, buf.data() + got, (zip_uint64_t)((zip_int64_t)buf.size() - got));
+        if (n <= 0) break;
+        got += n;
+      }
       zip_fclose(f);
       if (got != len) throw std::runtime_error(std::string("mzpeak: short read of ") + name);
       return buf;
