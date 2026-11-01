@@ -3,7 +3,8 @@
 ## Unreleased (1.7.1)
 
 **The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on
-public runs; option `-charge:min_charge 2` and above now gives the same higher-charge spectra as the default, see below).
+public runs), with two exceptions listed below: `-charge:min_charge 2` and above now gives the same higher-charge spectra
+as the default, and mzPeak archives with two isolation windows of one centre get each window's own mobility band.
 
 ### Fixed
 
@@ -20,11 +21,12 @@ public runs; option `-charge:min_charge 2` and above now gives the same higher-c
   It now takes the lower of MemAvailable and the cgroup headroom.
 - **`-charge:min_charge 2` changed the 2+ spectra** (0.3 % of them on a PXD029836 run): the 1+ precursors were dropped
   before the foreign-isotope removal looked for their envelopes. It now only filters the output.
+- **mzPeak: two isolation windows with one centre** both received the first window's ion-mobility band; each now gets
+  its own (changes the spectra of such archives only).
 - **Old or minimal TDFs** without `Frames.MzCalibration` were read by the tool but refused by the patched reader; both now
   use the single-row rule. A non-numeric calibration value or frame temperature is refused instead of read as 0, and a
   frame missing from the calibration table makes the integer detector fall back loudly.
-- `-assembly:max_fragments` below `-assembly:min_fragments` is refused. Precursors are routed on the exact isolation
-  bounds, not on bounds rounded to 0.01 Th. Overflows of internal 32- and 16-bit offsets are refused with a message,
+- `-assembly:max_fragments` below `-assembly:min_fragments` is refused. Overflows of internal 32- and 16-bit offsets are refused with a message,
   and size fields from mzPeak archives and dnoise window tables are bounded, instead of wrapping or allocating without
   limit. The OpenMS update check is always off.
 - **Log lines could be lost or garbled** when several threads logged at once (it also made one end-to-end check flaky);
@@ -36,6 +38,8 @@ public runs; option `-charge:min_charge 2` and above now gives the same higher-c
   reject a fragment (the shrinkage lifts every correlation above 0.3 at up to 4 shared points); the correlation counts
   frames without signal as zero; the co-location tests have one frame of slack; twin clusters are chains of pairs; above
   100 ms accumulation the dnoise port recovers some raw counts approximately (now counted in the log and the header).
+- Precursors are still routed on isolation bounds rounded to 0.01 Th, as in 1.7.0 (docs/options.md says so); routing on
+  the exact bounds would change the spectra of acquisitions whose window edges lie off that grid.
 - Test-only environment switches warn and are recorded in the header (`spx:test_env`).
 - `scripts/apply_openms_patches.sh` refuses an OpenMS checkout at another commit unless `--other-commit` is given.
 - Simpler code: log-only instrumentation and dead code removed (output-identical).

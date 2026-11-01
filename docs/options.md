@@ -80,7 +80,9 @@ The tool follows each ion over time (a trace), for precursors in the MS1 frames 
 
 ## Precursor charge
 
-The tool finds each precursor's isotope peaks, its charge and its monoisotopic peak.
+The tool finds each precursor's isotope peaks, its charge and its monoisotopic peak. A precursor belongs to the
+isolation windows whose bounds, rounded to 0.01 Th, contain its monoisotopic m/z; a window edge off that grid
+(499.996) therefore counts as its rounded value (500.00).
 
 | option | default | what it does |
 |---|---|---|

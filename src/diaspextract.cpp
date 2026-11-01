@@ -1742,24 +1742,10 @@ namespace
   /// overlapping mobility slices; keyed by m/z alone the halves would merge into one non-monotone
   /// window. With one slice per m/z the key orders and partitions exactly as (lo, hi) did.
   using WinKey = std::array<int, 3>;
-  /// The exact isolation bounds behind each key (the first ones seen): the key is rounded to 0.01 Th, the precursors are
-  /// routed on these, so an edge off that grid (499.996) neither admits nor excludes a precursor within 0.005 Th of it.
-  inline std::map<WinKey, std::pair<double, double>>& winExact_() { static std::map<WinKey, std::pair<double, double>> m; return m; }
-  inline std::mutex& winExactMu_() { static std::mutex m; return m; }   // the pipelined tile reader keys frames while windows route
-  inline WinKey winKey(double lo, double hi, uint32_t group)
-  {
-    const WinKey k{(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)group};
-    std::lock_guard<std::mutex> g(winExactMu_());
-    winExact_().try_emplace(k, lo, hi);
-    return k;
-  }
-  /// The isolation bounds of key @p k: the exact ones, or the key's own where none were registered.
-  inline std::pair<double, double> winBounds(const WinKey& k)
-  {
-    std::lock_guard<std::mutex> g(winExactMu_());
-    const auto it = winExact_().find(k);
-    return it != winExact_().end() ? it->second : std::pair<double, double>{k[0] / 100.0, k[1] / 100.0};
-  }
+  inline WinKey winKey(double lo, double hi, uint32_t group) { return {(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)group}; }
+  /// The isolation bounds precursors are routed on: the key's own, i.e. rounded to 0.01 Th (1.7.0's rule; exact bounds
+  /// would change the spectra of acquisitions whose edges lie off that grid).
+  inline std::pair<double, double> winBounds(const WinKey& k) { return {k[0] / 100.0, k[1] / 100.0}; }
   /// A window's m/z range as the logs and refusals name it: "lo-hi".
   inline String winLabel(const WinKey& k) { return String(k[0] / 100.0) + "-" + String(k[1] / 100.0); }
 
