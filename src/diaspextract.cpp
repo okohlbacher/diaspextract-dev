@@ -2389,9 +2389,8 @@ namespace
   /// precursor in the 1-m/z overlap of two isolation windows. Folds each such cluster into one spectrum.
   /// Relation: same MS1 frame (RT bit-equal; every precursor RT is a frame time), same charge > 0, precursor
   /// m/z within 20 ppm of the member earlier in `v`, |d1/K0| <= im_tol; clusters are its connected
-  /// components. Survivor: most isotopes, then most peaks, then the earliest. Only the members linked to the survivor
-  /// directly fold into it (a chain of links can span far beyond the tolerances); its peaks become the union of
-  /// theirs, fused within 10 ppm (m/z intensity-weighted, intensity = max); every other field is its
+  /// components (a chain of links can span more than the tolerances). Survivor: most isotopes, then most peaks, then the
+  /// earliest. Its peaks become the union of the cluster's, fused within 10 ppm (m/z intensity-weighted, intensity = max); every other field is its
   /// own. Same frame => same RT cell => same tile under every grouping, so the output stays grouping- and
   /// thread-invariant.
   /// `v` in canonical order; survivors keep their places. Returns the number of spectra removed.
@@ -2478,19 +2477,13 @@ namespace
       const uint32_t b = best[r];
       if (b == NONE || std::make_pair(isotopes(i), v[i].size()) > std::make_pair(isotopes(b), v[b].size())) best[r] = i;
     }
-    // A component is a chain of pairwise links and can span far more than the tolerances: 500.0000, 500.0095 and
-    // 500.0190 link pairwise within 20 ppm, the ends 38 ppm apart. Only members linked to the survivor DIRECTLY fold
-    // into it; the rest of the chain stays as written.
-    vector<int> kpos(v.size(), -1);
-    for (size_t k = 0; k < ks.size(); ++k) kpos[ks[k].i] = (int)k;
+    // A component is a chain of pairwise links and can span more than the tolerances (500.0000, 500.0095 and 500.0190
+    // link pairwise within 20 ppm, the ends 38 ppm apart). The whole component folds: on real runs such chains are one
+    // ion called at drifting m/z; folding only the survivor's direct links wrote 10.7 % more spectra on K562 9905 for
+    // the same peptides (Sage +0.02 %, MSFragger -0.19 %).
     vector<uint32_t> grp(v.size(), NONE);   // the survivor a spectrum folds into (itself for a survivor)
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
-    {
-      const uint32_t r = root(i), b = best[r];
-      if (n_in[r] < 2 || i == b) continue;
-      const K& lo = ks[(size_t)kpos[std::min(i, b)]]; const K& hi = ks[(size_t)kpos[std::max(i, b)]];
-      if (const int l = linked(lo, hi); l == 1 || l == 2) grp[i] = grp[b] = b;
-    }
+      if (n_in[root(i)] >= 2) grp[i] = best[root(i)];
     vector<uint32_t> surv;
     vector<int> slot(v.size(), -1);
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
@@ -3785,14 +3778,14 @@ protected:
   };
 
   /// [foreign] One window's precursors, the candidate foreign envelopes of its spectra: every precursor whose mono
-  /// m/z lies in the window or up to three isotope steps below it, with a finite apex RT and 1/K0 and an isotope-supported charge (a guessed precursor's
+  /// m/z lies in the window (a precursor whose mono lies just below it is not a candidate: extending the candidates there
+  /// moved no peptide on the screen panel), with a finite apex RT and 1/K0 and an isotope-supported charge (a guessed precursor's
   /// charge is a default, so its envelope would be fictional; they are dropped anyway),
   /// sorted by apex RT (ties by index). Built from the run's precursor list, not from the tile's owned subset, so it
   /// is the same in any tiling.
   struct ForeignIdx_
   {
     const vector<Precursor_>* p = nullptr;
-    double pos_lo = -std::numeric_limits<double>::infinity();   ///< isotope positions below it are not isolated: never counted
     vector<double> rt;       ///< apex RT, ascending
     vector<uint32_t> idx;    ///< into *p, in rt order
     void build(const vector<Precursor_>& v, size_t lo, size_t hi)
@@ -3864,7 +3857,6 @@ protected:
       for (int k = 0; k <= 3; ++k)
       {
         const double m = f->mono_mz + k * kIso / f->charge, tol = m * ppm;
-        if (m < fx.pos_lo) continue;   // below the isolation window: a fragment there is not this envelope's residue
         bool any = false;
         auto it = std::lower_bound(om.begin(), om.end(), m - tol, [&](uint32_t i, double v) { return frags[i].first < v; });
         for (; it != om.end() && frags[*it].first <= m + tol; ++it)
@@ -4501,8 +4493,8 @@ protected:
         chk(mergeTwins_(v, 0.005, false, 1.65, &edges, 3.0, &se) == 0 && v.size() == 2 && se[2] == 1, "a pair across a cell edge stays two spectra (counted)"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.002, 2, 1.0, 2, P), sp(11.1, 500.001, 2, 1.004, 2, P), sp(12.2, 500.0, 2, 1.0, 2, P)};
         std::array<size_t, 3> sc{};
-        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 2 && v.size() == 2 && v[1].getRT() == 12.2 && sc[0] == 1,
-            "frames 10, 11.1, 12.2 chain (span 2.2 > rt_tol): the 12.2 member links only through 11.1 and stays apart; one pair is linked at one frame"); }
+        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1,
+            "frames 10, 11.1, 12.2 chain into one cluster (span 2.2 > rt_tol); one pair is linked at one frame"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0, 2, 1.006, 2, P), sp(11.1, 500.0, 3, 1.0, 2, P), sp(11.1, 500.0125, 2, 1.0, 2, P)};
         chk(mergeTwins_(v, 0.005, false, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and 20 ppm still apply"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0002, 2, 1.0, 2, P), sp(11.6, 500.00002, 2, 1.0, 2, P), sp(10.0, 500.0005, 2, 1.0, 2, P)};
@@ -4522,8 +4514,7 @@ protected:
     { vector<MSSpectrum> v{sp(10.0, 500.0, 0, 1.0, 2, P), sp(10.0, 500.0, 0, 1.0, 2, P)};
       chk(mergeTwins_(v, 0.005) == 0 && v.size() == 2, "charge 0 (no charge call): untouched"); }
     { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0075, 2, 1.0, 2, P), sp(10.0, 500.015, 2, 1.0, 2, P)};
-      chk(mergeTwins_(v, 0.005) == 1 && v.size() == 2 && v[1].getPrecursors()[0].getMZ() == 500.015,
-          "a chain 15 + 15 ppm: the member within 20 ppm of the survivor folds, the far end (30 ppm) stays apart"); }
+      chk(mergeTwins_(v, 0.005) == 2 && v.size() == 1, "a chain 15 + 15 ppm is one cluster although its ends are 30 ppm apart"); }
     { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0075, 2, 1.0, 3, P), sp(10.0, 500.015, 2, 1.0, 2, P)};
       chk(mergeTwins_(v, 0.005) == 2 && v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.0075,
           "a chain whose survivor is its middle: both ends are within 20 ppm of it and fold"); }
@@ -5797,7 +5788,7 @@ protected:
       out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
     if (foreign_w_ < 1.0)   // [foreign] stamped only when on (1 = off leaves no stamp)
       out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
-                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3 from 1 Th below the window, own ion kept ("
+                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept ("
                                                  + (foreign_ppm_ > 30.0 ? String(foreign_ppm_) : String("30")) + " ppm)"));   // the own-ion tests' max(ppm, 30)
     if (fuse_ppm_ > 0.0)   // [fuse] stamped only when on (0 = off leaves no stamp)
     {
@@ -6291,13 +6282,7 @@ protected:
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
         // [foreign] the window's precursors by apex RT, owned by this tile or not: the same candidates in any tiling
         ForeignIdx_ fx;
-        // Candidates reach three isotope steps (a 1+ envelope) below the window: a precursor whose mono lies just below it
-        // still has M+1..M+3 isolated. Its positions count from 1 Th below the lower edge (quadrupole transmission).
-        if (foreign_w_ < 1.0)
-        {
-          fx.build(precursors, precRange(win_lo - 3.0 * kIso, win_hi).first, phi);
-          fx.pos_lo = win_lo - 1.0;
-        }
+        if (foreign_w_ < 1.0) fx.build(precursors, plo, phi);
 
         vector<MSSpectrum>& bucket = win_out[wi];
         {

@@ -1,23 +1,55 @@
 # Changelog
 
-## Unreleased
+## Unreleased (1.7.1)
+
+**The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on
+public runs; option `-charge:min_charge 2` and above now gives the same higher-charge spectra as the default, see below).
 
 ### Fixed
 
-- A ddaPASEF `.d` (MsMsType 8, empty DIA tables) aborted with `no such column: ScanNumBegin` from the loader. It is now
-  refused before the load, naming the acquisition mode, with exit code 11 (`INCOMPATIBLE_INPUT_DATA`). A `.d` without
-  diaPASEF frames of any other kind exits with 3.
-- A truncated `analysis.tdf_bin` aborted in zstd with "Data corruption detected ... unsupported variant of the format".
-  Every frame block is now checked against the file size before the load; the run stops with exit code 3
-  (`INPUT_FILE_CORRUPT`), naming the first frame that ends past the end of the file and how many frames are affected.
-- An exception from a library (SQLite, opentims) aborted the process. It now ends the run with its message and exit
-  code 8.
-- A run that emitted no spectrum wrote a 0-byte file and exited 0. It now writes a valid, indexed mzML with an empty
+- **Bruker input that is not diaPASEF, or broken, aborted the process.** A ddaPASEF `.d` (MsMsType 8, empty DIA tables)
+  now stops with exit code 11 (`INCOMPATIBLE_INPUT_DATA`), naming the acquisition mode. A truncated `analysis.tdf_bin`, a
+  frame claiming more points than the file holds, or no diaPASEF frame at all stop with exit code 3
+  (`INPUT_FILE_CORRUPT`). These checks run before the reader and take one header read. An exception from a library
+  (SQLite, opentims) now ends the run with its message and exit code 8 instead of an abort.
+- **A run that emitted no spectrum wrote a 0-byte file** and exited 0. It now writes a valid, indexed mzML with an empty
   spectrum list.
-- A failed write (full disk, quota) left a cut-off mzML under the output name and exited 0. The run now stops with
-  exit code 5 (`CANNOT_WRITE_OUTPUT_FILE`), and only the `.part` file remains.
+- **A failed write (full disk, quota) was reported as success**, the cut-off file renamed into place. The run now stops
+  with exit code 5; only `<out>.part` remains.
+- **Memory admission ignored cgroup limits** (Slurm `--mem`, containers) and could admit windows the job could not hold.
+  It now takes the lower of MemAvailable and the cgroup headroom.
+- **`-charge:min_charge 2` changed the 2+ spectra** (0.3 % of them on a PXD029836 run): the 1+ precursors were dropped
+  before the foreign-isotope removal looked for their envelopes. It now only filters the output.
+- **Old or minimal TDFs** without `Frames.MzCalibration` were read by the tool but refused by the patched reader; both now
+  use the single-row rule. A non-numeric calibration value or frame temperature is refused instead of read as 0, and a
+  frame missing from the calibration table makes the integer detector fall back loudly.
+- `-assembly:max_fragments` below `-assembly:min_fragments` is refused. Precursors are routed on the exact isolation
+  bounds, not on bounds rounded to 0.01 Th. Overflows of internal 32- and 16-bit offsets are refused with a message,
+  and size fields from mzPeak archives and dnoise window tables are bounded, instead of wrapping or allocating without
+  limit. The OpenMS update check is always off.
+- **Log lines could be lost or garbled** when several threads logged at once (it also made one end-to-end check flaky);
+  logging is serialised. Log numbers print at four significant digits.
 
-The spectra do not change.
+### Changed
+
+- The help texts and docs/options.md state what the defaults do: for faint precursors the correlation test cannot
+  reject a fragment (the shrinkage lifts every correlation above 0.3 at up to 4 shared points); the correlation counts
+  frames without signal as zero; the co-location tests have one frame of slack; twin clusters are chains of pairs; above
+  100 ms accumulation the dnoise port recovers some raw counts approximately (now counted in the log and the header).
+- Test-only environment switches warn and are recorded in the header (`spx:test_env`).
+- `scripts/apply_openms_patches.sh` refuses an OpenMS checkout at another commit unless `--other-commit` is given.
+- Simpler code: log-only instrumentation and dead code removed (output-identical).
+
+### Tests and tools
+
+- A real diaPASEF `.d` runs end to end in the suite (`DIASPEXTRACT_TEST_D`; CI fetches OpenMS's public test run):
+  thread-, tile- and tile-pipeline-invariant. New checks for the empty output, the failed write and the preflight.
+- `bench/slice_d.py` cuts a retention-time range out of a `.d`. `bench/entrapment.py` digests the search space with the
+  search config's enzyme and reuses results only for the same inputs; `bench/fix_mzml_cvparams.py` rebuilds the index;
+  `bench/mzml_specdiff.py` pairs spectra within one (RT, m/z, charge) by 1/K0 and isolation window.
+
+Screened and not adopted (peptides unchanged within noise on K562, HeLa 10/100 ng and TNBC, both engines): folding only
+the twins linked directly to the survivor (10.7 % more spectra on K562) and foreign-isotope candidates below the window.
 
 ## v1.7.0 — 2026-10-02
 

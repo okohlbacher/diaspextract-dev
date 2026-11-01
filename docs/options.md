@@ -168,7 +168,7 @@ the fragments of both.
 
 | option | default | what it does |
 |---|---|---|
-| `-assembly:twin_im_tolerance` | 0.005 | Fold two spectra with the same charge, precursor m/z within 20 ppm and 1/K0 within this tolerance. Negative: off. 0 folds only twins with identical 1/K0. At least -1. |
+| `-assembly:twin_im_tolerance` | 0.005 | Fold two spectra with the same charge, precursor m/z within 20 ppm and 1/K0 within this tolerance. Negative: off. 0 folds only twins with identical 1/K0. At least -1. Twins are joined pair by pair, so one cluster can be a chain whose ends lie further apart than 20 ppm; on real runs such chains are one ion called at drifting m/z. |
 | `-assembly:twin_rt_frames` | 0 | Also fold twins whose apexes lie up to n + 0.5 MS1 cycles apart and in the same retention-time cell (a pair across a cell edge stays apart), as `-assembly:twin_rt_match` allows. 0: set per run from the MS1 peak width. -1: the same MS1 frame only (as before 1.6.0). At least -1. |
 | `-assembly:twin_rt_match` | `ext` | Which twins from different MS1 frames fold. `ext`: precursor m/z within 0.05 ppm (one flight-time bin), and the monoisotope check (`-charge:mono_profile_check v2`) moved one of the two monoisotopic peaks one isotope lighter (see `-charge:mono_position_extend`). `bin`: any pair within 0.05 ppm. `ppm`: any pair within 20 ppm. `bin` and `ppm` fold more and are not recommended. Values: `ext`, `bin`, `ppm`. |
 
