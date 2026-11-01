@@ -26,7 +26,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
   its own (changes the spectra of such archives only).
 - **Old or minimal TDFs** without `Frames.MzCalibration` were read by the tool but refused by the patched reader; both now
   use the single-row rule. A non-numeric calibration value or frame temperature is refused instead of read as 0, and a
-  frame missing from the calibration table makes the integer detector fall back loudly.
+  frame missing from the calibration table (beyond its last id or a gap inside it) makes the integer detector fall back
+  loudly; an mzPeak archive with such a frame is refused.
 - `-assembly:max_fragments` below `-assembly:min_fragments` is refused. Overflows of internal 32- and 16-bit offsets are refused with a message,
   and size fields from mzPeak archives and dnoise window tables are bounded, instead of wrapping or allocating without
   limit. The OpenMS update check is always off.

@@ -8,6 +8,7 @@
 #include <array>
 #include <climits>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <fstream>
 #include <optional>
@@ -72,7 +73,8 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
 }
 
 /// The MzCalibration row the FRAMES reference (Frames.MzCalibration; PXD017703 files carry two rows), refused
-/// when frames reference more than one. t1_by_frame[id] = Frames.T1 (T1_ref when NULL); index 0 is never a frame.
+/// when frames reference more than one. t1_by_frame[id] = Frames.T1 (T1_ref when NULL); NaN for an id the table lacks (a gap), which the callers treat as
+/// uncalibrated; index 0 is never a frame.
 /// A frame whose T1 lies outside the span a negative C2 was checked over is refused (TdfMzCalibration::frameReason).
 inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
                                std::vector<double>& t1_by_frame, std::string& why)
@@ -127,7 +129,7 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   {
     const long long id = sqlite3_column_int64(st, 0);
     if (id < 0 || id > 10000000) return fail("implausible Frames.Id");
-    if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
+    if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, std::numeric_limits<double>::quiet_NaN());   // gaps: absent
     const int t1_type = sqlite3_column_type(st, 1);
     if (t1_type != SQLITE_NULL && t1_type != SQLITE_INTEGER && t1_type != SQLITE_FLOAT) return fail("frame " + std::to_string(id) + ": Frames.T1 is not a number");
     t1_by_frame[(size_t)id] = (t1_type == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);

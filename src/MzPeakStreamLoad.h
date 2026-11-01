@@ -163,7 +163,7 @@ namespace spx
       // Fail rather than fall back to the reference T1: substituting it for an unknown frame stamps
       // masses calibrated at the wrong temperature as "exact", which is silent wrongness the
       // provenance record would then vouch for.
-      if (frame_id < 0 || (size_t)frame_id >= t1_by_frame.size())
+      if (frame_id < 0 || (size_t)frame_id >= t1_by_frame.size() || std::isnan(t1_by_frame[(size_t)frame_id]))   // NaN: a gap in the table
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "mzPeak exact calibration: no tdf T1 for frame", std::to_string(frame_id));
       const double b = cal.frameFactor(t1_by_frame[(size_t)frame_id]);

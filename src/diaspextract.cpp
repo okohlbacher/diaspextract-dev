@@ -920,7 +920,7 @@ namespace
     String bounds_why;                                          ///< why the bounds are missing, if they are
 
     double factor(size_t frame_id) const
-    { return frame_id < b_by_frame.size() ? b_by_frame[frame_id] : cal.frameFactor(cal.T1_ref); }
+    { return frame_id < b_by_frame.size() && !std::isnan(b_by_frame[frame_id]) ? b_by_frame[frame_id] : cal.frameFactor(cal.T1_ref); }
     double mzOf(TofIdx tof, double b) const { return cal.tofToMz((double)tof, b); }
     TofIdx tofOf(double mz, double b) const
     {
@@ -938,10 +938,12 @@ namespace
     TofAxis& ax = tofAxis();
     ax.cal = cal;
     // A frame without a positive factor gets the reference one. Index 0 is the "unknown frame"
-    // sentinel (Frames.Id starts at 1; frameIdOf() returns 0 when it cannot parse) and stays 0.0.
+    // sentinel (Frames.Id starts at 1; frameIdOf() returns 0 when it cannot parse) and stays 0.0. An id the table lacks
+    // (t1 NaN: a gap) stays NaN, so frameCalibrated_() counts it as unmapped and factor() gives the reference one.
     const double bref = ax.cal.frameFactor(ax.cal.T1_ref);
     ax.b_by_frame.assign(t1.size(), 0.0);
-    for (size_t i = 1; i < t1.size(); ++i) { const double f = ax.cal.frameFactor(t1[i]); ax.b_by_frame[i] = f > 0.0 ? f : bref; }
+    for (size_t i = 1; i < t1.size(); ++i) { if (std::isnan(t1[i])) { ax.b_by_frame[i] = t1[i]; continue; }
+                                             const double f = ax.cal.frameFactor(t1[i]); ax.b_by_frame[i] = f > 0.0 ? f : bref; }
     ax.ok = true;
   }
   /// Load the axis from an analysis.tdf; false (axis unusable) when anything is missing.
@@ -964,7 +966,8 @@ namespace
   /// outliers on two artificial mobilities, and NaN into llround is UB.
   /// The frame has a per-frame calibration factor: a parseable id the calibration table holds. Before the table is
   /// loaded (an openms-detector run) only the id is checked.
-  inline bool frameCalibrated_(uint32_t fid) { return fid != 0 && (!tofAxis().ok || fid < tofAxis().b_by_frame.size()); }
+  inline bool frameCalibrated_(uint32_t fid)
+  { return fid != 0 && (!tofAxis().ok || (fid < tofAxis().b_by_frame.size() && !std::isnan(tofAxis().b_by_frame[fid]))); }
   struct CompactStats
   {
     size_t no_im_array = 0, size_mismatch = 0, bad_mz = 0, bad_im = 0, kept = 0;

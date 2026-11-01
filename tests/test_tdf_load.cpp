@@ -5,6 +5,7 @@
 // over a page header.
 #include "TdfLoad.h"
 #include <chrono>
+#include <cmath>
 #include <clocale>
 #include <cstdint>
 #include <cstdio>
@@ -287,6 +288,9 @@ static void testCalibrationAndBounds()
   const std::string ok = makeTdf("cal_ok.tdf", refShaped());
   CHECK(diaspextract::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
         "loadTdfCalibration: %s", why.c_str());
+  // a frame id missing inside the table is a gap (NaN, uncalibrated), not a frame at the reference temperature
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_gap.tdf", refShaped() + "DELETE FROM Frames WHERE Id = 4;"), cal, t1, why) && t1.size() == 11 &&
+          std::isnan(t1[4]) && !std::isnan(t1[3]) && !std::isnan(t1[5]), "calibration gap: %s", why.c_str());
   CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c4null.tdf", refShaped() + "UPDATE MzCalibration SET C4 = NULL;"), cal, t1, why) && has(why, "C4 is NULL"),
         "a NULL C4 (read as 0.0) is refused: %s", why.c_str());
   CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c0text.tdf", refShaped() + "UPDATE MzCalibration SET C0 = 'oops';"), cal, t1, why) && has(why, "C0 is not a number"),
