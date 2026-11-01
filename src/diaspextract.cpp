@@ -4582,6 +4582,14 @@ protected:
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
+    // ponytail: tuning knobs for the prototype via the environment; options once the values settle
+    if (const char* e = getenv("SPX_NOIMS_MS1_MIN_SCANS")) P.ms1_min_scans = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MS1_SPLIT")) P.ms1_split = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_MS2_MIN_SCANS")) P.ms2_min_scans = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MIN_CORR")) P.min_corr = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_FEW_APEX")) P.few_apex_cycles = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_SINGLES")) P.singles = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_MS2_PREC")) P.ms2_prec = atoi(e) != 0;
     PeakMap res;
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
     exp.clear(true);
