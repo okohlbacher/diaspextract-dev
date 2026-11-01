@@ -17,6 +17,7 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
+#include "CgroupMem.h"   // [dyn-mem] cgroup headroom net of page cache
 #include "TdfLoad.h"   // loadTdfCalibration: sqlite3, tool-only
 #include "DnoiseMs1.h"   // [dnoise] the dnoise v0.1.0 MS1 port (header-only; tests/test_dnoise_ms1.cpp compiles the same code)
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
@@ -525,34 +526,9 @@ namespace
   /// [dyn-mem] MemAvailable in bytes: the kernel's estimate of what can be allocated without swapping on a
   /// shared node. Our own RSS is NOT added back: after perf:malloc_trim it is the windows in flight, memory
   /// already spoken for. 0 if unreadable (the caller then admits one window at a time).
-  /// The headroom of the cgroups this process is in (Slurm --mem, a container limit), the least over the leaf and its
-  /// ancestors (a job's limit sits above its step's cgroup): limit minus usage. Unlimited or unreadable: SIZE_MAX.
-  static size_t cgroupHeadroom_()
-  {
-    auto num = [](const std::string& p) -> long long {
-      std::ifstream f(p); std::string s;
-      return (f >> s) && !s.empty() && std::isdigit((unsigned char)s[0]) ? std::atoll(s.c_str()) : -1; };
-    size_t room = SIZE_MAX;
-    std::ifstream cg("/proc/self/cgroup");
-    for (std::string line; std::getline(cg, line);)
-    {
-      const size_t a = line.find(':'), b = line.find(':', a + 1);
-      if (a == std::string::npos || b == std::string::npos) continue;
-      const std::string ctl = line.substr(a + 1, b - a - 1);
-      const bool v2 = line.compare(0, 2, "0:") == 0 && ctl.empty(), v1 = ctl.find("memory") != std::string::npos;
-      if (!v2 && !v1) continue;
-      const std::string root = v2 ? "/sys/fs/cgroup" : "/sys/fs/cgroup/memory";
-      const char* lim = v2 ? "/memory.max" : "/memory.limit_in_bytes";
-      const char* use = v2 ? "/memory.current" : "/memory.usage_in_bytes";
-      for (std::string p = line.substr(b + 1);; p = p.substr(0, p.rfind('/')))
-      {
-        const long long l = num(root + p + lim), u = num(root + p + use);
-        if (l > 0 && u >= 0 && l < (1LL << 60)) room = std::min(room, (size_t)std::max(0LL, l - u));
-        if (p.empty() || p == "/") break;
-      }
-    }
-    return room;
-  }
+  /// The headroom under the cgroup limits of this process (src/CgroupMem.h): limit minus usage net of reclaimable page
+  /// cache, the least over the leaf and its ancestors. Unlimited or unreadable: SIZE_MAX.
+  static size_t cgroupHeadroom_() { return diaspextract::cgroup::headroom(); }
   static size_t availableBytes_()
   { return std::min((size_t)std::max(0LL, procKb_("/proc/meminfo", "MemAvailable:")) * (size_t)1024, cgroupHeadroom_()); }
 

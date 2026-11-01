@@ -18,7 +18,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
 - **A failed write (full disk, quota) was reported as success**, the cut-off file renamed into place. The run now stops
   with exit code 5; only `<out>.part` remains.
 - **Memory admission ignored cgroup limits** (Slurm `--mem`, containers) and could admit windows the job could not hold.
-  It now takes the lower of MemAvailable and the cgroup headroom.
+  It now takes the lower of MemAvailable and the cgroup headroom (limit minus usage, reclaimable page cache counted as
+  free as MemAvailable does; v1 and v2 hierarchies found in mountinfo, so combined `cpu,memory` and hybrid mounts work).
 - **`-charge:min_charge 2` changed the 2+ spectra** (0.3 % of them on a PXD029836 run): the 1+ precursors were dropped
   before the foreign-isotope removal looked for their envelopes. It now only filters the output.
 - **mzPeak: two isolation windows with one centre** both received the first window's ion-mobility band; each now gets

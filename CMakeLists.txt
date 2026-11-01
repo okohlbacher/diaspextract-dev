@@ -32,6 +32,10 @@ enable_testing()
 add_executable(test_dnoise_ms1 tests/test_dnoise_ms1.cpp)
 target_include_directories(test_dnoise_ms1 PRIVATE src)
 add_test(NAME dnoise_ms1 COMMAND test_dnoise_ms1)
+# The cgroup memory headroom (src/CgroupMem.h) is plain file parsing, tested on a fake /proc and /sys tree.
+add_executable(test_cgroup_mem tests/test_cgroup_mem.cpp)
+target_include_directories(test_cgroup_mem PRIVATE src)
+add_test(NAME cgroup_mem COMMAND test_cgroup_mem)
 # src/TdfLoad.h reads analysis.tdf through sqlite3, so its test builds wherever SQLite is found (not on the Windows
 # portability leg). It includes the calibration model as the patched OpenMS installs it; the shim maps that include onto
 # src/TdfMzCalibration.h, the same file.
