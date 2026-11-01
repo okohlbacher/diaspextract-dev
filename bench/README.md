@@ -7,7 +7,9 @@ Small standard-library tools for checking DIAspeXtract output. Each script's doc
 - `mzml_specdiff.py`: per-spectrum diff of two outputs, to locate a digest difference; spectra are paired by RT,
   precursor m/z, charge, 1/K0 and isolation window.
 - `entrapment.py`: entrapment FDR estimator (foreign-proteome false positives, bootstrap CI). The peptide-space ratio
-  follows the Sage config's enzyme and bounds; results are reused only for the same inputs.
+  follows the Sage config's enzyme and bounds, digested as Sage does (N-terminal cleavage with `c_terminal: false`,
+  semi-enzymatic, no cleavage with `cleave_at: "$"`, non-specific with `cleave_at: ""`, refused when too large to
+  enumerate); results are reused only for the same inputs.
 - `fix_mzml_cvparams.py`: adds `value=""` to valueless cvParams so MSFragger can read OpenMS mzML, and rebuilds the
   index for the moved bytes.
 - `tile_concat.py`: concatenates RT-tiled outputs, keeping each tile's core precursors.

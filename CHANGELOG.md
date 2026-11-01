@@ -51,8 +51,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
 
 - A real diaPASEF `.d` runs end to end in the suite (`DIASPEXTRACT_TEST_D`; CI fetches OpenMS's public test run):
   thread-, tile- and tile-pipeline-invariant. New checks for the empty output, the failed write and the preflight.
-- `bench/slice_d.py` cuts a retention-time range out of a `.d`. `bench/entrapment.py` digests the search space with the
-  search config's enzyme and reuses results only for the same inputs; `bench/fix_mzml_cvparams.py` rebuilds the index;
+- `bench/slice_d.py` cuts a retention-time range out of a `.d`. `bench/entrapment.py` digests the search space as the
+  search config's enzyme does (also N-terminal, semi-enzymatic and non-specific searches) and reuses results only for the same inputs; `bench/fix_mzml_cvparams.py` rebuilds the index;
   `bench/mzml_specdiff.py` pairs spectra within one (RT, m/z, charge) by 1/K0 and isolation window.
 
 Screened and not adopted (peptides unchanged within noise on K562, HeLa 10/100 ng and TNBC, both engines): folding only
