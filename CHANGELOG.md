@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A ddaPASEF `.d` (MsMsType 8, empty DIA tables) aborted with `no such column: ScanNumBegin` from the loader. It is now
+  refused before the load, naming the acquisition mode, with exit code 11 (`INCOMPATIBLE_INPUT_DATA`). A `.d` without
+  diaPASEF frames of any other kind exits with 3.
+- A truncated `analysis.tdf_bin` aborted in zstd with "Data corruption detected ... unsupported variant of the format".
+  Every frame block is now checked against the file size before the load; the run stops with exit code 3
+  (`INPUT_FILE_CORRUPT`), naming the first frame that ends past the end of the file and how many frames are affected.
+- An exception from a library (SQLite, opentims) aborted the process. It now ends the run with its message and exit
+  code 8.
+- A run that emitted no spectrum wrote a 0-byte file and exited 0. It now writes a valid, indexed mzML with an empty
+  spectrum list.
+- A failed write (full disk, quota) left a cut-off mzML under the output name and exited 0. The run now stops with
+  exit code 5 (`CANNOT_WRITE_OUTPUT_FILE`), and only the `.part` file remains.
+
+The spectra do not change.
+
 ## v1.7.0 — 2026-10-02
 
 **Why 1.7.0.** A simplification release. Option values that did no better than the default, and debug settings, are

@@ -30,16 +30,17 @@ entrapment fraction a noisy statistic -- a point FDR without an error bar cannot
 calibration change from resampling noise. Both the RAW fraction and the corrected FDR (with CI) are
 printed, never the corrected number alone, so the reader can check the correction's assumptions.
 """
-import argparse, csv, os, subprocess, sys, json, random
+import argparse, csv, hashlib, os, subprocess, sys, json, random
 from pathlib import Path
 
 _AA = {'G':57.02146,'A':71.03711,'S':87.03203,'P':97.05276,'V':99.06841,'T':101.04768,'C':103.00919,
        'L':113.08406,'I':113.08406,'N':114.04293,'D':115.02694,'Q':128.05858,'K':128.09496,'E':129.04259,
        'M':131.04049,'H':137.05891,'F':147.06841,'R':156.10111,'Y':163.06333,'W':186.07931}
 
-def _digest(seq, mc=2, lo=7, hi=35, mlo=500.0, mhi=5000.0):
-    """Tryptic peptides matching Sage (cleave after K/R not before P, <=mc missed, len+mass bounds)."""
-    cuts = [0] + [i+1 for i in range(len(seq)-1) if seq[i] in 'KR' and seq[i+1] != 'P'] + [len(seq)]
+def _digest(seq, mc=2, lo=7, hi=35, mlo=500.0, mhi=5000.0, cleave="KR", restrict="P"):
+    """Peptides as Sage digests them: cleave after a `cleave` residue unless `restrict` follows, <=mc missed,
+    length and (unmodified) mass bounds. The defaults are bench/sage_closed.json's trypsin."""
+    cuts = [0] + [i+1 for i in range(len(seq)-1) if seq[i] in cleave and seq[i+1] not in (restrict or "")] + [len(seq)]
     peps, n = set(), len(cuts)-1
     for i in range(n):
         for j in range(i+1, min(i+2+mc, n+1)):
@@ -53,11 +54,22 @@ def _digest(seq, mc=2, lo=7, hi=35, mlo=500.0, mhi=5000.0):
                 if ok and mlo <= m <= mhi: peps.add(p)
     return peps
 
-def peptide_ratio(fasta, tag="ENTRAP_"):
-    """entrapment/target PEPTIDE-hypothesis ratio: |peptides UNIQUE to foreign| / |target peptides|."""
+def digest_rule(cfg):
+    """The _digest arguments of a Sage config: its enzyme and its peptide length and mass bounds."""
+    db = cfg.get("database", {}) if cfg else {}
+    e = db.get("enzyme", {})
+    return dict(mc=e.get("missed_cleavages", 2), lo=e.get("min_len", 7), hi=e.get("max_len", 35),
+                mlo=db.get("peptide_min_mass", 500.0), mhi=db.get("peptide_max_mass", 5000.0),
+                cleave=e.get("cleave_at", "KR"), restrict=e.get("restrict", "P"))
+
+
+def peptide_ratio(fasta, tag="ENTRAP_", rule=None):
+    """entrapment/target PEPTIDE-hypothesis ratio: |peptides UNIQUE to foreign| / |target peptides|, digested by
+    `rule` (digest_rule of the search config; trypsin without one)."""
     tgt, ent, seq, is_ent = set(), set(), [], False
+    rule = rule or {}
     def flush():
-        if seq: (ent if is_ent else tgt).update(_digest("".join(seq)))
+        if seq: (ent if is_ent else tgt).update(_digest("".join(seq), **rule))
     with open(fasta) as f:
         for line in f:
             if line.startswith(">"):
@@ -78,6 +90,22 @@ def _bootstrap_fdr(flags, ratio, B=1000, seed=1):
         fdrs.append(100.0 * (ne / ratio) / max(nt, 1) if ratio > 0 else float("nan"))
     fdrs.sort()
     return (fdrs[int(0.025*B)], fdrs[int(0.975*B)])
+
+
+def stamp(*parts):
+    """A digest of a run's inputs: files by path, size and mtime (a mzML is gigabytes), anything else by value."""
+    h = hashlib.sha256()
+    for x in parts:
+        st = os.stat(x) if isinstance(x, Path) and x.exists() else None
+        h.update(repr((str(x), st.st_size, st.st_mtime_ns) if st else x).encode())
+    return h.hexdigest()
+
+
+def reusable(out_file, key):
+    """True if out_file exists and was made from the inputs `key` names (its .inputs stamp); results from other
+    inputs -- another mzML, database or config under the same --out and arm name -- are never reused."""
+    st = Path(str(out_file) + ".inputs")
+    return out_file.exists() and st.exists() and st.read_text() == key
 
 
 def build_entrapment(target_fa, foreign_fa, out_fa, tag="ENTRAP_"):
@@ -158,19 +186,21 @@ def main():
         if not (a.target and a.foreign):
             sys.exit("ABORT: need --prebuilt, or both --target and --foreign")
         fa = out / "target_entrap.fasta"
-        if not fa.exists():
+        key = stamp(Path(a.target), Path(a.foreign), a.tag)
+        if not reusable(fa, key):
             n_t, n_e = build_entrapment(a.target, a.foreign, fa, a.tag)
+            Path(str(fa) + ".inputs").write_text(key)
             print("[db] %d target + %d entrapment proteins -> %s" % (n_t, n_e, fa), flush=True)
         else:
             n_t = sum(1 for l in open(a.target) if l.startswith(">"))
             n_e = sum(1 for l in open(a.foreign) if l.startswith(">"))
             print("[db] reusing %s (%d target + %d entrapment)" % (fa, n_t, n_e), flush=True)
+    cfg = json.load(open(a.config))
     prot_ratio = n_e / max(n_t, 1)
-    ratio = peptide_ratio(fa, a.tag)   # PEPTIDE-hypothesis ratio drives the FDR correction
+    ratio = peptide_ratio(fa, a.tag, digest_rule(cfg))   # PEPTIDE-hypothesis ratio, digested as the search digests
     print("[db] protein ratio %.3f (reference only); PEPTIDE-hypothesis ratio %.4f (drives FDR)"
           % (prot_ratio, ratio), flush=True)
 
-    cfg = json.load(open(a.config))
     cfg["database"]["fasta"] = str(fa)
     cfg_path = out / "sage_entrap.json"
     json.dump(cfg, open(cfg_path, "w"), indent=2)
@@ -186,13 +216,17 @@ def main():
             print("[skip] %s: no mzML at %s" % (name, d)); continue
         odir = out / name; odir.mkdir(exist_ok=True)
         tsv = odir / "results.sage.tsv"
-        if not tsv.exists():
+        key = stamp(mzml, Path(a.sage), json.dumps(cfg, sort_keys=True), Path(fa))
+        if not reusable(tsv, key):
+            if tsv.exists():
+                tsv.unlink()                  # a stale result must not survive a failed search
             print("[run] %s ..." % name, flush=True)
-            subprocess.run([a.sage, str(cfg_path), "-o", str(odir),
-                            "--disable-telemetry-i-dont-want-to-improve-sage", str(mzml)],
-                           stdout=open(odir / "sage.log", "w"), stderr=subprocess.STDOUT)
-        if not tsv.exists():
-            print("[fail] %s: sage produced no tsv" % name); continue
+            r = subprocess.run([a.sage, str(cfg_path), "-o", str(odir),
+                                "--disable-telemetry-i-dont-want-to-improve-sage", str(mzml)],
+                               stdout=open(odir / "sage.log", "w"), stderr=subprocess.STDOUT)
+            if r.returncode != 0 or not tsv.exists():
+                print("[fail] %s: sage exited %d (see %s)" % (name, r.returncode, odir / "sage.log")); continue
+            Path(str(tsv) + ".inputs").write_text(key)
         rows.append((name,) + score(str(tsv), a.tag, ratio, q_cut=a.q_cut))
 
     print("\n=== ENTRAPMENT FDR at nominal peptide_q <= %.3f (peptide-ratio corrected + 95%% bootstrap CI) ===" % a.q_cut)

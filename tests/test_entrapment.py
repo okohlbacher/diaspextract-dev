@@ -5,7 +5,8 @@ Guards its two corrections: peptide-hypothesis ratio (not protein ratio) and for
 """
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bench"))
-from entrapment import _bootstrap_fdr
+from entrapment import _bootstrap_fdr, peptide_ratio, digest_rule
+import tempfile
 
 def main():
     ratio = 0.6805
@@ -18,7 +19,14 @@ def main():
     assert lo0 != lo0 and hi0 != hi0, "empty input must yield NaN CI, not a number"
     lo_d, hi_d = _bootstrap_fdr([0] * 990 + [1] * 10, ratio)
     assert (lo, hi) == (lo_d, hi_d), "bootstrap must be deterministic (fixed seed)"
-    print(f"OK entrapment: point {point:.3f}%, CI [{lo:.3f}, {hi:.3f}], deterministic, NaN on empty")
+    # the peptide ratio digests as the search does: after E, a target without E is one peptide, a foreign one two
+    with tempfile.NamedTemporaryFile("w", suffix=".fasta", delete=False) as f:
+        f.write(">t\nAAAAAAKAAAAAAK\n>ENTRAP_f\nAAAAAAEAAAAAAE\n")
+    gluc = digest_rule({"database": {"enzyme": {"cleave_at": "E", "restrict": ""}}})
+    r_try, r_glu = peptide_ratio(f.name), peptide_ratio(f.name, rule=gluc)
+    os.unlink(f.name)
+    assert (r_try, r_glu) == (0.5, 2.0), f"peptide ratio trypsin {r_try} (want 0.5), cleave after E {r_glu} (want 2.0)"
+    print(f"OK entrapment: point {point:.3f}%, CI [{lo:.3f}, {hi:.3f}], deterministic, NaN on empty; ratio follows the enzyme")
     return 0
 
 if __name__ == "__main__":

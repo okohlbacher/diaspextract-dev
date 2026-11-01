@@ -49,7 +49,7 @@
 #include <malloc.h>    // mallinfo2: retained-vs-live at the milestones [mem]
 #endif
 
-// The four OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
+// The five OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
 // third: without defaulted moves an rvalue MassTrace binds to the copy constructor (not noexcept), and
 // every "move" of a trace in the band/split gathering is a deep copy of its points.
 static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is_nothrow_move_assignable_v<OpenMS::MassTrace>,
@@ -105,6 +105,9 @@ namespace
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   }
   static std::string clk_() { char b[32]; snprintf(b, sizeof b, " [t=%.0fs]", phase_clock_()); return b; }
+  /// A number for a log line: four significant digits (OpenMS's String(double) prints all 17). Header stamps keep
+  /// full precision, so a value can be passed back exactly.
+  static String num_(double x) { char b[32]; snprintf(b, sizeof b, "%.4g", x); return b; }
 
   /// [perf-instr] Per-phase wall/CPU/RSS accounting, printed unconditionally at the end.
   struct PhaseStat { double wall = 0; double cpu = 0; long rss_end_mb = 0; int n = 0; bool nested = false; };
@@ -537,7 +540,36 @@ namespace
   /// [dyn-mem] MemAvailable in bytes: the kernel's estimate of what can be allocated without swapping on a
   /// shared node. Our own RSS is NOT added back: after perf:malloc_trim it is the windows in flight, memory
   /// already spoken for. 0 if unreadable (the caller then admits one window at a time).
-  static size_t availableBytes_() { return (size_t)std::max(0LL, procKb_("/proc/meminfo", "MemAvailable:")) * 1024ull; }
+  /// The headroom of the cgroups this process is in (Slurm --mem, a container limit), the least over the leaf and its
+  /// ancestors (a job's limit sits above its step's cgroup): limit minus usage. Unlimited or unreadable: SIZE_MAX.
+  static size_t cgroupHeadroom_()
+  {
+    auto num = [](const std::string& p) -> long long {
+      std::ifstream f(p); std::string s;
+      return (f >> s) && !s.empty() && std::isdigit((unsigned char)s[0]) ? std::atoll(s.c_str()) : -1; };
+    size_t room = SIZE_MAX;
+    std::ifstream cg("/proc/self/cgroup");
+    for (std::string line; std::getline(cg, line);)
+    {
+      const size_t a = line.find(':'), b = line.find(':', a + 1);
+      if (a == std::string::npos || b == std::string::npos) continue;
+      const std::string ctl = line.substr(a + 1, b - a - 1);
+      const bool v2 = line.compare(0, 2, "0:") == 0 && ctl.empty(), v1 = ctl.find("memory") != std::string::npos;
+      if (!v2 && !v1) continue;
+      const std::string root = v2 ? "/sys/fs/cgroup" : "/sys/fs/cgroup/memory";
+      const char* lim = v2 ? "/memory.max" : "/memory.limit_in_bytes";
+      const char* use = v2 ? "/memory.current" : "/memory.usage_in_bytes";
+      for (std::string p = line.substr(b + 1);; p = p.substr(0, p.rfind('/')))
+      {
+        const long long l = num(root + p + lim), u = num(root + p + use);
+        if (l > 0 && u >= 0 && l < (1LL << 60)) room = std::min(room, (size_t)std::max(0LL, l - u));
+        if (p.empty() || p == "/") break;
+      }
+    }
+    return room;
+  }
+  static size_t availableBytes_()
+  { return std::min((size_t)std::max(0LL, procKb_("/proc/meminfo", "MemAvailable:")) * (size_t)1024, cgroupHeadroom_()); }
 
   /// The global RT axis: every distinct frame retention time (MS1 and MS2), sorted. No RT is stored per
   /// point: each TraceStore maps its frames to indices on this axis (rt_index). Built once after loading,
@@ -814,7 +846,11 @@ namespace
     const uint32_t f0 = pts.front().first, f1 = pts.back().first;
     const size_t L = (size_t)f1 - f0 + 1;
     if (L >= 65536) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
-    if (off == SIZE_MAX) { off = store.inten.size(); store.inten.resize(off + L, 0.0f); }
+    if (off == SIZE_MAX) off = store.inten.size();
+    if (off + L > (size_t)std::numeric_limits<uint32_t>::max())   // Trace::off is 32-bit: a wrapped offset would overwrite another trace
+      throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "one trace store holds more than 2^32 profile "
+            "points; run in smaller tiles (-tile:cells_per_tile 1, a smaller -tile:rt_sec)", String(off + L));
+    if (off + L > store.inten.size()) store.inten.resize(off + L, 0.0f);
     t.frame0 = f0; t.len = (uint16_t)L; t.off = (uint32_t)off;
     float best = -1.0f; uint16_t np = 0;
     for (const auto& q : pts)
@@ -966,10 +1002,13 @@ namespace
 
   /// Peaks that cannot be represented exactly are DROPPED and COUNTED: clamping 1/K0 would stack
   /// outliers on two artificial mobilities, and NaN into llround is UB.
+  /// The frame has a per-frame calibration factor: a parseable id the calibration table holds. Before the table is
+  /// loaded (an openms-detector run) only the id is checked.
+  inline bool frameCalibrated_(uint32_t fid) { return fid != 0 && (!tofAxis().ok || fid < tofAxis().b_by_frame.size()); }
   struct CompactStats
   {
     size_t no_im_array = 0, size_mismatch = 0, bad_mz = 0, bad_im = 0, kept = 0;
-    size_t unmapped_frame = 0;   ///< nativeID carried no parseable "frame=": cannot be calibrated
+    size_t unmapped_frame = 0;   ///< no parseable "frame=" in the nativeID, or a frame the calibration table lacks
     /// merge per-frame stats after a parallel batch [perf-load]
     CompactStats& operator+=(const CompactStats& o)
     {
@@ -1085,6 +1124,9 @@ namespace
         imq.insert(imq.end(), imq_, imq_ + n);
       }
       rt.push_back(frame_rt); frame_id.push_back(fid);
+      if (tof.size() > (size_t)std::numeric_limits<uint32_t>::max())   // frame_off is 32-bit: a wrapped bound would mix frames
+        throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "one isolation window holds more than 2^32 peaks; "
+              "run in smaller tiles (-tile:cells_per_tile 1, a smaller -tile:rt_sec)", String(tof.size()));
       frame_off.push_back((uint32_t)tof.size());
     }
     size_t reserved() const { return (tof.capacity() - tof.size()) * 4 + (inten.capacity() - inten.size()) * 4 + (imq.capacity() - imq.size()) * 2; }
@@ -1557,7 +1599,9 @@ namespace
       }
       t.tof = t_tof; t.bframe = fap;   // got-order first max: the frame the bin was measured on
       t.mz = cmz;                                              // the weighted centroid, as OpenMS reports
-      t.rt_at = (int16_t)((int64_t)fap - (int64_t)t.frame0);   // [soa-rt] the apex frame
+      { const int64_t d = (int64_t)fap - (int64_t)t.frame0;   // [soa-rt] the apex frame, 16-bit as in setRtFrame
+        if (d < -32768 || d > 32767) throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION);
+        t.rt_at = (int16_t)d; }
       t.im = IM_LO + cim / IM_Q;
       out.push_back(std::move(t));
     }
@@ -1715,7 +1759,24 @@ namespace
   /// overlapping mobility slices; keyed by m/z alone the halves would merge into one non-monotone
   /// window. With one slice per m/z the key orders and partitions exactly as (lo, hi) did.
   using WinKey = std::array<int, 3>;
-  inline WinKey winKey(double lo, double hi, uint32_t group) { return {(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)group}; }
+  /// The exact isolation bounds behind each key (the first ones seen): the key is rounded to 0.01 Th, the precursors are
+  /// routed on these, so an edge off that grid (499.996) neither admits nor excludes a precursor within 0.005 Th of it.
+  inline std::map<WinKey, std::pair<double, double>>& winExact_() { static std::map<WinKey, std::pair<double, double>> m; return m; }
+  inline std::mutex& winExactMu_() { static std::mutex m; return m; }   // the pipelined tile reader keys frames while windows route
+  inline WinKey winKey(double lo, double hi, uint32_t group)
+  {
+    const WinKey k{(int)llround(lo * 100.0), (int)llround(hi * 100.0), (int)group};
+    std::lock_guard<std::mutex> g(winExactMu_());
+    winExact_().try_emplace(k, lo, hi);
+    return k;
+  }
+  /// The isolation bounds of key @p k: the exact ones, or the key's own where none were registered.
+  inline std::pair<double, double> winBounds(const WinKey& k)
+  {
+    std::lock_guard<std::mutex> g(winExactMu_());
+    const auto it = winExact_().find(k);
+    return it != winExact_().end() ? it->second : std::pair<double, double>{k[0] / 100.0, k[1] / 100.0};
+  }
   /// A window's m/z range as the logs and refusals name it: "lo-hi".
   inline String winLabel(const WinKey& k) { return String(k[0] / 100.0) + "-" + String(k[1] / 100.0); }
 
@@ -1854,7 +1915,7 @@ namespace
   /// not reach the filter exactly once. Kept points are selected in place; an emptied frame stays.
   struct DnoiseRun
   {
-    struct Counts { long long frames = 0, emptied = 0, raw = 0, streak = 0, halo = 0, kept = 0; double cpu = 0.0; uint32_t fid = 0; };
+    struct Counts { long long frames = 0, emptied = 0, raw = 0, streak = 0, halo = 0, kept = 0, ambiguous = 0; double cpu = 0.0; uint32_t fid = 0; };
     /// one per thread for one batch: dnoise's Scratch plus the recovered integers (~45 B per raw point in flight)
     struct Work { spx::dnoise::Scratch w; std::vector<uint32_t> scan, tof, raw; std::vector<uint8_t> keep; std::vector<Size> idx; };
     bool on = false;                          ///< dnoise:ms1 true on a Bruker .d, set up
@@ -1944,7 +2005,7 @@ namespace
         double t = 0.0; int hits = 0;
         switch (spx::dnoise::recover::recoverPoint(ax.cal, b, s[i].getMZ(), im[i], v, corr, asc, falls, fr.num_scans, k.tof[i], k.scan[i], k.raw[i], t, hits))
         {
-          case Refusal::none: break;
+          case Refusal::none: c.ambiguous += (hits > 1); break;   // above 100 ms accumulation: the nearest of several raw counts
           case Refusal::tof:
             throw refuse("m/z " + String(s[i].getMZ()) + " in frame " + String(fid) + " is not the MzCalibration table model's value of a TOF bin (" + String(t) + "): the loader calibrated m/z otherwise");
           case Refusal::scan:
@@ -1976,7 +2037,7 @@ namespace
         if (c.frames == 0) continue;
         if (!seen.mark(c.fid))
           throw InputRefusal(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[dnoise] MS1 frame " + String(c.fid) + " reached the filter twice: the loader delivered it more than once; -dnoise:ms1 false runs without MS1 denoising", "frame=" + String(c.fid));
-        total.frames += c.frames; total.emptied += c.emptied; total.raw += c.raw; total.streak += c.streak; total.halo += c.halo; total.kept += c.kept; total.cpu += c.cpu;
+        total.frames += c.frames; total.emptied += c.emptied; total.raw += c.raw; total.streak += c.streak; total.halo += c.halo; total.kept += c.kept; total.ambiguous += c.ambiguous; total.cpu += c.cpu;
       }
     }
 
@@ -2005,10 +2066,11 @@ namespace
 
     String summary() const
     {
-      char b[320];
-      snprintf(b, sizeof b, "[dnoise] %s MS1: %lld frames (%lld emptied), %lld raw points -> streak %lld -> halo %lld -> window gate: kept %lld MS1 points (%.2f%%); filter CPU %.1f s",
+      char b[420];
+      snprintf(b, sizeof b, "[dnoise] %s MS1: %lld frames (%lld emptied), %lld raw points -> streak %lld -> halo %lld -> window gate: kept %lld MS1 points (%.2f%%); "
+               "%lld raw counts approximate (accumulation above 100 ms: the nearest of several counts); filter CPU %.1f s",
                spx::dnoise::kPortedFrom, total.frames, total.emptied, total.raw, total.streak, total.halo, total.kept,
-               total.raw > 0 ? 100.0 * (double)total.kept / (double)total.raw : 0.0, total.cpu);
+               total.raw > 0 ? 100.0 * (double)total.kept / (double)total.raw : 0.0, total.ambiguous, total.cpu);
       return String(b);
     }
   };
@@ -2084,7 +2146,7 @@ namespace
           ensureIMArrayName(s);
           frt[(size_t)i] = s.getRT();
           fid[(size_t)i] = frameIdOf(s.getNativeID());
-          if (fid[(size_t)i] == 0) ++st[(size_t)i].unmapped_frame;
+          if (!frameCalibrated_(fid[(size_t)i])) ++st[(size_t)i].unmapped_frame;
           const size_t o = scratch_off_[(size_t)i];
           kept[(size_t)i] = compactifyInto(s, st[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], scratch_off_[(size_t)i + 1] - o);
           s.clear(true);                                // raw frame dies here, inside the loop
@@ -2151,7 +2213,7 @@ namespace
       if (!omp_in_parallel())
       {
         #pragma omp parallel for schedule(dynamic, 1)
-        for (long w = 0; w < (long)per_win.size(); ++w) appendWin(w);
+        for (long w = 0; w < (long)per_win.size(); ++w) { try { appendWin(w); } catch (...) { taskErr_(pad_err); } }   // [task-err] bad_alloc, the slab bounds
       }
       else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
       if (pad_err) std::rethrow_exception(pad_err);
@@ -2350,8 +2412,9 @@ namespace
   /// precursor in the 1-m/z overlap of two isolation windows. Folds each such cluster into one spectrum.
   /// Relation: same MS1 frame (RT bit-equal; every precursor RT is a frame time), same charge > 0, precursor
   /// m/z within 20 ppm of the member earlier in `v`, |d1/K0| <= im_tol; clusters are its connected
-  /// components. Survivor: most isotopes, then most peaks, then the earliest. Its peaks become the union of
-  /// the cluster's, fused within 10 ppm (m/z intensity-weighted, intensity = max); every other field is its
+  /// components. Survivor: most isotopes, then most peaks, then the earliest. Only the members linked to the survivor
+  /// directly fold into it (a chain of links can span far beyond the tolerances); its peaks become the union of
+  /// theirs, fused within 10 ppm (m/z intensity-weighted, intensity = max); every other field is its
   /// own. Same frame => same RT cell => same tile under every grouping, so the output stays grouping- and
   /// thread-invariant.
   /// `v` in canonical order; survivors keep their places. Returns the number of spectra removed.
@@ -2393,6 +2456,15 @@ namespace
       if (a.rt != b.rt) return a.rt < b.rt;
       return a.i < b.i;
     });
+    // the twin relation, a earlier in v than b, its m/z window a's: 0 none, 1 one frame, 2 nearby frames, 3 refused at a cell edge
+    auto linked = [&](const K& a, const K& b) -> int {
+      if (!(fabs(b.mz - a.mz) <= a.mz * TWIN_PPM * 1e-6) || !(fabs(b.im - a.im) <= im_tol) || !(fabs(b.rt - a.rt) <= rt_tol)) return 0;
+      const bool same = b.rt == a.rt;
+      if (!same && near_mode >= 1 && fabs(b.mz - a.mz) > a.mz * BIN_PPM * 1e-6) return 0;
+      if (!same && near_mode == 2 && !a.ext && !b.ext) return 0;
+      if (b.cell != a.cell) return 3;
+      return same ? 1 : 2;
+    };
     vector<uint32_t> up(v.size());
     for (size_t i = 0; i < up.size(); ++i) up[i] = (uint32_t)i;
     auto root = [&](uint32_t a) { while (up[a] != a) { up[a] = up[up[a]]; a = up[a]; } return a; };
@@ -2405,12 +2477,11 @@ namespace
         // the probe is the EARLIER member of a pair, with its own tolerance
         const double tol = ks[a].mz * TWIN_PPM * 1e-6, lo = ks[a].mz - tol, hi = ks[a].mz + tol;
         auto link = [&](size_t b) {
-          if (ks[b].i <= ks[a].i || !(fabs(ks[b].im - ks[a].im) <= im_tol) || !(fabs(ks[b].rt - ks[a].rt) <= rt_tol)) return;
-          const bool same = ks[b].rt == ks[a].rt;
-          if (!same && near_mode >= 1 && fabs(ks[b].mz - ks[a].mz) > ks[a].mz * BIN_PPM * 1e-6) return;
-          if (!same && near_mode == 2 && !ks[a].ext && !ks[b].ext) return;
-          if (ks[b].cell != ks[a].cell) { ++n_edge; return; }
-          ++(same ? n_same : n_near);
+          if (ks[b].i <= ks[a].i) return;
+          const int l = linked(ks[a], ks[b]);
+          if (l == 3) ++n_edge;
+          if (l != 1 && l != 2) return;
+          ++(l == 1 ? n_same : n_near);
           { const uint32_t ra = root(ks[a].i), rb = root(ks[b].i); if (ra != rb) up[ra] = rb; }
         };
         for (size_t b = a + 1; b < g1 && ks[b].mz <= hi; ++b) link(b);
@@ -2430,15 +2501,25 @@ namespace
       const uint32_t b = best[r];
       if (b == NONE || std::make_pair(isotopes(i), v[i].size()) > std::make_pair(isotopes(b), v[b].size())) best[r] = i;
     }
+    // A component is a chain of pairwise links and can span far more than the tolerances: 500.0000, 500.0095 and
+    // 500.0190 link pairwise within 20 ppm, the ends 38 ppm apart. Only members linked to the survivor DIRECTLY fold
+    // into it; the rest of the chain stays as written.
+    vector<int> kpos(v.size(), -1);
+    for (size_t k = 0; k < ks.size(); ++k) kpos[ks[k].i] = (int)k;
+    vector<uint32_t> grp(v.size(), NONE);   // the survivor a spectrum folds into (itself for a survivor)
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
+    {
+      const uint32_t r = root(i), b = best[r];
+      if (n_in[r] < 2 || i == b) continue;
+      const K& lo = ks[(size_t)kpos[std::min(i, b)]]; const K& hi = ks[(size_t)kpos[std::max(i, b)]];
+      if (const int l = linked(lo, hi); l == 1 || l == 2) grp[i] = grp[b] = b;
+    }
     vector<uint32_t> surv;
     vector<int> slot(v.size(), -1);
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
-    {
-      const uint32_t r = root(i);
-      if (n_in[r] >= 2 && best[r] == i) { slot[i] = (int)surv.size(); surv.push_back(i); }
-    }
+      if (grp[i] == i) { slot[i] = (int)surv.size(); surv.push_back(i); }
     vector<vector<uint32_t>> members(surv.size());
-    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) if (grp[i] != NONE) members[(size_t)slot[grp[i]]].push_back(i);
     // fuse: each thread reads and writes one cluster's spectra only
     auto fuse = [&](const long c)
     {
@@ -2499,8 +2580,7 @@ namespace
     size_t w = 0;
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
     {
-      const uint32_t r = root(i);
-      if (n_in[r] >= 2 && best[r] != i) continue;
+      if (grp[i] != NONE && grp[i] != i) continue;
       if (w != i) v[w] = std::move(v[i]);
       ++w;
     }
@@ -2568,19 +2648,32 @@ namespace
   class TileWriter : public PlainMSDataWritingConsumer
   {
   public:
-    explicit TileWriter(const String& filename) : PlainMSDataWritingConsumer(filename) {}
+    explicit TileWriter(const String& filename) : PlainMSDataWritingConsumer(filename), path_(filename) {}
     ~TileWriter() override
     {
-      if (count_off_ >= 0 && ofs_.is_open())
+      if (count_off_ >= 0 && ofs_.is_open()) patchCount_();
+      // the base destructor closes <spectrumList> and writes the footer from spectra_offsets_ (nothing once finish() ran)
+    }
+
+    /// Completes and closes the file: with no spectrum at all, the header and an empty <spectrumList> (a valid mzML,
+    /// not a 0-byte file); then the count, the list end, the index and footer. Throws if any write failed (a full disk,
+    /// a quota), so a cut-off .part is never renamed into place. The base destructor then has nothing left to write.
+    void finish()
+    {
+      if (!started_writing_)
       {
-        const std::streampos end = ofs_.tellp();
-        ofs_.seekp(count_off_);
-        const char fill = ofs_.fill('0');
-        ofs_ << std::setw(10) << spectra_written_;
-        ofs_.fill(fill);
-        ofs_.seekp(end);
+        MapType empty; empty = settings_;
+        Internal::MzMLHandler::writeHeader_(ofs_, empty, dps_, *validator_);
+        started_writing_ = true;
       }
-      // the base destructor closes <spectrumList> and writes the footer from spectra_offsets_
+      if (!writing_spectra_) { ofs_ << "\t\t<spectrumList count=\"0\" defaultDataProcessingRef=\"dp_sp_0\">\n"; writing_spectra_ = true; }
+      if (count_off_ >= 0) patchCount_();
+      ofs_ << "\t\t</spectrumList>\n";
+      writing_spectra_ = false;
+      Internal::MzMLHandlerHelper::writeFooter_(ofs_, options_, spectra_offsets_, chromatograms_offsets_);
+      started_writing_ = false;
+      ofs_.close();
+      if (ofs_.fail()) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, path_, "writing the mzML failed (disk full or quota?)");
     }
 
     void writeBlock(const vector<MSSpectrum>& block)
@@ -2650,9 +2743,21 @@ namespace
         }
       }
       spectra_written_ += block.size();
+      if (!ofs_) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, path_, "writing the mzML failed (disk full or quota?)");
     }
 
   private:
+    /// the placeholder count, overwritten in place: same width, so the index offsets stay valid
+    void patchCount_()
+    {
+      const std::streampos end = ofs_.tellp();
+      ofs_.seekp(count_off_);
+      const char fill = ofs_.fill('0');
+      ofs_ << std::setw(10) << spectra_written_;
+      ofs_.fill(fill);
+      ofs_.seekp(end);
+    }
+    String path_;
     std::streamoff count_off_ = -1;
     vector<std::unique_ptr<TileWriter>> enc_;   ///< per-thread encoders (never write their /dev/null)
   };
@@ -2676,6 +2781,13 @@ public:
   String getDocumentationURL() const override { return "https://github.com/okohlbacher/diaspextract"; }
 
 protected:
+  // OpenMS's log streams are not thread-safe: two threads logging at once lose or repeat a line, or leave stray bytes.
+  // The window workers and the pipelined tile reader and writer log concurrently, so every line goes through one lock.
+  static std::mutex& logMu_() { static std::mutex m; return m; }
+  void writeLogInfo_(const String& t) const { std::lock_guard<std::mutex> g(logMu_()); TOPPBase::writeLogInfo_(t); }
+  void writeLogWarn_(const String& t) const { std::lock_guard<std::mutex> g(logMu_()); TOPPBase::writeLogWarn_(t); }
+  void writeLogError_(const String& t) const { std::lock_guard<std::mutex> g(logMu_()); TOPPBase::writeLogError_(t); }
+
   void registerOptionsAndFlags_() override
   {
     // a true/false option: a string option restricted to "true" and "false"
@@ -2702,7 +2814,7 @@ protected:
     registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets "
                               "the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.", false);
     registerDoubleOption_("gate:delta_rt", "<sec>", 3.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
-    registerDoubleOption_("gate:min_correlation", "<0..1>", 0.3, "Least correlation between the elution profiles of a precursor and a fragment. Raise "
+    registerDoubleOption_("gate:min_correlation", "<-1..1>", 0.3, "Least correlation between the elution profiles of a precursor and a fragment. Raise "
                               "it for cleaner but sparser spectra.", false);
     registerIntOption_("gate:min_correlation_points", "<n>", 3, "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, "
                            "gate:shrink_min_points is used instead.", false, true);
@@ -3136,8 +3248,7 @@ protected:
       if (conv_err) std::rethrow_exception(conv_err);
       off[0] = store.inten.size();
       for (size_t g = 0; g < n_tr; ++g) off[g + 1] += off[g];   // off[g] = the arena size before trace g's append
-      // Trace::off is 32-bit and makeSpan narrows the offset without a check: past 2^32 - 1 floats two traces' offsets
-      // would alias and their tasks would race on the same span, so the serial loop below runs instead.
+      // Trace::off is 32-bit: past 2^32 - 1 floats the serial loop below runs instead, and makeSpan refuses there
       if (off[n_tr] > (size_t)std::numeric_limits<uint32_t>::max()) conv_par = false;
     }
     if (conv_par)
@@ -3425,12 +3536,15 @@ protected:
     {
       const size_t b1 = std::min(b0 + spec_batch, order.size());
       // Phase 1: speculate. Nothing here writes `used`, so the concurrent reads are safe.
+      std::exception_ptr spec_err;
       #pragma omp parallel for schedule(dynamic, spec_chunk)
       for (long ii = (long)b0; ii < (long)b1; ++ii)
       {
         SeedRes& R = res[(size_t)ii - b0];
-        evalSeed(order[(size_t)ii], R);   // clears R; a used seed leaves it empty
+        try { evalSeed(order[(size_t)ii], R); }   // clears R; a used seed leaves it empty
+        catch (...) { taskErr_(spec_err); }   // [task-err] bad_alloc would abort the run without a message
       }
+      if (spec_err) std::rethrow_exception(spec_err);
       // Phase 2: commit in the original seed order.
       for (size_t ii = b0; ii < b1; ++ii)
       {
@@ -3693,13 +3807,14 @@ protected:
   };
 
   /// [foreign] One window's precursors, the candidate foreign envelopes of its spectra: every precursor whose mono
-  /// m/z lies in the window, with a finite apex RT and 1/K0 and an isotope-supported charge (a guessed precursor's
+  /// m/z lies in the window or up to three isotope steps below it, with a finite apex RT and 1/K0 and an isotope-supported charge (a guessed precursor's
   /// charge is a default, so its envelope would be fictional; they are dropped anyway),
   /// sorted by apex RT (ties by index). Built from the run's precursor list, not from the tile's owned subset, so it
   /// is the same in any tiling.
   struct ForeignIdx_
   {
     const vector<Precursor_>* p = nullptr;
+    double pos_lo = -std::numeric_limits<double>::infinity();   ///< isotope positions below it are not isolated: never counted
     vector<double> rt;       ///< apex RT, ascending
     vector<uint32_t> idx;    ///< into *p, in rt order
     void build(const vector<Precursor_>& v, size_t lo, size_t hi)
@@ -3771,6 +3886,7 @@ protected:
       for (int k = 0; k <= 3; ++k)
       {
         const double m = f->mono_mz + k * kIso / f->charge, tol = m * ppm;
+        if (m < fx.pos_lo) continue;   // below the isolation window: a fragment there is not this envelope's residue
         bool any = false;
         auto it = std::lower_bound(om.begin(), om.end(), m - tol, [&](uint32_t i, double v) { return frags[i].first < v; });
         for (; it != om.end() && frags[*it].first <= m + tol; ++it)
@@ -4404,8 +4520,8 @@ protected:
         chk(mergeTwins_(v, 0.005, false, 1.65, &edges, 3.0, &se) == 0 && v.size() == 2 && se[2] == 1, "a pair across a cell edge stays two spectra (counted)"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.002, 2, 1.0, 2, P), sp(11.1, 500.001, 2, 1.004, 2, P), sp(12.2, 500.0, 2, 1.0, 2, P)};
         std::array<size_t, 3> sc{};
-        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1,
-            "frames 10, 11.1, 12.2 chain into one cluster (span 2.2 > rt_tol); one pair is linked at one frame"); }
+        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 2 && v.size() == 2 && v[1].getRT() == 12.2 && sc[0] == 1,
+            "frames 10, 11.1, 12.2 chain (span 2.2 > rt_tol): the 12.2 member links only through 11.1 and stays apart; one pair is linked at one frame"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0, 2, 1.006, 2, P), sp(11.1, 500.0, 3, 1.0, 2, P), sp(11.1, 500.0125, 2, 1.0, 2, P)};
         chk(mergeTwins_(v, 0.005, false, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and 20 ppm still apply"); }
       { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0002, 2, 1.0, 2, P), sp(11.6, 500.00002, 2, 1.0, 2, P), sp(10.0, 500.0005, 2, 1.0, 2, P)};
@@ -4425,7 +4541,11 @@ protected:
     { vector<MSSpectrum> v{sp(10.0, 500.0, 0, 1.0, 2, P), sp(10.0, 500.0, 0, 1.0, 2, P)};
       chk(mergeTwins_(v, 0.005) == 0 && v.size() == 2, "charge 0 (no charge call): untouched"); }
     { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0075, 2, 1.0, 2, P), sp(10.0, 500.015, 2, 1.0, 2, P)};
-      chk(mergeTwins_(v, 0.005) == 2 && v.size() == 1, "a chain 15 + 15 ppm is one cluster although its ends are 30 ppm apart"); }
+      chk(mergeTwins_(v, 0.005) == 1 && v.size() == 2 && v[1].getPrecursors()[0].getMZ() == 500.015,
+          "a chain 15 + 15 ppm: the member within 20 ppm of the survivor folds, the far end (30 ppm) stays apart"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0075, 2, 1.0, 3, P), sp(10.0, 500.015, 2, 1.0, 2, P)};
+      chk(mergeTwins_(v, 0.005) == 2 && v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.0075,
+          "a chain whose survivor is its middle: both ends are within 20 ppm of it and fold"); }
     { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.001, 2, 1.0, 2, P)};
       mergeTwins_(v, 0.005);
       chk(v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.0, "equal isotopes and peaks: the earliest survives"); }
@@ -4577,6 +4697,9 @@ protected:
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
     const Size max_frags = (Size)getIntOption_("assembly:max_fragments");
+    if (max_frags < min_frags)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:max_fragments (" + String(max_frags)
+            + ") is below assembly:min_fragments (" + String(min_frags) + "): every written spectrum would hold fewer fragments than the minimum.");
     const double twin_im = getDoubleOption_("assembly:twin_im_tolerance");
     const int twin_rt_frames = getIntOption_("assembly:twin_rt_frames");   // [twin-rt] -1 off, 0 auto, n frames
     const String twin_rt_match = getStringOption_("assembly:twin_rt_match");
@@ -4597,7 +4720,14 @@ protected:
     { const char* e = std::getenv("DIASPEXTRACT_MS1_PRUNE_NO_CHAIN"); ms1_prune.no_chain = e && *e && *e != '0'; }   // its own switch: check 19b
     map<WinKey, PeakSlab> ms2_by_window;
     CompactStats cstat;
-    const bool stream_load = (getStringOption_("perf:stream_load") == "true");
+    // an mzML is always read whole: the frame-by-frame reader reads a .d (or an mzPeak archive) only
+    const FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
+#ifdef DIASPEXTRACT_WITH_MZPEAK
+    const bool streamable = in_type == FileTypes::BRUKER_TDF || in_type == FileTypes::MZPEAK;
+#else
+    const bool streamable = in_type == FileTypes::BRUKER_TDF;
+#endif
+    const bool stream_load = getStringOption_("perf:stream_load") == "true" && streamable;
     const bool trim_on = (getStringOption_("perf:malloc_trim") == "true");
     bool streamed = false;
     // Output format, resolved before the load: it decides the tiling below (mzPeak output runs as one tile), and a
@@ -4695,6 +4825,22 @@ protected:
                     + "; " + String(dnoise.im_asc.size()) + " TimsCalibration row(s) over " + String(dnoise.tdf.meta.max_num_scans)
                     + " scans (MAX(Frames.NumScans), the gate's); scan tables per row over its MS1 frames' scans: " + dnoise.scanTables());
     }
+    // [preflight] what the .d loader would abort on, refused here with its cause and an exit code a caller can route on:
+    // a ddaPASEF run (INCOMPATIBLE_INPUT_DATA) and a cut analysis.tdf_bin (INPUT_FILE_CORRUPT)
+    if (FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF)
+    {
+      bool dda = false;
+      if (const std::string w = diaspextract::tdfNotDiaReason(in + "/analysis.tdf", dda); !w.empty())
+      {
+        writeLogError_("Error: " + in + " " + w + ". DIAspeXtract needs diaPASEF data" + (dda ? "; search ddaPASEF runs directly." : "."));
+        return dda ? INCOMPATIBLE_INPUT_DATA : INPUT_FILE_CORRUPT;
+      }
+      if (const std::string w = diaspextract::tdfBinTruncationReason(in); !w.empty())
+      {
+        writeLogError_("Error: " + in + ": " + w + ".");
+        return INPUT_FILE_CORRUPT;
+      }
+    }
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
     // table regardless), pass 2 reads each tile's MS2 frames through the loader's RT range. The
@@ -4786,7 +4932,7 @@ protected:
           }
           return t; };
       }
-      writeLogInfo_("[outer] start-up before the stream reader: " + String(phase_clock_()) + " s");
+      writeLogInfo_("[outer] start-up before the stream reader: " + num_(phase_clock_()) + " s");
       try
       {
 #ifdef DIASPEXTRACT_WITH_MZPEAK
@@ -4797,7 +4943,7 @@ protected:
         consumer.finish();                                          // the last partial batch
         streamed = true;
         phaseAdd_("LOAD(stream)", 0.0, 0.0, false);                // [perf-instr] start-to-here
-        writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
+        writeLogInfo_("[perf-load] pick(flush) wall=" + num_(flush_wall_()) + " s inside LOAD(stream)");
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
                       + String(ms2_by_window.size()) + clk_() + rss_() + mem_());
@@ -4924,7 +5070,7 @@ protected:
           double lo = pr.getMZ() - pr.getIsolationWindowLowerOffset();
           double hi = pr.getMZ() + pr.getIsolationWindowUpperOffset();
           const uint32_t fid = frameIdOf(s.getNativeID());
-          if (fid == 0) ++cstat.unmapped_frame;
+          if (!frameCalibrated_(fid)) ++cstat.unmapped_frame;
           if (cmzq.size() < s.size()) { cmzq.resize(s.size()); cint.resize(s.size()); cimq.resize(s.size()); }
           const size_t kept = compactifyInto(s, cstat, cmzq.data(), cint.data(), cimq.data(), cmzq.size());
           ms2_by_window[winKey(lo, hi, windowGroupOf(s.getNativeID()))].append(s.getRT(), fid, cmzq.data(), cint.data(), cimq.data(), kept, ms1_map.size());
@@ -4986,7 +5132,7 @@ protected:
       sort(ax.begin(), ax.end());
       ax.erase(unique(ax.begin(), ax.end()), ax.end());
       writeLogInfo_("RT axis: " + String(ax.size()) + " distinct frame retention times"
-                    + (ax.empty() ? "" : " spanning " + String(ax.front()) + "-" + String(ax.back()) + " s"));
+                    + (ax.empty() ? "" : " spanning " + num_(ax.front()) + "-" + num_(ax.back()) + " s"));
       if (ax.empty())
       {
         writeLogError_("Error: the input's frames carry no retention times.");
@@ -5002,7 +5148,7 @@ protected:
 #ifdef __GLIBC__
       if (trim_on) malloc_trim(0);   // the load's arena churn, returned before the MS1 phase
 #endif
-      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis in " + String(phase_clock_() - _ts)
+      writeLogInfo_("[slab] " + String(ms2_by_window.size()) + " windows indexed on the RT axis in " + num_(phase_clock_() - _ts)
                     + " s; " + String(reserved / (1024ULL * 1024ULL)) + " MB reserved but untouched (virtual only) [RSS "
                     + String(_r0) + " -> " + String(rss_mb_()) + " MB]" + mem_());
     }
@@ -5020,7 +5166,7 @@ protected:
       for (long i = 0; i < (long)ms1_map.size(); ++i)
       { try { ms1_map[(Size)i].sortByPosition(); } catch (...) { taskErr_(ss_err); } }
       if (ss_err) std::rethrow_exception(ss_err);
-      writeLogInfo_("[outer] MS1 spectra sorted in " + String(phase_clock_() - _tss) + " s");
+      writeLogInfo_("[outer] MS1 spectra sorted in " + num_(phase_clock_() - _tss) + " s");
     }
     const double ms1_snr = getDoubleOption_("trace:ms1_chrom_peak_snr");
     const double ms2_snr = getDoubleOption_("trace:ms2_chrom_peak_snr");
@@ -5047,12 +5193,12 @@ protected:
         if (!cell_edges.empty() && 2 * (ms1_rt.size() - cell_edges.size() * n) < n) cell_edges.pop_back();   // remainder < pitch/2 joins the last cell
       }
       for (double e : cell_edges) { char buf[32]; std::snprintf(buf, sizeof buf, "%.17g", e); cell_boundaries += (cell_boundaries.empty() ? "" : ",") + String(buf); }   // round-trip exact
-      writeLogInfo_("[cell] pitch " + String(cell_pitch) + " s = " + String(n) + " MS1 frames (cycle " + String(cycle) + " s): "
+      writeLogInfo_("[cell] pitch " + String(cell_pitch) + " s = " + String(n) + " MS1 frames (cycle " + num_(cycle) + " s): "
                     + String(cell_edges.size() + 1) + " cells, edges " + (cell_boundaries.empty() ? String("none") : cell_boundaries));
     }
     const double splitter_scan_time = cycle;
     if (splitter_scan_time > 0.0)
-      writeLogInfo_("[split] scan time " + String(splitter_scan_time) + " s from " + String(ms1_rt.size()) + " MS1 frames -> chrom_fwhm / scan time is the splitter's window");
+      writeLogInfo_("[split] scan time " + num_(splitter_scan_time) + " s from " + String(ms1_rt.size()) + " MS1 frames -> chrom_fwhm / scan time is the splitter's window");
     else writeLogWarn_("[split] the MS1 frame times show no positive gap; valley splitting uses each trace's own cycle time.");
     const double max_span = getDoubleOption_("trace:max_span_sec");
     int ms1_bands = getIntOption_("perf:ms1_trace_bands");
@@ -5224,7 +5370,7 @@ protected:
       const size_t ties = sortExact_(ms1_traces, traceLess);
       writeLogInfo_("[det] MS1 traces sorted by content: " + String(ms1_traces.size()) + " traces, "
                     + String(ties) + " equal-key neighbours");
-      writeLogInfo_("[outer] MS1 content sort " + String(phase_clock_() - _tcs) + " s (" + (ties ? "equal keys: std::sort" : "unique order") + ")");
+      writeLogInfo_("[outer] MS1 content sort " + num_(phase_clock_() - _tcs) + " s (" + (ties ? "equal keys: std::sort" : "unique order") + ")");
     }
     if (iso_im_tol <= 0.0) iso_im_tol = autoIsoImTol_(ms1_traces, ms1_store, max_charge, delta_rt, mass_ppm, iso_tol_stamp);   // [isotol]
     else writeLogInfo_("[isotol] 1/K0 tolerance for isotope partners " + String(iso_im_tol) + " (fixed)");
@@ -5294,9 +5440,9 @@ protected:
           // On the 3+ band: unset the charge; it becomes a guessed precursor, which is dropped.
           else if (ok3 && r3 <= kband) { pc.charge = 0; ++to3; }
         }
-        writeLogInfo_("[im-veto] 2+ line 1/K0 = " + String(a2) + " + " + String(b2) + " * m/z (n=" + String(n2) + ", sigma "
-                      + String(s2) + ")" + (ok3 ? "; 3+ line " + String(a3) + " + " + String(b3) + " * m/z (n=" + String(n3) + ", sigma " + String(s3) + ")" : String("; no 3+ line"))
-                      + ". Of " + String(n1) + " z=1 calls, " + String(to2) + " (" + String((int)(1000.0 * to2 / std::max<size_t>(n1, 1)) / 10.0)
+        writeLogInfo_("[im-veto] 2+ line 1/K0 = " + num_(a2) + " + " + num_(b2) + " * m/z (n=" + String(n2) + ", sigma "
+                      + num_(s2) + ")" + (ok3 ? "; 3+ line " + num_(a3) + " + " + num_(b3) + " * m/z (n=" + String(n3) + ", sigma " + num_(s3) + ")" : String("; no 3+ line"))
+                      + ". Of " + String(n1) + " z=1 calls, " + String(to2) + " (" + num_(100.0 * (double)to2 / (double)std::max<size_t>(n1, 1))
                       + "%) sit on the 2+ band and are re-called 2+, " + String(to3) + " on the 3+ band are dropped, " + String(n1 - to2 - to3) + " kept as 1+");
       }
       else writeLogInfo_("[im-veto] too few confident 2+ calls to fit a mobility line; no z=1 re-calls");
@@ -5319,14 +5465,10 @@ protected:
       writeLogInfo_("[emission] dropped " + String(before - precursors.size())
                     + " guessed precursors, " + String(precursors.size()) + " isotope-supported remain");
     }
-    {
-      const int zmin = getIntOption_("charge:min_charge"); const size_t before = precursors.size();
-      precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
-                       [zmin](const Precursor_& pc){ return pc.charge > 0 && pc.charge < zmin; }), precursors.end());
-      if (before != precursors.size())
-        writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
-                      + " precursors below that charge, " + String(precursors.size()) + " remain");
-    }
+    // charge:min_charge filters the OUTPUT: precursors below it are assembled as usual (their isotope envelopes are what
+    // the foreign-isotope removal of the other spectra looks for) and their spectra are dropped before the write
+    const int zmin = getIntOption_("charge:min_charge");
+    std::atomic<size_t> n_below_zmin{0};   // written by the (possibly pipelined) tile writer
     // [ms1-funnel] diag:dump_ms1_tsv: MS1 traces and precursors, to attribute where a precursor is lost.
     const String ms1_dump = getStringOption_("diag:dump_ms1_tsv");
     if (!ms1_dump.empty())
@@ -5479,12 +5621,12 @@ protected:
                       + String(tofAxis().b_by_frame.size()) + " frame factors");
       }
 #endif
-    // FAIL CLOSED: a frame without a parseable "frame=<Id>" cannot be calibrated per frame, and the
-    // integer detector must not calibrate it at reference temperature -- fall back to openms instead.
+    // FAIL CLOSED: a frame without a parseable "frame=<Id>", or one the calibration table lacks, cannot be calibrated per
+    // frame, and the integer detector must not calibrate it at reference temperature -- fall back to openms instead.
     if (integer_detector && tofAxis().ok && cstat.unmapped_frame > 0)
     {
       writeLogWarn_("trace:detector integer needs a calibration for every frame, but " + String(cstat.unmapped_frame)
-                    + " frame(s) have no \"frame=<Id>\" in their nativeID (an mzML converted from a .d may lack it). "
+                    + " frame(s) have no \"frame=<Id>\" in their nativeID (an mzML converted from a .d may lack it) or are missing from the calibration table. "
                     "Falling back to trace:detector openms. Pass -trace:detector openms to silence this.");
       integer_detector = false;
     }
@@ -5547,7 +5689,7 @@ protected:
         tiles.push_back(Tile{c0 == 0 ? -std::numeric_limits<double>::infinity() : cell_edges[c0 - 1],
                              c1 == n_cells_run ? std::numeric_limits<double>::infinity() : cell_edges[c1 - 1], c1 == n_cells_run});
       }
-      String tl; for (const Tile& t : tiles) tl += (tl.empty() ? "" : " ") + String("[") + String(t.lo) + "," + String(t.hi) + ")";
+      String tl; for (const Tile& t : tiles) tl += (tl.empty() ? "" : " ") + String("[") + num_(t.lo) + "," + num_(t.hi) + ")";
       writeLogInfo_("[tile] " + String(tiles.size()) + " tile(s) of up to " + String(per) + " cell(s): " + tl);
     }
     // [tile] Run-level per-window band edges from the acquisition, so every tile traces in the same bands. A resident
@@ -5559,8 +5701,10 @@ protected:
         throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "trace:detector integer needs the acquisition m/z range and digitizer size (GlobalMetadata), which this input's calibration source lacks (" + tofAxis().bounds_why + "). Use -trace:detector openms.");
       for (const WinKey& k : fkeys) wbands[k] = {0xFFFFFFFFu, 0};
+      std::exception_ptr band_err;   // [task-err] a throw escaping the region would abort without a message
       #pragma omp parallel for schedule(dynamic, 1)
       for (long i = 0; i < (long)fkeys.size(); ++i)
+      try
       {
         const WinKey& k = fkeys[(size_t)i];
         const auto rs = ms2_by_window.find(k);   // a resident slab: converted here, once, in place
@@ -5588,6 +5732,8 @@ protected:
                       + " (digitizer " + String(tofAxis().n_bins > 1 ? tofAxis().n_bins - 1 : 0L) + ", MzAcqRangeUpper " + String(thi_mz) + ")");
         wbands.at(k) = pair<TofIdx, TofIdx>{0, thi_acq};
       }
+      catch (...) { taskErr_(band_err); }
+      if (band_err) std::rethrow_exception(band_err);
     }
     // [tile] carried boundary fragments (records + spans), in for tile k = out of tile k - 1; and
     // the once-only ownership check per precursor (a window's m/z range is tile-independent)
@@ -5623,7 +5769,7 @@ protected:
     for (const WinKey& k : fkeys)
     {
       carry[k];
-      const auto [plo, phi] = precRange(k[0] / 100.0, k[1] / 100.0);
+      const auto [plo, phi] = precRange(winBounds(k).first, winBounds(k).second);
       visited[k].assign(phi > plo ? phi - plo : 0, 0);
     }
     // [tile] The output: settings and stamps are fixed before the first tile, the mzML writer is
@@ -5640,6 +5786,17 @@ protected:
 #endif
     out_exp.setMetaValue("spx:mz_calibration", BrukerTimsFile::lastMzCalibration());
     out_exp.setMetaValue("spx:detector", String(integer_detector ? "integer" : "openms"));
+    { // the test-only switches (docs/options.md): each changes the output or the run, so a file made under one says so
+      String set;
+      for (const char* v : {"DIASPEXTRACT_TILE_NO_CARRY", "DIASPEXTRACT_MS1_PRUNE_NO_WITNESS", "DIASPEXTRACT_MS1_PRUNE_NO_CHAIN",
+                            "DIASPEXTRACT_DET", "DIASPEXTRACT_TASK_THROW"})
+        if (const char* e = std::getenv(v)) set += (set.empty() ? "" : " ") + String(v) + "=" + e;
+      if (!set.empty())
+      {
+        writeLogWarn_("Test-only variables are set; the output is not the tool's: " + set);
+        out_exp.setMetaValue("spx:test_env", set);
+      }
+    }
     out_exp.setMetaValue("spx:tile_rt_sec", cell_pitch);
     out_exp.setMetaValue("spx:tile_cells_per_tile", cells_per_tile);
     out_exp.setMetaValue("spx:band_edges", integer_detector ? String("acquisition") : String("none"));   // what was applied
@@ -5664,7 +5821,7 @@ protected:
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
     out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
-    out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
+    out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept) + " approximate " + String(dnoise.total.ambiguous)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", 1);
     if (!minlen_stamp.empty()) out_exp.setMetaValue("spx:ms1_min_length", minlen_stamp);   // [minlen] auto only: a fixed value leaves the header unchanged
     if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
@@ -5678,7 +5835,7 @@ protected:
       out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
     if (foreign_w_ < 1.0)   // [foreign] stamped only when on (1 = off leaves no stamp)
       out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
-                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept ("
+                                                 + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3 from 1 Th below the window, own ion kept ("
                                                  + (foreign_ppm_ > 30.0 ? String(foreign_ppm_) : String("30")) + " ppm)"));   // the own-ion tests' max(ppm, 30)
     if (fuse_ppm_ > 0.0)   // [fuse] stamped only when on (0 = off leaves no stamp)
     {
@@ -5699,6 +5856,8 @@ protected:
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
+    if (const size_t cg = cgroupHeadroom_(); cg != SIZE_MAX)
+      writeLogInfo_("[dyn-mem] cgroup memory limit: " + String((double)cg / (1ull << 30), false) + " GiB of headroom, used as the free RAM where it is lower");
 
     // [master/worker] The master walks the windows heaviest-first and admits them against memory BEFORE
     // spawning, so the byte budget and the window cap hold by construction; every unit of work inside a
@@ -5798,9 +5957,9 @@ protected:
           h = slabDigest_(kv.second, h);
           writeLogInfo_("[det] window " + winLabel(kv.first) + " tile " + String(tk + 1)
                         + " slab n=" + String(kv.second.peaks()) + " digest=" + String(slabDigest_(kv.second)) + " chain=" + String(h)); }
-      writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + String(tile.lo) + "," + String(tile.hi) + ") read: "
+      writeLogInfo_("[tile] " + String(tk + 1) + "/" + String(tiles.size()) + " [" + num_(tile.lo) + "," + num_(tile.hi) + ") read: "
                     + String(tile_slabs.size()) + " windows, frames delivered " + String(n_del) + " padded " + String(n_pad) + " absent-windows " + String(n_absent)
-                    + ", " + String(n_peaks) + " peaks, " + String(phase_clock_() - _tr0, 1) + " s" + rss_() + mem_());
+                    + ", " + String(n_peaks) + " peaks, " + num_(phase_clock_() - _tr0) + " s" + rss_() + mem_());
     }
     else if (tiles.size() > 1)
     {
@@ -5875,8 +6034,8 @@ protected:
       [&]() {
       try
       {
-        const double win_lo = wl[wi].first[0] / 100.0;
-        const double win_hi = wl[wi].first[1] / 100.0;
+        const double win_lo = winBounds(wl[wi].first).first;
+        const double win_hi = winBounds(wl[wi].first).second;
         // admitted by the master before this task existed; release both charges however we leave
         struct Release { std::atomic<size_t>& b; std::atomic<int>& a; size_t n;
                          ~Release() { b -= n; --a; } } rel{inflight, active, need};
@@ -5890,8 +6049,8 @@ protected:
         struct WinDone { std::function<void()> f; ~WinDone() { f(); } } win_done_guard{[&]() {
           #pragma omp critical(winlog)
           writeLogInfo_("  window " + String(++win_done) + "/" + String(wl.size()) + " " + String(win_lo) + "-" + String(win_hi)
-                        + ": prep " + String(w_prep) + " s | trace " + String(w_trace) + " s | split " + String(w_split)
-                        + " s | score " + String(w_score) + " s | emit " + String(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_());
+                        + ": prep " + num_(w_prep) + " s | trace " + num_(w_trace) + " s | split " + num_(w_split)
+                        + " s | score " + num_(w_score) + " s | emit " + num_(w_emit) + " s | spectra " + String(win_out[wi].size()) + clk_());
         }};
         // [tile-2d] take ONLY this window's slab (a move: the store is the slab) and convert its
         // m/z quanta to flight-time bins in place. Only the OpenMS path needs the peaks converted
@@ -6063,7 +6222,7 @@ protected:
                                           trimToSpan(wst, frag_traces[i], max_span); }); }
           vector<int16_t>().swap(wst.bins);
           writeLogInfo_("[mem] window " + String(win_lo) + "-" + String(win_hi) + ": seeds " + String(n_seeds) + " of " + String(n_peaks)
-                        + " peaks (" + String((int)(1000.0 * n_seeds / std::max<size_t>(n_peaks, 1)) / 10.0) + "%); traces " + String(n_parents)
+                        + " peaks (" + num_(100.0 * (double)n_seeds / (double)std::max<size_t>(n_peaks, 1)) + "%); traces " + String(n_parents)
                         + " -> " + String(frag_traces.size()) + " (cap " + String(frag_traces.capacity()) + ", "
                         + String(frag_traces.capacity() * sizeof(Trace) / (1024ULL * 1024ULL)) + " MB); arena " + String(wst.inten.size()) + "/"
                         + String(wst.inten.capacity()) + " floats (" + String(wst.inten.capacity() * 4 / (1024ULL * 1024ULL)) + " MB)" + rss_());
@@ -6193,7 +6352,13 @@ protected:
         vector<float> pdense(wst.frames(), 0.0f);   // indexed by window-local frame
         // [foreign] the window's precursors by apex RT, owned by this tile or not: the same candidates in any tiling
         ForeignIdx_ fx;
-        if (foreign_w_ < 1.0) fx.build(precursors, plo, phi);
+        // Candidates reach three isotope steps (a 1+ envelope) below the window: a precursor whose mono lies just below it
+        // still has M+1..M+3 isolated. Its positions count from 1 Th below the lower edge (quadrupole transmission).
+        if (foreign_w_ < 1.0)
+        {
+          fx.build(precursors, precRange(win_lo - 3.0 * kIso, win_hi).first, phi);
+          fx.pos_lo = win_lo - 1.0;
+        }
 
         vector<MSSpectrum>& bucket = win_out[wi];
         {
@@ -6264,7 +6429,7 @@ protected:
       size_t n_cov = 0;
       for (const WinKey& k : fkeys)
       {
-        const double lo = k[0] / 100.0, hi = k[1] / 100.0;
+        const auto [lo, hi] = winBounds(k);
         const auto [plo, phi] = precRange(lo, hi);
         const vector<uint8_t>& vis = visited.at(k);
         for (size_t pi = plo; pi < phi; ++pi)
@@ -6303,7 +6468,16 @@ protected:
       // whole run's order.
       vector<MSSpectrum> tile_out;
       { size_t n_tot = 0; for (const auto& bucket : win_out) n_tot += bucket.size(); tile_out.reserve(n_tot); }
-      for (auto& bucket : win_out) { for (auto& s : bucket) tile_out.push_back(std::move(s)); bucket.clear(); bucket.shrink_to_fit(); }
+      for (auto& bucket : win_out)
+      {
+        for (auto& s : bucket)
+        {
+          const int z = s.getPrecursors().empty() ? 0 : s.getPrecursors()[0].getCharge();
+          if (z > 0 && z < zmin) { ++n_below_zmin; continue; }   // charge:min_charge
+          tile_out.push_back(std::move(s));
+        }
+        bucket.clear(); bucket.shrink_to_fit();
+      }
       { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
       if (twin_im >= 0.0)
       {
@@ -6455,7 +6629,7 @@ protected:
 
     if (writer)
     {
-      { Phase _ph("WRITE(mzML)"); writer.reset(); }   // the count patched, the index and footer written
+      { Phase _ph("WRITE(mzML)"); writer->finish(); writer.reset(); }   // the count patched, the index and footer written; throws on a failed write
       if (std::rename(out_part.c_str(), out.c_str()) != 0)
         throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + out_part);
     }
@@ -6469,6 +6643,7 @@ protected:
     }
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
+    if (zmin > 1) writeLogInfo_("charge:min_charge " + String(zmin) + ": " + String(n_below_zmin.load()) + " spectra of lower charge assembled and not written");
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
     if (twin_im >= 0.0 && twin_rt_tol > 0.0)   // [twin-rt] the before/after of the near-frame relation
       writeLogInfo_("[twins] assembly:twin_rt_frames: " + String(twin_st[0]) + " twin pairs at one MS1 frame, " + String(twin_st[1])
@@ -6551,10 +6726,16 @@ int main(int argc, const char** argv)
     }
   }
   if (old_name) return TOPPBase::ILLEGAL_PARAMETERS;
-  // TOPPBase's update check sends this tool's name and version to an OpenMS REST endpoint on every run and,
-  // offline, prints Qt QIODevice errors on the stderr the harness parses (build.yml asserts --help stays clean).
-  // Set only if unset, so a user's export still decides.
-  ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 0);
+  // TOPPBase's update check sends this tool's name and version to an OpenMS REST endpoint and, offline, prints Qt
+  // QIODevice errors on the stderr the harness parses (build.yml asserts --help stays clean). Always off: the tool makes
+  // no network request (SECURITY.md), whatever the environment says.
+  ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 1);
   TOPPDIAspeXtract tool;
-  return tool.main(argc, argv);
+  // TOPPBase catches OpenMS exceptions only; one from a library (SQLite, opentims) would otherwise abort with no exit code
+  try { return tool.main(argc, argv); }
+  catch (const std::exception& e)
+  {
+    std::fprintf(stderr, "Error: %s\n", e.what());
+    return TOPPBase::UNKNOWN_ERROR;
+  }
 }

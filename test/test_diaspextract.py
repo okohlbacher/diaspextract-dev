@@ -16,16 +16,21 @@ checks that fail if the things most likely to break do break:
                          spectrum; seven missing cycles must give TWO traces. Every version of the
                          integer detector that lost 92% of the peptides passed checks 1-4.
   ... 14. writer           count, id="spectrum=K", index="K" and the <indexList> offsets agree
+     14b. no spectrum      a run that emits nothing still writes a valid, indexed, empty mzML
+     14c. failed write     a write that fails (file-size limit) is an error and leaves nothing under the output name
   ... 19. MS1 prune        perf:ms1_prune leaves the spectra byte-identical; dropping its witnesses does not
      19b. prune chain      a band kept alive only by interior chain links: dropping just the links changes it
      19c. stored order     MS1 spectra stored in descending m/z give the ascending fixture's result, prune off or on
      19d. non-finite m/z   a NaN or infinite MS1 m/z is refused right after the pick, before the prune, prune off or on
       20. dnoise:ms1       on by default, it filters a Bruker .d only: an mzML is skipped, logged, stamped, unchanged
       21. dnoise SDK       a .d holding only its analysis.tdf: with a Bruker SDK path set, dnoise:ms1 refuses before the
-                           load; without one the run gets past the dnoise setup and fails in the loader
+                           load; without one the run gets past the dnoise setup and is refused by the preflight
+                           (no analysis.tdf_bin)
       22. old variables    a set SPEXTRACTOR_* (SpeXtractor) or DIASPEXTRACTOR_* (DIAspeXtractor) variable refuses the run
                            before anything, naming it and its DIASPEXTRACT_ name; DIASPEXTRACT_DET runs and prints its
                            [det] lines
+      23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults writes spectra, and is thread-,
+                           tile- and tile-pipeline-invariant (skipped without it)
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
@@ -542,6 +547,33 @@ def main():
         invariants(out_def, "default output")
     check("count, ids, index and indexList agree", c14)
 
+    # 14b: no spectrum at all is still a valid, indexed mzML: the run once wrote a 0-byte file and exited 0.
+    def c14b():
+        o = os.path.join(work, "none.mzML")
+        run(binary, inp, o, extra=("-assembly:min_fragments", "500"))   # = max_fragments: no synthetic spectrum has that many
+        data = open(o, "rb").read()
+        assert b'<spectrumList count="0"' in data and data.rstrip().endswith(b"</indexedmzML>"), f"no-spectrum output is not a whole mzML ({len(data)} bytes)"
+        ilo = int(re.search(rb'<indexListOffset>(\d+)</indexListOffset>', data).group(1))
+        assert data[ilo:ilo + 16].lstrip().startswith(b"<indexList"), f"no-spectrum output: indexListOffset {ilo} does not point at <indexList"
+    check("a run with no spectrum writes a valid empty mzML", c14b)
+
+    # 14c: a write that fails (here a file-size limit, as a full disk or a quota would) ends the run with an error and
+    #      leaves no file under the output name: it once renamed the cut-off .part into place and exited 0.
+    def c14c():
+        import resource, signal
+        o = os.path.join(work, "cut.mzML")
+        def limit():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)   # the write then fails with EFBIG instead of killing the process
+            resource.setrlimit(resource.RLIMIT_FSIZE, (4096, 4096))
+        cmd = [binary, "-in", inp, "-out", o, "-threads", "1", "-assembly:min_fragments", "2", "-trace:ms2_min_length_sec", "0",
+               "-trace:ms1_split_valleys", "0", "-trace:ms2_split_valleys", "0"]
+        r = subprocess.run(cmd, capture_output=True, text=True, preexec_fn=limit)
+        assert r.returncode != 0, "a failed write exited 0:\n" + (r.stdout + r.stderr)[-800:]
+        assert not os.path.exists(o), "a failed write left a file under the output name"
+        assert "writing the mzML failed" in r.stdout + r.stderr, "a failed write did not say so:\n" + (r.stdout + r.stderr)[-800:]
+    if os.name == "posix":
+        check("a failed write is an error, never a renamed partial file", c14c)
+
     # 15: the cell grid (tile:rt_sec) is thread-invariant: each cell is traced on its own slice with
     #     its own seeds/visited, band stores are absorbed in a fixed order, and the band count is
     #     explicit -- so 1 and 4 threads must give byte-identical spectra at a pitch that cuts the
@@ -847,7 +879,8 @@ def main():
     #     the loader calibrates through the SDK, so the setup refuses before the load. The input is a .d holding only its
     #     analysis.tdf (synth_fake_d: no analysis.tdf_bin, the loader cannot read a frame). With OPENMS_BRUKER_SDK_PATH the
     #     run must be refused naming dnoise:ms1 and the SDK, with no dnoise setup line and no loader output; without it the
-    #     same input must get past the dnoise setup and fail in the loader, which shows the refusal comes first.
+    #     same input must get past the dnoise setup and be refused by the preflight (no analysis.tdf_bin), which shows the
+    #     refusal comes first.
     def c21():
         fake = synth_fake_d(os.path.join(work, "fake.d"))
         env = dict(os.environ)
@@ -860,7 +893,7 @@ def main():
         r = run(binary, fake, os.path.join(work, "fake_table.mzML"), expect_fail=True, env=env)
         log = r.stdout + r.stderr
         assert setup_line in log, "no Bruker SDK path: the fake .d did not get past the dnoise setup:\n" + log[-1500:]
-        assert "[stream] streaming load failed" in log, "no Bruker SDK path: the run did not fail in the loader (no analysis.tdf_bin):\n" + log[-800:]
+        assert "analysis.tdf_bin" in log and r.returncode == 3, "no Bruker SDK path: the run was not refused at the missing analysis.tdf_bin (exit 3):\n" + log[-800:]
     check("dnoise:ms1 refuses a Bruker SDK calibration before the load, and gets past its setup without one", c21)
 
     # 22: the renames' fail-closed guard. Every variable is DIASPEXTRACT_* since the tool became DIAspeXtract; before that
@@ -884,6 +917,35 @@ def main():
         r = run(binary, inp, os.path.join(work, "new_env.mzML"), env=dict(env, DIASPEXTRACT_DET="1"))
         assert "[det] " in r.stdout + r.stderr, "DIASPEXTRACT_DET=1 ran but printed no [det] line:\n" + (r.stdout + r.stderr)[-800:]
     check("a leftover SPEXTRACTOR_* or DIASPEXTRACTOR_* variable refuses the run; its DIASPEXTRACT_ name works", c22)
+
+    # 23: a REAL diaPASEF .d end to end (DIASPEXTRACT_TEST_D; CI uses OpenMS's public 5.6-min HeLa test run, and
+    #     bench/slice_d.py cuts one from any run). Everything above reads synthetic mzML; this is the shipped default
+    #     path: the streaming loader with the exact calibration, dnoise on real frames, the integer detector, tiled reads.
+    #     At the defaults, and at 20-s cells so the run has several tiles: spectra are written, and the output is the same
+    #     at 1 and 4 threads, with one tile or one per cell, and with the tile pipeline off (DIASPEXTRACT_PIPE_TILES=1).
+    real_d = os.environ.get("DIASPEXTRACT_TEST_D")
+    if real_d:
+        def c23():
+            env = {k: v for k, v in os.environ.items() if not k.startswith("DIASPEXTRACT_")}
+            def go(tag, threads, extra=(), pipe=None):
+                o = os.path.join(work, f"real_{tag}.mzML")
+                e = dict(env, **({"DIASPEXTRACT_PIPE_TILES": pipe} if pipe else {}))
+                r = subprocess.run([binary, "-in", real_d, "-out", o, "-threads", str(threads)] + list(extra), capture_output=True, text=True, env=e)
+                log = r.stdout + r.stderr
+                assert r.returncode == 0, f"real .d ({tag}) failed:\n" + log[-1500:]
+                assert "TDF MzCalibration table model (exact" in log, f"real .d ({tag}): not the exact calibration:\n" + log[-800:]
+                n = int(re.search(r"Wrote (\d+) pseudo-MS2 spectra", log).group(1))
+                assert n > 0, f"real .d ({tag}): no spectrum written"
+                return digest(o)
+            base = go("default", 4)
+            assert go("t1", 1) == base, "real .d: 1 thread differs from 4"
+            cells = ("-tile:rt_sec", "20")
+            one = go("one_tile", 4, cells + ("-tile:cells_per_tile", "0"))
+            assert go("per_cell", 4, cells + ("-tile:cells_per_tile", "1")) == one, "real .d: one tile per cell differs from one tile"
+            assert go("per_cell_nopipe", 4, cells + ("-tile:cells_per_tile", "1"), pipe="1") == one, "real .d: DIASPEXTRACT_PIPE_TILES=1 differs"
+        check("a real diaPASEF .d: spectra written, thread-, tile- and pipeline-invariant", c23)
+    else:
+        print("  SKIP  a real diaPASEF .d end to end: set DIASPEXTRACT_TEST_D to one (bench/slice_d.py cuts a small one)")
 
     print(f"\n{len(ran) - len(fails)}/{len(ran)} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0

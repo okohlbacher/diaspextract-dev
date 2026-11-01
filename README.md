@@ -112,7 +112,8 @@ names the new spelling.
 diaspextract -in sample.d -out pseudo.mzML
 ```
 
-Give the tool the `.d` itself. An mzML input runs without MS1 noise removal and, because it carries no instrument
+Give the tool the `.d` itself. A ddaPASEF `.d` is refused with exit code 11, and a `.d` whose `analysis.tdf_bin` is
+truncated with exit code 3; both name the cause. An mzML input runs without MS1 noise removal and, because it carries no instrument
 calibration, with the `openms` detector on the whole run: it needs more memory and gives different spectra.
 
 Then search the output like any DDA file, for example with Sage (`bench/sage_closed.json` is a closed-search

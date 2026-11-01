@@ -33,7 +33,7 @@ anyone can reproduce every number. Do not add, stage or cite unpublished data.
 ## Running the tests
 
 ```bash
-python3 test/test_diaspextract.py /path/to/diaspextract     # 29 end-to-end checks (30 where the build writes mzPeak), synthetic input
+python3 test/test_diaspextract.py /path/to/diaspextract     # 31 end-to-end checks (32 where the build writes mzPeak), synthetic input
 cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build
 ```
 
