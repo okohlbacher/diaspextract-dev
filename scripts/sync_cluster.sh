@@ -20,7 +20,7 @@ NODE=${1:-ibminode05}
 R=/scratch/kohlbach
 TOOLS=/ceph/ibmi/abi/oliver/spextract/tools
 TESTS=/ceph/ibmi/abi/oliver/spextract/tests
-INPUTS="src/diaspextract.cpp src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
+INPUTS="src/diaspextract.cpp src/TdfMzCalibration.h src/TdfLoad.h src/MzPeakStreamLoad.h src/DnoiseMs1.h src/NoImsPath.h src/PortableMath.h tests/test_dnoise_ms1.cpp tests/test_tdf_load.cpp"
 # The e2e suite, its golden file (check 9 reads ../tests/calibration_golden.json), the gate chains'
 # digest/diff tools and the remote launcher: each drifted once when it did not travel with the source.
 SHIP="test/test_diaspextract.py tests/calibration_golden.json bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/launch.sh"
@@ -42,7 +42,7 @@ set -euo pipefail
 S=$1; GITREV=$2; R=$3; TOOLS=$4; TESTS=$5
 OMS=$R/OpenMS; BUILD=$OMS/build; TOPP=$OMS/src/topp; UT=$R/diaspextract_unit; U=$S/unit
 LOCK=$R/.deploy.lock; PROV=$BUILD/bin/diaspextract.provenance
-BUILD_INPUTS="diaspextract.cpp TdfMzCalibration.h TdfLoad.h MzPeakStreamLoad.h DnoiseMs1.h"
+BUILD_INPUTS="diaspextract.cpp TdfMzCalibration.h TdfLoad.h MzPeakStreamLoad.h DnoiseMs1.h NoImsPath.h PortableMath.h"
 # The calibration model is header-only and lives in this repo; the OpenMS patch includes it from the
 # library's include dir. The tool's other headers live next to its source (a hand copy once drifted).
 dest() { if [ "$1" = TdfMzCalibration.h ]; then echo "$OMS/src/openms/include/OpenMS/FORMAT/$1"; else echo "$TOPP/$1"; fi; }
@@ -157,7 +157,7 @@ fi
 # A writer outside the lock (a hand copy, a patch script) during the build would make the provenance a lie.
 sha256sum -c --quiet promoted.sha256 || { echo "REFUSED: a build input changed during the build"; exit 2; }
 cd "$BUILD"
-HDRS_SHA=$(cat "$TOPP/TdfLoad.h" "$TOPP/MzPeakStreamLoad.h" "$TOPP/DnoiseMs1.h" | sha256sum | cut -d' ' -f1)
+HDRS_SHA=$(cat "$TOPP/TdfLoad.h" "$TOPP/MzPeakStreamLoad.h" "$TOPP/DnoiseMs1.h" "$TOPP/NoImsPath.h" "$TOPP/PortableMath.h" | sha256sum | cut -d' ' -f1)
 OMSVER=$(grep -m1 CF_OPENMS_PACKAGE_VERSION_FULLSTRING CMakeCache.txt | cut -d= -f2)
 EPD=$OMS/src/openms/source/FEATUREFINDER/ElutionPeakDetection.cpp
 # epd_patch_markers counts case-insensitively, so the patch comments count alike under the tool's old and new names.
