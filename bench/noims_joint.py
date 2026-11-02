@@ -161,29 +161,35 @@ def run(a):
     mp = dict(re.findall(r"(?m)^(\w+)\s*=\s*([^#\n]*?)\s*(?:#.*)?$", open(TOOLS["msfragger_params"]).read()))
     mrule = {"mc": int(mp.get("allowed_missed_cleavage_1", 2)), "lo": int(mp.get("digest_min_length", 7)),
              "hi": int(mp.get("digest_max_length", 50)), "cleave": mp.get("search_enzyme_cut_1", "KR"),
-             "restrict": mp.get("search_enzyme_nocut_1", "P")}
+             "restrict": mp.get("search_enzyme_nocut_1", "P"), "semi": int(mp.get("num_enzyme_termini", 2)) < 2,
+             "c_terminal": mp.get("search_enzyme_sense_1", "C") == "C"}
     mrule["mlo"], mrule["mhi"] = (float(x) for x in mp.get("digest_mass_range", "500.0 5000.0").split())
     if any(rule[k] != v for k, v in mrule.items()):
         raise SystemExit("MSFragger and Sage digest differently (%s vs %s): one entrapment ratio does not fit both" % (mrule, rule))
     ratio = est.peptide_ratio(str(TOOLS["entrap_fasta"]), TAG, rule)
     ident = {k: sha(v) for k, v in TOOLS.items()}
     ident.update(harness=sha(HARNESS), entrapment_py=sha(Path(__file__).with_name("entrapment.py")), msfragger_entrap_db=sha(mdb),
-                 joint=sha(__file__), raw=sha(staged) if staged.is_file() else "%s+%d" % (sha(staged / "analysis.tdf"),
-                                                                                         (staged / "analysis.tdf_bin").stat().st_size))
+                 joint=sha(__file__), raw=sha(staged) if staged.is_file() else "%s+%s" % (sha(staged / "analysis.tdf"),
+                                                                                         sha(staged / "analysis.tdf_bin")), threads=a.threads)
     for name, arm in arms.items():
         recp = out / "records" / ("%s.%s.json" % (a.sample, name))
+        env = dict(os.environ)
+        if arm.get("env"):
+            r = subprocess.run(["bash", "-c", 'source "$1" && env -0', "_", arm["env"]], capture_output=True, check=True)
+            env = dict(kv.split("=", 1) for kv in r.stdout.decode().split("\0") if "=" in kv)
+        # the arm's identity: its command, its env file and the extractor binary it resolves to
+        exe = shutil.which(env.get("SPX_BIN", "")) if env.get("SPX_BIN") else None
+        arm_id = {"cmd": arm["cmd"], "env": sha(arm["env"]) if arm.get("env") else None, "exe": sha(exe) if exe else None}
         if recp.is_file():   # reuse a finished record only for the same inputs, tools and arm
             old = json.load(open(recp))
-            if old.get("status") == "ok" and (old.get("ident"), old.get("cmd"), old.get("env")) == (ident, arm["cmd"], arm.get("env")):
+            if old.get("status") == "ok" and (old.get("ident"), old.get("arm_id")) == (ident, arm_id):
                 continue
         d = work / name; shutil.rmtree(d, ignore_errors=True); d.mkdir()
         rec = {"sample": a.sample, "arm": name, "cmd": arm["cmd"], "env": arm.get("env"), "threads": a.threads,
-               "node": os.uname().nodename, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ident": ident, "entrap_ratio": ratio}
+               "node": os.uname().nodename, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ident": ident, "arm_id": arm_id,
+               "entrap_ratio": ratio}
         try:
-            env = dict(os.environ)
             if arm.get("env"):
-                r = subprocess.run(["bash", "-c", 'source "$1" && env -0', "_", arm["env"]], capture_output=True, check=True)
-                env = dict(kv.split("=", 1) for kv in r.stdout.decode().split("\0") if "=" in kv)
                 rec["arm_provenance"] = Path(arm["env"]).with_name("provenance.txt").read_text() if Path(arm["env"]).with_name("provenance.txt").is_file() else None
             mz = d / "pseudo.mzML"
             cmd = arm["cmd"].format(**{"in": staged, "out": mz, "threads": a.threads, "dir": d})

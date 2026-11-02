@@ -75,8 +75,9 @@ jobs:
       - name: Build OpenMS
         run: |
           cmake -S OpenMS -B OpenMS/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DWITH_GUI=OFF -DHAS_XSERVER=OFF -DCMAKE_CXX_FLAGS=-ffp-contract=off \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          grep -q '^CMAKE_CXX_FLAGS:STRING=-ffp-contract=off$' OpenMS/build/CMakeCache.txt
           cmake --build OpenMS/build --target OpenMS
 
       - name: Build DIAspeXtract

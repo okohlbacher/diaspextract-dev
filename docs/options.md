@@ -269,14 +269,17 @@ changes the output or ends the run; a run with one set warns and records it as t
 
 ## Reproducing 1.5.0 spectra
 
-Version 1.6.0 changed seven defaults. These six options set them back and give the spectra of 1.5.0 (see the v1.6.0
-entry in [CHANGELOG.md](../CHANGELOG.md)):
+Version 1.6.0 changed seven defaults and 1.8.0 one more. These seven options set them back (see the v1.6.0 and
+v1.8.0 entries in [CHANGELOG.md](../CHANGELOG.md)):
 
 ```bash
 diaspextract -in sample.d -out pseudo.mzML \
   -assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0 \
-  -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3
+  -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3 -gate:delta_rt 3
 ```
+
+They restore 1.5.0's settings, not its exact bytes: 1.8.0's platform-independent math and tie-breaking change the
+spectra slightly. Exact 1.5.0 output needs the 1.5.0 binary.
 
 The seventh default, `-assembly:twin_rt_frames`, needs no reset: with `-charge:mono_profile_check false` and the
 default `-assembly:twin_rt_match ext`, no twins fold across MS1 frames.

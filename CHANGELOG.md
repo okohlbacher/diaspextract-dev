@@ -2,8 +2,8 @@
 
 ## v1.8.0 — unreleased
 
-**The spectra change on every platform** (all three now write the same file; 1.7.1's Linux output, the benchmark
-reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS), 11,219 (Windows) and 11,678
+**The spectra change on every platform** (for diaPASEF input all three now write the same file; 1.7.1's Linux output,
+the benchmark reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS), 11,219 (Windows) and 11,678
 (Linux) spectra; now 11,133 on all three, bit-identical (`spectrumList` digest `86f9eb62…`).
 
 ### Changed
@@ -48,9 +48,10 @@ reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS
     function. Build OpenMS with the flag too (README).
   - MS1 traces with equal summary keys are now ordered by their profile, so `std::sort`'s tie order cannot matter.
 
-  The identity is shown on diaPASEF input. The path for input without ion mobility orders everything by content too,
-  but Biosaur2's isotope-pattern check computes averagine probabilities with the platform's math library (through
-  Boost), so a feature at its acceptance threshold can differ between platforms.
+  The identity is shown on diaPASEF input, not proven: OpenMS's Savitzky-Golay coefficients (valley splitting) still
+  come from `std::pow` and an Eigen SVD. The path for input without ion mobility orders everything by content too, but
+  Biosaur2's isotope-pattern check computes averagine probabilities with the platform's math library (through Boost),
+  so a feature at its acceptance threshold can differ between platforms.
 
 ## v1.7.1 — 2026-11-01
 

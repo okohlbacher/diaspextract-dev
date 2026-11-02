@@ -279,7 +279,7 @@ namespace spx_noims
         out.push_back(std::move(p));
       }
       std::sort(out.begin(), out.end(), [](const Prec& a, const Prec& b) {   // a total order: Biosaur2's feature order is fixed, its ties are not
-        return std::tie(a.mz, a.rt, a.z, a.inten, a.rt_lo, a.rt_hi) < std::tie(b.mz, b.rt, b.z, b.inten, b.rt_lo, b.rt_hi); });
+        return std::tie(a.mz, a.rt, a.z, a.inten, a.rt_lo, a.rt_hi, a.rt_pts, a.int_pts) < std::tie(b.mz, b.rt, b.z, b.inten, b.rt_lo, b.rt_hi, b.rt_pts, b.int_pts); });
       return out;
     }
   }
@@ -312,11 +312,12 @@ namespace spx_noims
     for (const auto& kv : win) keys.push_back(kv.first);
     st.windows = keys.size();
     if (keys.empty() || ms1.empty()) { log("[noims] no MS1 scans or no MS2 isolation windows"); return st; }
-    // a precursor belongs to the window containing it whose center is nearest (windows may overlap)
+    // a precursor belongs to the window containing it whose center is nearest (windows may overlap); a window with
+    // fewer than 3 MS2 scans gives no spectra and so owns nothing
     auto owner = [&](double mz) {
       long best = -1; double bd = 1e9;
       for (size_t w = 0; w < keys.size(); ++w)
-        if (mz >= keys[w].first && mz < keys[w].second)
+        if (mz >= keys[w].first && mz < keys[w].second && win.at(keys[w]).size() >= 3)
         { const double d = std::fabs(mz - 0.5 * (keys[w].first + keys[w].second)); if (d < bd) { bd = d; best = (long)w; } }
       return best;
     };
@@ -414,7 +415,7 @@ namespace spx_noims
         for (const auto& pk : t) f.pts.emplace_back(pk.getRT(), pk.getIntensity());
         fr.push_back(std::move(f));
       }
-      std::sort(fr.begin(), fr.end(), [](const Frag& a, const Frag& b) { return std::tie(a.apex_rt, a.mz, a.inten) < std::tie(b.apex_rt, b.mz, b.inten); });
+      std::sort(fr.begin(), fr.end(), [](const Frag& a, const Frag& b) { return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts); });
 
       for (const Prec& p : prec)
       {
@@ -450,6 +451,8 @@ namespace spx_noims
         if ((int)pk.size() < P.min_frags) continue;
         if ((int)pk.size() > P.max_peaks)
         { std::nth_element(pk.begin(), pk.begin() + P.max_peaks, pk.end(), std::greater<>()); pk.resize(P.max_peaks); }
+        // by m/z, equal m/z by intensity: nth_element leaves the kept peaks in an unspecified order
+        std::sort(pk.begin(), pk.end(), [](const auto& a, const auto& b) { return std::tie(a.second, a.first) < std::tie(b.second, b.first); });
         MSSpectrum s;
         s.setMSLevel(2);
         s.setType(SpectrumSettings::SpectrumType::CENTROID);
@@ -459,7 +462,6 @@ namespace spx_noims
         pr.setIsolationWindowLowerOffset(p.mz - lo); pr.setIsolationWindowUpperOffset(hi - p.mz);
         s.setPrecursors({pr});
         for (const auto& q : pk) { Peak1D x; x.setMZ(q.second); x.setIntensity(q.first); s.push_back(x); }
-        s.sortByPosition();
         res[w].push_back(std::move(s));
       }
       busy[w] = std::chrono::duration<double>(clk::now() - tw).count();
