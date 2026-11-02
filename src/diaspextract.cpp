@@ -2963,6 +2963,8 @@ protected:
                           "(prototype); off: refuse such input, as 1.7.1 does. Input with ion mobility never uses it.", false, true);
     setValidStrings_("noims:path", {"auto", "off"});
     registerDoubleOption_("noims:min_corr", "<r>", 0.3, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
+    setMinFloat_("noims:min_corr", 0.0);
+    setMaxFloat_("noims:min_corr", 1.0);
     registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
 
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
@@ -4618,9 +4620,34 @@ protected:
     writeLogInfo_("[trim] " + what + ": " + String(r0) + " -> " + String(rss_mb_()) + " MB RSS in " + num_(phase_clock_() - t0) + " s");
   }
 
-  /// [noims] input without ion mobility: the separate path of NoImsPath.h, then the plain mzML write
-  ExitCodes runNoIms_(PeakMap& exp, const String& out)
+  /// The completed <out>.part becomes <out>: the data reach the disk before the name does, so a crash after the rename
+  /// never leaves a short file under <out> (a file system without fsync, EINVAL/ENOTSUP, is not an error);
+  /// std::filesystem::rename also replaces an existing <out> on Windows.
+  void commitOutput_(const String& part, const String& out)
   {
+#ifndef _WIN32
+    const int fd = ::open(part.c_str(), O_RDONLY);
+    const bool synced = fd >= 0 && (::fsync(fd) == 0 || errno == EINVAL || errno == ENOTSUP);
+    if (fd >= 0) ::close(fd);
+    if (!synced) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, part, "cannot flush the completed output to disk");
+#endif
+    std::error_code ec;
+    std::filesystem::rename(std::string(part), std::string(out), ec);
+    if (ec)
+      throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + part + ": " + ec.message());
+  }
+
+  /// [noims] input without ion mobility: the separate path of NoImsPath.h, written to <out>.part and committed like the
+  /// IMS path's output. Centroided input only: profile spectra would make every profile sample a peak.
+  ExitCodes runNoIms_(PeakMap& exp, const String& out, FileTypes::Type out_type)
+  {
+    for (const MSSpectrum& s : exp)
+      if (s.getType(true) == SpectrumSettings::SpectrumType::PROFILE)
+      {
+        writeLogError_("Error: the input has profile spectra (MS level " + String(s.getMSLevel()) + ", " + s.getNativeID()
+                       + "); the non-IMS path needs centroided MS1 and MS2 (centroid them first, e.g. with PeakPickerHiRes).");
+        return INCOMPATIBLE_INPUT_DATA;
+      }
     writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path (prototype).");
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
@@ -4639,7 +4666,19 @@ protected:
     PeakMap res;
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
     exp.clear(true);
-    FileHandler().storeExperiment(out, res, {FileTypes::MZML}, log_type_);
+    const String part = out + ".part";
+    FileHandler().storeExperiment(part, res, {out_type}, log_type_);
+    if (out_type == FileTypes::MZML)   // FileHandler does not report a failed write: the file must end in its footer
+    {
+      std::ifstream in(part.c_str(), std::ios::binary | std::ios::ate);
+      const std::streamoff size = in ? (std::streamoff)in.tellg() : (std::streamoff)0;
+      std::string tail(size > 64 ? 64 : (size_t)std::max<std::streamoff>(size, 0), ' ');
+      if (size > 0) { in.seekg(size - (std::streamoff)tail.size()); in.read(&tail[0], (std::streamsize)tail.size()); }
+      if (!in || tail.find("</indexedmzML>") == std::string::npos)
+        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, part, "writing the mzML failed (disk full or quota?)");
+    }
+    commitOutput_(part, out);
+    writeLogInfo_("Wrote " + String(res.size()) + " pseudo-MS2 spectra to " + out + " (" + String(FileTypes::typeToName(out_type)) + ")");
     return EXECUTION_OK;
   }
 
@@ -5047,7 +5086,12 @@ protected:
           writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
           return ILLEGAL_PARAMETERS;
         }
-        return runNoIms_(exp, out);   // [noims] a separate path; the IMS path below is never entered
+        if (IMTypes::determineIMFormat(exp, 2) != IMFormat::NONE)
+        {
+          writeLogError_("Error: the input has ion mobility at MS2 but not at MS1; neither path reads such a mix.");
+          return INCOMPATIBLE_INPUT_DATA;
+        }
+        return runNoIms_(exp, out, out_type);   // [noims] a separate path; the IMS path below is never entered
       }
       // Pick all IM frames in parallel. firstprivate gives each thread a deep copy (Param is a value type), so the
       // mutable ccs_warning_shown_ flag is not shared.
@@ -5384,7 +5428,13 @@ protected:
       { const double ia = intensityOf(ms1_store, a), ib = intensityOf(ms1_store, b); if (ia != ib) return ia < ib; }
       if (a.npts != b.npts) return a.npts < b.npts;
       if (a.len != b.len) return a.len < b.len;
-      return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
+      if (ms1_store.frame_rt[a.frame0] != ms1_store.frame_rt[b.frame0]) return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
+      // equal summaries: the profile decides, so equivalent traces are identical ones and std::sort's tie order cannot matter
+      if (a.tof != b.tof) return a.tof < b.tof;
+      if (a.apex != b.apex) return a.apex < b.apex;
+      const float* pa = ms1_store.inten.data() + a.off;
+      const float* pb = ms1_store.inten.data() + b.off;
+      return std::lexicographical_compare(pa, pa + a.len, pb, pb + b.len);
     };
     {
       // [outer] in parallel when that is provably std::sort's order (no equal-key neighbours), else std::sort itself
@@ -6608,20 +6658,7 @@ protected:
     if (writer)
     {
       { Phase _ph("WRITE(mzML)"); writer->finish(); writer.reset(); }   // the count patched, the index and footer written; throws on a failed write
-#ifndef _WIN32
-      // the data reach the disk before the name does: a crash after the rename never leaves a short file under <out>
-      // (a file system without fsync, EINVAL/ENOTSUP, is not an error)
-      {
-        const int fd = ::open(out_part.c_str(), O_RDONLY);
-        const bool synced = fd >= 0 && (::fsync(fd) == 0 || errno == EINVAL || errno == ENOTSUP);
-        if (fd >= 0) ::close(fd);
-        if (!synced) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out_part, "cannot flush the completed mzML to disk");
-      }
-#endif
-      std::error_code rename_ec;
-      std::filesystem::rename(std::string(out_part), std::string(out), rename_ec);
-      if (rename_ec)
-        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + out_part + ": " + rename_ec.message());
+      commitOutput_(out_part, out);
     }
     else
     {

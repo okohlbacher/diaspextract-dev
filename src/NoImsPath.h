@@ -26,6 +26,7 @@
 #include <functional>
 #include <map>
 #include <numeric>
+#include <tuple>
 #include <vector>
 
 namespace spx_noims
@@ -114,7 +115,7 @@ namespace spx_noims
     {
       std::vector<size_t> o(mt.size());
       std::iota(o.begin(), o.end(), 0);
-      std::sort(o.begin(), o.end(), [&](size_t a, size_t b) { return mt[a].getCentroidMZ() < mt[b].getCentroidMZ(); });
+      std::sort(o.begin(), o.end(), [&](size_t a, size_t b) { return mt[a].getCentroidMZ() < mt[b].getCentroidMZ() || (mt[a].getCentroidMZ() == mt[b].getCentroidMZ() && a < b); });
       std::vector<double> mz(o.size()), art(o.size());
       for (size_t k = 0; k < o.size(); ++k) { mz[k] = mt[o[k]].getCentroidMZ(); art[k] = apexRT(mt[o[k]]); }
       auto partner = [&](size_t k, double target) -> long {   // co-eluting trace at target m/z
@@ -277,7 +278,8 @@ namespace spx_noims
         Prec p{f.mz, f.rt_apex, h.rt_start, h.rt_end, f.intensity_apex, f.charge, h.rt_values, h.intensities};
         out.push_back(std::move(p));
       }
-      std::sort(out.begin(), out.end(), [](const Prec& a, const Prec& b) { return a.mz < b.mz || (a.mz == b.mz && a.rt < b.rt); });
+      std::sort(out.begin(), out.end(), [](const Prec& a, const Prec& b) {   // a total order: Biosaur2's feature order is fixed, its ties are not
+        return std::tie(a.mz, a.rt, a.z, a.inten, a.rt_lo, a.rt_hi) < std::tie(b.mz, b.rt, b.z, b.inten, b.rt_lo, b.rt_hi); });
       return out;
     }
   }
@@ -351,13 +353,14 @@ namespace spx_noims
     std::vector<std::vector<MSSpectrum>> res(keys.size());
     std::vector<size_t> nprec(keys.size(), 0), ntr1(keys.size(), 0), ntr2(keys.size(), 0);
     std::vector<double> busy(keys.size(), 0.0);
+    std::vector<char> short_win(keys.size(), 0);
     std::exception_ptr err;
     #pragma omp parallel for schedule(dynamic, 1)
     for (long w = 0; w < (long)keys.size(); ++w)
     try
     {
       const auto tw = clk::now();
-      if (win.at(keys[w]).size() < 3) continue;   // MassTraceDetection needs 3 scans
+      if (win.at(keys[w]).size() < 3) { short_win[w] = 1; continue; }   // MassTraceDetection needs 3 scans
       const double lo = keys[w].first, hi = keys[w].second;
       std::vector<Prec> prec;
       if (P.mono == 2)
@@ -411,7 +414,7 @@ namespace spx_noims
         for (const auto& pk : t) f.pts.emplace_back(pk.getRT(), pk.getIntensity());
         fr.push_back(std::move(f));
       }
-      std::sort(fr.begin(), fr.end(), [](const Frag& a, const Frag& b) { return a.apex_rt < b.apex_rt; });
+      std::sort(fr.begin(), fr.end(), [](const Frag& a, const Frag& b) { return std::tie(a.apex_rt, a.mz, a.inten) < std::tie(b.apex_rt, b.mz, b.inten); });
 
       for (const Prec& p : prec)
       {
@@ -473,9 +476,12 @@ namespace spx_noims
       st.precursors += nprec[w]; st.busy_s += busy[w]; st.ms1_traces += ntr1[w]; st.ms2_traces += ntr2[w];
       for (auto& s : res[w]) { st.peaks += s.size(); out.addSpectrum(std::move(s)); }
     }
-    out.sortSpectra(false);
+    // by RT; spectra of one RT keep the assembly order (window key, then precursor order), which is platform-independent
+    std::stable_sort(out.getSpectra().begin(), out.getSpectra().end(), [](const MSSpectrum& a, const MSSpectrum& b) { return a.getRT() < b.getRT(); });
     for (size_t i = 0; i < out.size(); ++i) out[i].setNativeID("index=" + String(i));
     st.spectra = out.size();
+    if (const auto n = std::count(short_win.begin(), short_win.end(), 1))
+      log("[noims] " + String(n) + " of " + String(keys.size()) + " isolation windows have fewer than 3 MS2 scans: no spectra from them");
     st.wall_s = std::chrono::duration<double>(clk::now() - t0).count();
     if (P.mono) log("[noims] monoisotope: " + String(P.mono == 1 ? "averagine shift test" : "Biosaur2 features"));
     log("[noims] " + String(st.ms1_traces) + " MS1 traces (window slices), " + String(st.ms2_traces) + " MS2 traces, " + String(st.precursors) + " precursors, " + String(st.spectra) + " spectra, " + String(st.peaks) + " peaks; "

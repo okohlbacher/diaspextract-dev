@@ -5,12 +5,13 @@ spectra, wall time, peptides at 1 % FDR and the entrapment FDR of each engine.
 
   noims_joint.py run   --arms arms.json --sample PXD021394 --raw X.mzML --out DIR [--threads 32]
   noims_joint.py table DIR          # markdown table of every record in DIR/records
+  noims_joint.py rescore DIR        # recount MSFragger in older records from their kept TSVs
   noims_joint.py selftest
 
-Counting rules are the harness's own (harness/corpus.py sage_peptides, msf_peptides, entrap_strata: same code as the
-orbi171 records), the entrapment estimator is bench/entrapment.py (peptide-hypothesis ratio, bootstrap CI). MSFragger
-has no entrapment path in the harness; here its entrapment search uses the same rule as msf_peptides (best hyperscore
-per peptide+mods, target-decoy competition at 1 %) and the same estimator: est. false targets = n_entrap / ratio.
+Sage is counted with the frozen harness's rules (harness/corpus.py sage_peptides, entrap_strata), the entrapment
+estimator is bench/entrapment.py (peptide-hypothesis ratio for the search's digestion rule, bootstrap CI). MSFragger is
+counted by msf_count (best hyperscore per peptide+mods, target-decoy competition at 1 %, classes from the protein
+accession) with the same estimator: est. false targets = n_entrap / ratio. `rescore DIR` recounts older records.
 
 arms.json: {"name": {"cmd": "bash template with {in} {out} {threads} {dir}", "env": "/abs/env.sh" (optional)}}.
 --profile tims: .d input (copied as a directory) and the timsTOF search configs (tools/sage_deiso.json, msfragger.params).
@@ -76,36 +77,41 @@ def isotope_share(tsv):
     return {"psms_1pct": n, "isotope_error_nonzero_pct": round(100.0 * nz / max(n, 1), 2)}
 
 
-def msf_entrap(tsv, ratio, fdr=0.01):
-    """MSFragger entrapment: msf_peptides' rule on the target+entrapment search, then bench/entrapment.py's estimator
-    (a peptide is entrapment only if EVERY protein it maps to is foreign)."""
+def msf_count(tsv, ratio=None, fdr=0.01):
+    """MSFragger peptides at `fdr`: best hyperscore per (peptide, modifications), target-decoy competition with the cut
+    taken after complete equal-score groups. A PSM is classified by its protein's accession (the first token of the
+    `proteins` header: descriptions contain commas, so splitting the header would turn decoys into targets): `rev_`
+    decoy, `ENTRAP_` entrapment, else target; an equal-score tie between classes counts as decoy. With `ratio`, also the
+    entrapment FDR estimate of bench/entrapment.py (foreign peptides / ratio / accepted non-foreign targets)."""
     best = {}
-    with open(tsv, newline="") as f:
+    with (gzip.open(tsv, "rt", newline="") if str(tsv).endswith(".gz") else open(tsv, newline="")) as f:
         for row in csv.DictReader(f, delimiter="\t"):
+            prot = (row.get("proteins") or row.get("protein") or "").strip()
+            if not prot:
+                raise RuntimeError("MSFragger TSV row without a protein (columns: %s)" % ",".join(row.keys()))
+            acc = prot.split()[0]
+            cls = "D" if acc.startswith("rev_") else "E" if acc.startswith(TAG) else "T"
             key = (row["peptide"], row.get("modification_info", "") or row.get("assigned_modifications", ""))
-            prots = [p.strip() for p in re.split(r"[,;@]", (row.get("proteins") or row.get("protein") or "") + ";"
-                                                  + (row.get("alternative_proteins") or "")) if p.strip()]
-            if not prots:
-                raise RuntimeError("MSFragger TSV row without proteins (columns: %s)" % ",".join(row.keys()))
-            dec = all(p.startswith("rev_") for p in prots)
-            ent = not dec and all(p.startswith(TAG) or p.startswith("rev_") for p in prots)
             hs = float(row["hyperscore"])
-            if key not in best or hs > best[key][0]:
-                best[key] = (hs, dec, ent)
-    t = d = 0
-    acc, n_t, n_e = [], 0, 0
-    for hs, dec, ent in sorted(best.values(), key=lambda v: -v[0]):
-        d += dec
-        t += not dec
-        if not dec:
-            acc.append(ent)
-        if t and d / t <= fdr:
-            n_e = sum(acc); n_t = len(acc) - n_e
-    if n_t <= 0:   # recorded, not raised: the arm's other three searches stay usable
-        return {"error": "0 target peptides at 1 %% (%d peptide keys, %d decoys): a failed search"
-                % (len(best), sum(v[1] for v in best.values())), "fdr_pct": float("nan")}
-    return {"target": n_t, "entrap": n_e, "fdr_pct": round(100.0 * n_e / ratio / max(n_t, 1), 3),
-            "keys": len(best), "decoy_keys": sum(v[1] for v in best.values())}
+            if key not in best or hs > best[key][0] or (hs == best[key][0] and cls == "D"):
+                best[key] = (hs, cls)
+    groups = {}
+    for hs, cls in best.values():
+        groups.setdefault(hs, []).append(cls)
+    d = t = e = 0
+    n_t = n_e = 0
+    for hs in sorted(groups, reverse=True):
+        g = groups[hs]
+        d += g.count("D"); t += g.count("T"); e += g.count("E")
+        if t + e and d / (t + e) <= fdr:
+            n_t, n_e = t, e
+    out = {"peptides": n_t + n_e, "keys": len(best), "decoy_keys": sum(v[1] == "D" for v in best.values()),
+           "parser": "accession"}
+    if ratio is not None:
+        if n_t <= 0:   # recorded, not raised: the arm's other searches stay usable
+            return dict(out, error="0 target peptides at 1 %: a failed search", fdr_pct=float("nan"))
+        out.update(target=n_t, entrap=n_e, fdr_pct=round(100.0 * n_e / ratio / n_t, 3))
+    return out
 
 
 def entrap_db(out: Path):
@@ -138,7 +144,6 @@ def run(a):
     (out / "records").mkdir(parents=True, exist_ok=True)
     c, est = load(HARNESS, "corpus_frozen"), load(Path(__file__).with_name("entrapment.py"), "entrapment_est")
     arms = json.load(open(a.arms))
-    ratio = est.peptide_ratio(str(TOOLS["entrap_fasta"]), TAG)
     work = Path(tempfile.mkdtemp(prefix="nj-", dir=os.environ.get("TMPDIR", "/tmp")))
     if a.profile == "tims":
         TOOLS.update(TIMS)
@@ -151,13 +156,26 @@ def run(a):
     mdb = entrap_db(work)
     me = work / "msfragger_entrap.params"
     me.write_text(re.sub(r"(?m)^database_name = .*$", "database_name = %s" % mdb, open(TOOLS["msfragger_params"]).read()))
+    # the peptide-hypothesis ratio for Sage's digestion rule; MSFragger's entrapment FDR uses it too, so its rule must match
+    rule = est.digest_rule(sc)
+    mp = dict(re.findall(r"(?m)^(\w+)\s*=\s*([^#\n]*?)\s*(?:#.*)?$", open(TOOLS["msfragger_params"]).read()))
+    mrule = {"mc": int(mp.get("allowed_missed_cleavage_1", 2)), "lo": int(mp.get("digest_min_length", 7)),
+             "hi": int(mp.get("digest_max_length", 50)), "cleave": mp.get("search_enzyme_cut_1", "KR"),
+             "restrict": mp.get("search_enzyme_nocut_1", "P")}
+    mrule["mlo"], mrule["mhi"] = (float(x) for x in mp.get("digest_mass_range", "500.0 5000.0").split())
+    if any(rule[k] != v for k, v in mrule.items()):
+        raise SystemExit("MSFragger and Sage digest differently (%s vs %s): one entrapment ratio does not fit both" % (mrule, rule))
+    ratio = est.peptide_ratio(str(TOOLS["entrap_fasta"]), TAG, rule)
     ident = {k: sha(v) for k, v in TOOLS.items()}
     ident.update(harness=sha(HARNESS), entrapment_py=sha(Path(__file__).with_name("entrapment.py")), msfragger_entrap_db=sha(mdb),
-                 joint=sha(__file__), raw=sha(staged) if staged.is_file() else sha(staged / "analysis.tdf"))
+                 joint=sha(__file__), raw=sha(staged) if staged.is_file() else "%s+%d" % (sha(staged / "analysis.tdf"),
+                                                                                         (staged / "analysis.tdf_bin").stat().st_size))
     for name, arm in arms.items():
         recp = out / "records" / ("%s.%s.json" % (a.sample, name))
-        if recp.is_file() and json.load(open(recp)).get("status") == "ok":
-            continue
+        if recp.is_file():   # reuse a finished record only for the same inputs, tools and arm
+            old = json.load(open(recp))
+            if old.get("status") == "ok" and (old.get("ident"), old.get("cmd"), old.get("env")) == (ident, arm["cmd"], arm.get("env")):
+                continue
         d = work / name; shutil.rmtree(d, ignore_errors=True); d.mkdir()
         rec = {"sample": a.sample, "arm": name, "cmd": arm["cmd"], "env": arm.get("env"), "threads": a.threads,
                "node": os.uname().nodename, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "ident": ident, "entrap_ratio": ratio}
@@ -187,7 +205,7 @@ def run(a):
                 os.link(fixed, md / "in.mzML")
                 rec[eng] = timed("%s -Xmx200G -jar %s %s ./in.mzML" % (JAVA, TOOLS["msfragger_jar"], params), md / "msf.log", md)
                 tsv = md / "in.tsv"
-                rec[eng].update(c.msf_peptides(tsv) if eng == "msfragger" else msf_entrap(tsv, ratio))
+                rec[eng].update(msf_count(tsv) if eng == "msfragger" else msf_count(tsv, ratio))
             rec["status"] = "ok"
         except Exception as e:                                     # the arm fails, the next one still runs
             rec.update(status="failed", error=str(e)[-2000:])
@@ -218,16 +236,33 @@ def table(a):
             e["fdr_pct"], e["ci_pct"][0], e["ci_pct"][1], format(r["msfragger"]["peptides"], ","), r["msfragger_entrap"]["fdr_pct"]))
 
 
+def rescore(a):
+    """recount MSFragger peptides and entrapment FDR of every record in DIR from its kept TSVs with msf_count (records
+    written before the accession rule split protein headers at commas); the old values are kept under msf_comma_split"""
+    for p in sorted(Path(a.out, "records").glob("*.json")):
+        r = json.load(open(p))
+        tdir = Path(a.out, "tsv", "%s.%s" % (r["sample"], r["arm"]))
+        if r.get("status") != "ok" or not (tdir / "msfragger.tsv.gz").is_file() or r["msfragger"].get("parser") == "accession":
+            continue
+        r["msf_comma_split"] = {"msfragger": r["msfragger"].get("peptides"), "msfragger_entrap": r["msfragger_entrap"].get("fdr_pct")}
+        r["msfragger"].update(msf_count(tdir / "msfragger.tsv.gz"))
+        r["msfragger_entrap"].update(msf_count(tdir / "msfragger_entrap.tsv.gz", r["entrap_ratio"]))
+        p.write_text(json.dumps(r, indent=1))
+        print("%s %s msfragger %s -> %s, entrap FDR %s -> %s" % (r["sample"], r["arm"], r["msf_comma_split"]["msfragger"],
+              r["msfragger"]["peptides"], r["msf_comma_split"]["msfragger_entrap"], r["msfragger_entrap"]["fdr_pct"]))
+
+
 def selftest(_=None):
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "t.tsv"
-        rows = [("AAA", 50, "sp|H1", ""), ("CCC", 40, "ENTRAP_X", "sp|H2"), ("DDD", 30, "ENTRAP_Y", ""),
-                ("EEE", 20, "rev_sp|H3", ""), ("FFF", 10, "sp|H4", "")]
-        p.write_text("peptide\thyperscore\tprotein\talternative_proteins\n" + "".join("%s\t%s\t%s\t%s\n" % r for r in rows))
-        # cut at 1 %: only above the first decoy -> AAA (human), CCC (shared, human), DDD (entrapment)
-        m = msf_entrap(p, 0.5)
-        assert (m["target"], m["entrap"]) == (2, 1), m
-        assert m["fdr_pct"] == 100.0, m              # 1 / 0.5 / 2
+        rows = [("AAA", 50, "sp|H1|A_HUMAN Kinase, mitochondrial"), ("CCC", 40, "ENTRAP_sp|X|B_ARATH Synthase, chloroplastic"),
+                ("DDD", 30, "ENTRAP_sp|Y|C_ARATH Protein"), ("EEE", 20, "rev_sp|H3|D_HUMAN Phosphatase, placental type"),
+                ("GGG", 20, "sp|H5|E_HUMAN Protein"), ("FFF", 10, "sp|H4|F_HUMAN Protein")]
+        p.write_text("peptide\thyperscore\tproteins\n" + "".join("%s\t%s\t%s\n" % r for r in rows))
+        # 3 non-decoys above the first decoy; the decoy's equal-score group (with GGG) gives 1/4 > 1 %, so the cut stays above
+        m = msf_count(p, 0.5)
+        assert (m["target"], m["entrap"], m["peptides"], m["decoy_keys"]) == (1, 2, 3, 1), m   # a comma does not hide a decoy
+        assert m["fdr_pct"] == 400.0, m              # 2 / 0.5 / 1
     print("selftest ok")
 
 
@@ -238,6 +273,7 @@ if __name__ == "__main__":
     r.add_argument("--raw", required=True); r.add_argument("--out", required=True); r.add_argument("--threads", type=int, default=32)
     r.add_argument("--profile", choices=["orbi", "tims"], default="orbi")
     t = sp.add_parser("table"); t.add_argument("out")
+    rs = sp.add_parser("rescore"); rs.add_argument("out")
     sp.add_parser("selftest")
     a = ap.parse_args()
-    {"run": run, "table": table, "selftest": selftest}[a.cmd](a)
+    {"run": run, "table": table, "rescore": rescore, "selftest": selftest}[a.cmd](a)
