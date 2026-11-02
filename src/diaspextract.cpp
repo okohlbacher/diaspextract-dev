@@ -2955,7 +2955,7 @@ protected:
     registerStringOption_("noims:path", "<auto/off>", "auto", "auto: input without ion mobility goes to the separate non-IMS path "
                           "(prototype); off: refuse such input, as 1.7.1 does. Input with ion mobility never uses it.", false, true);
     setValidStrings_("noims:path", {"auto", "off"});
-    registerDoubleOption_("noims:min_corr", "<r>", 0.6, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
+    registerDoubleOption_("noims:min_corr", "<r>", 0.3, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
     registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
 
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments

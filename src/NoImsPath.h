@@ -1,11 +1,14 @@
 // The extraction path for DIA input without ion mobility (Orbitrap, SWATH mzML). Separate from the IMS path by rule:
 // it shares loading and writing with it, nothing else, and never changes what the IMS path emits.
 //
-// Per isolation window, in parallel: (1) precursors = MS1 mass traces of the window's m/z slice grouped into isotope
-// envelopes (charge 1-4; the mono is the lightest trace of the group); (2) fragments = mass traces of the window's MS2
+// Precursors: Biosaur2 features of the whole run's MS1 (noims mono 2, the default; mono 0 = MS1 mass traces of each
+// window's m/z slice grouped into isotope envelopes, charge 1-4, the mono the lightest trace of the group).
+// Per isolation window, in parallel: (1) the window's precursors; (2) fragments = mass traces of the window's MS2
 // scans; (3) a fragment joins a precursor when its profile correlates with the precursor's over the precursor's
 // elution span (Pearson r >= noims:min_corr on the window's scan grid), or, with fewer than 3 grid points in that
-// span, when its apex lies within one cycle of the precursor apex. One spectrum per precursor with >= 3 fragments.
+// span, when its apex lies within one cycle of the precursor apex. A fragment's intensity is weighted by r^24 (Sage and MSFragger
+// peptides and entrapment on three Orbitrap sets: stronger powers overfit Sage's scoring); the 200 heaviest are kept,
+// one spectrum per precursor with >= 3 fragments.
 #pragma once
 
 #include <OpenMS/KERNEL/MSExperiment.h>
@@ -31,22 +34,22 @@ namespace spx_noims
   struct Params
   {
     double ppm = 10.0;          ///< mass-trace and isotope m/z tolerance
-    double min_corr = 0.6;      ///< fragment-precursor Pearson r on the window grid
-    int max_peaks = 150;        ///< most intense fragments kept per spectrum
+    double min_corr = 0.3;      ///< fragment-precursor Pearson r on the window grid
+    int max_peaks = 200;        ///< most intense fragments kept per spectrum (by weighted intensity)
     double ms1_noise = 0.0;     ///< MS1 peaks below this intensity are ignored (0 = MassTraceDetection's default)
     int ms1_min_scans = 2;      ///< MS1 traces need at least this many MS1 scans
     bool ms1_split = true;      ///< split MS1 traces at valleys (ElutionPeakDetection)
     double few_apex_cycles = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
-    int ms2_min_scans = 0;      ///< fragment traces need at least this many of the window's scans (1 = single points too; 0 = auto: 1 if sparse, else 2)
+    int ms2_min_scans = 1;      ///< fragment traces need at least this many of the window's scans (1 = single points too; 0 = auto: 1 if sparse, else 2)
     int singles = -1;           ///< MS1 traces in no isotope envelope become precursors at z = 2 and z = 3 (-1 = auto: only if sparse)
-    double weight_pow = 0.0;    ///< fragment intensity x r^weight_pow (few-point profiles: x exp(-(apex distance / cycle)^2)^(weight_pow/4))
+    double weight_pow = 24.0;   ///< fragment intensity x r^weight_pow (few-point profiles: x exp(-(apex distance / cycle)^2)^(weight_pow/4))
     int min_frags = 3;          ///< fewest fragments a spectrum needs
     bool ms2_prec = true;       ///< isotope envelopes (z >= 2) of unfragmented precursors in the window's MS2 traces (DIA-Umpire Q3-like)
     int high_n = 0;             ///< precursors with >= 3 grid points need >= high_n fragments with r >= high_r (0 = off; DIA-Umpire MinHighCorrCnt)
     double high_r = 0.84;       ///< see high_n (DIA-Umpire HighCorrThreshold 0.7 is R^2)
     bool zchain = false;        ///< charge = the one with the longest isotope chain (ties: higher z), not the highest z with an M+1 partner
     double min_mass = 0.0;      ///< precursors below this neutral mass are dropped (DIA-Umpire MinPrecursorMass 700)
-    int mono = 0;               ///< MS1 precursors: 0 greedy envelopes, 1 averagine shift test (avgEnvelopes), 2 Biosaur2 features
+    int mono = 2;               ///< MS1 precursors: 0 greedy envelopes, 1 averagine shift test (avgEnvelopes), 2 Biosaur2 features
     double mono_alt = 0.0;      ///< mono 1: also emit the runner-up (z, mono) when its score >= mono_alt x the best (0 = off)
   };
 
