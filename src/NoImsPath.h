@@ -12,6 +12,7 @@
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
+#include "PortableMath.h"
 #include <omp.h>
 #include <algorithm>
 #include <chrono>
@@ -321,11 +322,11 @@ namespace spx_noims
             const double r = pearson(pp, fp);
             if (r < P.min_corr) continue;
             nhigh += r >= P.high_r;
-            pk.emplace_back(f.inten * std::pow(r, P.weight_pow), f.mz);
+            pk.emplace_back(f.inten * pmath::pow(r, P.weight_pow), f.mz);
             continue;
           }
           const double d = (f.apex_rt - p.rt) / cycle;
-          pk.emplace_back(f.inten * std::pow(std::exp(-d * d), P.weight_pow / 4.0), f.mz);
+          pk.emplace_back(f.inten * pmath::exp(-d * d * P.weight_pow / 4.0), f.mz);
         }
         if ((int)pk.size() < P.min_frags || (!few && nhigh < P.high_n)) continue;
         if ((int)pk.size() > P.max_peaks)
