@@ -8,6 +8,9 @@ same ion mobility, and writes one MS2 spectrum per precursor to mzML. It uses no
 **open or blind search** of the output can find sequence variants and unexpected modifications. It is a standalone
 application under BSD-3-Clause that links a patched OpenMS.
 
+Since 1.8.0 it also reads centroided DIA mzML without ion mobility (Orbitrap, SWATH) through a separate path that
+leaves the diaPASEF processing untouched ([docs/options.md](docs/options.md#input-without-ion-mobility)).
+
 Earlier releases were named speXtract (up to 1.1.0) and DIAspeXtractor (1.2.x); [CHANGELOG.md](CHANGELOG.md) maps
 the old names to the current ones.
 
@@ -23,7 +26,7 @@ flowchart TD
     subgraph TILE["Per 10-minute tile"]
         READ["Read the tile's MS2 frames"]
         subgraph WIN["Per isolation window"]
-            FRAG["Trace fragment peaks over time"] --> GATE["Keep fragments that co-elute with the precursor<br/>apex within 3 s, 6 s if faint, and 0.01 1/K0<br/>elution profiles correlate"]
+            FRAG["Trace fragment peaks over time"] --> GATE["Keep fragments that co-elute with the precursor<br/>apex within 4 s, 6 s if faint, and 0.01 1/K0<br/>elution profiles correlate"]
             GATE --> SPEC["Build one spectrum per precursor<br/>weight and clean the fragments<br/>keep the best 500"]
         end
         FOLD["Sort the spectra<br/>fold spectra of one precursor, within 20 ppm<br/>write the tile"]
@@ -42,7 +45,7 @@ flowchart TD
   charge from 1 to 5. Ion mobility corrects charge calls, the monoisotope is checked against the isotope pattern,
   and precursors without an isotope partner are dropped. Some tolerances are measured from each run.
 - **Fragments.** In each isolation window, the MS2 peaks are traced over time on the instrument's flight-time bins.
-- **Co-elution gate.** A fragment joins a precursor's spectrum when their apexes lie within 3 s and 0.01 1/K0 and
+- **Co-elution gate.** A fragment joins a precursor's spectrum when their apexes lie within 4 s and 0.01 1/K0 and
   their elution profiles correlate (r ≥ 0.3 over at least 3 shared points; frames without signal count as zero). A
   faint precursor, seen in at most 4 frames, gets a looser test: apexes within 6 s and overlapping elution spans; at
   the defaults its fragments are not judged by correlation at all ([docs/options.md](docs/options.md#co-elution-gate)).
@@ -61,7 +64,7 @@ flowchart TD
 | OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. A released OpenMS package does not work |
 | Compiler | C++20 and OpenMP. CI builds the tool with GCC on Ubuntu |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
-| Platform | Linux is recommended. Elsewhere the tool cannot read the free memory and runs one isolation window at a time |
+| Platform | Linux or Windows. On macOS the tool cannot read the free memory and runs one isolation window at a time |
 | Memory | about 5–20 GB for the HeLa runs of PXD017703 and 25–32 GB for the 130-minute tissue runs of PXD047793 (1.6.0 at the defaults with 100 threads, 43 public runs; see [CHANGELOG.md](CHANGELOG.md)) |
 | Disk | the mzML output is large |
 
@@ -83,7 +86,8 @@ git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
 scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies eight patches
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
-      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF
+      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
+      -DCMAKE_CXX_FLAGS=-ffp-contract=off   # same spectra on every platform (clang-cl: /clang:-ffp-contract=off)
 cmake --build /path/to/OpenMS/build --target OpenMS -j          # the library only, not every OpenMS tool
 
 # 2. The tool.

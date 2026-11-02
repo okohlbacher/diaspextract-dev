@@ -10,20 +10,26 @@ reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS
 
 - **`-gate:delta_rt` defaults to 4 s** (was 3 s). Faint precursors keep `-gate:faint_delta_rt` (6 s). On the four PXD017703
   HeLa runs (three at 10 ng) Sage finds 3.5–8.5 % and MSFragger 3.0–5.3 % more peptides at 1 % FDR, with about 5 % more
-  spectra; the entrapment FDR estimate stays within the 3 s interval. 3 s gives the 1.7.x output.
+  spectra; the entrapment FDR estimate stays within the 3 s interval. `-gate:delta_rt 3` restores 1.7.x's gate; the
+  spectra still differ from 1.7.x because of the platform fixes below.
 
 ### Added
 
-- **DIA input without ion mobility** (Orbitrap, SWATH mzML) goes to a separate path; the diaPASEF output does not
-  change. Precursors are Biosaur2 isotope-pattern features of the MS1 scans; fragments are the mass traces of each
-  isolation window, kept when their elution profile correlates with the precursor's (Pearson r ≥ 0.3,
-  `-noims:min_corr`) and weighted by r²⁴, at most 200 per spectrum. On three public sets (PXD021394, PXD032263,
-  PXD063917; full human database, 1 % FDR) Sage finds 3.9 %, 8.7 % and 6.4 % more peptides than DIA-Umpire SE 2.2.8,
-  MSFragger 14 %, 2.4 % and 5.2 % fewer; the entrapment FDR estimate stays at or below 1 %. Extraction takes 17–41 s
-  on 16 cores (BinAC2, EPYC 7543), DIA-Umpire 2–5.5 min. `-noims:path off` refuses such input instead.
-  A new OpenMS patch (`openms-biosaur2-speed.patch`) skips Biosaur2's diagnostic-only isotope calibration and
-  parallelises the rest of Biosaur2 except scan-to-scan linking and the final pattern selection; the features do not
-  change. Biosaur2 on PXD032263 takes 3.2 s instead of about 60 s (16 cores, Apple M4 Max), 8.3 s on BinAC2.
+- **DIA input without ion mobility** (centroided Orbitrap or SWATH mzML) goes to a separate path; it never enters the
+  diaPASEF processing. Precursors are Biosaur2 isotope-pattern features of the MS1 scans; fragments are the mass
+  traces of each isolation window, kept when their elution profile correlates with the precursor's (Pearson r ≥ 0.3,
+  `-noims:min_corr`, 0 to 1) and weighted by r²⁴, at most 200 per spectrum. Profile spectra, and ion mobility at MS2
+  without it at MS1, are refused (exit code 11); `-noims:path off` refuses all such input. The output is written to
+  `<out>.part`, checked and renamed like the diaPASEF output, in the `-out_type` format. On three public sets
+  (PXD021394, PXD032263, PXD063917; full human database, 1 % FDR) Sage finds 3.9 %, 8.7 % and 6.4 % more peptides than
+  DIA-Umpire SE 2.2.8, MSFragger 14.2 %, 2.4 % and 5.2 % fewer; the entrapment FDR estimate stays at or below 0.90 %
+  with both engines. Extraction takes 20–37 s at 32 threads (BinAC2, EPYC 7543), DIA-Umpire 143–345 s.
+  A new OpenMS patch (`openms-biosaur2-speed.patch`) makes Biosaur2 faster and OpenMP-parallel without changing its
+  features: on PXD032263 73 s become 8.0 s on one thread and 2.7 s on 16 (BinAC2).
+- **`-charge:mono_profile_check v3`** (opt-in; the default stays `v2`): every candidate monoisotope position of the
+  isotope walk is scored by its cosine with the averagine pattern times the share of the pattern observed. On four
+  public diaPASEF runs 0.5–2 % more peptides with Sage and 0.6–1.8 % with MSFragger, fewer isotope errors and
+  0.6–2.2 % fewer spectra; the entrapment FDR estimates stay within their intervals.
 - **`-diag:spectrum_meta`** writes the precursor's support per spectrum (`spx_p_frames`, `spx_faint`, `spx_p_apex`), to
   join search results to faint precursors. Off by default; the spectra do not change.
 
@@ -38,7 +44,13 @@ reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS
     UCRT, enough to move fragment m/z and trace windows. The tool and the OpenMS trace detection and Gaussian smoothing
     (new patch `openms-portable-math.patch`) now use `src/PortableMath.h`, ports of fdlibm (exp, log; Sun 1993, see
     `LICENSES/fdlibm.txt`) and formulations built on them; `test_portable_math` pins their bits.
-  - FMA contraction: already off (`-ffp-contract=off`); the new math also switches it off inside each function.
+  - FMA contraction: already off for the tool (`-ffp-contract=off`); the new math also switches it off inside each
+    function. Build OpenMS with the flag too (README).
+  - MS1 traces with equal summary keys are now ordered by their profile, so `std::sort`'s tie order cannot matter.
+
+  The identity is shown on diaPASEF input. The path for input without ion mobility orders everything by content too,
+  but Biosaur2's isotope-pattern check computes averagine probabilities with the platform's math library (through
+  Boost), so a feature at its acceptance threshold can differ between platforms.
 
 ## v1.7.1 — 2026-11-01
 
