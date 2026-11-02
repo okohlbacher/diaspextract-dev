@@ -19,11 +19,11 @@ reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS
   isolation window, kept when their elution profile correlates with the precursor's (Pearson r ≥ 0.3,
   `-noims:min_corr`) and weighted by r²⁴, at most 200 per spectrum. On three public sets (PXD021394, PXD032263,
   PXD063917; full human database, 1 % FDR) Sage finds 3.9 %, 8.7 % and 6.4 % more peptides than DIA-Umpire SE 2.2.8,
-  MSFragger 14 %, 2.4 % and 5.2 % fewer; the entrapment FDR estimate stays at or below 1 %. Extraction takes 22–100 s
-  on 16 cores, DIA-Umpire 2–5.5 min. `-noims:path off` refuses such input instead.
+  MSFragger 14 %, 2.4 % and 5.2 % fewer; the entrapment FDR estimate stays at or below 1 %. Extraction takes 20–54 s
+  on 16 cores (BinAC2, EPYC 7543), DIA-Umpire 2–5.5 min. `-noims:path off` refuses such input instead.
   A new OpenMS patch (`openms-biosaur2-speed.patch`) skips Biosaur2's diagnostic-only isotope calibration, which
   scanned the hill list linearly per isotope, and finds isotope-pattern candidates in parallel; the features do not
-  change. Biosaur2 on PXD032263 takes 9.5 s instead of about 60 s (16 cores, Apple M4 Max).
+  change. Biosaur2 on PXD032263 takes 9.5 s instead of about 60 s (16 cores, Apple M4 Max), 21 s on BinAC2.
 - **`-diag:spectrum_meta`** writes the precursor's support per spectrum (`spx_p_frames`, `spx_faint`, `spx_p_apex`), to
   join search results to faint precursors. Off by default; the spectra do not change.
 
