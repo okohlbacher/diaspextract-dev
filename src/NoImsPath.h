@@ -329,7 +329,9 @@ namespace spx_noims
       std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
       return d[d.size() / 2];
     };
-    const double cycle = spacing(win.begin()->second, 1.0);   // MS2 cycle: the first window's scans
+    // MS2 cycle: the scans of the first window with >= 3 of them (a short window would give a wrong cycle to all others)
+    const auto cyc_win = std::find_if(win.begin(), win.end(), [](const auto& kv) { return kv.second.size() >= 3; });
+    const double cycle = spacing(cyc_win != win.end() ? cyc_win->second : win.begin()->second, 1.0);
     const double ms1_dt = spacing(ms1, cycle);
     log("[noims] " + String(keys.size()) + " isolation windows, " + String(ms1.size()) + " MS1 scans every " + String(ms1_dt)
         + " s, MS2 cycle " + String(cycle) + " s");

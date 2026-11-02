@@ -23,7 +23,7 @@ the benchmark reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote
   `<out>.part`, checked and renamed like the diaPASEF output, in the `-out_type` format. On three public sets
   (PXD021394, PXD032263, PXD063917; full human database, 1 % FDR) Sage finds 3.9 %, 8.7 % and 6.4 % more peptides than
   DIA-Umpire SE 2.2.8, MSFragger 14.2 %, 2.4 % and 5.2 % fewer; the entrapment FDR estimate stays at or below 0.90 %
-  with both engines. Extraction takes 20–37 s at 32 threads (BinAC2, EPYC 7543), DIA-Umpire 143–345 s.
+  with both engines. Extraction takes 27–43 s at 32 threads (BinAC2, EPYC 7543), DIA-Umpire 143–345 s.
   A new OpenMS patch (`openms-biosaur2-speed.patch`) makes Biosaur2 faster and OpenMP-parallel without changing its
   features: on PXD032263 73 s become 8.0 s on one thread and 2.7 s on 16 (BinAC2).
 - **`-charge:mono_profile_check v3`** (opt-in; the default stays `v2`): every candidate monoisotope position of the

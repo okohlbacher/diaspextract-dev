@@ -177,12 +177,14 @@ def run(a):
         if arm.get("env"):
             r = subprocess.run(["bash", "-c", 'source "$1" && env -0', "_", arm["env"]], capture_output=True, check=True)
             env = dict(kv.split("=", 1) for kv in r.stdout.decode().split("\0") if "=" in kv)
-        # the arm's identity: its command, its env file and the extractor binary it resolves to
-        exe = shutil.which(env.get("SPX_BIN", "")) if env.get("SPX_BIN") else None
-        arm_id = {"cmd": arm["cmd"], "env": sha(arm["env"]) if arm.get("env") else None, "exe": sha(exe) if exe else None}
-        if recp.is_file():   # reuse a finished record only for the same inputs, tools and arm
+        # the arm's identity: its command, its env file, the extractor binary it resolves to (on the arm's PATH) and every
+        # effective SPX_* setting; without a resolvable SPX_BIN the record is never reused
+        exe = shutil.which(env["SPX_BIN"], path=env.get("PATH")) if env.get("SPX_BIN") else None
+        arm_id = {"cmd": arm["cmd"], "env": sha(arm["env"]) if arm.get("env") else None, "exe": sha(exe) if exe else None,
+                  "spx_env": sorted((k, v) for k, v in env.items() if k.startswith("SPX_"))}
+        if recp.is_file() and exe:   # reuse a finished record only for the same inputs, tools and arm
             old = json.load(open(recp))
-            if old.get("status") == "ok" and (old.get("ident"), old.get("arm_id")) == (ident, arm_id):
+            if old.get("status") == "ok" and (old.get("ident"), old.get("arm_id")) == (ident, json.loads(json.dumps(arm_id))):
                 continue
         d = work / name; shutil.rmtree(d, ignore_errors=True); d.mkdir()
         rec = {"sample": a.sample, "arm": name, "cmd": arm["cmd"], "env": arm.get("env"), "threads": a.threads,
