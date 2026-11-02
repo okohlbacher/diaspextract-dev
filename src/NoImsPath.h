@@ -373,8 +373,10 @@ namespace spx_noims
     {
       double top = 0;
       for (const auto& k : keys) top = std::max(top, k.second);
+      const auto tb = clk::now();
       bio = biosaur(exp, ms1, P.ppm, keys.front().first - 1.0, top + 1.0);
-      log("[noims] Biosaur2: " + String(bio.size()) + " isotope-pattern features as precursors");
+      log("[noims] Biosaur2: " + String(bio.size()) + " isotope-pattern features as precursors in "
+          + String(std::chrono::duration<double>(clk::now() - tb).count()) + " s");
     }
     std::vector<std::vector<MSSpectrum>> res(keys.size());
     std::vector<size_t> nprec(keys.size(), 0), ntr1(keys.size(), 0), ntr2(keys.size(), 0), nalt(keys.size(), 0);

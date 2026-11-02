@@ -1,0 +1,59 @@
+diff --git a/src/openms/source/FEATUREFINDER/Biosaur2Algorithm.cpp b/src/openms/source/FEATUREFINDER/Biosaur2Algorithm.cpp
+index 661a07d208..f768b92ed5 100644
+--- a/src/openms/source/FEATUREFINDER/Biosaur2Algorithm.cpp
++++ b/src/openms/source/FEATUREFINDER/Biosaur2Algorithm.cpp
+@@ -2277,7 +2277,18 @@ vector<Biosaur2Algorithm::PatternCandidate> Biosaur2Algorithm::generateIsotopeCa
+   };
+ 
+   // Initial isotope candidate generation (analogous to get_initial_isotopes).
+-  for (Size i = 0; i < hills.size(); ++i)
++  // [spx] in parallel over contiguous chunks of mono hills; the chunks are concatenated in order, so the candidate
++  // list is the sequential one (each mono hill's candidates depend only on read-only data)
++  const Size n_hills = hills.size();
++  const Size chunk = 2048;
++  const SignedSize n_chunks = static_cast<SignedSize>((n_hills + chunk - 1) / chunk);
++  vector<vector<PatternCandidate>> ready_chunks(static_cast<Size>(n_chunks));
++  #pragma omp parallel for schedule(dynamic, 1)
++  for (SignedSize c = 0; c < n_chunks; ++c)
++  {
++  vector<PatternCandidate>& ready = ready_chunks[static_cast<Size>(c)];
++  const Size i_end = min(n_hills, static_cast<Size>(c + 1) * chunk);
++  for (Size i = static_cast<Size>(c) * chunk; i < i_end; ++i)
+   {
+     const Hill& mono_hill = hills[i];
+     if (mono_hill.scan_indices.empty()) continue;
+@@ -2465,7 +2476,7 @@ vector<Biosaur2Algorithm::PatternCandidate> Biosaur2Algorithm::generateIsotopeCa
+               {
+                 ready.push_back(pc);
+ 
+-                for (int ch_v : charge_ban_map[charge])
++                for (int ch_v : charge_ban_map.at(charge))
+                 {
+                   auto& ref = banned_charges[ch_v];
+                   ref = max(ref, n_iso_used);
+@@ -2494,6 +2505,11 @@ vector<Biosaur2Algorithm::PatternCandidate> Biosaur2Algorithm::generateIsotopeCa
+       }
+     }
+   }
++  }
++  for (auto& v : ready_chunks)
++  {
++    ready.insert(ready.end(), make_move_iterator(v.begin()), make_move_iterator(v.end()));
++  }
+ 
+   return ready;
+ }
+@@ -2924,12 +2940,7 @@ vector<Biosaur2Algorithm::PeptideFeature> Biosaur2Algorithm::detectIsotopePatter
+     hill_idx_to_index[hills[idx].hill_idx] = idx;
+   }
+ 
+-  // Initial isotope calibration (diagnostic only, mimics original behaviour).
+-  performInitialIsotopeCalibration_(hills,
+-                                    itol_ppm,
+-                                    min_charge,
+-                                    max_charge,
+-                                    enable_isotope_calib);
++  // [spx] the initial isotope calibration is diagnostic only (its result is discarded; it only logs): skipped
+ 
+   // Build fast m/z lookup and optional ion-mobility bins.
+   map<int, vector<FastHillEntry>> hills_mz_fast;

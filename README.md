@@ -81,7 +81,7 @@ cd diaspextract
 # 1. OpenMS at the pinned commit, patched, then built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
-scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies seven patches
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies eight patches
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
       -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF
 cmake --build /path/to/OpenMS/build --target OpenMS -j          # the library only, not every OpenMS tool
@@ -95,12 +95,13 @@ export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS   # a source-built OpenMS h
 The binary is `build/diaspextract`; `cmake --install build` puts it under `<prefix>/bin`. The GitHub workflow
 `.github/workflows/build.yml` runs the same recipe on Ubuntu and is the reference.
 
-`scripts/apply_openms_patches.sh` applies the seven small OpenMS patches in `patches/`. They give the Bruker reader the
+`scripts/apply_openms_patches.sh` applies the eight small OpenMS patches in `patches/`. They give the Bruker reader the
 acquisition's exact m/z calibration, let the tool set the scan time that peak splitting uses, make tracing and mzML
 writing faster on many threads, and let `--help` and the CTD and CWL export work for a tool outside OpenMS, so it can
 be wrapped for KNIME or Galaxy. Two make the spectra the same on every platform: the ion-mobility peak picker orders
 equal intensities by index (its `std::sort` left them to the standard library), and the trace detection and smoothing
-take `exp` and `log` from `src/PortableMath.h` instead of the platform's math library. Apply all seven: leaving one out
+take `exp` and `log` from `src/PortableMath.h` instead of the platform's math library. One makes Biosaur2, the
+precursor finder for input without ion mobility, faster without changing its result. Apply all eight: leaving one out
 stops the build, changes the spectra or slows the run.
 
 A normal run needs no environment variables; the ones a user may set are listed in [docs/options.md](docs/options.md).
@@ -184,7 +185,7 @@ grep -a 'spx:' pseudo.mzML
 
 ```
 src/        the tool and its headers: m/z calibration, .d metadata reader, MS1 denoiser, mzPeak loader
-patches/    the seven OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
+patches/    the eight OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
 scripts/    OpenMS patch application, mzPeak library build, option-name check
 test/       the end-to-end tests
 tests/      the unit tests and calibration checks
