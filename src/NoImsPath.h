@@ -12,6 +12,8 @@
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
+#include <OpenMS/FEATUREFINDER/Biosaur2Algorithm.h>
+#include <OpenMS/KERNEL/FeatureMap.h>
 #include "PortableMath.h"
 #include <omp.h>
 #include <algorithm>
@@ -44,9 +46,11 @@ namespace spx_noims
     double high_r = 0.84;       ///< see high_n (DIA-Umpire HighCorrThreshold 0.7 is R^2)
     bool zchain = false;        ///< charge = the one with the longest isotope chain (ties: higher z), not the highest z with an M+1 partner
     double min_mass = 0.0;      ///< precursors below this neutral mass are dropped (DIA-Umpire MinPrecursorMass 700)
+    int mono = 0;               ///< MS1 precursors: 0 greedy envelopes, 1 averagine shift test (avgEnvelopes), 2 Biosaur2 features
+    double mono_alt = 0.0;      ///< mono 1: also emit the runner-up (z, mono) when its score >= mono_alt x the best (0 = off)
   };
 
-  struct Stats { size_t windows = 0, ms1_traces = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
+  struct Stats { size_t alt = 0, windows = 0, ms1_traces = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
 
   namespace detail
   {
@@ -171,6 +175,134 @@ namespace spx_noims
           if (!used[k] && mz[k] >= lo && mz[k] < hi) { make(k, 2, 2); make(k, 3, 2); }
       return out;
     }
+
+    /// [mono] averagine isotope k of a peptide of this neutral mass (Poisson, lambda = 0.000594 m: the IMS path's rule)
+    inline double avg(double neutral, int k)
+    {
+      const double lam = std::max(0.10, 0.000594 * neutral);
+      double p = pmath::exp(-lam);
+      for (int i = 1; i <= k; ++i) p *= lam / i;
+      return p;
+    }
+
+    /// [mono] isotope envelopes chosen by an averagine shift test (Dinosaur / Monocle): seeds brightest first; for every
+    /// charge z at which the seed has a +-1 isotope partner and every monoisotope position c in [-3, 0] (the seed is then
+    /// isotope -c), the summed co-eluting intensity at positions c-1 .. c+5 is compared with [0, A0 .. A5] (averagine at the
+    /// mono's mass): score = cosine x the averagine fraction observed. The best (z, c) with an observed mono wins and claims
+    /// the traces of its positions c .. c+3; with alt > 0 the runner-up (z, c) is emitted too (tier 4) when its score is at
+    /// least alt x the best. The precursor's elution profile is the seed's (the brightest trace of the envelope).
+    inline std::vector<Prec> avgEnvelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute,
+                                          int zmin, bool singles, double alt, size_t& n_alt)
+    {
+      std::vector<size_t> o(mt.size());
+      for (size_t i = 0; i < o.size(); ++i) o[i] = i;
+      std::sort(o.begin(), o.end(), [&](size_t a, size_t b) { return mt[a].getCentroidMZ() < mt[b].getCentroidMZ() || (mt[a].getCentroidMZ() == mt[b].getCentroidMZ() && a < b); });
+      std::vector<double> mz(o.size()), art(o.size()), in(o.size());
+      for (size_t k = 0; k < o.size(); ++k) { mz[k] = mt[o[k]].getCentroidMZ(); art[k] = apexRT(mt[o[k]]); in[k] = mt[o[k]].getMaxIntensity(false); }
+      // summed intensity of the traces co-eluting with seed k at its isotope position `pos` (charge z); `best` = the brightest
+      auto PS = [&](size_t k, int z, int pos, long* best) -> double {
+        const double target = mz[k] + pos * C13 / z, tol = target * ppm * 1e-6;
+        const double half = std::max(mt[o[k]].getFWHM() * 0.5, coelute);
+        double sum = 0, bi = -1;
+        for (auto it = std::lower_bound(mz.begin(), mz.end(), target - tol); it != mz.end() && *it <= target + tol; ++it)
+        {
+          const size_t j = it - mz.begin();
+          if (std::fabs(art[j] - art[k]) > half) continue;
+          sum += in[j];
+          if (in[j] > bi) { bi = in[j]; if (best) *best = (long)j; }
+        }
+        return sum;
+      };
+      std::vector<size_t> seeds(o.size());
+      for (size_t k = 0; k < seeds.size(); ++k) seeds[k] = k;
+      std::sort(seeds.begin(), seeds.end(), [&](size_t a, size_t b) { return in[a] > in[b] || (in[a] == in[b] && a < b); });
+      std::vector<Prec> out;
+      std::vector<char> used(o.size(), 0);
+      struct Hyp { double score; int z, c; long mono; };
+      for (size_t k : seeds)
+      {
+        if (used[k]) continue;
+        Hyp h1{0, 0, 0, -1}, h2{0, 0, 0, -1};
+        for (int z = 4; z >= zmin; --z)
+        {
+          double ps[11];   // positions -4 .. +6 relative to the seed
+          long bt[11];
+          for (int p = -4; p <= 6; ++p) { bt[p + 4] = -1; ps[p + 4] = p == 0 ? in[k] : PS(k, z, p, &bt[p + 4]); }
+          if (ps[4 + 1] <= 0 && ps[4 - 1] <= 0) continue;   // no isotope partner at this charge
+          for (int c = -3; c <= 0; ++c)
+          {
+            if (ps[c + 4] <= 0) continue;   // the mono must be observed
+            const double neutral = z * (mz[k] + c * C13 / z - PROTON);
+            double sab = 0, saa = 0, sbb = 0, seen = 0, all = 0;
+            for (int i = -1; i <= 5; ++i)
+            {
+              const double a = i < 0 ? 0.0 : avg(neutral, i), b = ps[c + i + 4];
+              sab += a * b; saa += a * a; sbb += b * b;
+              if (i >= 0) { all += a; if (b > 0) seen += a; }
+            }
+            const double s = sab / std::sqrt(saa * sbb) * seen / all;
+            const Hyp h{s, z, c, c == 0 ? (long)k : bt[c + 4]};
+            if (s > h1.score) { h2 = h1; h1 = h; }
+            else if (s > h2.score) h2 = h;
+          }
+        }
+        if (h1.mono < 0) { if (singles && mz[k] >= lo && mz[k] < hi) for (int z : {2, 3}) { /* unpaired: as the greedy path */
+            const MassTrace& t = mt[o[k]];
+            Prec p{mz[k], art[k], t.begin()->getRT(), t.rbegin()->getRT(), in[k], z, {}, {}, 2};
+            for (const auto& pk : t) { p.rt_pts.push_back(pk.getRT()); p.int_pts.push_back(pk.getIntensity()); }
+            out.push_back(std::move(p)); }
+          used[k] = 1; continue; }
+        auto emit = [&](const Hyp& h, int tier) {
+          const MassTrace& t = mt[o[k]];
+          const double m = mz[(size_t)h.mono];
+          if (m < lo || m >= hi) return;
+          Prec p{m, art[k], t.begin()->getRT(), t.rbegin()->getRT(), in[k], h.z, {}, {}, tier};
+          for (const auto& pk : t) { p.rt_pts.push_back(pk.getRT()); p.int_pts.push_back(pk.getIntensity()); }
+          out.push_back(std::move(p));
+        };
+        emit(h1, 1);
+        if (alt > 0 && h2.mono >= 0 && h2.score >= alt * h1.score) { emit(h2, 4); ++n_alt; }
+        used[k] = 1;
+        for (int i = 0; i <= 3; ++i)   // claim the winner's positions
+        {
+          long b = -1;
+          if (h1.c + i == 0) continue;
+          if (PS(k, h1.z, h1.c + i, &b) > 0 && b >= 0) used[(size_t)b] = 1;
+        }
+      }
+      return out;
+    }
+
+    /// [mono C] precursors from OpenMS's Biosaur2 port, run once on the whole run's MS1 (averagine-checked isotope patterns)
+    inline std::vector<Prec> biosaur(const PeakMap& exp, const std::vector<size_t>& ms1, double ppm, double mzlo, double mzhi)
+    {
+      PeakMap m;
+      for (size_t i : ms1) m.addSpectrum(exp[i]);
+      Biosaur2Algorithm b;
+      Param p = b.getDefaults();
+      p.setValue("htol", ppm); p.setValue("itol", ppm);
+      p.setValue("minmz", mzlo); p.setValue("maxmz", mzhi);
+      p.setValue("cmin", 1); p.setValue("cmax", 4);
+      b.setParameters(p);
+      b.setMSData(std::move(m));
+      FeatureMap fm;
+      std::vector<Biosaur2Algorithm::Hill> hills;
+      std::vector<Biosaur2Algorithm::PeptideFeature> feats;
+      b.run(fm, hills, feats);
+      std::map<Size, size_t> at;
+      for (size_t i = 0; i < hills.size(); ++i) at[hills[i].hill_idx] = i;
+      std::vector<Prec> out;
+      for (const auto& f : feats)
+      {
+        auto it = at.find(f.mono_hill_idx);
+        if (it == at.end()) continue;
+        const auto& h = hills[it->second];
+        Prec p{f.mz, f.rt_apex, h.rt_start, h.rt_end, f.intensity_apex, f.charge, h.rt_values, h.intensities, 1};
+        out.push_back(std::move(p));
+      }
+      std::sort(out.begin(), out.end(), [](const Prec& a, const Prec& b) { return a.mz < b.mz || (a.mz == b.mz && a.rt < b.rt); });
+      return out;
+    }
   }
 
   /// @p exp: the resident run without ion mobility (MS1 and MS2 centroided). Fills @p out with one MS2 spectrum per precursor.
@@ -233,8 +365,16 @@ namespace spx_noims
     const int ms2_min = P.ms2_min_scans > 0 ? P.ms2_min_scans : (sparse ? 1 : 2);
     log(String("[noims] ") + (sparse ? "sparse" : "dense") + " sampling: single-scan fragments " + (ms2_min == 1 ? "on" : "off")
         + ", unpaired MS1 traces as z = 2/3 " + (singles ? "on" : "off"));
+    std::vector<Prec> bio;   // [mono C] Biosaur2 features of the whole run
+    if (P.mono == 2)
+    {
+      double top = 0;
+      for (const auto& k : keys) top = std::max(top, k.second);
+      bio = biosaur(exp, ms1, P.ppm, keys.front().first - 1.0, top + 1.0);
+      log("[noims] Biosaur2: " + String(bio.size()) + " isotope-pattern features as precursors");
+    }
     std::vector<std::vector<MSSpectrum>> res(keys.size());
-    std::vector<size_t> nprec(keys.size(), 0), ntr1(keys.size(), 0), ntr2(keys.size(), 0);
+    std::vector<size_t> nprec(keys.size(), 0), ntr1(keys.size(), 0), ntr2(keys.size(), 0), nalt(keys.size(), 0);
     std::vector<double> busy(keys.size(), 0.0);
     std::exception_ptr err;
     #pragma omp parallel for schedule(dynamic, 1)
@@ -254,9 +394,16 @@ namespace spx_noims
         for (auto it = s.MZBegin(lo - 1.5); it != s.end() && it->getMZ() < hi + 1.5; ++it) c.push_back(*it);
         m1.addSpectrum(std::move(c));
       }
-      std::vector<MassTrace> mt1 = traces(m1, P.ppm, (P.ms1_min_scans - 1) * ms1_dt * 0.99, P.ms1_noise, P.ms1_split);
-      ntr1[w] = mt1.size();
-      std::vector<Prec> prec = envelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, singles, P.zchain);
+      std::vector<Prec> prec;
+      if (P.mono == 2)
+      { for (const Prec& p : bio) if (p.mz >= lo && p.mz < hi) prec.push_back(p); }
+      else
+      {
+        std::vector<MassTrace> mt1 = traces(m1, P.ppm, (P.ms1_min_scans - 1) * ms1_dt * 0.99, P.ms1_noise, P.ms1_split);
+        ntr1[w] = mt1.size();
+        prec = P.mono == 1 ? avgEnvelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, singles, P.mono_alt, nalt[w])
+                           : envelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, singles, P.zchain);
+      }
       prec.erase(std::remove_if(prec.begin(), prec.end(), [&](const Prec& p) { return owner(p.mz) != w; }), prec.end());
       nprec[w] = prec.size();
       m1.clear(true);
@@ -355,13 +502,14 @@ namespace spx_noims
 
     for (size_t w = 0; w < keys.size(); ++w)
     {
-      st.precursors += nprec[w]; st.busy_s += busy[w]; st.ms1_traces += ntr1[w]; st.ms2_traces += ntr2[w];
+      st.alt += nalt[w]; st.precursors += nprec[w]; st.busy_s += busy[w]; st.ms1_traces += ntr1[w]; st.ms2_traces += ntr2[w];
       for (auto& s : res[w]) { st.peaks += s.size(); out.addSpectrum(std::move(s)); }
     }
     out.sortSpectra(false);
     for (size_t i = 0; i < out.size(); ++i) out[i].setNativeID("index=" + String(i));
     st.spectra = out.size();
     st.wall_s = std::chrono::duration<double>(clk::now() - t0).count();
+    if (P.mono) log("[noims] monoisotope: " + String(P.mono == 1 ? "averagine shift test" : "Biosaur2 features") + (P.mono_alt > 0 ? ", " + String(st.alt) + " runner-up precursors (alt " + String(P.mono_alt) + ")" : String("")));
     log("[noims] " + String(st.ms1_traces) + " MS1 traces (window slices), " + String(st.ms2_traces) + " MS2 traces, " + String(st.precursors) + " precursors, " + String(st.spectra) + " spectra, " + String(st.peaks) + " peaks; "
         + String(st.wall_s) + " s, window busy " + String(st.busy_s) + " s on " + String(st.threads) + " threads");
     return st;

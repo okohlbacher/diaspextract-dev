@@ -2920,8 +2920,9 @@ protected:
     registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "charge:im_charge_veto: half-width of the 2+ and 3+ mobility bands, in robust "
                               "standard deviations of the fit.", false);
     registerStringOption_("charge:mono_profile_check", "<false/v2>", "v2", "Check each precursor's monoisotope against the summed MS1 intensity at "
-                              "its isotope positions and move it by one isotope when averagine disagrees. 'v2' (default) = on; 'false' = off.", false, false);
-    setValidStrings_("charge:mono_profile_check", {"false", "v2"});
+                              "its isotope positions and move it by one isotope when averagine disagrees. 'v2' (default) = on; 'false' = off; 'v3' (experimental) = "
+                              "the monoisotope position with the best averagine cosine x observed fraction (Dinosaur/Monocle shift test).", false, false);
+    setValidStrings_("charge:mono_profile_check", {"false", "v2", "v3"});
     registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: reject the lightest isotope when its "
                               "averagine-scaled intensity ratio is below this; the monoisotope then moves one isotope heavier.", false, true);
     registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width of the isotope intensity sums. "
@@ -3446,7 +3447,7 @@ protected:
       // [monocheck-v2] Record what monoPositionPass_ needs (v2 reads only the immutable arrays and changes only
       // mono_mz, so deciding it after the loop gives the same result as deciding it here, lets an automatic im_box
       // use the run's own isotope scatter, and lets the decision follow the IM charge veto).
-      if (mono_check_ == 2 && best_z > 0)
+      if (mono_check_ >= 2 && best_z > 0)
       {
         R.v2.z = best_z; R.v2.nl = best_nl; R.v2.mono = best_mono;
         for (int i = 0; i < best_nl; ++i) R.v2.left_mz[(size_t)i] = ms1[best_partners[(size_t)i]].mz;
@@ -3489,7 +3490,7 @@ protected:
         bool stale = false;
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
         if (stale) evalSeed(seed, R);
-        for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
+        for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ >= 2) v2in.push_back(R.v2); }
         used[seed] = true;
         for (size_t j : R.claims) used[j] = true;
       }
@@ -3625,6 +3626,43 @@ protected:
         PS(-i, &bt);
         return bt >= 0 ? ms1[(size_t)bt].mz : s.mz - i * kIso / z;
       };
+      if (mono_check_ == 3)
+      {
+        // [monocheck-v3] every position c in [-(nl+1), 0] with intensity (the seed is isotope -c): cosine of PS(c-1 .. c+5)
+        // against [0, A0 .. A5] (Poisson averagine at the mono's mass) x the averagine fraction observed; best c wins
+        double best_s = -1.0, best_mz = v.mono;
+        int best_c = 1;
+        for (int c = -(nl + 1); c <= 0; ++c)
+        {
+          long bt = -1;
+          const double pc0 = c == 0 ? 1.0 : PS(c, &bt);
+          if (pc0 <= 0.0) continue;
+          const double neutral = (s.mz + c * kIso / z) * z - z * PROTON_;
+          const double lam = std::max(0.10, 0.000594 * neutral);
+          double sab = 0, saa = 0, sbb = 0, seen = 0, all = 0, a = pmath::exp(-lam);
+          for (int i = -1; i <= 5; ++i)
+          {
+            const double t = i < 0 ? 0.0 : a, b = PS(c + i, nullptr);
+            if (i >= 0) { all += t; if (b > 0.0) seen += t; a *= lam / (i + 1); }
+            sab += t * b; saa += t * t; sbb += b * b;
+          }
+          const double sc = sbb > 0.0 ? sab / std::sqrt(saa * sbb) * seen / all : 0.0;
+          if (sc > best_s)
+          {
+            best_s = sc; best_c = c;
+            best_mz = c == 0 ? s.mz : (-c <= nl && -c % mul == 0) ? v.left_mz[(size_t)(-c / mul - 1)] : (bt >= 0 ? ms1[(size_t)bt].mz : s.mz + c * kIso / z);
+          }
+        }
+        uint8_t f = (mul > 1 ? 32 : 0) | 1;
+        if (best_c <= 0 && best_mz != v.mono)
+        {
+          if (best_mz > v.mono) { f |= 2; if (best_c == 0) f |= 4; }
+          else { f |= 8 | 16; pc.mono_ext = -best_c > nl; }
+          pc.mono_mz = best_mz;
+        }
+        flag[(size_t)ii] = f;
+        continue;
+      }
       double mono = v.mono;
       uint8_t f = mul > 1 ? 32 : 0, r = 0;
       int acc = nl;
@@ -3673,7 +3711,7 @@ protected:
                     v2_p90, v2_nhit, v2_nb);
       box = String(b);
     }
-    const String cfg = "v2, min_ratio " + String(mono_pos_min_ratio_) + ", im_box " + box + ", extend "
+    const String cfg = mono_check_ == 3 ? String("v3 (averagine cosine x observed fraction, positions -(walk+1) .. 0), im_box ") + box + ", at the final charge" : "v2, min_ratio " + String(mono_pos_min_ratio_) + ", im_box " + box + ", extend "
                        + String(mono_pos_extend_) + (mono_pos_iterate_ ? ", iterate" : ", leftmost step only") + ", at the final charge";
     mono_check_stamp_ = cfg + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right, " + String(mc_tot[4]) + " of " + String(mc_tot[3]) + " moved left";
     writeLogInfo_("[monocheck] " + cfg + ": " + String(mc_tot[0]) + " count walks with a leftward partner tested, " + String(mc_tot[2])
@@ -4595,6 +4633,8 @@ protected:
     if (const char* e = getenv("SPX_NOIMS_HIGH_R")) P.high_r = atof(e);
     if (const char* e = getenv("SPX_NOIMS_ZCHAIN")) P.zchain = atoi(e) != 0;
     if (const char* e = getenv("SPX_NOIMS_MIN_MASS")) P.min_mass = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_MONO")) P.mono = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MONO_ALT")) P.mono_alt = atof(e);
     PeakMap res;
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
     exp.clear(true);
@@ -4628,7 +4668,7 @@ protected:
     if (getFlag_("diag:selftest_arena")) return selftestArena_();
     if (getFlag_("diag:selftest_twins")) return selftestTwins_();
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
-    mono_check_ = getStringOption_("charge:mono_profile_check") == "v2" ? 2 : 0;
+    { const String m = getStringOption_("charge:mono_profile_check"); mono_check_ = m == "v3" ? 3 : m == "v2" ? 2 : 0; }
     mono_pos_min_ratio_ = getDoubleOption_("charge:mono_position_min_ratio");
     mono_pos_im_box_ = getDoubleOption_("charge:mono_position_im_box");
     mono_pos_extend_ = getDoubleOption_("charge:mono_position_extend");
@@ -5357,7 +5397,7 @@ protected:
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
-                                                     mass_ppm, mono_check_ == 2 ? &mono_v2in : nullptr);
+                                                     mass_ppm, mono_check_ >= 2 ? &mono_v2in : nullptr);
     if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
     {
       size_t nf = 0;
@@ -5428,7 +5468,7 @@ protected:
     }
     // [monocheck-v2] At the final charge: after the veto (which reads the walks' own monoisotopes, as without v2),
     // before the charge-less precursors are dropped (the veto edits in place, so the order still matches).
-    if (mono_check_ == 2)
+    if (mono_check_ >= 2)
     {
       monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm);
       vector<MonoV2In_>().swap(mono_v2in);
@@ -5477,7 +5517,7 @@ protected:
     String twin_rt_desc;
     // `ext` folds across frames only through v2's extension: without v2 no spectrum carries the mark, so the relation
     // is the same-frame one, and it is logged and stamped as such
-    const bool twin_rt_inert = twin_rt_mode == 2 && mono_check_ != 2;
+    const bool twin_rt_inert = twin_rt_mode == 2 && mono_check_ < 2;
     if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && twin_rt_inert)
       writeLogInfo_("[twins] assembly:twin_rt_frames: the same MS1 frame only (twin_rt_match ext needs charge:mono_profile_check v2)");
     if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && !twin_rt_inert)
