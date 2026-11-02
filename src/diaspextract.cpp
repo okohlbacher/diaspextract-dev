@@ -20,6 +20,7 @@
 #include "TdfLoad.h"   // loadTdfCalibration: sqlite3, tool-only
 #include "NoImsPath.h"   // [noims] the separate extraction path for input without ion mobility
 #include "DnoiseMs1.h"   // [dnoise] the dnoise v0.1.0 MS1 port (header-only; tests/test_dnoise_ms1.cpp compiles the same code)
+#include "PortableMath.h"   // [xplat] exp/log/log1p/pow with the same bits on every platform (the libm's differ)
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
@@ -368,54 +369,6 @@ namespace
     return 0;
   }
 
-#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
-  /// [outer] libstdc++ 13's std::__introsort_loop with the right part of each cut handed to a task: the two parts are
-  /// disjoint and each is processed by the same calls in the same order as in the serial loop, so the array ends
-  /// exactly as std::sort leaves it, equal keys included. Small parts run inline (bounded task count).
-  template <typename It, typename Size, typename Cmp>
-  void introsortLoopPar_(It first, It last, Size depth, Cmp cmp)
-  {
-    while (last - first > 16)   // libstdc++'s _S_threshold
-    {
-      if (depth == 0) { std::__partial_sort(first, last, last, cmp); return; }
-      --depth;
-      It cut = std::__unguarded_partition_pivot(first, last, cmp);
-      if (last - cut >= 16384)
-      {
-        #pragma omp task default(shared) firstprivate(cut, last, depth, cmp)
-        introsortLoopPar_(cut, last, depth, cmp);
-      }
-      else introsortLoopPar_(cut, last, depth, cmp);
-      last = cut;
-    }
-  }
-#endif
-
-  /// [outer] std::sort(v.begin(), v.end(), less), equal keys in std::sort's own order, in parallel where the standard
-  /// library is libstdc++ 13 (the release compiler): its std::__sort is introsort loop + final insertion sort, replayed
-  /// here with tasks (introsortLoopPar_) and the same final pass. Any other library, small inputs or a caller already
-  /// inside a parallel region: std::sort itself.
-  template <typename T, typename Less>
-  void stdSortPar_(std::vector<T>& v, Less less)
-  {
-#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
-    if (v.size() >= ((size_t)1 << 15) && omp_get_max_threads() > 1 && !omp_in_parallel())
-    {
-      auto cmp = __gnu_cxx::__ops::__iter_comp_iter(less);
-      const auto first = v.begin(), last = v.end();
-      const auto depth = std::__lg(last - first) * 2;   // as std::__sort
-      #pragma omp parallel
-      #pragma omp single
-      {
-        #pragma omp taskgroup
-        introsortLoopPar_(first, last, depth, cmp);
-      }
-      std::__final_insertion_sort(first, last, cmp);
-      return;
-    }
-#endif
-    std::sort(v.begin(), v.end(), less);
-  }
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
@@ -1478,9 +1431,9 @@ namespace
       c *= (ct / dt); cnt += w * v; den += w;
     };
     auto sdRobust = [](double mz, double w, double mean, double& sd, double& wsum) {   // updateWeightedSDEstimateRobust
-      const double d1 = std::log(wsum) + 2.0 * std::log(sd);
-      const double d2 = std::log(w) + 2.0 * std::log(std::abs(mz - mean));
-      const double denom = std::sqrt(std::exp(d1) + std::exp(d2));
+      const double d1 = pmath::log(wsum) + 2.0 * pmath::log(sd);
+      const double d2 = pmath::log(w) + 2.0 * pmath::log(std::abs(mz - mean));
+      const double denom = std::sqrt(pmath::exp(d1) + pmath::exp(d2));
       const double ws = wsum + w;
       const double t = denom / std::sqrt(ws);
       if (t > std::numeric_limits<double>::epsilon()) sd = t;
@@ -3345,11 +3298,11 @@ protected:
     return tol;
   }
 
-  /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by std::sort on m/z alone.
+  /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by m/z, equal m/z by index.
   /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
   /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
-  /// With any equal (or unordered) neighbour (m/z is quantised, so equal values are common) the order of equal m/z is
-  /// std::sort's own, so it is std::sort's sequence, computed by stdSortPar_.
+  /// m/z is quantised, so equal values are common; [xplat] the index breaks those ties -- std::sort's own order of equal
+  /// keys differs between libstdc++, libc++ and the MS STL, and moved Linux's precursors against macOS and Windows.
   static void mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
   {
     const size_t N = ms1.size();
@@ -3359,7 +3312,7 @@ protected:
     size_t nonincr = 0;
     #pragma omp parallel for schedule(static) reduction(+ : nonincr)
     for (long i = 1; i < (long)N; ++i) if (!(ms1[(size_t)i - 1].mz < ms1[(size_t)i].mz)) ++nonincr;
-    if (nonincr) stdSortPar_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    if (nonincr) parallelSortTotal_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz || (ms1[a].mz == ms1[b].mz && a < b); });
   }
 
   /// Isotope/charge inference on MS1 traces: a greedy partner-count walk, brightest seed first, with exact ordered
@@ -3885,8 +3838,8 @@ protected:
       ++n;
       if (foreign_w_ <= 0.0) continue;
       frags[i].second *= foreign_w_;
-      const double L = std::log1p(frag_ai[i]);                       // the key is linear in its log
-      frag_scores[i] = L > 0.0 ? frag_scores[i] * std::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
+      const double L = pmath::log1p(frag_ai[i]);                       // the key is linear in its log
+      frag_scores[i] = L > 0.0 ? frag_scores[i] * pmath::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
       frag_ai[i] *= foreign_w_;                                      // [fuse] a fused key sums the attenuated apex
     }
     if (n && foreign_w_ <= 0.0)                                      // remove: compact every parallel array
@@ -3971,7 +3924,7 @@ protected:
       {
         const double mz = g.w > 0.0 ? g.wmz / g.w : frags[g.top].first;
         const char r = resc.empty() ? 0 : resc[g.top];
-        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * std::log1p(g.ai);
+        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * pmath::log1p(g.ai);
         if (!resc.empty()) resc[w] = r;
         ++groups; n_members += g.n;
       }
@@ -4028,7 +3981,7 @@ protected:
     }
     // [recall] assembly:im_weight_sigma: a Gaussian of the fragment's 1/K0 distance @p dim to the precursor
     auto imWeigh = [this](double& x, double dim) {
-      if (im_weight_sigma_ > 0.0) x *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_)); };
+      if (im_weight_sigma_ > 0.0) x *= pmath::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_)); };
     // [fragint] the frames a fragment's amplitude is summed over: core, the K frames centred on the precursor apex
     // (ties to the earlier frame); sum, the precursor's span with its gaps: a faint MS1 trace has missing points and the
     // concentric gate keeps fragments with no point where pdense != 0
@@ -4132,9 +4085,9 @@ protected:
           c_raw = c;
           if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
           {
-            const double z = std::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
-            const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
-            c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
+            const double z = pmath::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
+            const double t2 = shrink_sd_ * shrink_sd_, mu = pmath::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
+            c = pmath::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
           if (!(c >= min_corr))                                          // correlation gate (a NaN score is rejected too)
           { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 2u); continue; }
@@ -4145,12 +4098,12 @@ protected:
         imWeigh(inten, dim);
         double emit_inten = inten;
         if (frag_int_ != 0) emit_inten = fintAmp(f, dim);               // [fragint] base amplitude summed over frames; the cap key keeps the apex
-        if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
+        if (g_cp > 0.0 && c > 0.0) emit_inten *= pmath::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
         frag_span.emplace_back(f_lo, f_hi);
         if (fx || fuse_on) frag_ai.push_back(inten);
-        frag_scores.push_back(std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap));   // [cap] the max_fragments ranking key
+        frag_scores.push_back(std::max(c_raw, 0.0) * pmath::log1p(inten) * (1.0 + overlap));   // [cap] the max_fragments ranking key
         if (fuse_on)                                                   // [fuse] the same key without its intensity term
           frag_kq.push_back(std::max(c_raw, 0.0) * (1.0 + overlap));
         if (g_anchor && c >= anchor_min_corr_) anchors.push_back((uint32_t)fi);   // [anchor] a well-correlated accepted fragment
@@ -4238,12 +4191,12 @@ protected:
             const double dim = frag_im[q.fi] - pc.im;
             imWeigh(inten, dim);
             double emit_inten = frag_int_ != 0 ? fintAmp(f, dim) : inten;  // [fragint] the same amplitude as a gate-passing fragment
-            if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
+            if (g_cp > 0.0 && c > 0.0) emit_inten *= pmath::pow(c, g_cp);
             frags.emplace_back(q.mz, emit_inten);
             frag_bin.push_back(f.tof);
             frag_span.emplace_back(q.t_lo, q.t_hi);
             if (fx || fuse_on) frag_ai.push_back(inten);                 // [foreign]/[fuse] parallel to frags, as above
-            frag_scores.push_back(c * std::log1p(inten) * (1.0 + q.ov));
+            frag_scores.push_back(c * pmath::log1p(inten) * (1.0 + q.ov));
             if (fuse_on) frag_kq.push_back(c * (1.0 + q.ov));
             resc.push_back(1);
             ++n_why[q.why];

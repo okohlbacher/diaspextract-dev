@@ -40,6 +40,9 @@ add_test(NAME dnoise_ms1 COMMAND test_dnoise_ms1)
 add_executable(test_cgroup_mem tests/test_cgroup_mem.cpp)
 target_include_directories(test_cgroup_mem PRIVATE src)
 add_test(NAME cgroup_mem COMMAND test_cgroup_mem)
+# src/PortableMath.h: the exp/log the output path uses must give the same bits everywhere; the test pins one hash.
+add_executable(test_portable_math tests/test_portable_math.cpp)
+add_test(NAME portable_math COMMAND test_portable_math)
 # src/TdfLoad.h reads analysis.tdf through sqlite3, so its test builds wherever SQLite is found (not on the Windows
 # portability leg). It includes the calibration model as the patched OpenMS installs it; the shim maps that include onto
 # src/TdfMzCalibration.h, the same file.

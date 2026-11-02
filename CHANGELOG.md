@@ -2,6 +2,10 @@
 
 ## v1.8.0 — unreleased
 
+**The spectra change on every platform** (all three now write the same file; 1.7.1's Linux output, the benchmark
+reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS), 11,219 (Windows) and 11,678
+(Linux) spectra; now 11,133 on all three, bit-identical (`spectrumList` digest `86f9eb62…`).
+
 ### Changed
 
 - **`-gate:delta_rt` defaults to 4 s** (was 3 s). Faint precursors keep `-gate:faint_delta_rt` (6 s). On the four PXD017703
@@ -13,7 +17,20 @@
 - **`-diag:spectrum_meta`** writes the precursor's support per spectrum (`spx_p_frames`, `spx_faint`, `spx_p_apex`), to
   join search results to faint precursors. Off by default; the spectra do not change.
 
-## v1.7.1 — unreleased
+### Fixed
+
+- **macOS, Linux and Windows wrote different spectra from one input.** Three causes, all removed:
+  - ties in sorts: OpenMS PeakPickerIM's clustering and the tool's m/z order of MS1 traces sorted equal keys (integer
+    TOF intensities, quantised m/z) in whatever order the standard library's `std::sort` left them, which differs
+    between libstdc++, libc++ and the MS STL. The index now breaks every tie (new patch `openms-pickerim-ties.patch`;
+    the top-3 calibration sort in `openms-brukertims-mz-calibration.patch`).
+  - libm rounding: exp, log, log1p, pow, atanh and tanh differ in the last bit between Apple's libm, glibc and the
+    UCRT, enough to move fragment m/z and trace windows. The tool and the OpenMS trace detection and Gaussian smoothing
+    (new patch `openms-portable-math.patch`) now use `src/PortableMath.h`, ports of fdlibm (exp, log; Sun 1993, see
+    `LICENSES/fdlibm.txt`) and formulations built on them; `test_portable_math` pins their bits.
+  - FMA contraction: already off (`-ffp-contract=off`); the new math also switches it off inside each function.
+
+## v1.7.1 — 2026-11-01
 
 **The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on
 public runs), with two exceptions listed below: `-charge:min_charge 2` and above now gives the same higher-charge spectra
