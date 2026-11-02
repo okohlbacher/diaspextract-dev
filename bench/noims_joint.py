@@ -15,7 +15,7 @@ per peptide+mods, target-decoy competition at 1 %) and the same estimator: est. 
 arms.json: {"name": {"cmd": "bash template with {in} {out} {threads} {dir}", "env": "/abs/env.sh" (optional)}}.
 --profile tims: .d input (copied as a directory) and the timsTOF search configs (tools/sage_deiso.json, msfragger.params).
 """
-import argparse, csv, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, csv, gzip, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 B = Path("/pfs/10/project/bw26g016/diaspx-bench")
@@ -38,11 +38,8 @@ def load(path, name):
 
 
 def sha(p):
-    h = hashlib.sha256()
     with open(p, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def timed(cmd, log, cwd, env=None):
@@ -200,7 +197,8 @@ def run(a):
         keep.mkdir(parents=True, exist_ok=True)
         for eng, fn in (("sage", "results.sage.tsv"), ("sage_entrap", "results.sage.tsv"), ("msfragger", "in.tsv"), ("msfragger_entrap", "in.tsv")):
             if (d / eng / fn).is_file():
-                subprocess.run("gzip -c %s > %s" % (d / eng / fn, keep / (eng + ".tsv.gz")), shell=True)
+                with open(d / eng / fn, "rb") as src, gzip.open(keep / (eng + ".tsv.gz"), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
         shutil.rmtree(d, ignore_errors=True)
         print("%s %s %s" % (a.sample, name, rec["status"]), flush=True)
     shutil.rmtree(work, ignore_errors=True)
