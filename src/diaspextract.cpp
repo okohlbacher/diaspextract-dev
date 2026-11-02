@@ -50,6 +50,13 @@
 #ifdef __GLIBC__
 #include <malloc.h>    // malloc_trim [trim]
 #endif
+#include <filesystem>  // rename: replaces an existing -out on every platform (std::rename does not on Windows)
+#include <system_error>
+#include <cerrno>
+#ifndef _WIN32
+#include <fcntl.h>     // open/fsync of the completed .part before its rename
+#include <unistd.h>
+#endif
 
 // The five OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
 // third: without defaulted moves an rvalue MassTrace binds to the copy constructor (not noexcept), and
@@ -2434,8 +2441,8 @@ namespace
     }
     // A component is a chain of pairwise links and can span more than the tolerances (500.0000, 500.0095 and 500.0190
     // link pairwise within 20 ppm, the ends 38 ppm apart). The whole component folds: on real runs such chains are one
-    // ion called at drifting m/z; folding only the survivor's direct links wrote 10.7 % more spectra on K562 9905 for
-    // the same peptides (Sage +0.02 %, MSFragger -0.19 %).
+    // ion called at drifting m/z; folding only the survivor's direct links wrote 10.7 % more spectra on a public
+    // cell-line run for the same peptides (Sage +0.02 %, MSFragger -0.19 %).
     vector<uint32_t> grp(v.size(), NONE);   // the survivor a spectrum folds into (itself for a survivor)
     for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
       if (n_in[root(i)] >= 2) grp[i] = best[root(i)];
@@ -6601,8 +6608,20 @@ protected:
     if (writer)
     {
       { Phase _ph("WRITE(mzML)"); writer->finish(); writer.reset(); }   // the count patched, the index and footer written; throws on a failed write
-      if (std::rename(out_part.c_str(), out.c_str()) != 0)
-        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + out_part);
+#ifndef _WIN32
+      // the data reach the disk before the name does: a crash after the rename never leaves a short file under <out>
+      // (a file system without fsync, EINVAL/ENOTSUP, is not an error)
+      {
+        const int fd = ::open(out_part.c_str(), O_RDONLY);
+        const bool synced = fd >= 0 && (::fsync(fd) == 0 || errno == EINVAL || errno == ENOTSUP);
+        if (fd >= 0) ::close(fd);
+        if (!synced) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out_part, "cannot flush the completed mzML to disk");
+      }
+#endif
+      std::error_code rename_ec;
+      std::filesystem::rename(std::string(out_part), std::string(out), rename_ec);
+      if (rename_ec)
+        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + out_part + ": " + rename_ec.message());
     }
     else
     {

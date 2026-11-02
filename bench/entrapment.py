@@ -30,7 +30,7 @@ entrapment fraction a noisy statistic -- a point FDR without an error bar cannot
 calibration change from resampling noise. Both the RAW fraction and the corrected FDR (with CI) are
 printed, never the corrected number alone, so the reader can check the correction's assumptions.
 """
-import argparse, csv, hashlib, os, subprocess, sys, json, random
+import argparse, csv, hashlib, os, shutil, subprocess, sys, json, random
 from pathlib import Path
 
 _AA = {'G':57.02146,'A':71.03711,'S':87.03203,'P':97.05276,'V':99.06841,'T':101.04768,'C':103.00919,
@@ -254,7 +254,11 @@ def main():
     cfg_path = out / "sage_entrap.json"
     json.dump(cfg, open(cfg_path, "w"), indent=2)
 
-    rows = []
+    sage = shutil.which(a.sage)   # the file that runs, also for a bare name found on PATH: its size and mtime are stamped
+    if not sage:
+        sys.exit("ABORT: sage binary %r not found" % a.sage)
+    sage = os.path.realpath(sage)
+    rows, failed = [], []
     for spec in a.arm:
         name, d = spec.split("=", 1)
         mzml = Path(d) / "pseudo.mzML"
@@ -265,16 +269,17 @@ def main():
             print("[skip] %s: no mzML at %s" % (name, d)); continue
         odir = out / name; odir.mkdir(exist_ok=True)
         tsv = odir / "results.sage.tsv"
-        key = stamp(mzml, Path(a.sage), json.dumps(cfg, sort_keys=True), Path(fa))
+        key = stamp(mzml, Path(sage), json.dumps(cfg, sort_keys=True), Path(fa))
         if not reusable(tsv, key):
             if tsv.exists():
                 tsv.unlink()                  # a stale result must not survive a failed search
             print("[run] %s ..." % name, flush=True)
-            r = subprocess.run([a.sage, str(cfg_path), "-o", str(odir),
+            r = subprocess.run([sage, str(cfg_path), "-o", str(odir),
                                 "--disable-telemetry-i-dont-want-to-improve-sage", str(mzml)],
                                stdout=open(odir / "sage.log", "w"), stderr=subprocess.STDOUT)
             if r.returncode != 0 or not tsv.exists():
-                print("[fail] %s: sage exited %d (see %s)" % (name, r.returncode, odir / "sage.log")); continue
+                print("[fail] %s: sage exited %d (see %s)" % (name, r.returncode, odir / "sage.log"))
+                failed.append(name); continue
             Path(str(tsv) + ".inputs").write_text(key)
         rows.append((name,) + score(str(tsv), a.tag, ratio, q_cut=a.q_cut))
 
@@ -286,6 +291,10 @@ def main():
     print("\nREAD: nominal FDR is 1%% BY CONSTRUCTION in every row -- that is the point. If est. FDR%%")
     print("      RISES as the gate tightens, the extra peptides are errors and the 'gain' was")
     print("      recalibration. If it stays flat while accepted counts rise, the gain is real.")
+    if failed:
+        print("\nFAILED: the search of %s did not complete; the table lacks them." % ", ".join(failed))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

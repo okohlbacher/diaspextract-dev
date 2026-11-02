@@ -14,6 +14,14 @@ def main(src, dst, t0, t1):
     if os.path.exists(dst):
         sys.exit(f"{dst} exists")
     os.makedirs(dst)
+    try:
+        cut(src, dst, t0, t1)
+    except BaseException:          # a refusal (sys.exit) or an error: no partial .d is left behind
+        shutil.rmtree(dst, ignore_errors=True)
+        raise
+
+
+def cut(src, dst, t0, t1):
     shutil.copyfile(os.path.join(src, "analysis.tdf"), os.path.join(dst, "analysis.tdf"))
     db = sqlite3.connect(os.path.join(dst, "analysis.tdf"))
     keep = db.execute("SELECT Id, TimsId FROM Frames WHERE Time >= ? AND Time < ? ORDER BY TimsId", (t0, t1)).fetchall()

@@ -57,7 +57,8 @@ as the default, and mzPeak archives with two isolation windows of one centre get
 - **A run that emitted no spectrum wrote a 0-byte file** and exited 0. It now writes a valid, indexed mzML with an empty
   spectrum list.
 - **A failed write (full disk, quota) was reported as success**, the cut-off file renamed into place. The run now stops
-  with exit code 5; only `<out>.part` remains.
+  with exit code 5; only `<out>.part` remains. A completed mzML is flushed to disk before it is renamed, and the rename
+  replaces an existing `-out` on every platform.
 - **Memory admission ignored cgroup limits** (Slurm `--mem`, containers) and could admit windows the job could not hold.
   It now takes the lower of MemAvailable and the cgroup headroom (limit minus usage, reclaimable page cache counted as
   free as MemAvailable does; v1 and v2 hierarchies found in mountinfo, so combined `cpu,memory` and hybrid mounts work).
@@ -93,12 +94,16 @@ as the default, and mzPeak archives with two isolation windows of one centre get
 
 - A real diaPASEF `.d` runs end to end in the suite (`DIASPEXTRACT_TEST_D`; CI fetches OpenMS's public test run):
   thread-, tile- and tile-pipeline-invariant. New checks for the empty output, the failed write and the preflight.
-- `bench/slice_d.py` cuts a retention-time range out of a `.d`. `bench/entrapment.py` digests the search space as the
-  search config's enzyme does (also N-terminal, semi-enzymatic and non-specific searches) and reuses results only for the same inputs; `bench/fix_mzml_cvparams.py` rebuilds the index;
-  `bench/mzml_specdiff.py` pairs spectra within one (RT, m/z, charge) by 1/K0 and isolation window.
+- `bench/slice_d.py` cuts a retention-time range out of a `.d` (and leaves no partial `.d` when it fails).
+  `bench/entrapment.py` digests the search space as the search config's enzyme does (also N-terminal, semi-enzymatic
+  and non-specific searches), reuses results only for the same inputs (the Sage binary stamped where it resolves, also
+  from PATH) and exits 1 when a search fails; `bench/fix_mzml_cvparams.py` rebuilds the index and the `<fileChecksum>`;
+  `bench/mzml_specdiff.py` pairs spectra within one (RT, m/z, charge) by 1/K0 and isolation window, identical spectra
+  first.
 
-Screened and not adopted (peptides unchanged within noise on K562, HeLa 10/100 ng and TNBC, both engines): folding only
-the twins linked directly to the survivor (10.7 % more spectra on K562) and foreign-isotope candidates below the window.
+Screened and not adopted (peptides unchanged within noise on public HeLa 10/100 ng, TNBC and cell-line runs, both
+engines): folding only the twins linked directly to the survivor (10.7 % more spectra on the largest run) and
+foreign-isotope candidates below the window.
 
 ## v1.7.0 — 2026-10-02
 

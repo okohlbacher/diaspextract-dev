@@ -180,7 +180,7 @@ scan "K562 study (user decision 2026-09-23: no K562 result in any public file)" 
 # campaign's candidate/branch names and harness sample keys are private jargon no scan above catches
 scan "K562 accession/study name (PXD041421, MultiPro)" "-i" 'PXD041421|multi[-_ ]?pro([^a-z]|$)'
 scan "internal candidate and branch names (rc-a/rc-b, tune/, tuning campaign)" "-i" '(^|[^A-Za-z0-9_])rc-[ab]([^A-Za-z0-9_]|$)|tune/|tuning campaign'
-scan "harness sample keys (HeLa_NN, TNBC_NNN, CAD_NNNN)" "" '(HeLa|TNBC|CAD)_[0-9]'
+scan "harness sample keys (HeLa_NN, TNBC_NNN, CAD_NNNN; a digit run followed by a letter, as in a public file name HeLa_50ng, is not a key)" "" '(HeLa|TNBC|CAD)_[0-9]+([^A-Za-z0-9]|$)'
 echo "== internal-development mentions (informational, not a gate)"
 ( cd "$DST_ABS" && tr '\n' '\0' < "$WORK/textfiles.txt" | xargs -0 -r grep -a -n -H -i -E -- 'codex|(^|[^A-Za-z0-9_])(kimi|vibe)([^A-Za-z0-9_]|$)|adversarial|ibminode|/ceph/|/scratch/kohlbach|\[adv-fix\]' ) 2>/dev/null | sed 's/^/     /' | head -40
 echo "   (end of informational scan)"
