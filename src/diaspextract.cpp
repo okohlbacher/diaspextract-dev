@@ -4604,6 +4604,10 @@ protected:
     if (const char* e = getenv("SPX_NOIMS_WEIGHT_POW")) P.weight_pow = atof(e);
     if (const char* e = getenv("SPX_NOIMS_MIN_FRAGS")) P.min_frags = atoi(e);
     if (const char* e = getenv("SPX_NOIMS_MS2_PREC")) P.ms2_prec = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_HIGH_N")) P.high_n = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_HIGH_R")) P.high_r = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_ZCHAIN")) P.zchain = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_MIN_MASS")) P.min_mass = atof(e);
     PeakMap res;
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
     exp.clear(true);

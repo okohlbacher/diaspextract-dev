@@ -39,6 +39,10 @@ namespace spx_noims
     double weight_pow = 0.0;    ///< fragment intensity x r^weight_pow (few-point profiles: x exp(-(apex distance / cycle)^2)^(weight_pow/4))
     int min_frags = 3;          ///< fewest fragments a spectrum needs
     bool ms2_prec = true;       ///< isotope envelopes (z >= 2) of unfragmented precursors in the window's MS2 traces (DIA-Umpire Q3-like)
+    int high_n = 0;             ///< precursors with >= 3 grid points need >= high_n fragments with r >= high_r (0 = off; DIA-Umpire MinHighCorrCnt)
+    double high_r = 0.84;       ///< see high_n (DIA-Umpire HighCorrThreshold 0.7 is R^2)
+    bool zchain = false;        ///< charge = the one with the longest isotope chain (ties: higher z), not the highest z with an M+1 partner
+    double min_mass = 0.0;      ///< precursors below this neutral mass are dropped (DIA-Umpire MinPrecursorMass 700)
   };
 
   struct Stats { size_t windows = 0, ms1_traces = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -103,7 +107,7 @@ namespace spx_noims
     /// isotope envelopes from MS1 traces; a trace is a mono if it has a +1 isotope and no -1 isotope at the same charge
     // ponytail: greedy, highest charge first, no averagine check; add an intensity-pattern test if charge errors show up
     inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute,
-                                       int zmin = 1, bool singles = false)
+                                       int zmin = 1, bool singles = false, bool zchain = false)
     {
       std::vector<size_t> o(mt.size());
       for (size_t i = 0; i < o.size(); ++i) o[i] = i;
@@ -134,6 +138,22 @@ namespace spx_noims
       };
       for (size_t k = 0; k < o.size(); ++k)
       {
+        if (zchain)
+        {
+          int bz = 0, bn = 0;
+          for (int z = 4; z >= zmin; --z)
+          {
+            int n = 0;
+            for (long j = partner(k, mz[k] + C13 / z); j >= 0 && n < 3; j = partner((size_t)j, mz[j] + C13 / z)) ++n;
+            if (n > bn) { bn = n; bz = z; }
+          }
+          if (bz == 0) continue;
+          used[k] = 1;
+          if (partner(k, mz[k] - C13 / bz) >= 0) continue;   // not the lightest isotope at its best charge
+          for (long j = partner(k, mz[k] + C13 / bz), i = 1; j >= 0 && i <= 3; j = partner((size_t)j, mz[j] + C13 / bz), ++i) used[(size_t)j] = 1;
+          if (mz[k] >= lo && mz[k] < hi) make(k, bz, 1);
+          continue;
+        }
         for (int z = 4; z >= zmin; --z)
         {
           const long nx = partner(k, mz[k] + C13 / z);
@@ -235,7 +255,7 @@ namespace spx_noims
       }
       std::vector<MassTrace> mt1 = traces(m1, P.ppm, (P.ms1_min_scans - 1) * ms1_dt * 0.99, P.ms1_noise, P.ms1_split);
       ntr1[w] = mt1.size();
-      std::vector<Prec> prec = envelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, singles);
+      std::vector<Prec> prec = envelopes(mt1, P.ppm, lo, hi, 1.01 * ms1_dt, 1, singles, P.zchain);
       prec.erase(std::remove_if(prec.begin(), prec.end(), [&](const Prec& p) { return owner(p.mz) != w; }), prec.end());
       nprec[w] = prec.size();
       m1.clear(true);
@@ -250,7 +270,7 @@ namespace spx_noims
       m2.clear(true);
       if (P.ms2_prec)   // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)
       {
-        std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle, 2);
+        std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle, 2, false, P.zchain);
         const size_t n1 = prec.size();
         for (auto& c : q)
         {
@@ -282,6 +302,8 @@ namespace spx_noims
         for (size_t g = g0; g < g1; ++g) pp.push_back(interp(p.rt_pts, p.int_pts, grid[g]));
         const bool few = pp.size() < 3;
         const double neutral = p.z * (p.mz - PROTON);
+        if (neutral < P.min_mass) continue;
+        int nhigh = 0;
         std::vector<std::pair<double, double>> pk;   // (intensity, m/z)
         const double a0 = few ? p.rt - P.few_apex_cycles * cycle : p.rt_lo, a1 = few ? p.rt + P.few_apex_cycles * cycle : p.rt_hi;
         for (size_t k = std::lower_bound(fapex.begin(), fapex.end(), a0) - fapex.begin(); k < fr.size() && fapex[k] <= a1; ++k)
@@ -298,13 +320,14 @@ namespace spx_noims
             }
             const double r = pearson(pp, fp);
             if (r < P.min_corr) continue;
+            nhigh += r >= P.high_r;
             pk.emplace_back(f.inten * std::pow(r, P.weight_pow), f.mz);
             continue;
           }
           const double d = (f.apex_rt - p.rt) / cycle;
           pk.emplace_back(f.inten * std::pow(std::exp(-d * d), P.weight_pow / 4.0), f.mz);
         }
-        if ((int)pk.size() < P.min_frags) continue;
+        if ((int)pk.size() < P.min_frags || (!few && nhigh < P.high_n)) continue;
         if ((int)pk.size() > P.max_peaks)
         { std::nth_element(pk.begin(), pk.begin() + P.max_peaks, pk.end(), std::greater<>()); pk.resize(P.max_peaks); }
         MSSpectrum s;
