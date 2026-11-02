@@ -4649,6 +4649,14 @@ protected:
         return INCOMPATIBLE_INPUT_DATA;
       }
     writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path (prototype).");
+    // the path walks scans in file order and binary-searches their RTs: put an unordered file in RT order (stable, so
+    // an ordered file is left exactly as it is)
+    auto rt_less = [](const MSSpectrum& a, const MSSpectrum& b) { return a.getRT() < b.getRT(); };
+    if (!std::is_sorted(exp.begin(), exp.end(), rt_less))
+    {
+      std::stable_sort(exp.getSpectra().begin(), exp.getSpectra().end(), rt_less);
+      writeLogInfo_("[noims] the input spectra were not in retention-time order; sorted them.");
+    }
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
