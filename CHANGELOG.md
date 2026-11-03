@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.8.0 — unreleased
+## v1.8.0 — 2026-11-03
 
 **The spectra change on every platform** (for diaPASEF input all three now write the same file; 1.7.1's Linux output,
 the benchmark reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS), 11,219 (Windows) and 11,678

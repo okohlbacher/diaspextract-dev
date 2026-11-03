@@ -88,7 +88,7 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.7.1"
+#define DIASPEXTRACT_VERSION "1.8.0"
 #endif
 
 using namespace OpenMS;
@@ -2960,7 +2960,7 @@ protected:
 
     registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path");
     registerStringOption_("noims:path", "<auto/off>", "auto", "auto: input without ion mobility goes to the separate non-IMS path "
-                          "(prototype); off: refuse such input, as 1.7.1 does. Input with ion mobility never uses it.", false, true);
+                          "(prototype); off: refuse such input, as 1.7.x did. Input with ion mobility never uses it.", false, true);
     setValidStrings_("noims:path", {"auto", "off"});
     registerDoubleOption_("noims:min_corr", "<r>", 0.3, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
     setMinFloat_("noims:min_corr", 0.0);
