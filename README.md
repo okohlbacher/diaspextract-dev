@@ -73,7 +73,7 @@ mobility at MS2 but not at MS1, and MS2 scans with several isolation windows are
 | | |
 |---|---|
 | OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. A released OpenMS package does not work |
-| Compiler | C++20 and OpenMP. CI builds the tool with GCC on Ubuntu |
+| Compiler | C++20 and OpenMP. CI builds with GCC on Linux, Apple clang with Homebrew's libomp on macOS and clang-cl on Windows |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
 | Platform | Linux or Windows. On macOS the tool cannot read the free memory and runs one isolation window at a time |
 | Memory | about 5–20 GB for the HeLa runs of PXD017703 and 25–32 GB for the 130-minute tissue runs of PXD047793 (1.6.0 at the defaults with 100 threads, 43 public runs; see [CHANGELOG.md](CHANGELOG.md)) |
@@ -85,8 +85,36 @@ These memory figures are for a `.d` at the defaults. `DIASPEXTRACT_PIPE_TILES=1`
 
 ## Install
 
-There are no prebuilt binaries; build from source as below. OpenMS needs its build dependencies, including Arrow
-and Parquet; `.github/workflows/build.yml` lists the Ubuntu packages.
+### Prebuilt binaries
+
+Each [release](https://github.com/okohlbacher/diaspextract/releases/latest) carries a self-contained build for five
+platforms and a `SHA256SUMS` file:
+
+| platform | asset | needs |
+|---|---|---|
+| Linux x86-64 | `DIAspeXtract-linux-x64.tar.gz` | glibc 2.39 or newer (Ubuntu 24.04, Debian 13, RHEL 10) |
+| Linux arm64 | `DIAspeXtract-linux-arm64.tar.gz` | the same |
+| macOS, Apple silicon | `DIAspeXtract-macos-arm64.dmg` or `.tar.gz` | macOS 14 or newer |
+| macOS, Intel | `DIAspeXtract-macos-x64.dmg` or `.tar.gz` | macOS 15 or newer |
+| Windows x64 | `DIAspeXtract-windows-x64.zip` | Windows 10 or newer |
+
+Unpack it anywhere and run `bin/diaspextract` (`bin\diaspextract.exe` on Windows). The archive carries the patched
+OpenMS libraries and their `share/OpenMS` data, so it needs no OpenMS installation and no environment variable.
+
+With Homebrew, on macOS or Linux:
+
+```bash
+brew install okohlbacher/diaspextract/diaspextract
+```
+
+**Signing.** The macOS binaries are signed with a Developer ID and notarized by Apple. The disk image carries its
+notarization ticket and opens offline; the tarball is checked online the first time it runs. The Windows executable is
+not signed yet (signing through SignPath Foundation is prepared), so SmartScreen warns the first time it runs.
+
+### Build from source
+
+OpenMS needs its build dependencies, including Arrow and Parquet; `.github/workflows/build.yml` lists them for Ubuntu,
+macOS (Homebrew) and Windows.
 
 ```bash
 git clone https://github.com/okohlbacher/diaspextract.git
@@ -95,7 +123,7 @@ cd diaspextract
 # 1. OpenMS at the pinned commit, patched, then built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
-scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies eight patches
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies nine patches
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
       -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
       -DCMAKE_CXX_FLAGS=-ffp-contract=off   # same spectra on every platform (clang-cl: /clang:-ffp-contract=off)
@@ -108,15 +136,16 @@ export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS   # a source-built OpenMS h
 ```
 
 The binary is `build/diaspextract`; `cmake --install build` puts it under `<prefix>/bin`. The GitHub workflow
-`.github/workflows/build.yml` runs the same recipe on Ubuntu and is the reference.
+`.github/workflows/build.yml` runs the same recipe on Linux, macOS and Windows and is the reference. On Windows, build
+OpenMS and the tool with clang-cl, not cl.
 
-`scripts/apply_openms_patches.sh` applies the eight small OpenMS patches in `patches/`. They give the Bruker reader the
+`scripts/apply_openms_patches.sh` applies the nine small OpenMS patches in `patches/`. They give the Bruker reader the
 acquisition's exact m/z calibration, let the tool set the scan time that peak splitting uses, make tracing and mzML
 writing faster on many threads, and let `--help` and the CTD and CWL export work for a tool outside OpenMS, so it can
 be wrapped for KNIME or Galaxy. Two make the spectra the same on every platform: the ion-mobility peak picker orders
 equal intensities by index (its `std::sort` left them to the standard library), and the trace detection and smoothing
 take `exp` and `log` from `src/PortableMath.h` instead of the platform's math library. One makes Biosaur2, the
-precursor finder for input without ion mobility, faster without changing its result. Apply all eight: leaving one out
+precursor finder for input without ion mobility, faster without changing its result, and one lets clang-cl compile OpenMS on Windows. Apply all nine: leaving one out
 stops the build, changes the spectra or slows the run.
 
 A normal run needs no environment variables; the ones a user may set are listed in [docs/options.md](docs/options.md).
@@ -212,6 +241,7 @@ test/       the end-to-end tests
 tests/      the unit tests and calibration checks
 bench/      tools to compare outputs and check FDR, and a Sage configuration
 docs/       the option reference
+packaging/  the Homebrew formula and the tap's update workflow
 assets/     the logo
 LICENSES/   third-party licenses
 ```

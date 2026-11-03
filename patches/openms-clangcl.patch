@@ -1,0 +1,142 @@
+--- a/src/openms/include/OpenMS/DATASTRUCTURES/ExposedVector.h
++++ b/src/openms/include/OpenMS/DATASTRUCTURES/ExposedVector.h
+@@ -347,23 +347,28 @@
+       return data_ != other.data_;
+     }
+     
+-    // Define operators only if underlying vector supports them
+-    bool operator<(const ExposedVector& other) const requires LessThanComparable<VectorElement>
++    // Define operators only if underlying vector supports them. Member templates, not plain members: clang-cl
++    // instantiates every member of a dllexported class template, unsatisfied constraints included.
++    template<typename E = VectorElement>
++    bool operator<(const ExposedVector& other) const requires LessThanComparable<E>
+     {
+         return data_ < other.data_;
+     }
+ 
+-    bool operator<=(const ExposedVector& other) const requires LessThanComparable<VectorElement>
++    template<typename E = VectorElement>
++    bool operator<=(const ExposedVector& other) const requires LessThanComparable<E>
+     {
+         return data_ <= other.data_;
+     }
+ 
+-    bool operator>(const ExposedVector& other) const requires LessThanComparable<VectorElement>
++    template<typename E = VectorElement>
++    bool operator>(const ExposedVector& other) const requires LessThanComparable<E>
+     {
+         return data_ > other.data_;
+     }
+ 
+-    bool operator>=(const ExposedVector& other) const requires LessThanComparable<VectorElement>
++    template<typename E = VectorElement>
++    bool operator>=(const ExposedVector& other) const requires LessThanComparable<E>
+     {
+         return data_ >= other.data_;
+     }
+--- a/src/openms/include/OpenMS/DATASTRUCTURES/MassExplainer.h
++++ b/src/openms/include/OpenMS/DATASTRUCTURES/MassExplainer.h
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include <OpenMS/DATASTRUCTURES/Adduct.h>
++#include <OpenMS/DATASTRUCTURES/Compomer.h> // complete type: clang-cl emits the dllexported class's implicit members
+ 
+ #include <OpenMS/CONCEPT/Types.h>
+ 
+--- a/src/openms/include/OpenMS/ANALYSIS/ID/MessagePasserFactory.h
++++ b/src/openms/include/OpenMS/ANALYSIS/ID/MessagePasserFactory.h
+@@ -191,7 +191,7 @@
+ 
+   template <typename Label>
+   evergreen::TableDependency<Label> MessagePasserFactory<Label>::createSumFactor(size_t nrParents, Label nId) {
+-    evergreen::Tensor<double> table({nrParents+1});
++    evergreen::Tensor<double> table({static_cast<unsigned long>(nrParents + 1)});
+     for (unsigned long i=0; i <= nrParents; ++i) {
+       table[i] = 1.0/(nrParents+1.);
+     }
+--- a/src/openms/include/OpenMS/FORMAT/MascotRemoteQuery.h
++++ b/src/openms/include/OpenMS/FORMAT/MascotRemoteQuery.h
+@@ -38,10 +38,10 @@
+     OPENMS_DLLAPI MascotRemoteQuery();
+ 
+     /// assignment operator
+-    OPENMS_DLLAPI MascotRemoteQuery& operator=(const MascotRemoteQuery& rhs) = delete;
++    MascotRemoteQuery& operator=(const MascotRemoteQuery& rhs) = delete;
+ 
+     /// copy constructor
+-    OPENMS_DLLAPI MascotRemoteQuery(const MascotRemoteQuery& rhs) = delete;
++    MascotRemoteQuery(const MascotRemoteQuery& rhs) = delete;
+ 
+     /// destructor
+     OPENMS_DLLAPI ~MascotRemoteQuery() override;
+--- a/src/openms/include/OpenMS/SYSTEM/SIMDe.h
++++ b/src/openms/include/OpenMS/SYSTEM/SIMDe.h
+@@ -22,7 +22,7 @@
+ #include <simde/x86/ssse3.h> 
+ 
+ // these operators are defined for GCC/clang, but not in MSVC (TODO: maybe use SFINAE, but that is overkill for the moment)
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) && !defined(__clang__)   // clang-cl has the vector operators built in, and rejects these
+ inline simde__m128i operator|(const simde__m128i& left, const simde__m128i& right)
+ {
+   return simde_mm_or_si128(left, right);
+--- a/src/openms/source/FORMAT/Base64.cpp
++++ b/src/openms/source/FORMAT/Base64.cpp
+@@ -8,6 +8,20 @@
+ 
+ #include <OpenMS/FORMAT/Base64.h>
+ #include <OpenMS/SYSTEM/SIMDe.h>
++
++#include <cstring>
++
++namespace
++{
++  // 16 unaligned bytes into a register through memcpy: clang-cl turned simde_mm_lddqu_si128 on these unaligned
++  // buffers into an aligned movdqa (access violation in stringSimdEncoder_). memcpy is an unaligned load everywhere.
++  inline simde__m128i loadUnaligned_(const void* p)
++  {
++    simde__m128i r;
++    std::memcpy(&r, p, sizeof(r));
++    return r;
++  }
++}
+ 
+ using namespace std;
+ 
+@@ -130,7 +144,7 @@
+     for (int i = 0; i < loop; i++)
+     {
+       // Each iteration: 12 input bytes -> 16 output bytes (last 4 of 16 loaded bytes are discarded)
+-      data = simde_mm_lddqu_si128(reinterpret_cast<const simde__m128i*>(&in[12 * i]));
++      data = loadUnaligned_(&in[12 * i]);
+       registerEncoder_(data);
+       simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(&out[i * 16]), data);
+     }
+@@ -141,7 +155,7 @@
+     // Handle remaining bytes using a stack buffer to avoid out-of-bounds access
+     std::array<char, 16> buffer {};
+     memcpy(&buffer[0], &in[read], in.size() - read - 4); // minus 4 because of 4 appended null bytes
+-    data = simde_mm_lddqu_si128(reinterpret_cast<const simde__m128i*>(&buffer[0]));
++    data = loadUnaligned_(&buffer[0]);
+     registerEncoder_(data);
+     simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(&out[written]), data);
+ 
+@@ -185,7 +199,7 @@
+     for (int i = 0; i < loop; i++)
+     {
+       // IMPORTANT: Pointer cast must use simde__m128i* to match data type (strict aliasing).
+-      simde__m128i data = simde_mm_lddqu_si128(reinterpret_cast<const simde__m128i*>(inPtr + i * 16));
++      simde__m128i data = loadUnaligned_(inPtr + i * 16);
+       registerDecoder_(data);
+       simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(outPtr + i * 12), data);
+     }
+@@ -198,7 +212,7 @@
+     std::fill(rest.begin(), rest.end(), 'x');
+     std::copy(in.begin() + read, in.end(), rest.begin());
+ 
+-    simde__m128i data = simde_mm_lddqu_si128(reinterpret_cast<const simde__m128i*>(&rest[0]));
++    simde__m128i data = loadUnaligned_(&rest[0]);
+     registerDecoder_(data);
+     simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(outPtr + written), data);
+ 

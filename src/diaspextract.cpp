@@ -2479,6 +2479,11 @@ namespace
     return removed;
   }
 
+#ifdef _WIN32
+  static constexpr const char* NULL_DEVICE_ = "NUL";   // the encoders' own files: never written, only opened
+#else
+  static constexpr const char* NULL_DEVICE_ = "/dev/null";
+#endif
   /// [tile] Streams spectra to an mzML in BLOCKS: the header once, then every block encoded in
   /// parallel chunks (the tool-side twin of patches/openms-mzml-parallel-write.patch) and appended in
   /// order, the index offsets rebased as each chunk lands. Blocks arrive in the canonical order (a
@@ -2545,7 +2550,7 @@ namespace
       const bool in_team = omp_in_parallel();
       const Size CHUNK = 256;
       const Size n_thr = (Size)std::max(1, in_team ? omp_get_num_threads() : omp_get_max_threads());
-      while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter("/dev/null")); enc_.back()->options_ = options_; }
+      while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter(NULL_DEVICE_)); enc_.back()->options_ = options_; }
       const Size wave = CHUNK * n_thr;
       for (Size w0 = 0; w0 < block.size(); w0 += wave)
       {
@@ -2600,7 +2605,7 @@ namespace
     }
     String path_;
     std::streamoff count_off_ = -1;
-    vector<std::unique_ptr<TileWriter>> enc_;   ///< per-thread encoders (never write their /dev/null)
+    vector<std::unique_ptr<TileWriter>> enc_;   ///< per-thread encoders (never write their null device)
   };
 }
 
