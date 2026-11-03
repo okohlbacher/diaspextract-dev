@@ -19,7 +19,8 @@ is refused with an unknown-option error.
 - The 13 `-dnoise:*` filter settings: fixed at dnoise's defaults. `-dnoise:ms1` stays.
 - `-noims:path`: input without ion mobility always takes its own path.
 - The `SPX_NOIMS_*` environment variables of the non-IMS path and its two unused precursor models (greedy envelopes,
-  averagine shift test); Biosaur2 was the default and is now the only model.
+  averagine shift test); Biosaur2 was the default and is now the only model. A set `SPX_NOIMS_*` variable now refuses
+  the run (exit code 6) instead of being ignored.
 
 ### Changed
 
@@ -30,8 +31,7 @@ is refused with an unknown-option error.
   isolation windows first, and lets idle threads help with the precursors of the last windows.
 - mzPeak output of diaPASEF input is written as `<out>.part` and renamed when complete, as mzML output is;
   `-out x.mzML -out_type mzpeak` no longer fails at the final write.
-- `--help`, the CTD and the documentation describe both kinds of input; options of the diaPASEF path say so. The CTD
-  cites Biosaur2.
+- `--help`, the CTD and the documentation describe both kinds of input; options of the diaPASEF path say so..
 
 ## v1.8.0 — 2026-11-03
 

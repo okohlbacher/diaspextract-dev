@@ -350,6 +350,7 @@ namespace spx_noims
         fr.push_back(std::move(f));
       }
       std::sort(fr.begin(), fr.end(), [](const Frag& a, const Frag& b) { return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts); });
+      for (auto& f : fr) std::vector<std::pair<double, double>>().swap(f.pts);   // pts only break sort ties; gpts serve the rest
 
       // one slot per precursor, filled by tasks that idle threads can take
       std::vector<MSSpectrum> slot(prec.size());

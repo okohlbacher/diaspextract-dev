@@ -2609,10 +2609,7 @@ class TOPPDIAspeXtract : public TOPPBase
 public:
   TOPPDIAspeXtract() :
     // official=false: a standalone tool, absent from ToolHandler's official list (TOPPBase rejects an unregistered official name).
-    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap, SWATH) for DDA search engines.", false,
-             {{"Abdrakhimov et al.",
-               "Biosaur: An open-source Python software for liquid chromatography-mass spectrometry peptide feature detection with ion mobility support",
-               "Rapid Communications in Mass Spectrometry. 2022", "10.1002/rcm.9045"}})
+    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap, SWATH) for DDA search engines.", false)
   {
     // Otherwise TOPPBase reports OpenMS's version as ours: version_ feeds the ini and the mzML software entry,
     // verboseVersion_ the --help Version line, which carries both numbers because a bug report needs the OpenMS build too.
@@ -2804,7 +2801,7 @@ protected:
     registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write the MS1 traces and the precursors inferred from them to <prefix>.traces.tsv and "
                               "<prefix>.precursors.tsv, to see where a precursor was lost. Empty = off.", false, true);
 
-    registerIntOption_("max_charge", "<n>", 5, "Highest precursor charge considered.", false);
+    registerIntOption_("max_charge", "<n>", 5, "Highest precursor charge considered (diaPASEF input only).", false);
 
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message.
@@ -4338,7 +4335,7 @@ protected:
         return INCOMPATIBLE_INPUT_DATA;
       }
       if (s.getMSLevel() == 2 && s.getPrecursors().size() > 1)
-      {
+      {   // multiplexed DIA: one <precursor>, with its own isolation window, per window
         writeLogError_("Error: MS2 spectrum " + s.getNativeID() + " has " + String(s.getPrecursors().size())
                        + " isolation windows (multiplexed DIA); the non-IMS path reads one isolation window per MS2 scan.");
         return INCOMPATIBLE_INPUT_DATA;
@@ -6382,6 +6379,12 @@ int main(int argc, const char** argv)
       const int m = n - (int)op.len;                            // the part after the old prefix
       std::fprintf(stderr, "Error: %.*s is set, but this tool reads only DIASPEXTRACT_* variables: "
                            "rename it to DIASPEXTRACT_%.*s or unset it. Nothing was run.\n", n, *e, m, *e + op.len);
+      old_name = true;
+    }
+    if (std::strncmp(*e, "SPX_NOIMS_", 10) == 0)   // the non-IMS path's tuning variables, removed after 1.8.0: fixed values now
+    {
+      std::fprintf(stderr, "Error: %.*s is set, but the non-IMS path no longer reads SPX_NOIMS_* variables (their values are "
+                           "fixed): unset it. Nothing was run.\n", (int)std::strcspn(*e, "="), *e);
       old_name = true;
     }
   }

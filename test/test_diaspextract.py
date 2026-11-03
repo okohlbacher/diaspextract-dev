@@ -992,7 +992,10 @@ def main():
         with open(mux, "w") as f: f.write(txt[:i] + '<precursorList count="2">' + inner + inner + txt[j:])
         r = run(binary, mux, os.path.join(work, "noims_mux.out.mzML"), expect_fail=True)
         assert r.returncode == 11 and "isolation windows" in r.stdout + r.stderr, "multiplexed MS2 not refused with exit 11:\n" + (r.stdout + r.stderr)[-600:]
-    check("input without ion mobility: the non-IMS path, thread-invariant; profile, MS2-only IM, multiplexed MS2 and negative min_corr refused", c24)
+        # a removed SPX_NOIMS_* tuning variable refuses the run instead of being ignored
+        r = run(binary, ni, os.path.join(work, "noims_env.mzML"), expect_fail=True, env=dict(os.environ, SPX_NOIMS_MAX_PEAKS="100"))
+        assert "SPX_NOIMS_MAX_PEAKS" in r.stdout + r.stderr, "SPX_NOIMS_MAX_PEAKS not refused by name:\n" + (r.stdout + r.stderr)[-600:]
+    check("input without ion mobility: the non-IMS path, thread-invariant; profile, MS2-only IM, multiplexed MS2, SPX_NOIMS_* and negative min_corr refused", c24)
 
     # 23: a REAL diaPASEF .d end to end (DIASPEXTRACT_TEST_D; CI uses OpenMS's public 5.6-min HeLa test run, and
     #     bench/slice_d.py cuts one from any run). Everything above reads synthetic mzML; this is the shipped default

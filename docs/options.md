@@ -17,9 +17,9 @@ a `spx:` entry. Pass that value to fix it for another run.
 
 How to install, run and read the output, and how to report a problem: [README.md](../README.md).
 
-Input with ion mobility (diaPASEF) and input without it (Orbitrap, SWATH) take separate paths. The sections from
-[Speed and memory](#speed-and-memory) to [Diagnostics](#diagnostics) apply to diaPASEF input only; input without ion
-mobility reads `-threads` and the options in [Input without ion mobility](#input-without-ion-mobility).
+Input with ion mobility (diaPASEF) and input without it (Orbitrap, SWATH) take separate paths. All sections except
+[Input and output](#input-and-output) and [Input without ion mobility](#input-without-ion-mobility) apply to diaPASEF
+input only; input without ion mobility reads `-threads` and the options of its own section.
 
 Sections: [Input and output](#input-and-output) · [Speed and memory](#speed-and-memory) ·
 [Trace detection](#trace-detection) · [Precursor charge](#precursor-charge) · [Co-elution gate](#co-elution-gate) ·
