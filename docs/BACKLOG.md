@@ -35,6 +35,28 @@ the software, so every item below is also a release-quality item.
 
 ---
 
+## After 1.8.0 (added 2026-11-03, user request)
+
+- **A broader, reproducible benchmark harness.** One public, versioned harness that regenerates every number in the
+  release notes and the 1.8.0 summary from public data with one command, replacing the frozen BinAC2 harness
+  (`harness/corpus.py`, sha 390e512a) and the per-release scripts.
+  - **Data:** public PXD runs only, downloaded by accession with pinned checksums: diaPASEF (HeLa loads, TNBC), Orbitrap
+    DIA (PXD021394, PXD032263, PXD063917), FAIMS, plus at least one SWATH and one Astral set not covered today.
+  - **Arms:** DIAspeXtract (any two versions), DIA-Umpire, diaTracer; engines Sage, MSFragger and ProSE with the
+    settings files under version control; entrapment database (human + Arabidopsis) built by a script.
+  - **Readouts:** peptides at 1 % FDR per engine and run, entrapment FDR with bootstrap CI, extraction wall time and
+    peak RSS, spectra digests across platforms; tables and figures written by script, no hand edits.
+  - **Runs on:** a Slurm cluster and a single workstation (same driver, different executor); tool versions pinned
+    (containers or checksummed binaries).
+  - **Deposit:** configurations, scripts and result tables on Zenodo with the release, so the paper can cite them
+    instead of "available from the authors".
+  - **Done when:** a fresh checkout on BinAC2 reproduces the 1.8.0 summary tables within run-to-run noise.
+- **Tauri GUI app.** Re-requested; the plan is "Distribution" D4 at the end of this file (Tauri 2 from FASTag's `gui/`,
+  CLI tree as a signed resource). New since that plan: the GUI must also cover the non-IMS path (Orbitrap/SWATH mzML
+  input, `-noims:*` options) and show its refusals (exit code 11) as readable messages.
+
+---
+
 ## N+1. Learned monoisotope/charge predictor from MS1 + fragment features
 
 **Status 2026-09-23:** open -- no measurement on the shipped arm; charge is not where peptides are lost (deprioritised)
