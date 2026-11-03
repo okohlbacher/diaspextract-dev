@@ -970,7 +970,8 @@ def main():
     check("a leftover SPEXTRACTOR_* or DIASPEXTRACTOR_* variable refuses the run; its DIASPEXTRACT_ name works", c22)
 
     # 24: input without ion mobility takes the separate non-IMS path: it finds the precursor, is thread-invariant and
-    #     commits its output like the IMS path; profile spectra, IM at MS2 only and a negative noims:min_corr are refused
+    #     commits its output like the IMS path; profile spectra, IM at MS2 only, multiplexed MS2 scans and a negative
+    #     noims:min_corr are refused
     def c24():
         ni = os.path.join(work, "noims.mzML"); mono = synth_noims(ni)
         o1, o4 = os.path.join(work, "noims1.mzML"), os.path.join(work, "noims4.mzML")
@@ -984,7 +985,14 @@ def main():
             r = run(binary, bad, os.path.join(work, "noims_bad.out.mzML"), expect_fail=True)
             assert "profile" in r.stdout + r.stderr or "MS2" in r.stdout + r.stderr, label + ": no reason given\n" + (r.stdout + r.stderr)[-600:]
         run(binary, ni, os.path.join(work, "noims_neg.mzML"), extra=["-noims:min_corr", "-0.5"], expect_fail=True)
-    check("input without ion mobility: the non-IMS path, thread-invariant; profile, MS2-only IM and negative min_corr refused", c24)
+        # multiplexed DIA: an MS2 scan with two isolation windows is refused, not read by its first window only
+        txt = open(ni).read(); tag = '<precursorList count="1">'
+        i = txt.index(tag); j = txt.index('</precursorList>', i); inner = txt[i + len(tag):j]
+        mux = os.path.join(work, "noims_mux.mzML")
+        with open(mux, "w") as f: f.write(txt[:i] + '<precursorList count="2">' + inner + inner + txt[j:])
+        r = run(binary, mux, os.path.join(work, "noims_mux.out.mzML"), expect_fail=True)
+        assert r.returncode == 11 and "isolation windows" in r.stdout + r.stderr, "multiplexed MS2 not refused with exit 11:\n" + (r.stdout + r.stderr)[-600:]
+    check("input without ion mobility: the non-IMS path, thread-invariant; profile, MS2-only IM, multiplexed MS2 and negative min_corr refused", c24)
 
     # 23: a REAL diaPASEF .d end to end (DIASPEXTRACT_TEST_D; CI uses OpenMS's public 5.6-min HeLa test run, and
     #     bench/slice_d.py cuts one from any run). Everything above reads synthetic mzML; this is the shipped default

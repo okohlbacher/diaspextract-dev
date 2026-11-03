@@ -101,18 +101,23 @@ using namespace std;
 /**
   @page TOPP_DIAspeXtract DIAspeXtract
 
-  @brief Extracts pseudo-MS/MS ("pseudo-DDA") spectra from diaPASEF (ion-mobility DIA) data.
+  @brief Builds pseudo-MS/MS ("pseudo-DDA") spectra from DIA data for DDA search engines.
 
-  Reconstructs DDA-like MS2 spectra from ion-mobility DIA (timsTOF / diaPASEF) data by
-  exploiting the fact that, in PASEF, fragments are recorded at the ion-mobility (1/K0)
-  elution coordinate of their precursor. Precursor and fragment mass traces are detected
-  IM-aware (@ref MassTraceDetection with an ion-mobility tolerance), then fragments are
-  assigned to a precursor when they co-localize in ion mobility, retention time, and
-  elution-profile (Pearson) correlation. The result is written as searchable mzML.
+  Reconstructs one DDA-like MS2 spectrum per precursor from data-independent acquisition, so that any DDA search
+  engine, including open and blind searches, can search DIA data without a spectral library. It does not perform the
+  database search, FDR control, library building or quantification.
 
-  This is an OpenMS-native, BSD-3 analogue of the published diaPASEF pseudo-MS/MS extractors. It is
-  a discovery front-end (enables open / semi-tryptic / PTM searches); it does not perform the database
-  search, FDR, library building or quantification.
+  Two kinds of input take two separate paths:
+  - <b>diaPASEF</b> (Bruker timsTOF, ion-mobility DIA; a .d directory, mzML or mzPeak). MS1 frames are denoised and
+    centroided along ion mobility; precursor and fragment mass traces are detected on the instrument's flight-time
+    bins; isotope traces at the same ion mobility form precursors (charge 1-5, checked by ion mobility and by the
+    isotope pattern). A fragment joins a precursor when the two co-localize in ion mobility and retention time and
+    their elution profiles correlate. The run is processed in retention-time tiles, the isolation windows in parallel.
+  - <b>DIA without ion mobility</b> (Orbitrap, SWATH; centroided mzML). Precursors are @ref Biosaur2Algorithm
+    isotope-pattern features of the MS1 scans; fragments are the mass traces of each isolation window whose elution
+    profiles correlate with the precursor's. None of the diaPASEF options apply to this path.
+
+  The output is mzML (or mzPeak in a build with mzPeak support), written as &lt;out&gt;.part and renamed when complete.
 
   <B>The command line parameters of this tool are:</B>
   @verbinclude TOPP_DIAspeXtract.cli
@@ -2604,7 +2609,10 @@ class TOPPDIAspeXtract : public TOPPBase
 public:
   TOPPDIAspeXtract() :
     // official=false: a standalone tool, absent from ToolHandler's official list (TOPPBase rejects an unregistered official name).
-    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data for DDA search engines.", false)
+    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap, SWATH) for DDA search engines.", false,
+             {{"Abdrakhimov et al.",
+               "Biosaur: An open-source Python software for liquid chromatography-mass spectrometry peptide feature detection with ion mobility support",
+               "Rapid Communications in Mass Spectrometry. 2022", "10.1002/rcm.9045"}})
   {
     // Otherwise TOPPBase reports OpenMS's version as ours: version_ feeds the ini and the mzML software entry,
     // verboseVersion_ the --help Version line, which carries both numbers because a bug report needs the OpenMS build too.
@@ -2629,7 +2637,8 @@ protected:
     // a true/false option: a string option restricted to "true" and "false"
     auto regBool = [this](const String& name, const String& def, const String& desc, bool advanced = false)
     { registerStringOption_(name, "<true/false>", def, desc, false, advanced); setValidStrings_(name, {"true", "false"}); };
-    registerInputFile_("in", "<file>", "", "Input diaPASEF run (ion-mobility DIA): a Bruker .d directory, mzML, or mzPeak in a build that supports it.");
+    registerInputFile_("in", "<file>", "", "Input DIA run: a Bruker diaPASEF .d directory, an mzML (with ion mobility, or centroided Orbitrap/SWATH "
+                       "DIA without it, which takes the separate noims path), or mzPeak in a build that supports it.");
 #ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("in", {"mzML", "mzpeak", "d"});
 #else
@@ -2646,7 +2655,7 @@ protected:
                               "the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support).", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
-    registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum");
+    registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum (diaPASEF input only)");
     registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets "
                               "the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.", false);
     registerDoubleOption_("gate:delta_rt", "<sec>", 4.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
@@ -2655,7 +2664,7 @@ protected:
     registerIntOption_("gate:min_correlation_points", "<n>", 3, "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, "
                            "gate:shrink_min_points is used instead.", false, true);
 
-    registerTOPPSubsection_("assembly", "Building the spectra");
+    registerTOPPSubsection_("assembly", "Building the spectra (diaPASEF input only)");
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Write a spectrum only if it has at least this many fragments.", false);
     registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many fragments per spectrum, best-ranked first. The twin fold can "
                            "exceed it. At least assembly:min_fragments.", false);
@@ -2668,7 +2677,7 @@ protected:
                            "retention-time cell, when their precursor m/z lie within 0.05 ppm (one flight-time bin) and charge:mono_profile_check v2 "
                            "moved one of the two monoisotopes. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only.", false);
 
-    registerTOPPSubsection_("trace", "Mass-trace detection");
+    registerTOPPSubsection_("trace", "Mass-trace detection (diaPASEF input only)");
     registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance (ppm) of mass-trace detection.", false);
     registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise level: peaks at or below it are not traced.", false);
     registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise level: peaks at or below it are not traced.", false);
@@ -2680,7 +2689,7 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "A fragment trace's apex must exceed this times trace:ms2_noise_threshold_int. "
                               "Lower it to keep weaker fragments.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Shortest fragment trace kept (seconds). 0 = no filter.", false);
-    registerTOPPSubsection_("tile", "Retention-time cells and tiles");   // registered, or --helphelp throws ElementNotFound
+    registerTOPPSubsection_("tile", "Retention-time cells and tiles (diaPASEF input only)");   // registered, or --helphelp throws ElementNotFound
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Width (seconds) of the fixed retention-time cells the integer detector traces in; a trace "
                               "that crosses a cell edge is cut there. 0 or negative = the whole run as one cell. Changes the output.", false, true);
     registerIntOption_("tile:cells_per_tile", "<n>", 1, "Process the run in tiles of this many retention-time cells to bound memory; fewer cells per "
@@ -2711,7 +2720,7 @@ protected:
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Add n neighbouring MS1 frames on each side to every MS1 frame before peak picking "
                            "(Bruker .d with perf:stream_load true). 0 = off. Needs -dnoise:ms1 false.", false, true);
 
-    registerTOPPSubsection_("perf", "Speed and memory (the output does not change unless an option says so)");
+    registerTOPPSubsection_("perf", "Speed and memory, diaPASEF input only (the output does not change unless an option says so)");
     registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces too short for a correlation: 'concentric' (default) keeps one "
                               "whose retention-time span lies inside the precursor's (one frame of slack) and is centred on it; 'off' drops them. Applies to the "
                               "precursors gate:adaptive selects.", false, true);
@@ -2799,7 +2808,7 @@ protected:
 
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message.
-    registerTOPPSubsection_("charge", "Isotopes, charge and monoisotope");
+    registerTOPPSubsection_("charge", "Isotopes, charge and monoisotope (diaPASEF input only)");
     registerIntOption_("charge:min_charge", "<n>", 1, "Lowest precursor charge written. Default 1: singly charged precursors are real 1+ ions but "
                            "carry a higher FDR, so control FDR per charge downstream. 2 writes only 2+ and higher, the same spectra as at 1.", false);
     regBool("charge:im_charge_veto", "true", "Use ion mobility to correct charge calls: a 1+ call on the run's 2+ mobility trend is re-called 2+, one "
@@ -2825,7 +2834,7 @@ protected:
                           "Denoise every MS1 frame before peak picking, with a port of dnoise v0.1.0 (Garrett, Diedrich & Yates III, bioRxiv "
                           "2026.08.27.747603). Bruker .d input only; other inputs pass through. Lowers peak memory; false turns it off.");
 
-    registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path");
+    registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path; the other sections do not apply to it");
     registerDoubleOption_("noims:min_corr", "<r>", 0.3, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
     setMinFloat_("noims:min_corr", 0.0);
     setMaxFloat_("noims:min_corr", 1.0);
