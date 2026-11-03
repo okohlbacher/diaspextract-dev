@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.1 — 2026-11-03
 
 **The spectra do not change**: at the defaults the output is 1.8.0's, bit for bit, for diaPASEF and for input without
 ion mobility.
@@ -31,7 +31,21 @@ is refused with an unknown-option error.
   isolation windows first, and lets idle threads help with the precursors of the last windows.
 - mzPeak output of diaPASEF input is written as `<out>.part` and renamed when complete, as mzML output is;
   `-out x.mzML -out_type mzpeak` no longer fails at the final write.
-- `--help`, the CTD and the documentation describe both kinds of input; options of the diaPASEF path say so..
+- `--help`, the CTD and the documentation describe both kinds of input; options of the diaPASEF path say so.
+
+### Added
+
+- Ready-to-run packages, built and tested by CI on every release: Linux x64 and arm64 (tarballs), macOS arm64 and x64
+  (disk image and tarball, signed with a Developer ID and notarized) and Windows x64 (zip, built with clang-cl). All five
+  produce the same spectra from the test run. macOS: `brew install okohlbacher/diaspextract/diaspextract`.
+
+### Fixed
+
+- Errors in several threads at once could corrupt memory: every OpenMS exception wrote five shared strings without a
+  lock. On Windows a run that failed this way could crash (exit code 0xC0000005) instead of reporting its error.
+  A new OpenMS patch (`openms-exception-threadsafe.patch`) keeps that state per thread.
+- Windows: base64 encoding of the mzML peak arrays read 16-byte blocks with an aligned load, which crashed on unaligned
+  input (`openms-clangcl.patch`); the tile writer opens `NUL` instead of `/dev/null`.
 
 ## v1.8.0 — 2026-11-03
 
