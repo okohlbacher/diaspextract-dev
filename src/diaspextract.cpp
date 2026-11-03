@@ -4642,13 +4642,21 @@ protected:
   ExitCodes runNoIms_(PeakMap& exp, const String& out, FileTypes::Type out_type)
   {
     for (const MSSpectrum& s : exp)
+    {
       if (s.getType(true) == SpectrumSettings::SpectrumType::PROFILE)
       {
         writeLogError_("Error: the input has profile spectra (MS level " + String(s.getMSLevel()) + ", " + s.getNativeID()
                        + "); the non-IMS path needs centroided MS1 and MS2 (centroid them first, e.g. with PeakPickerHiRes).");
         return INCOMPATIBLE_INPUT_DATA;
       }
-    writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path (prototype).");
+      if (s.getMSLevel() == 2 && s.getPrecursors().size() > 1)
+      {
+        writeLogError_("Error: MS2 spectrum " + s.getNativeID() + " has " + String(s.getPrecursors().size())
+                       + " isolation windows (multiplexed DIA); the non-IMS path reads one isolation window per MS2 scan.");
+        return INCOMPATIBLE_INPUT_DATA;
+      }
+    }
+    writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path.");
     // the path walks scans in file order and binary-searches their RTs: put an unordered file in RT order (stable, so
     // an ordered file is left exactly as it is)
     auto rt_less = [](const MSSpectrum& a, const MSSpectrum& b) { return a.getRT() < b.getRT(); };
@@ -4660,20 +4668,8 @@ protected:
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
-    // ponytail: tuning knobs for the prototype via the environment; options once the values settle
-    if (const char* e = getenv("SPX_NOIMS_MS1_MIN_SCANS")) P.ms1_min_scans = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_MS1_SPLIT")) P.ms1_split = atoi(e) != 0;
-    if (const char* e = getenv("SPX_NOIMS_MS2_MIN_SCANS")) P.ms2_min_scans = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_FEW_APEX")) P.few_apex_cycles = atof(e);
-    if (const char* e = getenv("SPX_NOIMS_SINGLES")) P.singles = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_MAX_PEAKS")) P.max_peaks = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_WEIGHT_POW")) P.weight_pow = atof(e);
-    if (const char* e = getenv("SPX_NOIMS_MIN_FRAGS")) P.min_frags = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_MS2_PREC")) P.ms2_prec = atoi(e) != 0;
-    if (const char* e = getenv("SPX_NOIMS_MONO")) P.mono = atoi(e);
     PeakMap res;
-    spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
-    exp.clear(true);
+    spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
     const String part = out + ".part";
     FileHandler().storeExperiment(part, res, {out_type}, log_type_);
     if (out_type == FileTypes::MZML)   // FileHandler does not report a failed write: the file must end in its footer
