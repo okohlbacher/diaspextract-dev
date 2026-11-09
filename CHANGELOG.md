@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**The spectra do not change**: on the diaPASEF test runs they are 1.9.2's, bit for bit, at 1, 2, 16 and 64 threads.
+
+### Changed
+
+- **Faster on many threads.** The thread that reads a tile now decodes the next batch of frames while the threads that
+  help it pick ion mobility on the previous batch; before, it waited for that pick. On a 64-core EPYC the diaPASEF HeLa
+  benchmark run takes 1:31.8 at 64 threads (1.9.2: 1:42.8) and 4:38.7 at 16 (4:44.8). Peak memory at 64 threads rises
+  by about 0.9 GB (one more batch of frames in flight). Only the streamed Bruker `.d` and mzPeak reads change.
+
 ## v1.9.2 — 2026-11-07
 
 **The spectra do not change**: on the diaPASEF test runs they are 1.9.1's, bit for bit, at every thread count.
