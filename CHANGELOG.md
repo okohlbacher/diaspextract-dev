@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**The spectra do not change** (diaPASEF, FAIMS and Orbitrap test runs: 1.9.2's, bit for bit).
+
+### Fixed
+
+- **FAIMS log no longer reports PASEF centroiding.** Biosaur2 read a FAIMS run's per-spectrum compensation voltage as
+  ion mobility and logged "PASEF centroiding: N peaks -> 0 centroided clusters". It did nothing (no per-peak mobility),
+  and the non-IMS path now switches it off.
+- **mzPeak input without ion mobility in builds with the streaming mzPeak reader** (`-DMZPEAK_ROOT`; the release
+  builds have none). Such an archive (Orbitrap, FAIMS) was streamed like a diaPASEF one and, under the default integer
+  detector, refused for lacking an exact TDF calibration. It is now read whole and takes the non-IMS path.
+
 ## v1.9.2 — 2026-11-07
 
 **The spectra do not change**: on the diaPASEF test runs they are 1.9.1's, bit for bit, at every thread count.

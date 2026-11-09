@@ -153,6 +153,9 @@ using diaspextract::String;
         p.setValue("htol", ppm); p.setValue("itol", ppm);
         p.setValue("minmz", mzlo); p.setValue("maxmz", mzhi);
         p.setValue("cmin", 1); p.setValue("cmax", 4);
+        // no per-peak ion mobility on this path: a FAIMS run's per-spectrum CV made Biosaur2 switch on its PASEF
+        // centroiding and IM gating, both no-ops without an IM array but logged as if they ran
+        p.setValue("paseftol", 0.0);
         b.setParameters(p);
         b.setMSData(std::move(ms1));
         FeatureMap fm;   // unused; freed with the algorithm's copy of the MS1 data
