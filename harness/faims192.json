@@ -1,0 +1,1185 @@
+{
+ "cells": {
+  "dia_umpire": {
+   "kind": "diaumpire",
+   "label": "DIA-Umpire SE (DIA_Umpire_SE-2.2.8.jar)",
+   "search_at": 16,
+   "sha256": "143cda2c5907547165b49bb27d23584e2cb75ae5f5eacc28ff4a5511cf48544a",
+   "threads": [
+    16
+   ]
+  },
+  "spx192": {
+   "kind": "cmd",
+   "label": "diaspextract",
+   "search_at": 16,
+   "sha256": "28d38f5aaece686962e7ba8d6b378fe7e6bd8596cb48c5de423d03d149ce7966",
+   "threads": [
+    16
+   ]
+  }
+ },
+ "code": [
+  [
+   "4e4400a72cd959cb6e470611bf58a0051df050bfd6432def88644392e439b526",
+   "54c9849fb6d8ae77eb90862d9927984f18aa12917da31af8d0d3a9ce7a8ab6a5"
+  ]
+ ],
+ "count_rule": "corpus2-count-1: target-only peptides keyed by modified sequence; Sage rank 1, peptide_q <= 0.01, label 1; MSFragger best hyperscore per (peptide, mods), TDC cut after complete equal-score groups",
+ "engines": [
+  "sage",
+  "msfragger"
+ ],
+ "entrap_rule": "corpus2-entrap-1: Wen et al. 2025 lower N_E/(N_T+N_E) and combined N_E(1+1/r)/(N_T+N_E) per charge stratum, bootstrap 95 % CI over accepted peptides (B=1000, seed 1); entrapment iff every protein is ENTRAP_; r per stratum",
+ "entrapment": [],
+ "generated": "2026-11-09T09:33:41-0600",
+ "missing": [],
+ "per_tool": {
+  "dia_umpire": {
+   "ids_sum": {
+    "msfragger_peptides": 192496,
+    "sage_peptides": 209991,
+    "sage_target_peptides": 209991,
+    "spectra": 549082
+   },
+   "samples": 14,
+   "samples_all_p": 14,
+   "scaling_sum_wall": [
+    {
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 2079.79,
+     "wall_min_s": 2079.79,
+     "wall_s": 2079.79
+    }
+   ]
+  },
+  "spx192": {
+   "ids_sum": {
+    "msfragger_peptides": 249399,
+    "sage_peptides": 293928,
+    "sage_target_peptides": 293928,
+    "spectra": 1666827
+   },
+   "samples": 14,
+   "samples_all_p": 14,
+   "scaling_sum_wall": [
+    {
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 223.69,
+     "wall_min_s": 223.69,
+     "wall_s": 223.69
+    }
+   ]
+  }
+ },
+ "pinning": "none",
+ "plan": "faims192",
+ "q_max": 0.01,
+ "repeats": 1,
+ "rows": [
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 21757,
+    "sage_peptides": 24645,
+    "sage_target_peptides": 24645,
+    "spectra": 121193
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-015"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_1",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.5433,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.55,
+     "rss_max_gb": 4.55,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 17.24,
+     "wall_min_s": 17.24,
+     "wall_s": 17.24
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 17089,
+    "sage_peptides": 18092,
+    "sage_target_peptides": 18092,
+    "spectra": 45089
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-015"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_1",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.5172,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 10.56,
+     "rss_max_gb": 10.56,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 154.23,
+     "wall_min_s": 154.23,
+     "wall_s": 154.23
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 19891,
+    "sage_peptides": 23572,
+    "sage_target_peptides": 23572,
+    "spectra": 124107
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-017"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_2",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4715,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 3.64,
+     "rss_max_gb": 3.64,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 15.93,
+     "wall_min_s": 15.93,
+     "wall_s": 15.93
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 11202,
+    "sage_peptides": 12108,
+    "sage_target_peptides": 12108,
+    "spectra": 30381
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-017"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_2",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4081,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 7.94,
+     "rss_max_gb": 7.94,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 123.37,
+     "wall_min_s": 123.37,
+     "wall_s": 123.37
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 21351,
+    "sage_peptides": 20491,
+    "sage_target_peptides": 20491,
+    "spectra": 129654
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-021"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_3",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4884,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.1,
+     "rss_max_gb": 4.1,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 16.58,
+     "wall_min_s": 16.58,
+     "wall_s": 16.58
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 13760,
+    "sage_peptides": 14571,
+    "sage_target_peptides": 14571,
+    "spectra": 36880
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-021"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_3",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4627,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 7.48,
+     "rss_max_gb": 7.48,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 119.11,
+     "wall_min_s": 119.11,
+     "wall_s": 119.11
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 21726,
+    "sage_peptides": 24968,
+    "sage_target_peptides": 24968,
+    "spectra": 122453
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-024"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_4",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.5191,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.17,
+     "rss_max_gb": 4.17,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 16.94,
+     "wall_min_s": 16.94,
+     "wall_s": 16.94
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 16185,
+    "sage_peptides": 17332,
+    "sage_target_peptides": 17332,
+    "spectra": 42252
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-024"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_4",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4825,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 9.25,
+     "rss_max_gb": 9.25,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 144.5,
+     "wall_min_s": 144.5,
+     "wall_s": 144.5
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 20339,
+    "sage_peptides": 19737,
+    "sage_target_peptides": 19737,
+    "spectra": 122002
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-042"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_5",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4913,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 3.89,
+     "rss_max_gb": 3.89,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 15.92,
+     "wall_min_s": 15.92,
+     "wall_s": 15.92
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 12918,
+    "sage_peptides": 14050,
+    "sage_target_peptides": 14050,
+    "spectra": 34317
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-042"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_5",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4463,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 8.41,
+     "rss_max_gb": 8.41,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 122.32,
+     "wall_min_s": 122.32,
+     "wall_s": 122.32
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 19162,
+    "sage_peptides": 22818,
+    "sage_target_peptides": 22818,
+    "spectra": 124097
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-044"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_6",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4965,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 3.66,
+     "rss_max_gb": 3.66,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 15.41,
+     "wall_min_s": 15.41,
+     "wall_s": 15.41
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 11945,
+    "sage_peptides": 12979,
+    "sage_target_peptides": 12979,
+    "spectra": 32349
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-044"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_35V_6",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.4374,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 10.42,
+     "rss_max_gb": 10.42,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 121.23,
+     "wall_min_s": 121.23,
+     "wall_s": 121.23
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 16513,
+    "sage_peptides": 21270,
+    "sage_target_peptides": 21270,
+    "spectra": 117368
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-058"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_1",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.5974,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.43,
+     "rss_max_gb": 4.43,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 17.33,
+     "wall_min_s": 17.33,
+     "wall_s": 17.33
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 13372,
+    "sage_peptides": 14756,
+    "sage_target_peptides": 14756,
+    "spectra": 37311
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-058"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_1",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6306,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 10.99,
+     "rss_max_gb": 10.99,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 145.06,
+     "wall_min_s": 145.06,
+     "wall_s": 145.06
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 15085,
+    "sage_peptides": 19887,
+    "sage_target_peptides": 19887,
+    "spectra": 126839
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-075"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_2",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6197,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.64,
+     "rss_max_gb": 4.64,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 18.13,
+     "wall_min_s": 18.13,
+     "wall_s": 18.13
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 12824,
+    "sage_peptides": 14470,
+    "sage_target_peptides": 14470,
+    "spectra": 39521
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-075"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_2",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6641,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 19.62,
+     "rss_max_gb": 19.62,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 161.38,
+     "wall_min_s": 161.38,
+     "wall_s": 161.38
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 15765,
+    "sage_peptides": 20304,
+    "sage_target_peptides": 20304,
+    "spectra": 121571
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-078"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_3",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6102,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.44,
+     "rss_max_gb": 4.44,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 17.54,
+     "wall_min_s": 17.54,
+     "wall_s": 17.54
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 13109,
+    "sage_peptides": 14505,
+    "sage_target_peptides": 14505,
+    "spectra": 37656
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-078"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_3",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6488,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 17.51,
+     "rss_max_gb": 17.51,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 150.51,
+     "wall_min_s": 150.51,
+     "wall_s": 150.51
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 17037,
+    "sage_peptides": 20659,
+    "sage_target_peptides": 20659,
+    "spectra": 120563
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-080"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_4",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6263,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.93,
+     "rss_max_gb": 4.93,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 18.16,
+     "wall_min_s": 18.16,
+     "wall_s": 18.16
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 13954,
+    "sage_peptides": 15573,
+    "sage_target_peptides": 15573,
+    "spectra": 41537
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-080"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_4",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6918,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 14.85,
+     "rss_max_gb": 14.85,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 163.58,
+     "wall_min_s": 163.58,
+     "wall_s": 163.58
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "spx192",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 16557,
+    "sage_peptides": 21197,
+    "sage_target_peptides": 21197,
+    "spectra": 120578
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-081"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_5",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6245,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.56,
+     "rss_max_gb": 4.56,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 18.02,
+     "wall_min_s": 18.02,
+     "wall_s": 18.02
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": false,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 13889,
+    "sage_peptides": 15541,
+    "sage_target_peptides": 15541,
+    "spectra": 39637
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-081"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_5",
+   "scaling": [
+    {
+     "contended": false,
+     "cpu_util": 0.6476,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 15.51,
+     "rss_max_gb": 15.51,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 150.24,
+     "wall_min_s": 150.24,
+     "wall_s": 150.24
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "spx192",
+   "contended": true,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 14802,
+    "sage_peptides": 19788,
+    "sage_target_peptides": 19788,
+    "spectra": 116137
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-017"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_6",
+   "scaling": [
+    {
+     "contended": true,
+     "cpu_util": 0.6892,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 4.49,
+     "rss_max_gb": 4.49,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 16.14,
+     "wall_min_s": 16.14,
+     "wall_s": 16.14
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": true,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 12606,
+    "sage_peptides": 14267,
+    "sage_target_peptides": 14267,
+    "spectra": 37256
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-017"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_KLOF_NONE_6",
+   "scaling": [
+    {
+     "contended": true,
+     "cpu_util": 0.6378,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 16.29,
+     "rss_max_gb": 16.29,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 152.31,
+     "wall_min_s": 152.31,
+     "wall_s": 152.31
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "spx192",
+   "contended": true,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 14357,
+    "sage_peptides": 16752,
+    "sage_target_peptides": 16752,
+    "spectra": 89198
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-021"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_HELA_35V",
+   "scaling": [
+    {
+     "contended": true,
+     "cpu_util": 0.5181,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 3.09,
+     "rss_max_gb": 3.09,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 9.76,
+     "wall_min_s": 9.76,
+     "wall_s": 9.76
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": true,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 13435,
+    "sage_peptides": 14113,
+    "sage_target_peptides": 14113,
+    "spectra": 41607
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-021"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_HELA_35V",
+   "scaling": [
+    {
+     "contended": true,
+     "cpu_util": 0.5817,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 8.9,
+     "rss_max_gb": 8.9,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 179.93,
+     "wall_min_s": 179.93,
+     "wall_s": 179.93
+    }
+   ],
+   "scheme": "Orbitrap Eclipse FAIMS -35V"
+  },
+  {
+   "cell": "spx192",
+   "contended": true,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 15057,
+    "sage_peptides": 17840,
+    "sage_target_peptides": 17840,
+    "spectra": 111067
+   },
+   "kind": "cmd",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-042"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_HELA_NONE",
+   "scaling": [
+    {
+     "contended": true,
+     "cpu_util": 0.5875,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 3.28,
+     "rss_max_gb": 3.28,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 10.59,
+     "wall_min_s": 10.59,
+     "wall_s": 10.59
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  },
+  {
+   "cell": "dia_umpire",
+   "contended": true,
+   "cores": 128,
+   "cpu_model": "AMD EPYC 7543 32-Core Processor",
+   "ids": {
+    "msfragger_peptides": 16208,
+    "sage_peptides": 17634,
+    "sage_target_peptides": 17634,
+    "spectra": 53289
+   },
+   "kind": "diaumpire",
+   "label": "PXD029902",
+   "nodes": [
+    "node2-042"
+   ],
+   "numa_nodes": 2,
+   "physical_cores": 64,
+   "sample": "FAIMS_HELA_NONE",
+   "scaling": [
+    {
+     "contended": true,
+     "cpu_util": 0.6752,
+     "efficiency": 1.0,
+     "efficiency_physical": 1.0,
+     "n": 1,
+     "p": 16,
+     "rss_gb": 11.28,
+     "rss_max_gb": 11.28,
+     "smt": false,
+     "speedup": 1.0,
+     "spread": null,
+     "wall_max_s": 192.02,
+     "wall_min_s": 192.02,
+     "wall_s": 192.02
+    }
+   ],
+   "scheme": "Orbitrap Eclipse no FAIMS"
+  }
+ ]
+}
