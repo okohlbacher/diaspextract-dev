@@ -2977,6 +2977,8 @@ protected:
     setMinFloat_("noims:min_corr", 0.0);
     setMaxFloat_("noims:min_corr", 1.0);
     registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
+    registerStringOption_("noims:instrument", "<type>", "auto", "Non-IMS path: mass analyzer the defaults are tuned for; auto = from the input's instrument (TOF without Orbitrap or FTICR = tof).", false, true);
+    setValidStrings_("noims:instrument", {"auto", "orbitrap", "tof"});
     registerStringOption_("noims:tof", "<mode>", "off", "Non-IMS path: Biosaur2's TOF noise filter on MS1.", false, true);
     setValidStrings_("noims:tof", {"off", "on"});
     registerDoubleOption_("noims:min_intensity", "<i>", 1.0, "Non-IMS path: least MS1 peak intensity for precursor detection (Biosaur2 mini).", false, true);
@@ -2989,6 +2991,9 @@ protected:
     registerDoubleOption_("noims:weight_power", "<p>", 24.0, "Non-IMS path: fragment intensity is weighted by r^p.", false, true);
     registerDoubleOption_("noims:ms2_ppm", "<ppm>", 0.0, "Non-IMS path: MS2 mass-trace tolerance; 0 = noims:ppm.", false, true);
     setMinFloat_("noims:ms2_ppm", 0.0);
+    registerDoubleOption_("noims:split", "<f>", 0.0, "Non-IMS path: split MS2 traces at elution valleys below f x the lower flanking maximum; 0 = off.", false, true);
+    setMinFloat_("noims:split", 0.0);
+    setMaxFloat_("noims:split", 1.0);
     setMinInt_("noims:max_fragments", 1);
     setMinFloat_("noims:weight_power", 0.0);
     setMinFloat_("noims:min_fragment_intensity", 0.0);
@@ -4518,6 +4523,10 @@ protected:
     return writeNoIms_(res, out, out_type);
   }
 
+  // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage peptides at 1 %)
+  static constexpr double TOF_MS2_PPM = 5.0, TOF_SPLIT = 0.5;
+  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3;
+
   ExitCodes noImsSpectra_(PeakMap& exp, PeakMap& res)
   {
     for (const MSSpectrum& s : exp)
@@ -4557,6 +4566,32 @@ protected:
     P.max_frags = getIntOption_("noims:max_fragments");
     P.weight_pow = getDoubleOption_("noims:weight_power");
     P.ms2_ppm = getDoubleOption_("noims:ms2_ppm");
+    P.split = getDoubleOption_("noims:split");
+    // [tof] TOF analyzers (SWATH) record each fragment m/z with more scatter and many unrelated ions per scan: wide MS2
+    // traces join neighbouring ions and recurring m/z into one long trace whose single apex reaches one precursor only.
+    // TOF input therefore gets narrow MS2 traces split into elution peaks, and fewer precursors: charge >= 2, seen in
+    // >= 3 MS1 scans (charge 1 gave 0.2 % PSMs per spectrum on SWATH). Only options left at their defaults change; Orbitrap and FTICR input keeps every default.
+    String inst = getStringOption_("noims:instrument");
+    if (inst == "auto")
+    {
+      bool tof = false, ft = false;
+      for (const auto& a : exp.getInstrument().getMassAnalyzers())
+      {
+        tof |= a.getType() == MassAnalyzer::AnalyzerType::TOF;
+        ft |= a.getType() == MassAnalyzer::AnalyzerType::ORBITRAP || a.getType() == MassAnalyzer::AnalyzerType::FOURIERTRANSFORM;
+      }
+      inst = tof && !ft ? "tof" : "orbitrap";
+    }
+    if (inst == "tof")
+    {
+      const spx_noims::Params D;
+      if (P.ms2_ppm == D.ms2_ppm) P.ms2_ppm = TOF_MS2_PPM;
+      if (P.split == D.split) P.split = TOF_SPLIT;
+      if (P.min_charge == D.min_charge) P.min_charge = TOF_MIN_CHARGE;
+      if (P.min_hill_scans == D.min_hill_scans) P.min_hill_scans = TOF_MIN_HILL_SCANS;
+      writeLogInfo_("[noims] TOF input: MS2 traces at " + String(P.ms2_ppm) + " ppm split at valleys below " + String(P.split)
+                    + ", precursors of charge >= " + String(P.min_charge) + " seen in >= " + String(P.min_hill_scans) + " MS1 scans");
+    }
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
     return EXECUTION_OK;
   }
