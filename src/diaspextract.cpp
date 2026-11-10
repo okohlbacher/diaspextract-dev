@@ -2994,6 +2994,10 @@ protected:
     registerDoubleOption_("noims:split", "<f>", 0.0, "Non-IMS path: split MS2 traces at elution valleys below f x the lower flanking maximum; 0 = off.", false, true);
     setMinFloat_("noims:split", 0.0);
     setMaxFloat_("noims:split", 1.0);
+    registerStringOption_("noims:envelope_charges", "<mode>", "first", "Non-IMS path: MS2 isotope envelopes: first = a -1 isotope at the highest matching charge drops the envelope; all = try the lower charges.", false, true);
+    setValidStrings_("noims:envelope_charges", {"first", "all"});
+    registerStringOption_("noims:precursor_peaks", "<mode>", "keep", "Non-IMS path: the precursor's own isotope peaks in its spectrum: keep or drop.", false, true);
+    setValidStrings_("noims:precursor_peaks", {"keep", "drop"});
     setMinInt_("noims:max_fragments", 1);
     setMinFloat_("noims:weight_power", 0.0);
     setMinFloat_("noims:min_fragment_intensity", 0.0);
@@ -4567,6 +4571,8 @@ protected:
     P.weight_pow = getDoubleOption_("noims:weight_power");
     P.ms2_ppm = getDoubleOption_("noims:ms2_ppm");
     P.split = getDoubleOption_("noims:split");
+    P.env_all_charges = getStringOption_("noims:envelope_charges") == "all";
+    P.drop_precursor = getStringOption_("noims:precursor_peaks") == "drop";
     // [tof] TOF analyzers (SWATH) record each fragment m/z with more scatter and many unrelated ions per scan: wide MS2
     // traces join neighbouring ions and recurring m/z into one long trace whose single apex reaches one precursor only.
     // TOF input therefore gets narrow MS2 traces split into elution peaks, and fewer precursors: charge >= 2, seen in

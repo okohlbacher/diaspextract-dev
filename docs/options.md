@@ -212,6 +212,8 @@ exit code 11.
 | `-noims:instrument` | auto | Mass analyzer the defaults are tuned for: `auto` (from the input's instrument description: TOF without Orbitrap or FTICR is `tof`), `orbitrap`, `tof`. On `tof`, options left at their defaults change to: `-noims:ms2_ppm 5`, `-noims:split 0.5`, `-noims:min_charge 2`, `-noims:min_hill_scans 3`. |
 | `-noims:ms2_ppm` | 0 | m/z tolerance of the MS2 mass traces (ppm); 0 = `-noims:ppm`. |
 | `-noims:split` | 0 | Split MS2 traces into elution peaks at valleys below this fraction of both flanking maxima; 0 = off. 0 to 1. |
+| `-noims:envelope_charges` | first | Isotope envelopes found in MS2: `first` drops an envelope whose highest matching charge has a −1 isotope; `all` tries the lower charges. |
+| `-noims:precursor_peaks` | keep | The precursor's own isotope peaks (mono −1 to +3) in its spectrum: `keep` or `drop`. |
 | `-noims:min_charge` | 1 | Smallest precursor charge (Biosaur2 `cmin`). 1 to 4. |
 | `-noims:min_fragments` | 3 | Fewest fragments a spectrum needs. |
 | `-noims:max_fragments` | 200 | Most fragments kept per spectrum, by weighted intensity. |

@@ -53,6 +53,8 @@ using diaspextract::String;
     double weight_pow = 24.0;   ///< fragment intensity x r^weight_pow
     double ms2_ppm = 0;         ///< MS2 mass-trace tolerance; 0 = ppm
     double split = 0;           ///< split MS2 traces at elution valleys below split x the lower flanking maximum; 0 = off
+    bool env_all_charges = false; ///< MS2 envelopes: a -1 isotope at one charge moves on to the next lower charge (else: no precursor)
+    bool drop_precursor = false;  ///< drop the precursor's own isotope peaks (mono-1 .. mono+3) from its spectrum
   };
 
   struct Stats { size_t windows = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -127,7 +129,7 @@ using diaspextract::String;
 
     /// isotope envelopes (z = 2..4) from MS2 traces; a trace is a mono if it has a +1 isotope and no -1 isotope at the same charge
     // ponytail: greedy, highest charge first, no averagine check; add an intensity-pattern test if charge errors show up
-    inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute)
+    inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute, bool all_charges = false)
     {
       std::vector<size_t> o(mt.size());
       std::iota(o.begin(), o.end(), 0);
@@ -154,7 +156,7 @@ using diaspextract::String;
         for (int z = 4; z >= 2; --z)
         {
           if (partner(k, mz[k] + C13 / z) < 0) continue;
-          if (partner(k, mz[k] - C13 / z) >= 0) break;   // not the lightest isotope at this charge: not a mono
+          if (partner(k, mz[k] - C13 / z) >= 0) { if (all_charges) continue; break; }   // not the lightest isotope at this charge
           if (mz[k] >= lo && mz[k] < hi)
           {
             const MassTrace& t = mt[o[k]];
@@ -231,6 +233,11 @@ using diaspextract::String;
       {
         const Frag& f = fr[k];
         if (f.mz - PROTON > neutral - 56.0) continue;   // heavier than the precursor allows at z = 1
+        if (P.drop_precursor)
+        {
+          const double iso = std::round((f.mz - p.mz) * p.z / C13);
+          if (iso >= -1 && iso <= 3 && std::fabs(f.mz - p.mz - iso * C13 / p.z) <= f.mz * P.ppm * 1e-6) continue;   // unfragmented precursor
+        }
         if (!few)
         {
           double r;
@@ -378,7 +385,7 @@ using diaspextract::String;
       t_mtd[w] = std::chrono::duration<double>(clk::now() - tw).count();
       m2[w].clear(true);
       // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)
-      std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle);
+      std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle, P.env_all_charges);
       const size_t n1 = prec.size();
       for (auto& c : q)
       {
