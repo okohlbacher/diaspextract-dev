@@ -157,3 +157,53 @@ writes the isolation-window centre as PEPMASS and no charge, so it is searched M
 
 Results: `<kit>/results/<plan>/` (corpus pairs: `results/corpus171/corpus-corpus171_rc160/`). Records carry the harness
 sha256; the table refuses records of two harness versions in one plan, so baseline.py must not change while a plan runs.
+
+## `baseline2.py`: the paper rules of `corpus2.py` (2026-11-08)
+
+`harness/baseline2.py` runs the same Slurm design and CLI as `baseline.py` (which stays frozen, like `corpus.py` and
+`corpus2.py`), but every search, count and score goes through `corpus2.py`: it imports `baseline.py`, rebinds its
+`corpus` module to `corpus2`, and replaces the functions it must change (list `OVERRIDES` in the file). `submit` ships
+all four files to `<results>/harness/b2-<sha16>/`; the job runs `baseline2.py job --spec ...`.
+
+```
+python3 harness/baseline2.py selftest                       # offline, fake tools; prints N/N
+python3 harness/baseline2.py dry-run|preflight|submit|status|fetch|table|submit-corpus|corpus-table ...   # as baseline.py
+python3 harness/baseline2.py manifest --plan P[,P2] [--source remote|DIR] --out manifest.json [--records DIR] [--spx CELL]
+```
+
+What changes against `baseline.py`:
+- **Counts**: corpus2 `COUNT_RULE` (Sage target-only; MSFragger TDC cut after complete equal-score groups), plus
+  corpus2's per-charge split (`by_charge`, G-V19) on every Sage/MSFragger search.
+- **Entrapment** (`entrapment: true`): `entrap` (Sage) and `entrap_msf` (MSFragger) searches on every mzML cell, Wen et
+  al. lower and combined upper bound per charge stratum, r per stratum, bootstrap CIs. Tools then need `sage_entrap`,
+  `entrapment` (+ `msfragger_entrap_params` with MSFragger); `search_db_sha256` needs `entrap_fasta` (+ `entrap_msf_db`).
+  A cell with its own `sage_config`/`msfragger_params` must set `entrapment: false`.
+- **Engine pins**: `engine_sha256: {sage, msfragger_jar}` is required (one key per engine run); a differing run-local
+  copy aborts (G-V12). Search records carry `engine_version`, run records `engine_versions`.
+- **Measurement hashes**: searches carry corpus2's search/score/cells hashes (same values as the corpus2 records behind
+  `manifest-corpus2.json`); run records carry `measure_sha256.run` (pinned in the selftest, `RUN_MEASURE_PIN`).
+- **Cell kind `diaumpire`** (DIA-UMPIRE SE 2.2.8, `.mzML` samples only): `jar`, `params`, `sha256: {jar, params}`,
+  optional `java_args` (e.g. `[-Xmx100g]`; not `-jar`, `-cp`, `-Djava.io.tmpdir`) and `env`. Untimed before the run: the
+  staged input hard-linked as `run.mzML`, the pinned params copied with `Thread = p`. Timed: `java
+  -Djava.io.tmpdir=<jnatmp> [java_args] -jar <jar> run.mzML diaumpire_se.params`. Untimed after it: `run_Q1/Q2/Q3.mgf`
+  converted to one `pseudo.mzML` by the stdlib `mgf_to_mzml` (Q1, Q2, Q3 order; scan numbers 1..N unique across them;
+  peaks m/z-sorted, intensity <= 0 dropped; PEPMASS -> selected ion + isolation target; CHARGE -> charge state when
+  present; RTINSECONDS, negative -> 0; every cvParam with a value, so `fix_mzml_cvparams.py` is a no-op). The mzML count
+  must equal the MGFs' BEGIN IONS count, and `corpus2.mzml_scan` must find every spectrum decodable, sorted and with a
+  selected ion (G-B09). Both engines then read that mzML through corpus2's read checks. Why convert: corpus2's search
+  path (spectrumList count, Sage read check, MSFragger cvParam fix and `Scans =` check, patch) is mzML-only, so a
+  converted file keeps every read check and gives both engines the same input; MSFragger 4.4.1 reads MGF natively,
+  Sage 0.14 support for MGF could not be verified offline and is not relied on.
+- **Figure records** (`manifest --records DIR`): make_figures.py reads `<id>.pair.json` and `<id>.<tool>.<engine>.json`,
+  not per-thread run records. `manifest` writes DIR/records/ in corpus2's layout: per sample one pair (the diaspextract
+  cell as arm `spx`, the diatracer cell as `dt`, both at `search_at`, repeat 0; `pair_run` = `<spx run>+<dt run>`;
+  `failed` if either run failed) and their searches renamed to `spx`/`dt` (`cell_run` keeps the cell's run id), and the
+  manifest (`corpus2.build_manifest`, G-V13). `make_figures.py --records DIR --manifest manifest.json` then loads them.
+  Other cells (DIA-NN, DIA-UMPIRE, cmd) are in the table, not in the figure records.
+
+New guards: G-B08 DIA-UMPIRE jar/params differ from the pin, params without exactly one `Thread =` line; G-B09 Q1..Q3
+missing or stale, an unparseable MGF (global keys, a line that is no peak, no PEPMASS/RTINSECONDS, not one positive
+charge, an open block), 0 spectra, or the converted mzML differing from the MGFs; G-B10 an ok search counted by another
+rule or an entrapment record of another estimator (table, manifest), figure records without one diaspextract and one
+diatracer cell or with different search_at/engines/run code. The existing plans (`orbi171`, `scaling171`, ...) need
+`engine_sha256` (and, for DIA-UMPIRE as a `diaumpire` cell, `jar`/`params`/`sha256`) before baseline2.py runs them.

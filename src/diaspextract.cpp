@@ -4662,7 +4662,8 @@ protected:
     // an mzML is always read whole: the frame-by-frame reader reads a .d (or an mzPeak archive) only
     const FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
 #ifdef DIASPEXTRACT_WITH_MZPEAK
-    const bool streamable = in_type == FileTypes::BRUKER_TDF || in_type == FileTypes::MZPEAK;
+    // [noims] an mzPeak archive without ion mobility is read whole, as an mzML is
+    const bool streamable = in_type == FileTypes::BRUKER_TDF || (in_type == FileTypes::MZPEAK && spx::mzPeakHasIonMobility(in));
 #else
     const bool streamable = in_type == FileTypes::BRUKER_TDF;
 #endif

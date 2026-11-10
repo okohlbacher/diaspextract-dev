@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-**The spectra do not change**: on the diaPASEF test runs they are 1.9.2's, bit for bit, at 1, 2, 16 and 64 threads.
+**The spectra do not change** (diaPASEF, FAIMS and Orbitrap test runs: 1.9.2's, bit for bit; diaPASEF at 1, 2, 16 and 64 threads).
 
 ### Changed
 
@@ -10,6 +10,15 @@
   help it pick ion mobility on the previous batch; before, it waited for that pick. On a 64-core EPYC the diaPASEF HeLa
   benchmark run takes 1:31.8 at 64 threads (1.9.2: 1:42.8) and 4:38.7 at 16 (4:44.8). Peak memory at 64 threads rises
   by about 0.9 GB (one more batch of frames in flight). Only the streamed Bruker `.d` and mzPeak reads change.
+
+### Fixed
+
+- **FAIMS log no longer reports PASEF centroiding.** Biosaur2 read a FAIMS run's per-spectrum compensation voltage as
+  ion mobility and logged "PASEF centroiding: N peaks -> 0 centroided clusters". It did nothing (no per-peak mobility),
+  and the non-IMS path now switches it off.
+- **mzPeak input without ion mobility in builds with the streaming mzPeak reader** (`-DMZPEAK_ROOT`; the release
+  builds have none). Such an archive (Orbitrap, FAIMS) was streamed like a diaPASEF one and, under the default integer
+  detector, refused for lacking an exact TDF calibration. It is now read whole and takes the non-IMS path.
 
 ## v1.9.2 — 2026-11-07
 
