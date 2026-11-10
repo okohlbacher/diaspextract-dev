@@ -81,7 +81,7 @@ mk_node() {
    'I=../src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h' 'T=../src/topp' \
    'diaspextract: bin/diaspextract' \
    'lib/libOpenMS.so: $(I) ../src/openms/source/FORMAT/BrukerTimsFile.cpp' '\tcat $^ > $@' \
-   'bin/diaspextract: lib/libOpenMS.so $(T)/diaspextract.cpp $(T)/TdfLoad.h $(T)/MzPeakStreamLoad.h $(T)/DnoiseMs1.h' \
+   'bin/diaspextract: lib/libOpenMS.so $(T)/diaspextract.cpp $(T)/TdfLoad.h $(T)/MzPeakStreamLoad.h $(T)/DnoiseMs1.h $(T)/NoImsPath.h $(T)/PortableMath.h' \
    '\tcat $^ > $@.part' \
    '\ttouch ../building; sleep $$(cat ../slow); rm -f ../building' \
    '\tif grep -q BREAK_BUILD $(T)/diaspextract.cpp; then sleep 1; echo "error: forced compile failure" >&2; exit 1; fi' \
@@ -104,6 +104,8 @@ set_version() {  # repo tag calib dnoise_ok tdf_ok [cpp extra]
   printf '#define TDF_OK %s // TdfLoad %s\n' "$5" "$2" > $D/src/TdfLoad.h
   printf '// MzPeakStreamLoad %s\n' "$2" > $D/src/MzPeakStreamLoad.h
   printf '#define DNOISE_OK %s // %s\n' "$4" "$2" > $D/src/DnoiseMs1.h
+  printf '// NoImsPath %s\n' "$2" > $D/src/NoImsPath.h
+  printf '// PortableMath %s\n' "$2" > $D/src/PortableMath.h
   # both include forms the real tests may use; each test fails unless it compiled against the staged headers
   printf '#include "DnoiseMs1.h"\n#include <OpenMS/FORMAT/TdfMzCalibration.h>\n#include <cstring>\nint main() { return DNOISE_OK && !std::strcmp(CALIB_TAG, "%s") ? 0 : 1; } // %s\n' "$3" "$2" > $D/tests/test_dnoise_ms1.cpp
   printf '#include "TdfLoad.h"\n#include "../src/TdfMzCalibration.h"\n#include <sqlite3.h>\n#include <cstring>\nint main() { return TDF_OK && fake_sqlite3_version() == 3049002 && !std::strcmp(CALIB_TAG, "%s") ? 0 : 1; } // %s\n' "$3" "$2" > $D/tests/test_tdf_load.cpp
@@ -120,13 +122,14 @@ shaf() { shasum -a 256 "$1" | cut -d' ' -f1; }
 pv()   { sed -n "s/^$1=//p" "$2"; }
 tree_is() { local W=$V/ver/$1
   same $W/src/diaspextract.cpp $O/src/topp/diaspextract.cpp && same $W/src/TdfMzCalibration.h $O/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h &&
-  same $W/src/TdfLoad.h $O/src/topp/TdfLoad.h && same $W/src/MzPeakStreamLoad.h $O/src/topp/MzPeakStreamLoad.h && same $W/src/DnoiseMs1.h $O/src/topp/DnoiseMs1.h; }
+  same $W/src/TdfLoad.h $O/src/topp/TdfLoad.h && same $W/src/MzPeakStreamLoad.h $O/src/topp/MzPeakStreamLoad.h && same $W/src/DnoiseMs1.h $O/src/topp/DnoiseMs1.h &&
+  same $W/src/NoImsPath.h $O/src/topp/NoImsPath.h && same $W/src/PortableMath.h $O/src/topp/PortableMath.h; }
 ship_is() { local W=$V/ver/$1 f; for f in test/test_diaspextract.py bench/semantic_digest.py bench/mzml_specdiff.py bench/tile_concat.py bench/launch.sh; do same $W/$f "$TOOLS/$(basename $f)" || return 1; done
   same $W/tests/calibration_golden.json $TESTS/calibration_golden.json && same $W/tests/test_dnoise_ms1.cpp $R/diaspextract_unit/test_dnoise_ms1.cpp &&
   same $W/tests/test_tdf_load.cpp $R/diaspextract_unit/test_tdf_load.cpp && [ -e $R/diaspextract_unit/test_dnoise_ms1.log ] && [ -e $R/diaspextract_unit/test_tdf_load.log ]; }
 prov_is() { local W=$V/ver/$1 P=${2:-$PROV}
   [ "$(pv src_sha256 $P)" = "$(shaf $W/src/diaspextract.cpp)" ] && [ "$(pv calibration_header_sha256 $P)" = "$(shaf $W/src/TdfMzCalibration.h)" ] &&
-  [ "$(pv tool_headers_sha256 $P)" = "$(cat $W/src/TdfLoad.h $W/src/MzPeakStreamLoad.h $W/src/DnoiseMs1.h | shasum -a 256 | cut -d' ' -f1)" ] &&
+  [ "$(pv tool_headers_sha256 $P)" = "$(cat $W/src/TdfLoad.h $W/src/MzPeakStreamLoad.h $W/src/DnoiseMs1.h $W/src/NoImsPath.h $W/src/PortableMath.h | shasum -a 256 | cut -d' ' -f1)" ] &&
   [ "$(pv git $P)" = "$(cat $W/REV)" ]; }
 ut_is() { [ "$(pv dnoise_unit_test $PROV)" = passed ] && [ "$(pv tdf_load_unit_test $PROV)" = "$1" ]; }
 prov_truthful() { [ -e $PROV ] && [ "$(pv binary_sha256 $PROV)" = "$(shaf $O/build/bin/diaspextract)" ] && [ "$(pv libopenms_sha256 $PROV)" = "$(shaf $O/build/lib/libOpenMS.so)" ]; }
