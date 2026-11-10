@@ -49,6 +49,8 @@ using diaspextract::String;
     int min_frags = 3;          ///< fewest fragments a spectrum needs
     double min_frag_intensity = 0; ///< least apex intensity of a fragment trace
     int min_frag_points = 1;    ///< fewest scans of a fragment trace
+    int max_frags = 200;        ///< most intense fragments kept per spectrum (by weighted intensity)
+    double weight_pow = 24.0;   ///< fragment intensity x r^weight_pow
   };
 
   struct Stats { size_t windows = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -56,8 +58,6 @@ using diaspextract::String;
   namespace detail
   {
     constexpr double C13 = 1.0033548, PROTON = 1.007276;
-    constexpr int MAX_PEAKS = 200;          ///< most intense fragments kept per spectrum (by weighted intensity)
-    constexpr double WEIGHT_POW = 24.0;     ///< fragment intensity x r^24 (few-point profiles: x exp(-(apex distance / cycle)^2)^6)
     constexpr double FEW_APEX_CYCLES = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
 
     struct Prec { double mz, rt, rt_lo, rt_hi, inten; int z; std::vector<double> rt_pts, int_pts; };
@@ -189,7 +189,7 @@ using diaspextract::String;
 
     /// the spectrum of precursor @p p from the window's fragments (sorted by apex RT), or an empty one (no MS level)
     inline MSSpectrum assemble(const Prec& p, const std::vector<Frag>& fr, const std::vector<double>& grid, double cycle,
-                               double min_corr, int min_frags, double lo, double hi)
+                               const Params& P, double lo, double hi)
     {
       MSSpectrum s;
       const size_t g0 = std::lower_bound(grid.begin(), grid.end(), p.rt_lo) - grid.begin();
@@ -211,16 +211,16 @@ using diaspextract::String;
           std::fill(fp.begin(), fp.end(), 0.0);
           for (const auto& q : f.gpts) if (q.first >= g0 && q.first < g1) fp[q.first - g0] = q.second;
           const double r = pearson(pp, fp);
-          if (r < min_corr) continue;
-          pk.emplace_back(f.inten * pmath::pow(r, WEIGHT_POW), f.mz);
+          if (r < P.min_corr) continue;
+          pk.emplace_back(f.inten * pmath::pow(r, P.weight_pow), f.mz);
           continue;
         }
         const double d = (f.apex_rt - p.rt) / cycle;
-        pk.emplace_back(f.inten * pmath::exp(-d * d * WEIGHT_POW / 4.0), f.mz);
+        pk.emplace_back(f.inten * pmath::exp(-d * d * P.weight_pow / 4.0), f.mz);
       }
-      if ((int)pk.size() < min_frags) return s;
-      if ((int)pk.size() > MAX_PEAKS)
-      { std::nth_element(pk.begin(), pk.begin() + MAX_PEAKS, pk.end(), std::greater<>()); pk.resize(MAX_PEAKS); }
+      if ((int)pk.size() < P.min_frags) return s;
+      if ((int)pk.size() > P.max_frags)
+      { std::nth_element(pk.begin(), pk.begin() + P.max_frags, pk.end(), std::greater<>()); pk.resize(P.max_frags); }
       // by m/z, equal m/z by intensity: nth_element leaves the kept peaks in an unspecified order
       std::sort(pk.begin(), pk.end(), [](const auto& a, const auto& b) { return std::tie(a.second, a.first) < std::tie(b.second, b.first); });
       s.setMSLevel(2);
@@ -374,7 +374,7 @@ using diaspextract::String;
       #pragma omp taskloop grainsize(256) default(shared)
       for (long i = 0; i < np; ++i)
       {
-        try { slot[i] = assemble(prec[i], fr, gr, cycle, P.min_corr, P.min_frags, lo, hi); }
+        try { slot[i] = assemble(prec[i], fr, gr, cycle, P, lo, hi); }
         catch (...)
         {
           #pragma omp critical(noims_err)
