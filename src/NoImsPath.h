@@ -51,6 +51,7 @@ using diaspextract::String;
     int min_frag_points = 1;    ///< fewest scans of a fragment trace
     int max_frags = 200;        ///< most intense fragments kept per spectrum (by weighted intensity)
     double weight_pow = 24.0;   ///< fragment intensity x r^weight_pow
+    double ms2_ppm = 0;         ///< MS2 mass-trace tolerance; 0 = ppm
   };
 
   struct Stats { size_t windows = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -335,7 +336,7 @@ using diaspextract::String;
         if (owner(it->mz) == (long)w) prec.push_back(*it);
 
       // MS2 traces on the window's scan grid
-      const std::vector<MassTrace> ft = traces(m2[w], P.ppm);
+      const std::vector<MassTrace> ft = traces(m2[w], P.ms2_ppm > 0 ? P.ms2_ppm : P.ppm);
       ntr2[w] = ft.size();
       m2[w].clear(true);
       // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)

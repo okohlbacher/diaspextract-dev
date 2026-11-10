@@ -2987,6 +2987,8 @@ protected:
     registerIntOption_("noims:min_fragment_points", "<n>", 1, "Non-IMS path: fewest MS2 scans of a fragment trace.", false, true);
     registerIntOption_("noims:max_fragments", "<n>", 200, "Non-IMS path: most fragments kept per spectrum.", false, true);
     registerDoubleOption_("noims:weight_power", "<p>", 24.0, "Non-IMS path: fragment intensity is weighted by r^p.", false, true);
+    registerDoubleOption_("noims:ms2_ppm", "<ppm>", 0.0, "Non-IMS path: MS2 mass-trace tolerance; 0 = noims:ppm.", false, true);
+    setMinFloat_("noims:ms2_ppm", 0.0);
     setMinInt_("noims:max_fragments", 1);
     setMinFloat_("noims:weight_power", 0.0);
     setMinFloat_("noims:min_fragment_intensity", 0.0);
@@ -4554,6 +4556,7 @@ protected:
     P.min_frag_points = getIntOption_("noims:min_fragment_points");
     P.max_frags = getIntOption_("noims:max_fragments");
     P.weight_pow = getDoubleOption_("noims:weight_power");
+    P.ms2_ppm = getDoubleOption_("noims:ms2_ppm");
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
     return EXECUTION_OK;
   }
