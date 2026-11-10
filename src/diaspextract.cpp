@@ -2977,6 +2977,21 @@ protected:
     setMinFloat_("noims:min_corr", 0.0);
     setMaxFloat_("noims:min_corr", 1.0);
     registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
+    registerStringOption_("noims:tof", "<mode>", "off", "Non-IMS path: Biosaur2's TOF noise filter on MS1.", false, true);
+    setValidStrings_("noims:tof", {"off", "on"});
+    registerDoubleOption_("noims:min_intensity", "<i>", 1.0, "Non-IMS path: least MS1 peak intensity for precursor detection (Biosaur2 mini).", false, true);
+    registerIntOption_("noims:min_hill_scans", "<n>", 2, "Non-IMS path: fewest MS1 scans per precursor hill (Biosaur2 minlh).", false, true);
+    registerIntOption_("noims:min_charge", "<z>", 1, "Non-IMS path: least precursor charge (Biosaur2 cmin).", false, true);
+    registerIntOption_("noims:min_fragments", "<n>", 3, "Non-IMS path: fewest fragments a spectrum needs.", false, true);
+    registerDoubleOption_("noims:min_fragment_intensity", "<i>", 0.0, "Non-IMS path: least apex intensity of a fragment trace.", false, true);
+    registerIntOption_("noims:min_fragment_points", "<n>", 1, "Non-IMS path: fewest MS2 scans of a fragment trace.", false, true);
+    setMinFloat_("noims:min_fragment_intensity", 0.0);
+    setMinInt_("noims:min_fragment_points", 1);
+    setMinFloat_("noims:min_intensity", 0.0);
+    setMinInt_("noims:min_hill_scans", 1);
+    setMinInt_("noims:min_charge", 1);
+    setMaxInt_("noims:min_charge", 4);
+    setMinInt_("noims:min_fragments", 1);
 
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
@@ -4526,6 +4541,13 @@ protected:
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
+    P.tof = getStringOption_("noims:tof") == "on";
+    P.min_intensity = getDoubleOption_("noims:min_intensity");
+    P.min_hill_scans = getIntOption_("noims:min_hill_scans");
+    P.min_charge = getIntOption_("noims:min_charge");
+    P.min_frags = getIntOption_("noims:min_fragments");
+    P.min_frag_intensity = getDoubleOption_("noims:min_fragment_intensity");
+    P.min_frag_points = getIntOption_("noims:min_fragment_points");
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
     return EXECUTION_OK;
   }

@@ -41,6 +41,14 @@ using diaspextract::String;
   {
     double ppm = 10.0;          ///< mass-trace and isotope m/z tolerance
     double min_corr = 0.3;      ///< fragment-precursor Pearson r on the window grid
+    // MS1 precursor detection (Biosaur2): the Orbitrap defaults; TOF input changes them (see noImsSpectra_)
+    bool tof = false;           ///< Biosaur2's TOF noise filter (per-50-m/z-bin intensity floor)
+    double min_intensity = 1.0; ///< Biosaur2 mini: least peak intensity
+    int min_hill_scans = 2;     ///< Biosaur2 minlh: fewest MS1 scans per hill
+    int min_charge = 1;         ///< Biosaur2 cmin
+    int min_frags = 3;          ///< fewest fragments a spectrum needs
+    double min_frag_intensity = 0; ///< least apex intensity of a fragment trace
+    int min_frag_points = 1;    ///< fewest scans of a fragment trace
   };
 
   struct Stats { size_t windows = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -49,7 +57,6 @@ using diaspextract::String;
   {
     constexpr double C13 = 1.0033548, PROTON = 1.007276;
     constexpr int MAX_PEAKS = 200;          ///< most intense fragments kept per spectrum (by weighted intensity)
-    constexpr int MIN_FRAGS = 3;            ///< fewest fragments a spectrum needs
     constexpr double WEIGHT_POW = 24.0;     ///< fragment intensity x r^24 (few-point profiles: x exp(-(apex distance / cycle)^2)^6)
     constexpr double FEW_APEX_CYCLES = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
 
@@ -143,16 +150,18 @@ using diaspextract::String;
     }
 
     /// precursors from OpenMS's Biosaur2 port, run once on the whole run's MS1 (averagine-checked isotope patterns)
-    inline std::vector<Prec> biosaur(PeakMap&& ms1, double ppm, double mzlo, double mzhi)
+    inline std::vector<Prec> biosaur(PeakMap&& ms1, const Params& P, double mzlo, double mzhi)
     {
       std::vector<Biosaur2Algorithm::Hill> hills;
       std::vector<Biosaur2Algorithm::PeptideFeature> feats;
       {
         Biosaur2Algorithm b;
         Param p = b.getDefaults();
-        p.setValue("htol", ppm); p.setValue("itol", ppm);
+        p.setValue("htol", P.ppm); p.setValue("itol", P.ppm);
         p.setValue("minmz", mzlo); p.setValue("maxmz", mzhi);
-        p.setValue("cmin", 1); p.setValue("cmax", 4);
+        p.setValue("cmin", P.min_charge); p.setValue("cmax", 4);
+        p.setValue("mini", P.min_intensity); p.setValue("minlh", P.min_hill_scans);
+        p.setValue("tof", P.tof ? "true" : "false");
         // no per-peak ion mobility on this path: a FAIMS run's per-spectrum CV made Biosaur2 switch on its PASEF
         // centroiding and IM gating, both no-ops without an IM array but logged as if they ran
         p.setValue("paseftol", 0.0);
@@ -180,7 +189,7 @@ using diaspextract::String;
 
     /// the spectrum of precursor @p p from the window's fragments (sorted by apex RT), or an empty one (no MS level)
     inline MSSpectrum assemble(const Prec& p, const std::vector<Frag>& fr, const std::vector<double>& grid, double cycle,
-                               double min_corr, double lo, double hi)
+                               double min_corr, int min_frags, double lo, double hi)
     {
       MSSpectrum s;
       const size_t g0 = std::lower_bound(grid.begin(), grid.end(), p.rt_lo) - grid.begin();
@@ -209,7 +218,7 @@ using diaspextract::String;
         const double d = (f.apex_rt - p.rt) / cycle;
         pk.emplace_back(f.inten * pmath::exp(-d * d * WEIGHT_POW / 4.0), f.mz);
       }
-      if ((int)pk.size() < MIN_FRAGS) return s;
+      if ((int)pk.size() < min_frags) return s;
       if ((int)pk.size() > MAX_PEAKS)
       { std::nth_element(pk.begin(), pk.begin() + MAX_PEAKS, pk.end(), std::greater<>()); pk.resize(MAX_PEAKS); }
       // by m/z, equal m/z by intensity: nth_element leaves the kept peaks in an unspecified order
@@ -301,7 +310,7 @@ using diaspextract::String;
     double top = 0;
     for (const auto& k : keys) top = std::max(top, k.second);
     const auto tb = clk::now();
-    const std::vector<Prec> bio = biosaur(std::move(m1), P.ppm, keys.front().first - 1.0, top + 1.0);
+    const std::vector<Prec> bio = biosaur(std::move(m1), P, keys.front().first - 1.0, top + 1.0);
     log("[noims] Biosaur2: " + String(bio.size()) + " isotope-pattern features as precursors in "
         + String(std::chrono::duration<double>(clk::now() - tb).count()) + " s");
 
@@ -346,6 +355,7 @@ using diaspextract::String;
       fr.reserve(ft.size());
       for (const auto& t : ft)
       {
+        if (t.getMaxIntensity(false) < P.min_frag_intensity || (int)t.getSize() < P.min_frag_points) continue;
         Frag f{t.getCentroidMZ(), apexRT(t), t.getMaxIntensity(false), {}, {}};
         for (const auto& pk : t)
         {
@@ -364,7 +374,7 @@ using diaspextract::String;
       #pragma omp taskloop grainsize(256) default(shared)
       for (long i = 0; i < np; ++i)
       {
-        try { slot[i] = assemble(prec[i], fr, gr, cycle, P.min_corr, lo, hi); }
+        try { slot[i] = assemble(prec[i], fr, gr, cycle, P.min_corr, P.min_frags, lo, hi); }
         catch (...)
         {
           #pragma omp critical(noims_err)
