@@ -65,7 +65,7 @@ using diaspextract::String;
     int mono_corr = 0;          ///< MS2-envelope precursors move to the MS1 feature whose isotope peak they sit on: 0 off, 1 the precursor features, 2 features of a second Biosaur2 pass with 1-scan hills
     bool env_pattern = false;   ///< MS2 envelopes: +1/mono intensity must fit averagine within x3; the best-fitting charge wins
     int hill_seeds = 0;         ///< fragment-driven tier: MS1 hills outside every feature become z 2 and 3 precursors, kept with at least this many complementary fragment pairs; 0 = off
-    bool tag_src = false;       ///< write userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, 3 MS1 hill with fragment pairs)
+    bool tag_src = false;       ///< write userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, 3 MS1 hill with fragment pairs); hill seeds also get hill_pairs and hill_span (s)
     int pair_top = 50;          ///< hill seeds: complementary pairs are counted among this many most intense peaks
     bool seed_mono = false;     ///< hill seeds: also hills that are a feature's monoisotopic peak
     double ms2_shift = 0;       ///< fragment m/z shift in ppm
@@ -759,7 +759,9 @@ using diaspextract::String;
         for (long i = 0; i < ns; i += 2)
         {
           const long j = np2[i + 1] > np2[i] ? i + 1 : i;   // one charge per seed; z 2 on a tie
-          if (np2[j] >= P.hill_seeds) { res[w].push_back(std::move(s2[j])); ++nprec[w]; }
+          if (np2[j] < P.hill_seeds) continue;
+          if (P.tag_src) { s2[j].setMetaValue("hill_pairs", np2[j]); s2[j].setMetaValue("hill_span", sd[j].rt_hi - sd[j].rt_lo); }   // quality of the seed, for offline ranking
+          res[w].push_back(std::move(s2[j])); ++nprec[w];
         }
       }
       busy[w] = std::chrono::duration<double>(clk::now() - tw).count();

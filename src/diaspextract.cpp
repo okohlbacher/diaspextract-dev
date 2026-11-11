@@ -4553,7 +4553,7 @@ protected:
 
   // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage peptides at 1 %)
   static constexpr double TOF_MS2_PPM = 4.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
-  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 1, TOF_PAIR_TOP = 200;
+  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3, TOF_PAIR_TOP = 200;   // hill seeds: 3 pairs beat 1 on six TripleTOF runs with entrapment (+413 peptides, 45 % fewer spectra)
 
   ExitCodes noImsSpectra_(PeakMap& exp, PeakMap& res)
   {
