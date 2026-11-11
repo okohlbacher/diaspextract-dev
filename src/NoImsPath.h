@@ -25,7 +25,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <exception>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <functional>
 #include <map>
 #include <numeric>
@@ -55,6 +59,18 @@ using diaspextract::String;
     double split = 0;           ///< split MS2 traces at elution valleys below split x the lower flanking maximum; 0 = off
     bool env_all_charges = false; ///< MS2 envelopes: a -1 isotope at one charge moves on to the next lower charge (else: no precursor)
     bool drop_precursor = false;  ///< drop the precursor's own isotope peaks (mono-1 .. mono+3) from its spectrum
+    double comp_boost = 0;      ///< weight x this for fragments with a complementary partner (m1 + m2 = M + 2 H+, both z = 1); 0 = off
+    int frag_rank = 0;          ///< a fragment goes only to its this many best-correlated precursors of the window; 0 = all
+    bool ms2_env = true;        ///< precursors from MS2 isotope envelopes
+    int mono_corr = 0;          ///< MS2-envelope precursors move to the MS1 feature whose isotope peak they sit on: 0 off, 1 the precursor features, 2 features of a second Biosaur2 pass with 1-scan hills
+    bool env_pattern = false;   ///< MS2 envelopes: +1/mono intensity must fit averagine within x3; the best-fitting charge wins
+    int hill_seeds = 0;         ///< fragment-driven tier: MS1 hills outside every feature become z 2 and 3 precursors, kept with at least this many complementary fragment pairs; 0 = off
+    bool tag_src = false;       ///< write userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, 3 MS1 hill with fragment pairs)
+    int pair_top = 50;          ///< hill seeds: complementary pairs are counted among this many most intense peaks
+    bool seed_mono = false;     ///< hill seeds: also hills that are a feature's monoisotopic peak
+    double ms2_shift = 0;       ///< fragment m/z shift in ppm
+    bool ms2_shift_auto = false; ///< estimate the shift from the y1 ions of tryptic peptides
+    int span_pad = 0;           ///< widen the precursor's RT span by this many window scans on each side (correlation and apex gate); 0 = off
   };
 
   struct Stats { size_t windows = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -62,9 +78,10 @@ using diaspextract::String;
   namespace detail
   {
     constexpr double C13 = 1.0033548, PROTON = 1.007276;
+    inline double ms2_scale = 1.0;   // fragment m/z recalibration factor, set once per run (DIASPX_MS2_SHIFT)
     constexpr double FEW_APEX_CYCLES = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
 
-    struct Prec { double mz, rt, rt_lo, rt_hi, inten; int z; std::vector<double> rt_pts, int_pts; };
+    struct Prec { double mz, rt, rt_lo, rt_hi, inten; int z; std::vector<double> rt_pts, int_pts; int src = 0; };
     /// a fragment trace; `pts` are (RT, intensity), `gpts` the same points as (grid index, intensity)
     struct Frag { double mz, apex_rt, inten; std::vector<std::pair<double, double>> pts; std::vector<std::pair<size_t, double>> gpts; };
 
@@ -129,7 +146,7 @@ using diaspextract::String;
 
     /// isotope envelopes (z = 2..4) from MS2 traces; a trace is a mono if it has a +1 isotope and no -1 isotope at the same charge
     // ponytail: greedy, highest charge first, no averagine check; add an intensity-pattern test if charge errors show up
-    inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute, bool all_charges = false)
+    inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute, bool all_charges = false, bool pattern = false)
     {
       std::vector<size_t> o(mt.size());
       std::iota(o.begin(), o.end(), 0);
@@ -151,19 +168,38 @@ using diaspextract::String;
         return best;
       };
       std::vector<Prec> out;
-      for (size_t k = 0; k < o.size(); ++k)
+      auto emit = [&](size_t k, int z) {
+        const MassTrace& t = mt[o[k]];
+        Prec p{mz[k], art[k], t.begin()->getRT(), t.rbegin()->getRT(), t.getMaxIntensity(false), z, {}, {}, 1};
+        for (const auto& pk : t) { p.rt_pts.push_back(pk.getRT()); p.int_pts.push_back(pk.getIntensity()); }
+        out.push_back(std::move(p));
+      };
+      auto in = [&](long j) { return (double)mt[o[j]].getMaxIntensity(false); };
+      for (size_t k = 0; pattern && k < o.size(); ++k)
+      {
+        if (!(mz[k] >= lo && mz[k] < hi)) continue;
+        // ponytail: averagine as one number, I(+1)/I(mono) = 5.3e-4 x mass, within x3; fit the +2 peak too if charges stay wrong
+        const double LN3 = 1.0986;
+        int bz = 0; double bs = LN3;
+        for (int z = 4; z >= 2; --z)
+        {
+          const long p1 = partner(k, mz[k] + C13 / z);
+          if (p1 < 0) continue;
+          const double ex = 5.3e-4 * z * (mz[k] - PROTON);
+          const long m1 = partner(k, mz[k] - C13 / z);
+          if (m1 >= 0 && std::fabs(std::log(in(k) / in(m1) / ex)) < LN3) continue;   // this trace is the +1 isotope at z
+          const double sc = std::fabs(std::log(in(p1) / in(k) / ex));
+          if (sc < bs) { bs = sc; bz = z; }
+        }
+        if (bz) emit(k, bz);
+      }
+      for (size_t k = 0; !pattern && k < o.size(); ++k)
       {
         for (int z = 4; z >= 2; --z)
         {
           if (partner(k, mz[k] + C13 / z) < 0) continue;
           if (partner(k, mz[k] - C13 / z) >= 0) { if (all_charges) continue; break; }   // not the lightest isotope at this charge
-          if (mz[k] >= lo && mz[k] < hi)
-          {
-            const MassTrace& t = mt[o[k]];
-            Prec p{mz[k], art[k], t.begin()->getRT(), t.rbegin()->getRT(), t.getMaxIntensity(false), z, {}, {}};
-            for (const auto& pk : t) { p.rt_pts.push_back(pk.getRT()); p.int_pts.push_back(pk.getIntensity()); }
-            out.push_back(std::move(p));
-          }
+          if (mz[k] >= lo && mz[k] < hi) emit(k, z);
           break;
         }
       }
@@ -171,7 +207,7 @@ using diaspextract::String;
     }
 
     /// precursors from OpenMS's Biosaur2 port, run once on the whole run's MS1 (averagine-checked isotope patterns)
-    inline std::vector<Prec> biosaur(PeakMap&& ms1, const Params& P, double mzlo, double mzhi)
+    inline std::vector<Prec> biosaur(PeakMap&& ms1, const Params& P, double mzlo, double mzhi, std::vector<Prec>* seeds = nullptr)
     {
       std::vector<Biosaur2Algorithm::Hill> hills;
       std::vector<Biosaur2Algorithm::PeptideFeature> feats;
@@ -191,6 +227,18 @@ using diaspextract::String;
         FeatureMap fm;   // unused; freed with the algorithm's copy of the MS1 data
         b.run(fm, hills, feats);
       }
+      if (const char* hp = std::getenv("DIASPX_HILLS"))   // DEBUG (experimental): every hill (H) and feature (F)
+      {
+        std::ofstream of(hp); of.precision(8);
+        for (const auto& h : hills) of << "H\t" << h.mz_weighted_mean << '\t' << h.rt_start << '\t' << h.rt_end << '\t' << h.rt_apex << '\t' << h.length << '\t' << h.intensity_apex << '\n';
+        for (const auto& f : feats) of << "F\t" << f.mz << '\t' << f.charge << '\t' << f.rt_start << '\t' << f.rt_end << '\t' << f.rt_apex << '\t' << f.n_isotopes << '\t' << f.n_scans << '\t' << f.intensity_apex << '\n';
+      }
+      if (seeds)   // every hill, charge open; run() drops those a feature explains
+      {
+        for (const auto& h : hills) seeds->push_back(Prec{h.mz_weighted_mean, h.rt_apex, h.rt_start, h.rt_end, h.intensity_apex, 0, h.rt_values, h.intensities, 3});
+        std::sort(seeds->begin(), seeds->end(), [](const Prec& a, const Prec& b) {
+          return std::tie(a.mz, a.rt, a.inten, a.rt_lo, a.rt_hi, a.rt_pts, a.int_pts) < std::tie(b.mz, b.rt, b.inten, b.rt_lo, b.rt_hi, b.rt_pts, b.int_pts); });
+      }
       Size top = 0;
       for (const auto& h : hills) top = std::max(top, h.hill_idx);
       std::vector<size_t> at(hills.empty() ? 0 : top + 1, SIZE_MAX);   // hill_idx -> position in hills (last one wins, as a map would)
@@ -208,13 +256,38 @@ using diaspextract::String;
       return out;
     }
 
+    /// singly charged fragment pairs among the @p top most intense peaks of @p s that sum to the precursor (b + y = M + 2 H+)
+    inline int complementPairs(const MSSpectrum& s, double neutral, double ppm, size_t top = 50)
+    {
+      std::vector<std::pair<double, double>> v;   // (intensity, m/z)
+      for (const auto& x : s) v.emplace_back(x.getIntensity(), x.getMZ());
+      // ponytail: a plain count among the top peaks; score by intensity if the count alone is too coarse
+      if (v.size() > top) { std::nth_element(v.begin(), v.begin() + top, v.end(), std::greater<>()); v.resize(top); }
+      std::vector<double> m;
+      for (const auto& x : v) m.push_back(x.second);
+      std::sort(m.begin(), m.end());
+      const double sum = neutral + 2 * PROTON, tol = sum * ppm * 1e-6;
+      int n = 0;
+      for (long i = 0, j = (long)m.size() - 1; i < j;)
+      {
+        const double d = m[i] + m[j] - sum;
+        if (d < -tol) ++i; else if (d > tol) --j; else { ++n; ++i; --j; }
+      }
+      return n;
+    }
+
     /// the spectrum of precursor @p p from the window's fragments (sorted by apex RT), or an empty one (no MS level)
     inline MSSpectrum assemble(const Prec& p, const std::vector<Frag>& fr, const std::vector<double>& grid, double cycle,
-                               const Params& P, double lo, double hi)
+                               const Params& P, double lo, double hi,
+                               std::vector<std::pair<uint32_t, float>>* cand = nullptr, const std::vector<float>* rmin = nullptr,
+                               std::vector<std::pair<double, double>>* raw = nullptr)
     {
+      // frag_rank: with @p cand the call only records (fragment, r) of the correlated fragments; with @p rmin it
+      // skips fragments whose r is below their rank threshold. ponytail: r is computed twice, cache it if this stays
       MSSpectrum s;
-      const size_t g0 = std::lower_bound(grid.begin(), grid.end(), p.rt_lo) - grid.begin();
-      const size_t g1 = std::upper_bound(grid.begin(), grid.end(), p.rt_hi) - grid.begin();
+      size_t g0 = std::lower_bound(grid.begin(), grid.end(), p.rt_lo) - grid.begin();
+      size_t g1 = std::upper_bound(grid.begin(), grid.end(), p.rt_hi) - grid.begin();
+      g0 -= std::min(g0, (size_t)P.span_pad); g1 = std::min(grid.size(), g1 + P.span_pad);   // the precursor is 0 outside its hill
       std::vector<double> pp;
       for (size_t g = g0; g < g1; ++g) pp.push_back(interp(p.rt_pts, p.int_pts, grid[g]));
       const bool few = pp.size() < 3;
@@ -227,7 +300,12 @@ using diaspextract::String;
       double sa = 0, saa = 0;
       for (double a : pp) { sa += a; saa += a * a; }
       const double nn = (double)pp.size(), va = nn * saa - sa * sa;
-      const double a0 = few ? p.rt - FEW_APEX_CYCLES * cycle : p.rt_lo, a1 = few ? p.rt + FEW_APEX_CYCLES * cycle : p.rt_hi;
+      const bool pad = P.span_pad > 0 && !few;
+      const double a0 = few ? p.rt - FEW_APEX_CYCLES * cycle : pad ? grid[g0] : p.rt_lo, a1 = few ? p.rt + FEW_APEX_CYCLES * cycle : pad ? grid[g1 - 1] : p.rt_hi;
+      // raw: the weighted fragments depend on the charge only through the mass limit (drop_precursor off), so a
+      // second charge of the same precursor filters the list of the higher charge instead of correlating again
+      if (raw && !raw->empty()) { for (const auto& q : *raw) if (q.second - PROTON <= neutral - 56.0) pk.push_back(q); }
+      else {
       const auto first = std::lower_bound(fr.begin(), fr.end(), a0, [](const Frag& f, double t) { return f.apex_rt < t; });
       for (size_t k = first - fr.begin(); k < fr.size() && fr[k].apex_rt <= a1; ++k)
       {
@@ -256,13 +334,29 @@ using diaspextract::String;
             r = pearson(pp, fp);
           }
           if (r < P.min_corr) continue;
+          if (cand) { cand->emplace_back((uint32_t)k, (float)r); continue; }
+          if (rmin && (float)r < (*rmin)[k]) continue;
           pk.emplace_back(f.inten * pmath::pow(r, P.weight_pow), f.mz);
           continue;
         }
         const double d = (f.apex_rt - p.rt) / cycle;
         pk.emplace_back(f.inten * pmath::exp(-d * d * P.weight_pow / 4.0), f.mz);
       }
-      if ((int)pk.size() < P.min_frags) return s;
+      if (raw) *raw = pk;
+      }
+      if (cand || (int)pk.size() < P.min_frags) return s;
+      if (P.comp_boost > 0)
+      {
+        std::sort(pk.begin(), pk.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        const double target = neutral + 2 * PROTON, tol = target * 2 * P.ppm * 1e-6;
+        std::vector<char> hit(pk.size(), 0);
+        for (size_t i = 0, j = pk.size(); i < pk.size(); ++i)   // j: first peak too heavy to pair with i
+        {
+          while (j > 0 && pk[i].second + pk[j - 1].second > target + tol) --j;
+          for (size_t q = j; q-- > 0 && pk[i].second + pk[q].second >= target - tol;) if (q != i) hit[i] = hit[q] = 1;   // a peak is not its own complement
+        }
+        for (size_t i = 0; i < pk.size(); ++i) if (hit[i]) pk[i].first *= P.comp_boost;
+      }
       if ((int)pk.size() > P.max_frags)
       { std::nth_element(pk.begin(), pk.begin() + P.max_frags, pk.end(), std::greater<>()); pk.resize(P.max_frags); }
       // by m/z, equal m/z by intensity: nth_element leaves the kept peaks in an unspecified order
@@ -274,8 +368,9 @@ using diaspextract::String;
       pr.setMZ(p.mz); pr.setCharge(p.z); pr.setIntensity(p.inten);
       pr.setIsolationWindowLowerOffset(p.mz - lo); pr.setIsolationWindowUpperOffset(hi - p.mz);
       s.setPrecursors({pr});
+      if (P.tag_src) s.setMetaValue("precursor_source", p.src);
       s.reserve(pk.size());
-      for (const auto& q : pk) { Peak1D x; x.setMZ(q.second); x.setIntensity(q.first); s.push_back(x); }
+      for (const auto& q : pk) { Peak1D x; x.setMZ(q.second * ms2_scale); x.setIntensity(q.first); s.push_back(x); }
       return s;
     }
   }
@@ -351,10 +446,56 @@ using diaspextract::String;
     for (size_t i : ms1) m1.addSpectrum(std::move(exp[i]));
     exp.clear(true);
 
+    // fragment m/z shift (P.ms2_shift ppm); auto estimates the run's offset from the y1 ions of tryptic peptides
+    // (K 147.11280, R 175.11895) in the raw MS2 scans.
+    // ponytail: the 1.7 ppm margin was tuned on one TripleTOF run; fit it per instrument if other TOFs disagree
+    ms2_scale = 1.0;
+    if (P.ms2_shift_auto || P.ms2_shift != 0)
+    {
+      double shift = P.ms2_shift;
+      if (P.ms2_shift_auto)
+      {
+        std::vector<double> d, core;
+        for (const auto& m : m2) for (const auto& sp : m) for (double a : {147.11280, 175.11895})
+          for (auto it = sp.MZBegin(a * (1 - 15e-6)); it != sp.end() && it->getMZ() <= a * (1 + 15e-6); ++it) d.push_back((it->getMZ() - a) / a * 1e6);
+        const auto median = [](std::vector<double>& v) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+        const double m0 = d.size() < 1000 ? 0 : median(d);
+        for (double x : d) if (std::fabs(x - m0) < 6) core.push_back(x);   // second pass: without the flat random background
+        const double off = d.size() < 1000 ? 0 : median(core);
+        shift = d.size() < 1000 ? 0 : -(off + 1.7);
+        log("[noims] fragment m/z offset from y1 ions: " + String(off) + " ppm (n=" + String(d.size()) + "), shift " + String(shift) + " ppm");
+      }
+      ms2_scale = 1.0 + shift * 1e-6;
+    }
+
+    // DEBUG (experimental, not for release): DIASPX_DUMP=<dir> reads <dir>/queries.tsv ("mz z rt frag_mz...") and writes
+    // <dir>/dump.tsv: every precursor (P), raw MS2 signal of the query fragments (R), their fate per matching precursor (F)
+    struct Q { size_t id; double mz, rt; int z; std::vector<double> fr; std::vector<std::pair<int, double>> raw; };
+    std::vector<std::vector<Q>> qs(W);
+    std::vector<std::ostringstream> dbg(W);
+    const char* dump = std::getenv("DIASPX_DUMP");
+    if (dump)
+    {
+      std::ifstream in(std::string(dump) + "/queries.tsv");
+      std::string line; size_t id = 0;
+      while (std::getline(in, line))
+      {
+        std::istringstream ls(line); Q q; q.id = id++; ls >> q.mz >> q.z >> q.rt;
+        for (double f; ls >> f;) q.fr.push_back(f);
+        std::sort(q.fr.begin(), q.fr.end());
+        const long w = owner(q.mz);
+        if (w >= 0) qs[w].push_back(std::move(q));
+      }
+    }
+
     double top = 0;
     for (const auto& k : keys) top = std::max(top, k.second);
     const auto tb = clk::now();
-    const std::vector<Prec> bio = biosaur(std::move(m1), P, keys.front().first - 1.0, top + 1.0);
+    std::vector<Prec> bio2;   // mono_corr 2: features with 1-scan hills, for correction only
+    if (P.mono_corr == 2) { Params R = P; R.min_hill_scans = 1; PeakMap c = m1; bio2 = biosaur(std::move(c), R, keys.front().first - 1.0, top + 1.0); }
+    std::vector<Prec> seeds;
+    const std::vector<Prec> bio = biosaur(std::move(m1), P, keys.front().first - 1.0, top + 1.0, P.hill_seeds > 0 ? &seeds : nullptr);
+    const std::vector<Prec>& ref = P.mono_corr == 2 ? bio2 : bio;
     log("[noims] Biosaur2: " + String(bio.size()) + " isotope-pattern features as precursors in "
         + String(std::chrono::duration<double>(clk::now() - tb).count()) + " s");
 
@@ -383,15 +524,45 @@ using diaspextract::String;
       const std::vector<MassTrace> ft = traces(m2[w], P.ms2_ppm > 0 ? P.ms2_ppm : P.ppm);
       ntr2[w] = ft.size();
       t_mtd[w] = std::chrono::duration<double>(clk::now() - tw).count();
+      for (Q& q : qs[w])
+        for (double f : q.fr)
+        {
+          int n = 0; double mx = 0;
+          for (const auto& sp : m2[w])
+          {
+            if (std::fabs(sp.getRT() - q.rt) > 30.0) continue;
+            const Int j = sp.findNearest(f, f * 20e-6);
+            if (j >= 0) { ++n; mx = std::max(mx, (double)sp[j].getIntensity()); }
+          }
+          q.raw.emplace_back(n, mx);
+        }
       m2[w].clear(true);
       // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)
-      std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle, P.env_all_charges);
+      std::vector<Prec> q = P.ms2_env ? envelopes(ft, P.ppm, lo, hi, 1.01 * cycle, P.env_all_charges, P.env_pattern) : std::vector<Prec>();
       const size_t n1 = prec.size();
       for (auto& c : q)
       {
+        if (P.mono_corr)
+        {
+          // the MS1 feature that has this trace as isotope peak k = 0..3 while it elutes; the same m/z and charge confirms, else the most intense
+          const Prec* best = nullptr; bool same = false;
+          for (int fz = 2; fz <= 4 && !same; ++fz)
+            for (int k = 0; k <= 3 && !same; ++k)
+            {
+              const double t = c.mz - k * C13 / fz, tol = t * P.ppm * 1e-6;
+              for (auto it = std::lower_bound(ref.begin(), ref.end(), t - tol, [](const Prec& p, double m) { return p.mz < m; });
+                   it != ref.end() && it->mz <= t + tol; ++it)
+              {
+                if (it->z != fz || c.rt < it->rt_lo - cycle || c.rt > it->rt_hi + cycle) continue;
+                if (k == 0 && fz == c.z) { same = true; break; }
+                if (!best || it->inten > best->inten) best = &*it;
+              }
+            }
+          if (!same && best) { c.mz = best->mz; c.z = best->z; c.src = 2; }
+        }
         if (owner(c.mz) != (long)w) continue;
         bool dup = false;
-        for (size_t i = 0; i < n1 && !dup; ++i)
+        for (size_t i = 0, n = c.src == 2 ? prec.size() : n1; i < n && !dup; ++i)
           dup = prec[i].z == c.z && std::fabs(prec[i].mz - c.mz) <= c.mz * P.ppm * 1e-6 && std::fabs(prec[i].rt - c.rt) <= cycle;
         if (!dup) prec.push_back(std::move(c));
       }
@@ -445,10 +616,32 @@ using diaspextract::String;
       std::vector<MSSpectrum> slot(prec.size());
       std::exception_ptr terr;
       const long np = (long)prec.size();
+      std::vector<float> rmin;
+      if (P.frag_rank > 0)
+      {
+        std::vector<std::vector<std::pair<uint32_t, float>>> cand(prec.size());
+        #pragma omp taskloop grainsize(256) default(shared)
+        for (long i = 0; i < np; ++i)
+        {
+          try { assemble(prec[i], fr, gr, cycle, P, lo, hi, &cand[i]); }
+          catch (...)
+          {
+            #pragma omp critical(noims_err)
+            if (!terr) terr = std::current_exception();
+          }
+        }
+        if (terr) std::rethrow_exception(terr);
+        std::vector<std::vector<float>> rs(fr.size());
+        for (const auto& c : cand) for (const auto& q : c) rs[q.first].push_back(q.second);
+        rmin.assign(fr.size(), 0.0f);
+        for (size_t k = 0; k < fr.size(); ++k) if ((int)rs[k].size() > P.frag_rank)
+        { std::nth_element(rs[k].begin(), rs[k].begin() + P.frag_rank - 1, rs[k].end(), std::greater<>()); rmin[k] = rs[k][P.frag_rank - 1]; }
+      }
+      const std::vector<float>* rm = P.frag_rank > 0 ? &rmin : nullptr;
       #pragma omp taskloop grainsize(256) default(shared)
       for (long i = 0; i < np; ++i)
       {
-        try { slot[i] = assemble(prec[i], fr, gr, cycle, P, lo, hi); }
+        try { slot[i] = assemble(prec[i], fr, gr, cycle, P, lo, hi, nullptr, rm); }
         catch (...)
         {
           #pragma omp critical(noims_err)
@@ -456,7 +649,119 @@ using diaspextract::String;
         }
       }
       if (terr) std::rethrow_exception(terr);
+      if (dump)
+      {
+        std::ostringstream& o = dbg[w];
+        o.precision(10);
+        auto corr = [&](const Prec& p, const Frag& f, int& npts) {   // the sparse r of assemble()
+          const size_t g0 = std::lower_bound(gr.begin(), gr.end(), p.rt_lo) - gr.begin();
+          const size_t g1 = std::upper_bound(gr.begin(), gr.end(), p.rt_hi) - gr.begin();
+          double sa = 0, saa = 0, sb = 0, sbb = 0, sab = 0; const double nn = g1 > g0 ? double(g1 - g0) : 0.0;
+          for (size_t g = g0; g < g1; ++g) { const double a = interp(p.rt_pts, p.int_pts, gr[g]); sa += a; saa += a * a; }
+          npts = 0;
+          for (const auto& x : f.gpts) if (x.first >= g0 && x.first < g1)
+          { const double a = interp(p.rt_pts, p.int_pts, gr[x.first]); sb += x.second; sbb += x.second * x.second; sab += a * x.second; ++npts; }
+          const double va = nn * saa - sa * sa, vb = nn * sbb - sb * sb;
+          return (va > 0 && vb > 0) ? (nn * sab - sa * sb) / std::sqrt(va * vb) : 0.0;
+        };
+        for (size_t i = 0; i < prec.size(); ++i)
+        {
+          const Prec& p = prec[i];
+          double mn = 0;
+          for (const auto& x : slot[i]) mn = (mn == 0 || x.getIntensity() < mn) ? x.getIntensity() : mn;
+          const size_t g0 = std::lower_bound(gr.begin(), gr.end(), p.rt_lo) - gr.begin(), g1 = std::upper_bound(gr.begin(), gr.end(), p.rt_hi) - gr.begin();
+          o << "P\t" << w << '\t' << i << '\t' << p.mz << '\t' << p.z << '\t' << p.rt << '\t' << p.rt_lo << '\t' << p.rt_hi << '\t' << p.inten
+            << '\t' << (i < n1 ? 1 : 2) << '\t' << p.rt_pts.size() << '\t' << (g1 > g0 ? g1 - g0 : 0) << '\t' << slot[i].size() << '\t' << mn << '\n';
+        }
+        for (const Q& q : qs[w])
+        {
+          for (size_t j = 0; j < q.fr.size(); ++j) o << "R\t" << q.id << '\t' << q.fr[j] << '\t' << q.raw[j].first << '\t' << q.raw[j].second << '\n';
+          for (size_t i = 0; i < prec.size(); ++i)
+          {
+            const Prec& p = prec[i];
+            if (p.z != q.z || std::fabs(p.rt - q.rt) > 30.0) continue;
+            const double k = std::round((p.mz - q.mz) * q.z / C13);
+            if (std::fabs(k) > 3 || std::fabs(p.mz - q.mz - k * C13 / q.z) > q.mz * 20e-6) continue;
+            o << "M\t" << q.id << '\t' << w << '\t' << i << '\t' << k << '\n';
+            const bool few = (std::upper_bound(gr.begin(), gr.end(), p.rt_hi) - std::lower_bound(gr.begin(), gr.end(), p.rt_lo)) < 3;
+            const double a0 = few ? p.rt - cycle : p.rt_lo, a1 = few ? p.rt + cycle : p.rt_hi;
+            for (auto it = std::lower_bound(fr.begin(), fr.end(), p.rt - 60.0, [](const Frag& f, double t) { return f.apex_rt < t; });
+                 it != fr.end() && it->apex_rt <= p.rt + 60.0; ++it)
+            {
+              auto m = std::lower_bound(q.fr.begin(), q.fr.end(), it->mz * (1 - 20e-6));
+              if (m == q.fr.end() || *m > it->mz * (1 + 20e-6)) continue;
+              int npts = 0;
+              const double r = corr(p, *it, npts);
+              const bool kept = slot[i].getMSLevel() == 2 && slot[i].findNearest(it->mz, 1e-9) >= 0;
+              o << "F\t" << q.id << '\t' << w << '\t' << i << '\t' << *m << '\t' << it->mz << '\t' << it->apex_rt - p.rt << '\t'
+                << (it->apex_rt >= a0 && it->apex_rt <= a1) << '\t' << it->gpts.size() << '\t' << npts << '\t' << r << '\t' << it->inten << '\t' << kept << '\n';
+            }
+          }
+        }
+      }
       for (auto& s : slot) if (s.getMSLevel() == 2) res[w].push_back(std::move(s));
+      if (P.hill_seeds > 0)
+      {
+        // fragment-driven tier, after and apart from the spectra above: hills that are no isotope peak (k = 0..5) of a
+        // feature, tried as z 2 and 3; the charge with more complementary pairs is kept if it has enough of them
+        std::vector<Prec> sd;   // per seed: z 2, then z 3
+        const bool seed_mono = P.seed_mono, share = !P.drop_precursor;
+        for (auto it = std::lower_bound(seeds.begin(), seeds.end(), lo, [](const Prec& p, double m) { return p.mz < m; });
+             it != seeds.end() && it->mz < hi; ++it)
+        {
+          if (owner(it->mz) != (long)w) continue;
+          bool used = false;
+          for (int fz = 1; fz <= 4 && !used; ++fz)
+            for (int k = 0; k <= 5 && !used; ++k)
+            {
+              const double t = it->mz - k * C13 / fz, tol = t * P.ppm * 1e-6;
+              for (auto b = std::lower_bound(bio.begin(), bio.end(), t - tol, [](const Prec& p, double m) { return p.mz < m; });
+                   b != bio.end() && b->mz <= t + tol && !used; ++b)
+                used = b->z == fz && it->rt_lo <= b->rt_hi && b->rt_lo <= it->rt_hi;
+            }
+          if (used) continue;
+          for (int z = 2; z <= 3; ++z)
+          {
+            sd.push_back(*it); sd.back().z = z;
+            if (!seed_mono) continue;
+            // experiment (DIASPX_SEED_MONO): a hill one isotope step below means this one is not the lightest at z
+            const double t = it->mz - C13 / z, tol = t * P.ppm * 1e-6;
+            for (auto b = std::lower_bound(seeds.begin(), seeds.end(), t - tol, [](const Prec& p, double m) { return p.mz < m; });
+                 b != seeds.end() && b->mz <= t + tol && sd.back().z; ++b)
+              if (it->rt_lo <= b->rt_hi && b->rt_lo <= it->rt_hi) sd.back().z = 0;   // 0 = skipped
+          }
+        }
+        std::vector<MSSpectrum> s2(sd.size());
+        std::vector<int> np2(sd.size(), 0);
+        const long ns = (long)sd.size();
+        #pragma omp taskloop grainsize(128) default(shared)
+        for (long i = 0; i < ns; i += 2)
+        {
+          try
+          {
+            std::vector<std::pair<double, double>> raw;
+            const auto one = [&](long j, std::vector<std::pair<double, double>>* r)
+            {
+              s2[j] = assemble(sd[j], fr, gr, cycle, P, lo, hi, nullptr, rm, r);
+              if (s2[j].getMSLevel() == 2) np2[j] = complementPairs(s2[j], sd[j].z * (sd[j].mz - PROTON), P.ms2_ppm > 0 ? P.ms2_ppm : P.ppm, (size_t)P.pair_top);
+            };
+            const bool z3 = sd[i + 1].z > 0, sh = z3 && share;
+            if (z3) one(i + 1, share ? &raw : nullptr);
+            if (sd[i].z > 0 && !(sh && raw.empty())) one(i, sh ? &raw : nullptr);   // nothing at z 3: nothing at z 2
+          }
+          catch (...)
+          {
+            #pragma omp critical(noims_err)
+            if (!terr) terr = std::current_exception();
+          }
+        }
+        if (terr) std::rethrow_exception(terr);
+        for (long i = 0; i < ns; i += 2)
+        {
+          const long j = np2[i + 1] > np2[i] ? i + 1 : i;   // one charge per seed; z 2 on a tie
+          if (np2[j] >= P.hill_seeds) { res[w].push_back(std::move(s2[j])); ++nprec[w]; }
+        }
+      }
       busy[w] = std::chrono::duration<double>(clk::now() - tw).count();
     }
     catch (...)
@@ -466,6 +771,7 @@ using diaspextract::String;
     }
     if (err) std::rethrow_exception(err);
 
+    if (dump) { std::ofstream of(std::string(dump) + "/dump.tsv"); for (auto& o : dbg) of << o.str(); }
     for (size_t w = 0; w < W; ++w)
     {
       st.precursors += nprec[w]; st.busy_s += busy[w]; st.ms2_traces += ntr2[w];

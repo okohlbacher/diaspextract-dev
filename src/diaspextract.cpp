@@ -2746,6 +2746,9 @@ struct S3Copy
   }
 };
 
+// -noims:* options named on the command line, each followed by a space: an explicit value wins over the TOF defaults
+static std::string g_noims_cli;
+
 class TOPPDIAspeXtract : public TOPPBase
 {
 public:
@@ -2998,6 +3001,27 @@ protected:
     setValidStrings_("noims:envelope_charges", {"first", "all"});
     registerStringOption_("noims:precursor_peaks", "<mode>", "keep", "Non-IMS path: the precursor's own isotope peaks in its spectrum: keep or drop.", false, true);
     setValidStrings_("noims:precursor_peaks", {"keep", "drop"});
+    registerDoubleOption_("noims:complement_boost", "<f>", 0.0, "Non-IMS path: weight x f for fragments with a complementary partner (sum = precursor mass + 2 protons); 0 = off.", false, true);
+    setMinFloat_("noims:complement_boost", 0.0);
+    registerIntOption_("noims:fragment_rank", "<n>", 0, "Non-IMS path: a fragment goes only to its n best-correlated precursors of the window; 0 = all.", false, true);
+    setMinInt_("noims:fragment_rank", 0);
+    registerIntOption_("noims:span_pad", "<n>", 0, "Non-IMS path: widen each precursor's RT span by n window scans per side for the fragment correlation; 0 = off.", false, true);
+    setMinInt_("noims:span_pad", 0);
+    registerStringOption_("noims:ms2_envelopes", "<mode>", "on", "Non-IMS path: precursors from MS2 isotope envelopes.", false, true);
+    setValidStrings_("noims:ms2_envelopes", {"on", "off"});
+    registerStringOption_("noims:mono_correction", "<mode>", "off", "Non-IMS path: move MS2-envelope precursors to the MS1 feature whose isotope peak they sit on; relaxed = also features seen in one MS1 scan (second Biosaur2 pass).", false, true);
+    setValidStrings_("noims:mono_correction", {"off", "on", "relaxed"});
+    registerStringOption_("noims:envelope_pattern", "<mode>", "off", "Non-IMS path: MS2 isotope envelopes must fit the averagine +1/mono intensity ratio; the best-fitting charge wins.", false, true);
+    setValidStrings_("noims:envelope_pattern", {"off", "on"});
+    registerIntOption_("noims:hill_seeds", "<n>", 0, "Non-IMS path: MS1 hills outside every feature become charge 2 and 3 precursors, kept with at least this many complementary fragment pairs (0 = off).", false, true);
+    setMinInt_("noims:hill_seeds", 0);
+    registerIntOption_("noims:pair_top", "<n>", 50, "Non-IMS path: hill seeds count complementary fragment pairs among the n most intense peaks.", false, true);
+    setMinInt_("noims:pair_top", 2);
+    registerStringOption_("noims:seed_mono", "<mode>", "off", "Non-IMS path: hill seeds also from hills that are a feature's monoisotopic peak.", false, true);
+    setValidStrings_("noims:seed_mono", {"off", "on"});
+    registerStringOption_("noims:ms2_shift", "<ppm|auto>", "0", "Non-IMS path: shift of the fragment m/z in ppm; auto = estimated from the y1 ions of tryptic peptides.", false, true);
+    registerStringOption_("noims:tag_source", "<mode>", "off", "Non-IMS path: write each spectrum's precursor source as userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope).", false, true);
+    setValidStrings_("noims:tag_source", {"off", "on"});
     setMinInt_("noims:max_fragments", 1);
     setMinFloat_("noims:weight_power", 0.0);
     setMinFloat_("noims:min_fragment_intensity", 0.0);
@@ -4528,8 +4552,8 @@ protected:
   }
 
   // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage peptides at 1 %)
-  static constexpr double TOF_MS2_PPM = 5.0, TOF_SPLIT = 0.5;
-  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3;
+  static constexpr double TOF_MS2_PPM = 4.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
+  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 1, TOF_PAIR_TOP = 200;
 
   ExitCodes noImsSpectra_(PeakMap& exp, PeakMap& res)
   {
@@ -4573,6 +4597,17 @@ protected:
     P.split = getDoubleOption_("noims:split");
     P.env_all_charges = getStringOption_("noims:envelope_charges") == "all";
     P.drop_precursor = getStringOption_("noims:precursor_peaks") == "drop";
+    P.comp_boost = getDoubleOption_("noims:complement_boost");
+    P.frag_rank = getIntOption_("noims:fragment_rank");
+    P.span_pad = getIntOption_("noims:span_pad");
+    P.ms2_env = getStringOption_("noims:ms2_envelopes") == "on";
+    { const String m = getStringOption_("noims:mono_correction"); P.mono_corr = m == "relaxed" ? 2 : m == "on" ? 1 : 0; }
+    P.env_pattern = getStringOption_("noims:envelope_pattern") == "on";
+    P.hill_seeds = getIntOption_("noims:hill_seeds");
+    P.tag_src = getStringOption_("noims:tag_source") == "on";
+    P.pair_top = getIntOption_("noims:pair_top");
+    P.seed_mono = getStringOption_("noims:seed_mono") == "on";
+    { const String m = getStringOption_("noims:ms2_shift"); P.ms2_shift_auto = m == "auto"; P.ms2_shift = P.ms2_shift_auto ? 0 : std::atof(m.c_str()); }
     // [tof] TOF analyzers (SWATH) record each fragment m/z with more scatter and many unrelated ions per scan: wide MS2
     // traces join neighbouring ions and recurring m/z into one long trace whose single apex reaches one precursor only.
     // TOF input therefore gets narrow MS2 traces split into elution peaks, and fewer precursors: charge >= 2, seen in
@@ -4591,10 +4626,24 @@ protected:
     if (inst == "tof")
     {
       const spx_noims::Params D;
-      if (P.ms2_ppm == D.ms2_ppm) P.ms2_ppm = TOF_MS2_PPM;
-      if (P.split == D.split) P.split = TOF_SPLIT;
-      if (P.min_charge == D.min_charge) P.min_charge = TOF_MIN_CHARGE;
-      if (P.min_hill_scans == D.min_hill_scans) P.min_hill_scans = TOF_MIN_HILL_SCANS;
+      // ponytail: "explicit" = named on the command line; a value set only in an -ini file counts if it differs from the general default
+      const auto dflt = [](const char* o, bool at_default) { return at_default && g_noims_cli.find(std::string("-noims:") + o + " ") == std::string::npos; };
+      if (dflt("ms2_ppm", P.ms2_ppm == D.ms2_ppm)) P.ms2_ppm = TOF_MS2_PPM;
+      if (dflt("split", P.split == D.split)) P.split = TOF_SPLIT;
+      if (dflt("min_charge", P.min_charge == D.min_charge)) P.min_charge = TOF_MIN_CHARGE;
+      if (dflt("min_hill_scans", P.min_hill_scans == D.min_hill_scans)) P.min_hill_scans = TOF_MIN_HILL_SCANS;
+      // tuned on PXD002952 run 008 against Sage peptides at 1 %: tighter tolerances, flatter correlation weight, wider RT span,
+      // complement boost, averagine-checked MS2 envelopes, hill seeds, and a per-run fragment m/z shift
+      if (dflt("ppm", P.ppm == D.ppm)) P.ppm = TOF_PPM;
+      if (dflt("min_corr", P.min_corr == D.min_corr)) P.min_corr = TOF_MIN_CORR;
+      if (dflt("weight_power", P.weight_pow == D.weight_pow)) P.weight_pow = TOF_WEIGHT_POW;
+      if (dflt("complement_boost", P.comp_boost == D.comp_boost)) P.comp_boost = TOF_COMP_BOOST;
+      if (dflt("span_pad", P.span_pad == D.span_pad)) P.span_pad = TOF_SPAN_PAD;
+      if (dflt("hill_seeds", P.hill_seeds == D.hill_seeds)) P.hill_seeds = TOF_HILL_SEEDS;
+      if (dflt("pair_top", P.pair_top == D.pair_top)) P.pair_top = TOF_PAIR_TOP;
+      if (dflt("envelope_pattern", !P.env_pattern)) P.env_pattern = true;
+      if (dflt("seed_mono", !P.seed_mono)) P.seed_mono = true;
+      if (dflt("ms2_shift", !P.ms2_shift_auto && P.ms2_shift == 0)) P.ms2_shift_auto = true;
       writeLogInfo_("[noims] TOF input: MS2 traces at " + String(P.ms2_ppm) + " ppm split at valleys below " + String(P.split)
                     + ", precursors of charge >= " + String(P.min_charge) + " seen in >= " + String(P.min_hill_scans) + " MS1 scans");
     }
@@ -6748,6 +6797,7 @@ int main(int argc, const char** argv)
     if (std::filesystem::is_directory(bundled, ec)) set_default("DOTNET_ROOT", std::filesystem::canonical(bundled, ec).string());
     set_default("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1");
   }
+  for (int i = 1; i < argc; ++i) if (std::strncmp(argv[i], "-noims:", 7) == 0) g_noims_cli += std::string(argv[i]) + " ";
   TOPPDIAspeXtract tool;
   // TOPPBase catches OpenMS exceptions only; one from a library (SQLite, opentims) would otherwise abort with no exit code
   try { return tool.main(argc, argv); }
