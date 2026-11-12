@@ -72,7 +72,7 @@ struct Params
   bool tag_src = false;   ///< write userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 3 MS1 hill with fragment pairs); hill seeds also get
                           ///< hill_pairs and hill_span (s)
   int pair_top = 50;      ///< hill seeds: complementary pairs are counted among this many most intense peaks
-  bool seed_mono = false; ///< hill seeds: also hills that are a feature's monoisotopic peak
+  bool seed_mono = false; ///< hill seeds: skip a charge when a hill one isotope step lighter overlaps in RT (not monoisotopic)
   double ms2_shift = 0;   ///< fragment m/z shift in ppm
   bool ms2_shift_auto = false; ///< estimate the shift from the y1 ions of tryptic peptides
   int span_pad = 0;            ///< widen the precursor's RT span by this many window scans on each side (correlation and apex gate); 0 = off
