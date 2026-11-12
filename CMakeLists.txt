@@ -106,7 +106,7 @@ if(WIN32)
 endif()
 # The source carries the same number as a fallback for builds that do not go through this file
 # (the in-tree OpenMS build); refuse to configure if the two have drifted.
-file(STRINGS src/diaspextract.cpp _spx_fallback REGEX "^#define DIASPEXTRACT_VERSION \"")
+file(STRINGS src/diaspextract.cpp _spx_fallback REGEX "^[ \t]*#[ \t]*define DIASPEXTRACT_VERSION \"")
 if(NOT _spx_fallback MATCHES "\"${PROJECT_VERSION}\"")
   message(FATAL_ERROR "src/diaspextract.cpp's DIASPEXTRACT_VERSION fallback (${_spx_fallback}) != project VERSION ${PROJECT_VERSION}")
 endif()
