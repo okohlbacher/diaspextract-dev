@@ -110,7 +110,7 @@ static inline double spxFileTimeSec(FILETIME a, FILETIME b) // two FILETIMEs (10
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-  #define DIASPEXTRACT_VERSION "1.9.4"
+  #define DIASPEXTRACT_VERSION "1.9.5"
 #endif
 
 using namespace OpenMS;
@@ -5304,6 +5304,11 @@ protected:
                        "fragment pairs (0 = off).",
                        false, true);
     setMinInt_("noims:hill_seeds", 0);
+    registerIntOption_("noims:env_ms1_support", "<n>", 0,
+                       "Non-IMS path: an MS2 isotope envelope becomes a precursor only if MS1 has its mono m/z (15 ppm) in at least n scans "
+                       "within 1.5 cycles of its apex (0 = off).",
+                       false, true);
+    setMinInt_("noims:env_ms1_support", 0);
     registerIntOption_("noims:pair_top", "<n>", 50, "Non-IMS path: hill seeds count complementary fragment pairs among the n most intense peaks.",
                        false, true);
     setMinInt_("noims:pair_top", 2);
@@ -7740,10 +7745,18 @@ protected:
     return writeNoIms_(res, out, out_type);
   }
 
-  // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage peptides at 1 %)
+  // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage and MSFragger + Percolator peptides at 1 %, with entrapment).
+  // Hill seeds: 3 pairs beat 1 on six TripleTOF runs (+413 peptides, 45 % fewer spectra). MS1 support of MS2 envelopes: level on the
+  // six 64-variable-window runs, +0.6 to +1.2 % on 32-fixed-window runs 004-007.
+  // ponytail: a single 6600 setting; a split of 0.3, padding 3 and a cap of 300 gained 2-4 % with 32 fixed windows but lost 1-2 % with
+  // 64 variable ones. Key them on the window scheme if both matter.
   static constexpr double TOF_MS2_PPM = 4.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
-  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3,
-                       TOF_PAIR_TOP = 200; // hill seeds: 3 pairs beat 1 on six TripleTOF runs with entrapment (+413 peptides, 45 % fewer spectra)
+  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3, TOF_PAIR_TOP = 200,
+                       TOF_ENV_MS1_SUPPORT = 2;
+  // TripleTOF 5600 (lower MS1 resolution: hills break at 7 ppm): wider MS1 and MS2 tolerances, a lower split valley, a wider correlation
+  // window and a weaker complement boost. Tuned on PXD002952 5600 runs 007 and 009, confirmed on 008 and 010-012.
+  static constexpr double TOF5600_PPM = 15.0, TOF5600_MS2_PPM = 6.0, TOF5600_SPLIT = 0.3, TOF5600_COMP_BOOST = 1.0;
+  static constexpr int TOF5600_SPAN_PAD = 8;
 
   /**
     @brief Validate the non-IMS input, apply the TOF defaults when the instrument is a TOF, and run NoIms::run.
@@ -7798,6 +7811,7 @@ protected:
     noims_opts.span_pad = getIntOption_("noims:span_pad");
     noims_opts.env_pattern = getStringOption_("noims:envelope_pattern") == "on";
     noims_opts.hill_seeds = getIntOption_("noims:hill_seeds");
+    noims_opts.env_ms1_support = getIntOption_("noims:env_ms1_support");
     noims_opts.tag_src = getStringOption_("noims:tag_source") == "on";
     noims_opts.pair_top = getIntOption_("noims:pair_top");
     noims_opts.seed_mono = getStringOption_("noims:seed_mono") == "on";
@@ -7828,23 +7842,25 @@ protected:
       // ponytail: "explicit" = named on the command line; a value set only in an -ini file counts if it differs from the general default
       const auto dflt
         = [](const char* o, bool at_default) { return at_default && g_noims_cli.find(std::string("-noims:") + o + " ") == std::string::npos; };
-      if (dflt("ms2_ppm", noims_opts.ms2_ppm == noims_dflt.ms2_ppm)) { noims_opts.ms2_ppm = TOF_MS2_PPM; }
-      if (dflt("split", noims_opts.split == noims_dflt.split)) { noims_opts.split = TOF_SPLIT; }
+      const bool tof5600 = exp.getInstrument().getName().find("5600") != std::string::npos;
+      if (dflt("ms2_ppm", noims_opts.ms2_ppm == noims_dflt.ms2_ppm)) { noims_opts.ms2_ppm = tof5600 ? TOF5600_MS2_PPM : TOF_MS2_PPM; }
+      if (dflt("split", noims_opts.split == noims_dflt.split)) { noims_opts.split = tof5600 ? TOF5600_SPLIT : TOF_SPLIT; }
       if (dflt("min_charge", noims_opts.min_charge == noims_dflt.min_charge)) { noims_opts.min_charge = TOF_MIN_CHARGE; }
       if (dflt("min_hill_scans", noims_opts.min_hill_scans == noims_dflt.min_hill_scans)) { noims_opts.min_hill_scans = TOF_MIN_HILL_SCANS; }
       // tuned on PXD002952 run 008 against Sage peptides at 1 %: tighter tolerances, flatter correlation weight, wider RT span,
       // complement boost, averagine-checked MS2 envelopes, hill seeds, and a per-run fragment m/z shift
-      if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = TOF_PPM; }
+      if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = tof5600 ? TOF5600_PPM : TOF_PPM; }
       if (dflt("min_corr", noims_opts.min_corr == noims_dflt.min_corr)) { noims_opts.min_corr = TOF_MIN_CORR; }
       if (dflt("weight_power", noims_opts.weight_pow == noims_dflt.weight_pow)) { noims_opts.weight_pow = TOF_WEIGHT_POW; }
-      if (dflt("complement_boost", noims_opts.comp_boost == noims_dflt.comp_boost)) { noims_opts.comp_boost = TOF_COMP_BOOST; }
-      if (dflt("span_pad", noims_opts.span_pad == noims_dflt.span_pad)) { noims_opts.span_pad = TOF_SPAN_PAD; }
+      if (dflt("complement_boost", noims_opts.comp_boost == noims_dflt.comp_boost)) { noims_opts.comp_boost = tof5600 ? TOF5600_COMP_BOOST : TOF_COMP_BOOST; }
+      if (dflt("span_pad", noims_opts.span_pad == noims_dflt.span_pad)) { noims_opts.span_pad = tof5600 ? TOF5600_SPAN_PAD : TOF_SPAN_PAD; }
       if (dflt("hill_seeds", noims_opts.hill_seeds == noims_dflt.hill_seeds)) { noims_opts.hill_seeds = TOF_HILL_SEEDS; }
       if (dflt("pair_top", noims_opts.pair_top == noims_dflt.pair_top)) { noims_opts.pair_top = TOF_PAIR_TOP; }
+      if (dflt("env_ms1_support", noims_opts.env_ms1_support == noims_dflt.env_ms1_support)) { noims_opts.env_ms1_support = TOF_ENV_MS1_SUPPORT; }
       if (dflt("envelope_pattern", ! noims_opts.env_pattern)) { noims_opts.env_pattern = true; }
       if (dflt("seed_mono", ! noims_opts.seed_mono)) { noims_opts.seed_mono = true; }
       if (dflt("ms2_shift", ! noims_opts.ms2_shift_auto && noims_opts.ms2_shift == 0)) { noims_opts.ms2_shift_auto = true; }
-      writeLogInfo_("[noims] TOF input: MS2 traces at " + String(noims_opts.ms2_ppm) + " ppm split at valleys below " + String(noims_opts.split)
+      writeLogInfo_("[noims] TOF input" + String(tof5600 ? " (TripleTOF 5600)" : "") + ": MS1 at " + String(noims_opts.ppm) + " ppm, MS2 traces at " + String(noims_opts.ms2_ppm) + " ppm split at valleys below " + String(noims_opts.split)
                     + ", precursors of charge >= " + String(noims_opts.min_charge) + " seen in >= " + String(noims_opts.min_hill_scans)
                     + " MS1 scans");
     }
