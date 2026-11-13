@@ -7754,10 +7754,11 @@ protected:
   static constexpr double TOF_MS2_PPM = 4.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
   static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3, TOF_PAIR_TOP = 200,
                        TOF_ENV_MS1_SUPPORT = 2;
-  // Fixed-width isolation windows (not on a 5600): split 0.3, padding 3, cap 300. Tuned on PXD002952 6600 32-fixed runs 002 and 003,
-  // confirmed on 004-007 (Sage +1.7 to +2.7 %, MSFragger + Percolator +1.9 to +4.1 % peptides, all four runs).
-  static constexpr double TOF_FIXED_SPLIT = 0.3;
-  static constexpr int TOF_FIXED_SPAN_PAD = 3, TOF_FIXED_MAX_FRAGS = 300;
+  // Fixed-width isolation windows (not on a 5600): split 0.3, correlation weight r^4, cap 300. Tuned on PXD002952 6600 32-fixed runs
+  // 002 and 003; on 004-007 it beat the alternative with padding 3 instead of r^4 with both engines (Sage +2.1 / +3.7 %, MSFragger +
+  // Percolator +3.8 / +4.6 % against the variable-window values, standard / entrapment database, all four runs).
+  static constexpr double TOF_FIXED_SPLIT = 0.3, TOF_FIXED_WEIGHT_POW = 4.0;
+  static constexpr int TOF_FIXED_MAX_FRAGS = 300;
   // TripleTOF 5600 (lower MS1 resolution: hills break at 7 ppm): wider MS1 and MS2 tolerances, a lower split valley, a wider correlation
   // window and a weaker complement boost. Tuned on PXD002952 5600 runs 007 and 009, confirmed on 008 and 010-012.
   static constexpr double TOF5600_PPM = 15.0, TOF5600_MS2_PPM = 6.0, TOF5600_SPLIT = 0.3, TOF5600_COMP_BOOST = 1.0;
@@ -7874,11 +7875,11 @@ protected:
       // complement boost, averagine-checked MS2 envelopes, hill seeds, and a per-run fragment m/z shift
       if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = tof5600 ? TOF5600_PPM : TOF_PPM; }
       if (dflt("min_corr", noims_opts.min_corr == noims_dflt.min_corr)) { noims_opts.min_corr = TOF_MIN_CORR; }
-      if (dflt("weight_power", noims_opts.weight_pow == noims_dflt.weight_pow)) { noims_opts.weight_pow = TOF_WEIGHT_POW; }
+      if (dflt("weight_power", noims_opts.weight_pow == noims_dflt.weight_pow)) { noims_opts.weight_pow = fixed ? TOF_FIXED_WEIGHT_POW : TOF_WEIGHT_POW; }
       if (dflt("complement_boost", noims_opts.comp_boost == noims_dflt.comp_boost)) { noims_opts.comp_boost = tof5600 ? TOF5600_COMP_BOOST : TOF_COMP_BOOST; }
       if (dflt("span_pad", noims_opts.span_pad == noims_dflt.span_pad))
       {
-        noims_opts.span_pad = tof5600 ? TOF5600_SPAN_PAD : fixed ? TOF_FIXED_SPAN_PAD : TOF_SPAN_PAD;
+        noims_opts.span_pad = tof5600 ? TOF5600_SPAN_PAD : TOF_SPAN_PAD;
       }
       if (fixed && dflt("max_fragments", noims_opts.max_frags == noims_dflt.max_frags)) { noims_opts.max_frags = TOF_FIXED_MAX_FRAGS; }
       if (dflt("hill_seeds", noims_opts.hill_seeds == noims_dflt.hill_seeds)) { noims_opts.hill_seeds = TOF_HILL_SEEDS; }

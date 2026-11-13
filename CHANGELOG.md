@@ -15,11 +15,12 @@ test runs: 1.9.3's files, byte for byte; diaPASEF: every spectrum identical).
   0.97 %); MSFragger with Percolator 13,920 (11,000, +27 %). All four runs gain with both engines. Extraction takes about
   1:35 per run on 16 threads.
 - **Fixed isolation windows.** When at least 90 % of the distinct MS2 isolation windows lie within 1 m/z of their median
-  width (not on a TripleTOF 5600), options left at their defaults change to `-noims:split 0.3`, `-noims:span_pad 3` and
-  `-noims:max_fragments 300`; with variable windows these values lost 1 % to 2 % and are not used. On four TripleTOF 6600
-  runs with 32 fixed windows not used for tuning, mean peptides per run at 1 % FDR: Sage 16,473 (1.9.4: 16,098, +2.3 %),
-  15,253 against the entrapment database (14,681, +3.9 %; estimated FDP 1.06 %, 1.9.4: 1.01 %); MSFragger with
-  Percolator 18,434 (18,079, +2.0 %). All four runs gain with both engines.
+  width (not on a TripleTOF 5600), options left at their defaults change to `-noims:split 0.3`, `-noims:weight_power 4`
+  and `-noims:max_fragments 300`; with variable windows such settings lost 1 % to 2 % and are not used. On four
+  TripleTOF 6600 runs with 32 fixed windows not used for tuning, mean peptides per run at 1 % FDR: Sage 16,533 (1.9.4:
+  16,098, +2.7 %), 15,401 against the entrapment database (14,681, +4.9 %; estimated FDP 0.96 %, 1.9.4: 1.01 %);
+  MSFragger with Percolator 18,764 (18,079, +3.8 %). All four runs gain with both engines. These runs also chose between
+  this setting and one with `-noims:span_pad 3` instead of `-noims:weight_power 4`, which gained less.
 - **`-noims:env_ms1_support`.** An isotope envelope found in MS2 becomes a precursor only if MS1 shows its monoisotopic
   m/z (15 ppm) in at least this many scans within 1.5 cycles of its apex; 2 for TOF input, 0 (off) otherwise. Without
   MS1 signal such an envelope is mostly a fragment ion: on a TripleTOF 5600 run 86 % of the MS2-envelope spectra had
