@@ -14,6 +14,12 @@ test runs: 1.9.3's files, byte for byte; diaPASEF: every spectrum identical).
   +21 %), 8,117 against a database twice the size (shuffled entrapment; 6,426, +26 %; estimated FDP 1.12 %, 1.9.4:
   0.97 %); MSFragger with Percolator 13,920 (11,000, +27 %). All four runs gain with both engines. Extraction takes about
   1:35 per run on 16 threads.
+- **Fixed isolation windows.** When at least 90 % of the distinct MS2 isolation windows lie within 1 m/z of their median
+  width (not on a TripleTOF 5600), options left at their defaults change to `-noims:split 0.3`, `-noims:span_pad 3` and
+  `-noims:max_fragments 300`; with variable windows these values lost 1 % to 2 % and are not used. On four TripleTOF 6600
+  runs with 32 fixed windows not used for tuning, mean peptides per run at 1 % FDR: Sage 16,473 (1.9.4: 16,098, +2.3 %),
+  15,253 against the entrapment database (14,681, +3.9 %; estimated FDP 1.06 %, 1.9.4: 1.01 %); MSFragger with
+  Percolator 18,434 (18,079, +2.0 %). All four runs gain with both engines.
 - **`-noims:env_ms1_support`.** An isotope envelope found in MS2 becomes a precursor only if MS1 shows its monoisotopic
   m/z (15 ppm) in at least this many scans within 1.5 cycles of its apex; 2 for TOF input, 0 (off) otherwise. Without
   MS1 signal such an envelope is mostly a fragment ion: on a TripleTOF 5600 run 86 % of the MS2-envelope spectra had
@@ -24,7 +30,7 @@ test runs: 1.9.3's files, byte for byte; diaPASEF: every spectrum identical).
 
 ### Changed
 
-- The log line for TOF input names the instrument model when it selects the TripleTOF 5600 defaults, and gives the MS1
+- The log line for TOF input says when it selects the TripleTOF 5600 or the fixed-window defaults, and gives the MS1
   tolerance.
 
 ## v1.9.4 — 2026-11-12
