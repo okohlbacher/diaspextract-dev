@@ -78,6 +78,10 @@ struct Params
   int span_pad = 0;            ///< widen the precursor's RT span by this many window scans on each side (correlation and apex gate); 0 = off
   int env_ms1_support = 0;     ///< MS2 envelopes need their mono m/z in MS1 (15 ppm) in at least this many scans within 1.5 cycles of their
                                ///< apex; 0 = off. Without MS1 signal an envelope is mostly a fragment ion, not an unfragmented precursor.
+  int refine_top = 0;          ///< second correlation pass against the summed profile of the precursor and its n best-correlated fragments;
+                               ///< 0 = off. Short MS1 profiles (3 points on a TripleTOF) make the first r close to noise.
+  bool prec_ms2 = false;       ///< MS1 precursors take the profile of their unfragmented trace in the window's MS2 scans where one exists
+                               ///< (same scan grid as the fragments, no interpolation)
 };
 
 /// @brief Counts and timings of one run(), for the log.
@@ -529,7 +533,8 @@ namespace Internal
       sa += a;
       saa += a * a;
     }
-    const double nn = (double)pp.size(), va = nn * saa - sa * sa;
+    const double nn = (double)pp.size();
+    double va = nn * saa - sa * sa;
     const bool pad = opts.span_pad > 0 && ! few;
     const double a0 = few   ? p.rt - FEW_APEX_CYCLES * cycle
                       : pad ? grid[g0]
@@ -549,45 +554,95 @@ namespace Internal
     else
     {
       const auto first = std::lower_bound(fr.begin(), fr.end(), a0, [](const Frag& f, double t) { return f.apex_rt < t; });
-      for (OpenMS::Size k = first - fr.begin(); k < fr.size() && fr[k].apex_rt <= a1; ++k)
-      {
-        const Frag& f = fr[k];
+      const auto cand = [&](const Frag& f) {
         if (f.mz - PROTON > neutral - 56.0)
         {
-          continue; // heavier than the precursor allows at z = 1
+          return false; // heavier than the precursor allows at z = 1
         }
         if (opts.drop_precursor)
         {
           const double iso = std::round((f.mz - p.mz) * p.z / C13);
           if (iso >= -1 && iso <= 3 && std::fabs(f.mz - p.mz - iso * C13 / p.z) <= f.mz * opts.ppm * 1e-6)
           {
-            continue; // unfragmented precursor
+            return false; // unfragmented precursor
           }
         }
-        if (! few)
+        return true;
+      };
+      const auto corr = [&](const Frag& f) {
+        if (sparse)
         {
-          double r;
-          if (sparse)
+          double sb = 0, sbb = 0, sab = 0;
+          for (auto it = std::lower_bound(f.gpts.begin(), f.gpts.end(), std::make_pair(g0, -1.0)); it != f.gpts.end() && it->first < g1; ++it)
           {
-            double sb = 0, sbb = 0, sab = 0;
-            for (auto it = std::lower_bound(f.gpts.begin(), f.gpts.end(), std::make_pair(g0, -1.0)); it != f.gpts.end() && it->first < g1; ++it)
-            {
-              sb += it->second;
-              sbb += it->second * it->second;
-              sab += pp[it->first - g0] * it->second;
-            }
-            const double vb = nn * sbb - sb * sb;
-            r = (va > 0 && vb > 0) ? (nn * sab - sa * sb) / std::sqrt(va * vb) : 0.0;
+            sb += it->second;
+            sbb += it->second * it->second;
+            sab += pp[it->first - g0] * it->second;
           }
-          else
+          const double vb = nn * sbb - sb * sb;
+          return (va > 0 && vb > 0) ? (nn * sab - sa * sb) / std::sqrt(va * vb) : 0.0;
+        }
+        std::fill(fp.begin(), fp.end(), 0.0);
+        for (const auto& q : f.gpts)
+        {
+          if (q.first >= g0 && q.first < g1) { fp[q.first - g0] = q.second; }
+        }
+        return pearson(pp, fp);
+      };
+      if (! few && opts.refine_top > 0)
+      {
+        // noims:refine_top: the precursor's profile plus its n best fragments, each scaled to a maximum of 1, become the
+        // template of the final pass. ponytail: one round, and the n fragments correlate with themselves; leave-one-out if
+        // that inflates their weight
+        std::vector<std::pair<double, OpenMS::Size>> best; // (r, fragment index)
+        for (OpenMS::Size k = first - fr.begin(); k < fr.size() && fr[k].apex_rt <= a1; ++k)
+        {
+          if (! cand(fr[k])) { continue; }
+          const double r = corr(fr[k]);
+          if (r >= opts.min_corr) { best.emplace_back(r, k); }
+        }
+        if (best.size() >= 2)
+        {
+          const OpenMS::Size n = std::min(best.size(), (OpenMS::Size)opts.refine_top);
+          std::partial_sort(best.begin(), best.begin() + n, best.end(), [](const auto& a, const auto& b) {
+            return a.first > b.first || (a.first == b.first && a.second < b.second);
+          });
+          std::vector<double> t(pp.size(), 0.0);
+          const auto add = [&](const std::vector<double>& y) {
+            const double mx = *std::max_element(y.begin(), y.end());
+            if (mx <= 0) { return; }
+            for (OpenMS::Size g = 0; g < y.size(); ++g)
+            {
+              t[g] += y[g] / mx;
+            }
+          };
+          add(pp);
+          for (OpenMS::Size b = 0; b < n; ++b)
           {
             std::fill(fp.begin(), fp.end(), 0.0);
-            for (const auto& q : f.gpts)
+            for (const auto& q : fr[best[b].second].gpts)
             {
               if (q.first >= g0 && q.first < g1) { fp[q.first - g0] = q.second; }
             }
-            r = pearson(pp, fp);
+            add(fp);
           }
+          pp.swap(t);
+          sa = saa = 0;
+          for (double a : pp)
+          {
+            sa += a;
+            saa += a * a;
+          }
+          va = nn * saa - sa * sa;
+        }
+      }
+      for (OpenMS::Size k = first - fr.begin(); k < fr.size() && fr[k].apex_rt <= a1; ++k)
+      {
+        const Frag& f = fr[k];
+        if (! cand(f)) { continue; }
+        if (! few)
+        {
+          const double r = corr(f);
           if (r < opts.min_corr) { continue; }
           pk.emplace_back(f.inten * pmath::pow(r, opts.weight_pow), f.mz);
           continue;
@@ -899,6 +954,60 @@ inline Stats run(OpenMS::PeakMap& exp,
         if (! dup) { prec.push_back(std::move(c)); }
       }
       nprec[w] = prec.size();
+      // noims:precursor_profile ms2: an MS1 precursor (feature or hill seed) takes the profile of the most intense MS2
+      // trace at its m/z (ppm) with its apex inside the precursor's span +-1 cycle, cut to the span +-2 cycles, if that
+      // leaves at least 3 points
+      std::vector<OpenMS::Size> fo;
+      std::vector<double> fmz;
+      if (opts.prec_ms2)
+      {
+        fo.resize(ft.size());
+        std::iota(fo.begin(), fo.end(), 0);
+        std::sort(fo.begin(), fo.end(), [&](OpenMS::Size a, OpenMS::Size b) {
+          return ft[a].getCentroidMZ() < ft[b].getCentroidMZ() || (ft[a].getCentroidMZ() == ft[b].getCentroidMZ() && a < b);
+        });
+        for (OpenMS::Size i : fo)
+        {
+          fmz.push_back(ft[i].getCentroidMZ());
+        }
+      }
+      const auto ms2Profile = [&](Internal::Prec& p) {
+        const double tol = p.mz * opts.ppm * 1e-6;
+        long bt = -1;
+        double bi = 0;
+        for (auto it = std::lower_bound(fmz.begin(), fmz.end(), p.mz - tol); it != fmz.end() && *it <= p.mz + tol; ++it)
+        {
+          const OpenMS::MassTrace& t = ft[fo[it - fmz.begin()]];
+          const double a = Internal::apexRT(t), in = t.getMaxIntensity(false);
+          if (a >= p.rt_lo - cycle && a <= p.rt_hi + cycle && in > bi)
+          {
+            bi = in;
+            bt = (long)fo[it - fmz.begin()];
+          }
+        }
+        if (bt < 0) { return; }
+        std::vector<double> rt, in;
+        for (const auto& pk : ft[bt])
+        {
+          if (pk.getRT() >= p.rt_lo - 2 * cycle && pk.getRT() <= p.rt_hi + 2 * cycle)
+          {
+            rt.push_back(pk.getRT());
+            in.push_back(pk.getIntensity());
+          }
+        }
+        if (rt.size() < 3) { return; }
+        p.rt_lo = rt.front();
+        p.rt_hi = rt.back();
+        p.rt_pts.swap(rt);
+        p.int_pts.swap(in);
+      };
+      if (opts.prec_ms2)
+      {
+        for (auto& p : prec)
+        {
+          if (p.src == 0) { ms2Profile(p); }
+        }
+      }
       const std::vector<double>& gr = grid[w];
       std::vector<Internal::Frag> fr;
       fr.reserve(ft.size());
@@ -1011,6 +1120,7 @@ inline Stats run(OpenMS::PeakMap& exp,
           {
             sd.push_back(*it);
             sd.back().z = z;
+            if (opts.prec_ms2) { ms2Profile(sd.back()); }
             if (! seed_mono) { continue; }
             // noims:seed_mono: a hill one isotope step below means this one is not the lightest at z
             const double t = it->mz - Internal::C13 / z, tol = t * opts.ppm * 1e-6;

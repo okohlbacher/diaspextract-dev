@@ -5310,6 +5310,16 @@ protected:
                        "within 1.5 cycles of its apex (0 = off).",
                        false, true);
     setMinInt_("noims:env_ms1_support", 0);
+    registerIntOption_("noims:refine_top", "<n>", 0,
+                       "Non-IMS path: correlate fragments a second time, against the summed profile of the precursor and its n best-correlated "
+                       "fragments (0 = off).",
+                       false, true);
+    setMinInt_("noims:refine_top", 0);
+    registerStringOption_("noims:precursor_profile", "<source>", "ms1",
+                          "Non-IMS path: elution profile of MS1 precursors for the fragment correlation: 'ms1', or 'ms2', the precursor's "
+                          "unfragmented trace in the window's MS2 scans where it has at least 3 points.",
+                          false, true);
+    setValidStrings_("noims:precursor_profile", {"ms1", "ms2"});
     registerIntOption_("noims:pair_top", "<n>", 50, "Non-IMS path: hill seeds count complementary fragment pairs among the n most intense peaks.",
                        false, true);
     setMinInt_("noims:pair_top", 2);
@@ -7820,6 +7830,8 @@ protected:
     noims_opts.env_pattern = getStringOption_("noims:envelope_pattern") == "on";
     noims_opts.hill_seeds = getIntOption_("noims:hill_seeds");
     noims_opts.env_ms1_support = getIntOption_("noims:env_ms1_support");
+    noims_opts.refine_top = getIntOption_("noims:refine_top");
+    noims_opts.prec_ms2 = getStringOption_("noims:precursor_profile") == "ms2";
     noims_opts.tag_src = getStringOption_("noims:tag_source") == "on";
     noims_opts.pair_top = getIntOption_("noims:pair_top");
     noims_opts.seed_mono = getStringOption_("noims:seed_mono") == "on";
