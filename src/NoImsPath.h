@@ -69,7 +69,7 @@ struct Params
   bool env_pattern = false;      ///< MS2 envelopes: +1/mono intensity must fit averagine within x3; the best-fitting charge wins
   int hill_seeds = 0;            ///< fragment-driven tier: MS1 hills outside every feature become z 2 and 3 precursors, kept with at least this many
                                  ///< complementary fragment pairs; 0 = off
-  bool tag_src = false;   ///< write userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 3 MS1 hill with fragment pairs); hill seeds also get
+  bool tag_src = false;   ///< write userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 3 MS1 hill with fragment pairs, 4 MS1 hill confirmed in MS2); hill seeds also get
                           ///< hill_pairs and hill_span (s)
   int pair_top = 50;      ///< hill seeds: complementary pairs are counted among this many most intense peaks
   bool seed_mono = false; ///< hill seeds: skip a charge when a hill one isotope step lighter overlaps in RT (not monoisotopic)
@@ -82,6 +82,8 @@ struct Params
                                ///< 0 = off. Short MS1 profiles (3 points on a TripleTOF) make the first r close to noise.
   bool prec_ms2 = false;       ///< MS1 precursors take the profile of their unfragmented trace in the window's MS2 scans where one exists
                                ///< (same scan grid as the fragments, no interpolation)
+  int hill_ms2 = 0;            ///< hill seeds without enough fragment pairs are kept when MS2 holds their unfragmented trace (same m/z, apex in
+                               ///< the hill's span +-1 cycle, >= 3 points); 2 also needs an MS2 +1 isotope (and no -1) at the kept charge; 0 = off
 };
 
 /// @brief Counts and timings of one run(), for the log.
@@ -115,7 +117,7 @@ namespace Internal
     double mz, rt, rt_lo, rt_hi, inten;  ///< m/z, apex RT, RT span (first and last point), apex intensity
     int z;                               ///< charge (0 = open or skipped, on hill seeds)
     std::vector<double> rt_pts, int_pts; ///< elution profile: RT and intensity of each point
-    int src = 0;                         ///< source: 0 MS1 feature, 1 MS2 envelope, 3 MS1 hill seed
+    int src = 0;                         ///< source: 0 MS1 feature, 1 MS2 envelope, 3 MS1 hill seed, 4 hill seed confirmed in MS2
   };
   /**
     @brief A fragment trace.
@@ -901,7 +903,7 @@ inline Stats run(OpenMS::PeakMap& exp,
   const auto tb = clk::now();
   std::vector<Internal::Prec> seeds;
   const std::vector<Internal::Prec> bio
-    = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 ? &seeds : nullptr);
+    = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 || opts.hill_ms2 > 0 ? &seeds : nullptr);
   log("[noims] Biosaur2: " + DIAspeXtract::String(bio.size()) + " isotope-pattern features as precursors in "
       + DIAspeXtract::String(std::chrono::duration<double>(clk::now() - tb).count()) + " s");
 
@@ -959,7 +961,7 @@ inline Stats run(OpenMS::PeakMap& exp,
       // leaves at least 3 points
       std::vector<OpenMS::Size> fo;
       std::vector<double> fmz;
-      if (opts.prec_ms2)
+      if (opts.prec_ms2 || opts.hill_ms2 > 0)
       {
         fo.resize(ft.size());
         std::iota(fo.begin(), fo.end(), 0);
@@ -1092,11 +1094,28 @@ inline Stats run(OpenMS::PeakMap& exp,
       {
         if (s.getMSLevel() == 2) { res[w].push_back(std::move(s)); }
       }
-      if (opts.hill_seeds > 0)
+      if (opts.hill_seeds > 0 || opts.hill_ms2 > 0)
       {
         // fragment-driven tier, after and apart from the spectra above: hills that are no isotope peak (k = 0..5) of a
         // feature, tried as z 2 and 3; the charge with more complementary pairs is kept if it has enough of them
         std::vector<Internal::Prec> sd; // per seed: z 2, then z 3
+        std::vector<char> ms2ok;        // noims:hill_ms2: MS2 evidence allows this seed at this charge
+        // apex RT of the most intense MS2 trace (>= 3 points) within ppm of mz with its apex in [a, b]; -1 if none
+        const auto ms2Apex = [&](double mz, double a, double b) {
+          const double tol = mz * opts.ppm * 1e-6;
+          double bi = 0, br = -1;
+          for (auto f = std::lower_bound(fmz.begin(), fmz.end(), mz - tol); f != fmz.end() && *f <= mz + tol; ++f)
+          {
+            const OpenMS::MassTrace& t = ft[fo[f - fmz.begin()]];
+            const double r = Internal::apexRT(t), in = t.getMaxIntensity(false);
+            if (t.getSize() >= 3 && r >= a && r <= b && in > bi)
+            {
+              bi = in;
+              br = r;
+            }
+          }
+          return br;
+        };
         const bool seed_mono = opts.seed_mono, share = ! opts.drop_precursor;
         for (auto it = std::lower_bound(seeds.begin(), seeds.end(), lo, [](const Internal::Prec& p, double m) { return p.mz < m; });
              it != seeds.end() && it->mz < hi; ++it)
@@ -1116,10 +1135,18 @@ inline Stats run(OpenMS::PeakMap& exp,
             }
           }
           if (used) { continue; }
+          const double a0 = opts.hill_ms2 > 0 ? ms2Apex(it->mz, it->rt_lo - cycle, it->rt_hi + cycle) : -1;
           for (int z = 2; z <= 3; ++z)
           {
             sd.push_back(*it);
             sd.back().z = z;
+            bool ok = a0 >= 0;
+            if (ok && opts.hill_ms2 >= 2) // the MS2 trace is the mono of an envelope at z
+            {
+              const double d = Internal::C13 / z;
+              ok = ms2Apex(it->mz + d, a0 - cycle, a0 + cycle) >= 0 && ms2Apex(it->mz - d, a0 - cycle, a0 + cycle) < 0;
+            }
+            ms2ok.push_back(ok);
             if (opts.prec_ms2) { ms2Profile(sd.back()); }
             if (! seed_mono) { continue; }
             // noims:seed_mono: a hill one isotope step below means this one is not the lightest at z
@@ -1166,8 +1193,15 @@ inline Stats run(OpenMS::PeakMap& exp,
         if (terr) { std::rethrow_exception(terr); }
         for (long i = 0; i < ns; i += 2)
         {
-          const long j = np2[i + 1] > np2[i] ? i + 1 : i; // one charge per seed; z 2 on a tie
-          if (np2[j] < opts.hill_seeds) { continue; }
+          long j = np2[i + 1] > np2[i] ? i + 1 : i; // one charge per seed; z 2 on a tie
+          if (opts.hill_seeds == 0 || np2[j] < opts.hill_seeds)
+          {
+            // noims:hill_ms2: no pair evidence, but MS2 has the unfragmented precursor
+            const auto live = [&](long k) { return ms2ok[k] && sd[k].z > 0 && s2[k].getMSLevel() == 2; };
+            if (! live(i) && ! live(i + 1)) { continue; }
+            if (! live(j)) { j = j == i ? i + 1 : i; }
+            if (opts.tag_src) { s2[j].setMetaValue("precursor_source", 4); }
+          }
           if (opts.tag_src)
           {
             s2[j].setMetaValue("hill_pairs", np2[j]);

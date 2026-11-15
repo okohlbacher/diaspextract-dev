@@ -5320,6 +5320,12 @@ protected:
                           "unfragmented trace in the window's MS2 scans where it has at least 3 points.",
                           false, true);
     setValidStrings_("noims:precursor_profile", {"ms1", "ms2"});
+    registerIntOption_("noims:hill_ms2", "<mode>", 0,
+                       "Non-IMS path: keep MS1 hill seeds without enough fragment pairs when the window's MS2 scans hold their unfragmented "
+                       "trace (1), and also an MS2 +1 isotope at the kept charge (2); 0 = off.",
+                       false, true);
+    setMinInt_("noims:hill_ms2", 0);
+    setMaxInt_("noims:hill_ms2", 2);
     registerIntOption_("noims:pair_top", "<n>", 50, "Non-IMS path: hill seeds count complementary fragment pairs among the n most intense peaks.",
                        false, true);
     setMinInt_("noims:pair_top", 2);
@@ -5331,7 +5337,7 @@ protected:
     registerStringOption_(
       "noims:tag_source", "<mode>", "off",
       "Non-IMS path: write each spectrum's precursor source as userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, "
-      "3 hill seed); hill seeds also get hill_pairs and hill_span (s).",
+      "3 hill seed, 4 hill seed confirmed in MS2); hill seeds also get hill_pairs and hill_span (s).",
       false, true);
     setValidStrings_("noims:tag_source", {"off", "on"});
     setMinInt_("noims:max_fragments", 1);
@@ -7832,6 +7838,7 @@ protected:
     noims_opts.env_ms1_support = getIntOption_("noims:env_ms1_support");
     noims_opts.refine_top = getIntOption_("noims:refine_top");
     noims_opts.prec_ms2 = getStringOption_("noims:precursor_profile") == "ms2";
+    noims_opts.hill_ms2 = getIntOption_("noims:hill_ms2");
     noims_opts.tag_src = getStringOption_("noims:tag_source") == "on";
     noims_opts.pair_top = getIntOption_("noims:pair_top");
     noims_opts.seed_mono = getStringOption_("noims:seed_mono") == "on";
